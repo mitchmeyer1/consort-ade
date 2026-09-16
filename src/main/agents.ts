@@ -75,6 +75,7 @@ export async function send(chatId: string, text: string, files: string[] = []) {
   const shown = staged.length ? `${text}\n\n${staged.map((f) => `📎 ${basename(f)}`).join("\n")}` : text;
   if (staged.length) text = `${text}\n\nAttached files (read them from disk):\n${staged.map((f) => `- ${f}`).join("\n")}`;
   chat.messages.push({ id: randomUUID(), role: "user", blocks: [{ type: "text", text: shown }], ts: Date.now() });
+  chat.unreadCompletion = false;
   chat.running = true;
   chat.error = undefined;
   if (chat.phase === "waiting" || chat.phase === "complete") chat.phase = "planning";
@@ -91,6 +92,11 @@ export async function send(chatId: string, text: string, files: string[] = []) {
   } finally {
     running.delete(chatId);
     chat.running = false;
+    chat.permissions = [];
+    if (!ac.signal.aborted && !chat.error && (chat.phase as Phase) !== "waiting") {
+      chat.phase = "complete";
+      chat.unreadCompletion = true;
+    } else if (ac.signal.aborted) chat.phase = "waiting";
     store.save();
   }
 }
@@ -170,11 +176,23 @@ async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, 
       allowDangerouslySkipPermissions: chat.autoApprove,
       canUseTool: async (tool, input) => {
         const id = randomUUID();
+        const request = { id, chatId: chat.id, tool, input };
         const allow = await new Promise<boolean>((res) => {
-          pending.set(id, res);
-          askPermission({ id, chatId: chat.id, tool, input });
+          const finish = (allow: boolean) => {
+            ac.signal.removeEventListener("abort", abort);
+            pending.delete(id);
+            chat.permissions = chat.permissions?.filter((p) => p.id !== id);
+            store.save();
+            res(allow);
+          };
+          const abort = () => finish(false);
+          pending.set(id, finish);
+          if (ac.signal.aborted) { finish(false); return; }
+          ac.signal.addEventListener("abort", abort, { once: true });
+          chat.permissions = [...(chat.permissions ?? []), request];
+          store.save();
+          askPermission(request);
         });
-        pending.delete(id);
         return allow ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: "User denied" };
       },
     },

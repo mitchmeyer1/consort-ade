@@ -1,16 +1,17 @@
 import React, { useEffect, useRef, useState } from "react";
-import { MODELS, PHASES, type Api, type Chat, type Job, type Phase, type PermissionRequest, type Project, type RepoInfo, type State, type Worktree, type WorktreeStatus } from "../../shared/types";
+import { MODELS, PHASES, type Api, type Chat, type Job, type Phase, type PermissionRequest, type Project, type RepoInfo, type RootStatus, type State, type Worktree, type WorktreeStatus } from "../../shared/types";
+import { chatStatus } from "../../shared/chatStatus";
 import { Lockup, Mark } from "./Logo";
+import { artifactLinks, chatArtifacts } from "../../shared/artifacts";
 import { marked } from "marked";
 
 const ade = (window as any).ade as Api;
 const EMPTY: State = { projects: [], worktrees: [], chats: [], keys: [], appearance: { theme: "dark", background: "opaque" } };
-type Tab = "terminal" | "diff" | "editor" | "markdown" | "settings";
+type Tab = "terminal" | "diff" | "editor" | "markdown" | "artifacts" | "settings";
 const PHASE_ICON: Record<Phase, string> = { waiting: "candle", planning: "scroll", executing: "sun", validating: "chalice", complete: "wreath" };
-const MD_PATH = /(?:\/?[\w.@~-]+\/)*[\w.@-]+\.md\b/g;
 type Sel = { type: "chat"; id: string } | { type: "worktree"; id: string; form?: boolean } | { type: "project"; id: string; form?: boolean };
 
-function useStatus(id?: string) {
+function useStatus(id?: string, revision = 0) {
   const [st, setSt] = useState<WorktreeStatus | null>(null);
   useEffect(() => {
     if (!id) return;
@@ -18,7 +19,7 @@ function useStatus(id?: string) {
     tick();
     const t = setInterval(tick, 15000);
     return () => clearInterval(t);
-  }, [id]);
+  }, [id, revision]);
   return st;
 }
 const CHECK = { pass: "●", fail: "✗", pending: "◌" } as const;
@@ -95,7 +96,7 @@ export function App() {
   const [file, setFile] = useState<string>();
   const openMd = (path: string) => { setFile(path); setTab("markdown"); };
   const openEditor = (path: string) => { setFile(path); setTab("editor"); };
-  const [perms, setPerms] = useState<PermissionRequest[]>([]);
+  const perms = state.chats.flatMap((c) => c.permissions ?? []);
   const [jobs, setJobs] = useState<Job[]>([]);
   const running = React.useMemo(() => new Set(jobs.filter((j) => j.status === "running").map((j) => j.scopeId)), [jobs]);
   const failed = React.useMemo(() => new Set(jobs.filter(isUnseenFailure).map((j) => j.scopeId)), [jobs]);
@@ -104,10 +105,23 @@ export function App() {
     ade.getState().then(setState);
     ade.jobs().then(setJobs);
     const a = ade.onState(setState);
-    const b = ade.onPermission((r) => setPerms((p) => [...p, r]));
+    const b = ade.onOpenChat((id) => setSel({ type: "chat", id }));
     const c = ade.onJobs(setJobs);
     return () => { a(); b(); c(); };
   }, []);
+
+  useEffect(() => {
+    const update = () => { void ade.setActiveChat(document.hasFocus() && document.visibilityState === "visible" && sel?.type === "chat" ? sel.id : null); };
+    update();
+    window.addEventListener("focus", update);
+    window.addEventListener("blur", update);
+    document.addEventListener("visibilitychange", update);
+    return () => {
+      window.removeEventListener("focus", update);
+      window.removeEventListener("blur", update);
+      document.removeEventListener("visibilitychange", update);
+    };
+  }, [sel]);
 
   const [leftW, setLeftW] = useState(() => +(localStorage.getItem("leftW") ?? 280));
   const [rightW, setRightW] = useState(() => +(localStorage.getItem("rightW") ?? 460));
@@ -137,7 +151,7 @@ export function App() {
   useEffect(() => { document.title = chat ? `${crumb} · ${chat.name}` : crumb; }, [crumb, chat?.name]);
   const answer = (id: string, allow: boolean) => {
     ade.answerPermission(id, allow);
-    setPerms((p) => p.filter((x) => x.id !== id));
+
   };
   const toggle = (t: Tab) => setTab((cur) => (cur === t ? undefined : t));
 
@@ -168,11 +182,12 @@ export function App() {
             <button className={tab === "terminal" ? "on" : ""} onClick={() => toggle("terminal")}><Ico n="terminal" /><span>Terminal</span></button>
             <button className={tab === "diff" ? "on" : ""} onClick={() => toggle("diff")}><Ico n="branch" /><span>Diff</span></button>
             <button className={tab === "editor" ? "on" : ""} onClick={() => toggle("editor")}><Ico n="pencil" /><span>Editor</span></button>
+            {chat && <button className={tab === "artifacts" ? "on" : ""} aria-pressed={tab === "artifacts"} onClick={() => toggle("artifacts")}><Ico n="scroll" /><span>Artifacts</span></button>}
             <button className={tab === "settings" ? "on" : ""} onClick={() => toggle("settings")}><Ico n="gear" /><span>Settings</span></button>
           </div>
         </div>
         {chat ? (
-          <ChatPane chat={chat} perms={perms.filter((p) => p.chatId === chat.id)} answer={answer} onOpenMd={openMd} />
+          <ChatPane chat={chat} perms={perms.filter((p) => p.chatId === chat.id)} answer={answer} onOpenMd={(target) => { if (worktree) ade.artifactMenu(worktree.id, target).then((action) => { if (action === "open") openMd(target); }).catch((e) => alert(e.message)); }} />
         ) : worktree ? (
           <WorktreePage key={worktree.id} wt={worktree} state={state} openForm={sel?.type === "worktree" && !!sel.form} onSelect={setSel} />
         ) : project ? (
@@ -191,7 +206,7 @@ export function App() {
       </div>
       {tab && <>
         <div className="resizer right" style={{ right: rightW - 3 }} onMouseDown={drag("right")} />
-        <Drawer tab={tab} state={state} worktree={worktree} scope={worktree ? { id: worktree.id, cwd: worktree.path, title: worktree.title } : project ? { id: project.id, cwd: project.path, title: project.name } : undefined}
+        <Drawer tab={tab} state={state} chat={chat} worktree={worktree} scope={worktree ? { id: worktree.id, cwd: worktree.path, title: worktree.title } : project ? { id: project.id, cwd: project.path, title: project.name } : undefined}
           jobs={jobs} width={rightW} file={file} onEdit={openEditor} onView={openMd} onClose={() => setTab(undefined)} />
       </>}
     </div>
@@ -221,7 +236,8 @@ function Sidebar({ state, sel, running, failed, onSelect, onCollapse }: { state:
   );
 }
 
-function NewWorktreeDialog({ p, onClose, branchPreset }: { p: Project; onClose: () => void; branchPreset?: string }) {
+function NewWorktreeDialog({ p, onClose, branchPreset, onRoot }: { p: Project; onClose: () => void; branchPreset?: string; onRoot: (id: string) => void }) {
+  const [workAtRoot, setWorkAtRoot] = useState(false);
   const [name, setName] = useState(branchPreset ? branchPreset.split("/").pop()! : "");
   const [branch, setBranch] = useState(branchPreset ?? "");
   const [base, setBase] = useState(branchPreset ? `origin/${branchPreset}` : p.defaultBase);
@@ -229,18 +245,22 @@ function NewWorktreeDialog({ p, onClose, branchPreset }: { p: Project; onClose: 
   const submit = async () => {
     setBusy(true);
     try {
-      await ade.addWorktree(p.id, name, branch || name, base);
+      if (workAtRoot) onRoot(await ade.openRootWorktree(p.id));
+      else await ade.addWorktree(p.id, name, branch || name, base);
       onClose();
     } catch (e: any) { alert(e.message); } finally { setBusy(false); }
   };
   return (
     <Dialog title="Create a worktree" onClose={onClose} footer={<>
       <button onClick={onClose}>Cancel</button>
-      <button className="primary" disabled={!name || busy} onClick={submit}>{busy ? "Creating…" : "Create"}</button>
+      <button className="primary" disabled={(!workAtRoot && !name) || busy} onClick={submit}>{busy ? "Opening…" : workAtRoot ? "Open Root" : "Create"}</button>
     </>}>
+      <label className="root-option"><input type="checkbox" checked={workAtRoot} disabled={busy} onChange={(e) => setWorkAtRoot(e.target.checked)} /> Work out of root</label>
+      {workAtRoot ? <p>Open Root at {p.path}. Chats will work directly in this folder on its current checkout. No branch or worktree will be created.</p> : <>
       <Field label="Name" info={`Folder name under ${p.name}-wt/`}><input value={name} onChange={(e) => setName(e.target.value)} autoFocus placeholder="feature-name" /></Field>
       <Field label="Branch" optional info="Created from the base ref if it doesn't exist; an existing local or remote branch is checked out as-is"><input placeholder={name || "defaults to name"} value={branch} onChange={(e) => setBranch(e.target.value)} /></Field>
       <Field label="Base ref" info="Change the project default on its page"><input value={base} onChange={(e) => setBase(e.target.value)} /></Field>
+      </>}
     </Dialog>
   );
 }
@@ -286,19 +306,20 @@ function WorktreeNode({ wt, state, sel, running, failed, onSelect, collapsed, to
   return (
     <div>
       <div className={"row worktree" + (active ? " active" : "") + (wt.archived ? " dim" : "")} onClick={() => onSelect({ type: "worktree", id: wt.id })}>
-        <span className="grow"><Editable value={wt.title} onSave={(t) => ade.renameWorktree(wt.id, t)} /><Dots id={wt.id} running={running} failed={failed} /></span>
+        <span className="grow">{wt.root ? "Root" : <Editable value={wt.title} onSave={(t) => ade.renameWorktree(wt.id, t)} />}<Dots id={wt.id} running={running} failed={failed} /></span>
         <small className="branch">{st?.branch ?? wt.branch}</small>
         {st && (st.dirty > 0 || st.ahead > 0 || st.behind > 0 || st.pr || st.inBase) && <Badges st={st} />}
         <span className="tools" onClick={(e) => e.stopPropagation()}>
           <button className="icon" title="New chat here" onClick={() => onSelect({ type: "worktree", id: wt.id, form: true })}>＋</button>
           <button className="icon" title={wt.archived ? "Unarchive" : "Archive (hide from list)"} onClick={() => ade.archiveWorktree(wt.id, !wt.archived)}><Ico n="vase" className="solo" /></button>
-          <button className="icon" title="Delete worktree from disk" onClick={() => confirm(`Delete worktree ${wt.title}?\n\nRuns: git worktree remove --force ${wt.path}\n${chats.length ? `Also deletes ${chats.length} chat(s).` : ""}`) && ade.removeWorktree(wt.id).catch((e) => alert(e.message))}><Flame /></button>
+          {!wt.root && <button className="icon" title="Delete worktree from disk" onClick={() => confirm(`Delete worktree ${wt.title}?\n\nRuns: git worktree remove --force ${wt.path}\n${chats.length ? `Also deletes ${chats.length} chat(s).` : ""}`) && ade.removeWorktree(wt.id).catch((e) => alert(e.message))}><Flame /></button>}
           <button className="icon" title={collapsed[wt.id] ? "Expand" : "Collapse"} onClick={() => toggle(wt.id)}>{collapsed[wt.id] ? "▸" : "▾"}</button>
         </span>
       </div>
       {!collapsed[wt.id] && chats.map((c) => (
         <div key={c.id} className={"row chat" + (sel?.type === "chat" && c.id === sel.id ? " active" : "")} onClick={() => onSelect({ type: "chat", id: c.id })}>
-          <span className="grow">{c.running && <span className="spin" />} {c.name}</span>
+          <span className="chat-symbol"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="8" cy="8" r="4.5" /><path d="M8 0v5M8 11v5M0 8h5M11 8h5" /></svg>{chatStatus(c) && <span role="img" aria-label={chatStatus(c)!} title={chatStatus(c)!} className={`chat-dot ${chatStatus(c)}`} />}</span>
+          <span className="grow">{c.name}</span>
           <MiniBar phase={c.phase} />
           <span className="tools" onClick={(e) => e.stopPropagation()}>
             <button className="icon" onClick={() => confirm("Delete chat?") && ade.deleteChat(c.id)}>×</button>
@@ -326,6 +347,32 @@ function ProjectPage({ project: p, state, openForm, onSelect }: { project: Proje
   const [form, setForm] = useState<false | { branch?: string }>(openForm ? {} : false);
   useEffect(() => { if (openForm) setForm({}); }, [openForm]);
   const [info, setInfo] = useState<RepoInfo>();
+  const [root, setRoot] = useState<RootStatus>();
+  const [rootError, setRootError] = useState("");
+  const [checkout, setCheckout] = useState<Worktree>();
+  const [commitMessage, setCommitMessage] = useState("");
+  const [checkoutBusy, setCheckoutBusy] = useState(false);
+  const [checkoutError, setCheckoutError] = useState("");
+  useEffect(() => {
+    let disposed = false;
+    const refresh = () => ade.rootStatus(p.id).then((s) => { if (!disposed) { setRoot(s); setRootError(""); } }, (e) => { if (!disposed) setRootError(e.message); });
+    refresh();
+    const timer = setInterval(refresh, 10000);
+    window.addEventListener("focus", refresh);
+    return () => { disposed = true; clearInterval(timer); window.removeEventListener("focus", refresh); };
+  }, [p.id]);
+  const doCheckout = async () => {
+    if (!checkout) return;
+    setCheckoutBusy(true);
+    setCheckoutError("");
+    try { setRoot(await ade.checkoutAtRoot(checkout.id, commitMessage)); setCheckout(undefined); }
+    catch (e: any) {
+      setCheckoutError(e.message);
+      await ade.rootStatus(p.id).then(setRoot, () => {});
+    }
+    finally { setCheckoutBusy(false); }
+  };
+
   const [showArchived, setShowArchived] = useState(false);
   useEffect(() => { ade.repoInfo(p.id).then(setInfo); }, [p.id]);
   const wts = state.worktrees.filter((w) => w.projectId === p.id && (showArchived || !w.archived));
@@ -368,6 +415,7 @@ function ProjectPage({ project: p, state, openForm, onSelect }: { project: Proje
       <div>
         <h1>{p.name}</h1>
         <div className="path">{p.path}</div>
+        <div className="m" style={{ marginTop: 8 }}>Root: {rootError || (root ? `${root.branch ?? "detached HEAD"} · ${root.commit.slice(0, 8)}${root.dirty ? " · uncommitted changes" : ""}` : "loading…")}</div>
         {info?.repo && <div className="m" style={{ marginTop: 6 }}>
           <a href="#" onClick={(e) => { e.preventDefault(); ade.openExternal(info.repo!.url); }}>{info.repo.nameWithOwner}</a>
           {info.repo.isPrivate ? " · private" : ""} · pushed {ago(info.repo.pushedAt)}{info.repo.description ? ` — ${info.repo.description}` : ""}
@@ -382,11 +430,22 @@ function ProjectPage({ project: p, state, openForm, onSelect }: { project: Proje
           <button className="icon" title={`GitHub default is ${info.repo.defaultBranch}`} onClick={() => ade.setProjectBase(p.id, `origin/${info.repo!.defaultBranch}`)}>use origin/{info.repo.defaultBranch}</button>
         )}
       </div>
-      {form && <NewWorktreeDialog p={p} branchPreset={form.branch} onClose={() => setForm(false)} />}
+      {form && <NewWorktreeDialog p={p} branchPreset={form.branch} onClose={() => setForm(false)} onRoot={(id) => onSelect({ type: "worktree", id })} />}
 
       <h2>Worktrees {archivedN > 0 && <button className="icon" onClick={() => setShowArchived((x) => !x)}>{showArchived ? "hide" : "show"} {archivedN} archived</button>}</h2>
       {!wts.length && <div className="m">No worktrees yet — create one above or open a PR below as a worktree.</div>}
-      <div className="grid">{wts.map((w) => <WorktreeCard key={w.id} wt={w} state={state} onSelect={onSelect} />)}</div>
+      <div className="grid">{wts.map((w) => <WorktreeCard key={w.id} wt={w} state={state} onSelect={onSelect} onCheckout={() => { setCheckout(w); setCommitMessage(""); setCheckoutError(""); }} />)}</div>
+
+      {checkout && <Dialog title={`Pull ${checkout.title} into root`} onClose={() => { if (!checkoutBusy) setCheckout(undefined); }} footer={<>
+        <button disabled={checkoutBusy} onClick={() => setCheckout(undefined)}>Cancel</button>
+        <button className="primary" disabled={checkoutBusy || !!root?.dirty} onClick={doCheckout}>{checkoutBusy ? "Pulling into root…" : "Pull into root"}</button>
+      </>}>
+        <p>Commit changes in this worktree, push {checkout.branch} to origin, then switch {p.path} to that branch and pull. This worktree will be left detached at its pushed commit.</p>
+        <Field label="Commit message" optional info="If this worktree has changes, a message is required. All tracked and untracked changes, except ignored files, will be committed first."><input value={commitMessage} disabled={checkoutBusy} onChange={(e) => setCommitMessage(e.target.value)} placeholder="Leave blank if already committed" /></Field>
+        <p>Any uncommitted tracked and untracked files (except ignored files) will be included. A commit message is required when there are changes.</p>
+        {root?.dirty && <p role="alert">The root has uncommitted changes. Commit or stash them first.</p>}
+        {checkoutError && <p role="alert">{checkoutError}</p>}
+      </Dialog>}
 
       <h2>My PRs {info && <span className="m">({mine.length}{info.me ? ` · ${info.me}` : ""})</span>}</h2>
       {!info ? <div className="m">loading from GitHub…</div> : !mine.length ? <div className="m">nothing waiting on you</div> : (
@@ -415,7 +474,7 @@ function ProjectPage({ project: p, state, openForm, onSelect }: { project: Proje
   );
 }
 
-function WorktreeCard({ wt, state, onSelect }: { wt: Worktree; state: State; onSelect: (s: Sel) => void }) {
+function WorktreeCard({ wt, state, onSelect, onCheckout }: { wt: Worktree; state: State; onSelect: (s: Sel) => void; onCheckout?: () => void }) {
   const st = useStatus(wt.id);
   const chats = state.chats.filter((c) => c.worktreeId === wt.id);
   const running = chats.filter((c) => c.running).length;
@@ -425,6 +484,7 @@ function WorktreeCard({ wt, state, onSelect }: { wt: Worktree; state: State; onS
       <div className="m mono">{st?.branch ?? wt.branch}</div>
       <Badges st={st} />
       <div className="snip">{chats.length} chat{chats.length === 1 ? "" : "s"}{running ? ` · ${running} running` : ""}{wt.archived ? " · archived" : ""}</div>
+      {onCheckout && !wt.root && <button style={{ marginTop: 10 }} disabled={running > 0} title={running ? "Wait for running chats to finish" : "Commit and push this worktree, then switch the root to its branch and pull"} onClick={(e) => { e.stopPropagation(); onCheckout(); }}>Pull into root</button>}
     </div>
   );
 }
@@ -438,7 +498,26 @@ const lastText = (c: Chat) => {
 };
 
 function WorktreePage({ wt, state, openForm, onSelect }: { wt: Worktree; state: State; openForm: boolean; onSelect: (s: Sel) => void }) {
-  const st = useStatus(wt.id);
+  const [revision, setRevision] = useState(0);
+  const st = useStatus(wt.id, revision);
+  const [committing, setCommitting] = useState(false);
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [gitError, setGitError] = useState("");
+  const [gitResult, setGitResult] = useState("");
+  const runGit = async (push: boolean) => {
+    if (!st || busy) return;
+    setBusy(true); setGitError(""); setGitResult("");
+    try {
+      if (push) { await ade.pushWorktree(wt.id, st.branch); setGitResult(`Pushed to origin/${st.branch}.`); }
+      else {
+        const commit = await ade.commitWorktree(wt.id, st.branch, message);
+        setGitResult(`Committed ${commit.slice(0, 7)} on ${st.branch}.`);
+        setMessage(""); setCommitting(false);
+      }
+    } catch (e) { setGitError((e as Error).message); }
+    finally { setBusy(false); setRevision((n) => n + 1); }
+  };
   const [form, setForm] = useState(openForm);
   useEffect(() => { if (openForm) setForm(true); }, [openForm]);
   const chats = state.chats.filter((c) => c.worktreeId === wt.id);
@@ -454,7 +533,7 @@ function WorktreePage({ wt, state, openForm, onSelect }: { wt: Worktree; state: 
   return (
     <div className="page">
       <div>
-        <h1><Editable value={wt.title} onSave={(t) => ade.renameWorktree(wt.id, t)} trigger="click" /> <button className="icon" title="Name with AI" onClick={() => ade.autoTitle(wt.id)}><Ico n="star" className="big" /></button></h1>
+        <h1>{wt.root ? "Root" : <><Editable value={wt.title} onSave={(t) => ade.renameWorktree(wt.id, t)} trigger="click" /> <button className="icon" title="Name with AI" onClick={() => ade.autoTitle(wt.id)}><Ico n="star" className="big" /></button></>}</h1>
         <div className="meta-rows">
           <div><span className="badge">{st?.branch ?? wt.branch}</span></div>
           <Badges st={st} />
@@ -466,6 +545,22 @@ function WorktreePage({ wt, state, openForm, onSelect }: { wt: Worktree; state: 
         <button onClick={prWriteup}><Ico n="scroll" /> PR write-up</button>
       </div>
       {st && <GitCard st={st} />}
+      <div className="actions">
+        <button disabled={busy || !st?.dirty || chats.some((c) => c.running)} onClick={() => { setCommitting(true); setGitError(""); }}>Commit…</button>
+        <button disabled={busy || !st || chats.some((c) => c.running)} onClick={() => runGit(true)}>{busy ? "Working…" : `Push to origin/${st?.branch ?? wt.branch}`}</button>
+      </div>
+      {chats.some((c) => c.running) && <div className="m">Commit and push are available when this worktree's chats finish.</div>}
+      {!committing && gitError && <div className="error">{gitError}</div>}
+      {gitResult && <div role="status">{gitResult}</div>}
+      {committing && <Dialog title={`Commit to ${st?.branch ?? wt.branch}`} onClose={() => { if (!busy) setCommitting(false); }} footer={<>
+        <button disabled={busy} onClick={() => setCommitting(false)}>Cancel</button>
+        <button className="primary" disabled={busy || !message.trim() || chats.some((c) => c.running)} onClick={() => runGit(false)}>{busy ? "Committing…" : "Commit changes"}</button>
+      </>}>
+        <p>Include all tracked and untracked changes in this worktree. Ignored files are excluded.</p>
+        <pre className="files">{st?.files}</pre>
+        <Field label="Commit message"><input autoFocus value={message} disabled={busy} onChange={(e) => setMessage(e.target.value)} /></Field>
+        {gitError && <div className="error">{gitError}</div>}
+      </Dialog>}
       {form && <NewChatForm wt={wt} state={state} onClose={() => setForm(false)} onDone={(id) => { setForm(false); onSelect({ type: "chat", id }); }} />}
       <h2>Chats</h2>
       {!chats.length && <div className="m">No chats in this worktree yet.</div>}
@@ -572,14 +667,13 @@ function NewChatForm({ wt, state, onClose, onDone }: { wt: Worktree; state: Stat
 
 /* ---------- chat ---------- */
 
-// .md paths in agent text become links that open the markdown viewer
 function MdLinks({ text, onOpen }: { text: string; onOpen: (p: string) => void }) {
   const parts: React.ReactNode[] = [];
   let last = 0;
-  for (const m of text.matchAll(MD_PATH)) {
-    parts.push(text.slice(last, m.index));
-    parts.push(<a key={m.index} href="#" className="mdlink" onClick={(e) => { e.preventDefault(); onOpen(m[0]); }}>{m[0]}</a>);
-    last = m.index! + m[0].length;
+  for (const link of artifactLinks(text)) {
+    parts.push(text.slice(last, link.index));
+    parts.push(<a key={link.index} href="#" className="mdlink" onClick={(e) => { e.preventDefault(); e.stopPropagation(); onOpen(link.target); }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); onOpen(link.target); }}>{link.label}</a>);
+    last = link.index + link.length;
   }
   parts.push(text.slice(last));
   return <>{parts}</>;
@@ -637,11 +731,12 @@ function ChatPane({ chat, perms, answer, onOpenMd }: { chat: Chat; perms: Permis
       {files.length > 0 && (
         <div className="chips">{files.map((f) => <span key={f} className="chip">📎 {f.split("/").pop()}<button onClick={() => setFiles((x) => x.filter((y) => y !== f))}>×</button></span>)}</div>
       )}
+      {chatStatus(chat) === "running" && <div className="composer-working" role="status"><span className="working-circle" aria-hidden="true" />Working…</div>}
       <div className={"composer" + (over ? " over" : "")} onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)} onDrop={onDrop}>
         <button className="icon attach" title="Attach files" onClick={async () => addFiles(await ade.pickFiles())}>
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.5l-8.6 8.6a5 5 0 0 1-7-7l9.2-9.2a3.3 3.3 0 0 1 4.7 4.7L10 18.9a1.6 1.6 0 0 1-2.3-2.3l8.5-8.5" /></svg>
         </button>
-        <textarea value={text} rows={1} onChange={(e) => setText(e.target.value)} placeholder={chat.running ? "working…" : "Message… ↩ to send, ⇧↩ for a new line"}
+        <textarea value={text} rows={1} onChange={(e) => setText(e.target.value)} placeholder={chat.running ? "Draft your next message…" : "Message… ↩ to send, ⇧↩ for a new line"}
           onInput={(e) => { const t = e.currentTarget; t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 220) + "px"; }}
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); } }} />
         <button className="icon enter" title="Send (↩)" disabled={chat.running || (!text.trim() && !files.length)} onClick={send}>
@@ -655,15 +750,16 @@ function ChatPane({ chat, perms, answer, onOpenMd }: { chat: Chat; perms: Permis
 /* ---------- drawer ---------- */
 
 type Scope = { id: string; cwd: string; title: string };
-function Drawer({ tab, state, worktree, scope, jobs, width, file, onEdit, onView, onClose }: { tab: Tab; state: State; worktree?: Worktree; scope?: Scope; jobs: Job[]; width: number; file?: string; onEdit: (p: string) => void; onView: (p: string) => void; onClose: () => void }) {
+function Drawer({ tab, state, chat, worktree, scope, jobs, width, file, onEdit, onView, onClose }: { tab: Tab; state: State; chat?: Chat; worktree?: Worktree; scope?: Scope; jobs: Job[]; width: number; file?: string; onEdit: (p: string) => void; onView: (p: string) => void; onClose: () => void }) {
   return (
     <div className="drawer" style={{ width }}>
       <div className="dhead">
-        <span><Ico n={{ terminal: "terminal", diff: "branch", editor: "pencil", markdown: "scroll", settings: "gear" }[tab]} className="big" /> {tab[0].toUpperCase() + tab.slice(1)}{scope && tab !== "settings" ? ` · ${scope.title}` : ""}</span>
+        <span><Ico n={{ terminal: "terminal", diff: "branch", editor: "pencil", markdown: "scroll", artifacts: "scroll", settings: "gear" }[tab]} className="big" /> {tab[0].toUpperCase() + tab.slice(1)}{scope && tab !== "settings" ? ` · ${scope.title}` : ""}</span>
         <button className="icon" onClick={onClose}>×</button>
       </div>
       <div className="dbody">
         {tab === "settings" ? <Settings state={state} />
+          : tab === "artifacts" ? (chat ? <ArtifactsView key={chat.id} chat={chat} onOpen={onView} /> : <div className="card">Select a chat to see its artifacts.</div>)
           : tab === "terminal" ? (scope ? <Terminals key={scope.id} scope={scope} jobs={jobs.filter((j) => j.scopeId === scope.id)} /> : <div className="card">Select a project, worktree or chat first.</div>)
           : !worktree ? <div className="card">Select a worktree or chat first.</div>
           : tab === "editor" ? <Editor key={worktree.id + (file ?? "")} worktree={worktree} initial={file} onView={onView} />
@@ -672,6 +768,26 @@ function Drawer({ tab, state, worktree, scope, jobs, width, file, onEdit, onView
       </div>
     </div>
   );
+}
+
+function ArtifactsView({ chat, onOpen }: { chat: Chat; onOpen: (path: string) => void }) {
+  const artifacts = React.useMemo(() => chatArtifacts(chat.messages), [chat.messages]);
+  const [error, setError] = useState("");
+  const open = async (target: string) => {
+    setError("");
+    try { if (await ade.artifactMenu(chat.worktreeId, target) === "open") onOpen(target); }
+    catch (e) { setError((e as Error).message); }
+  };
+  return <div className="artifacts-list">
+    <div className="m">{artifacts.length} linked file{artifacts.length === 1 ? "" : "s"} · {chat.name}</div>
+    {error && <div className="error" role="alert">{error}</div>}
+    {!artifacts.length ? <div className="card">No artifacts yet. Files linked in assistant responses will appear here.</div>
+      : <ul>{artifacts.map(({ label, target }) => <li key={target}>
+        <button className="artifact-entry" title={target} onClick={() => open(target)} onContextMenu={(e) => { e.preventDefault(); open(target); }}>
+          <Ico n="scroll" /><span><strong>{label}</strong>{label !== target && <small>{target}</small>}</span><span aria-hidden="true">›</span>
+        </button>
+      </li>)}</ul>}
+  </div>;
 }
 
 const termTabs = new Map<string, string[]>(); // scopeId -> terminal ids (session-lived)
@@ -819,35 +935,42 @@ function Editor({ worktree, initial, onView }: { worktree: Worktree; initial?: s
   );
 }
 
-// ponytail: marked output injected as-is; content is our own agent's local files
 function MarkdownView({ worktree, path: initial, onEdit }: { worktree: Worktree; path?: string; onEdit: (p: string) => void }) {
   const [path, setPath] = useState(initial);
-  const [html, setHtml] = useState<string>();
+  const [preview, setPreview] = useState<Awaited<ReturnType<Api["previewArtifact"]>>>();
   const [err, setErr] = useState<string>();
-  const load = () => path && ade.readFile(worktree.id, path).then((t) => { setErr(undefined); setHtml(marked.parse(t) as string); }, (e) => setErr(e.message));
-  useEffect(() => { load(); }, [worktree.id, path]);
-  // relative .md links stay in the viewer; anything http goes to the browser
+  const [reload, setReload] = useState(0);
+  useEffect(() => {
+    let active = true;
+    setPreview(undefined); setErr(undefined);
+    if (path) ade.previewArtifact(worktree.id, path).then((p) => { if (active) setPreview(p); }, (e) => { if (active) setErr(e.message); });
+    return () => { active = false; };
+  }, [worktree.id, path, reload]);
   const onClick = (e: React.MouseEvent) => {
     const a = (e.target as HTMLElement).closest("a");
     if (!a) return;
     e.preventDefault();
     const href = a.getAttribute("href") ?? "";
-    if (/^https?:/.test(href)) return void ade.openExternal(href);
-    if (href.endsWith(".md") || href.includes(".md#")) {
-      const rel = href.split("#")[0];
-      const dir = path!.includes("/") ? path!.slice(0, path!.lastIndexOf("/") + 1) : "";
-      setPath(rel.startsWith("/") ? rel : dir + rel);
-    }
+    if (href.startsWith("#")) return;
+    const dir = path!.includes("/") ? path!.slice(0, path!.lastIndexOf("/") + 1) : "";
+    const target = /^(?:[a-z]+:|\/|~\/)/i.test(href) ? href : dir + href;
+    ade.artifactMenu(worktree.id, target).then((action) => { if (action === "open") setPath(target); }).catch((e) => setErr(e.message));
   };
-  if (!path) return <div className="card">Click a .md path in a chat to view it here.</div>;
+  if (!path) return <div className="card">Open a linked file in a chat to preview it here.</div>;
   return (
     <div className="mdwrap">
       <div className="ebar">
-        <span className="grow mono">{path}</span>
-        <button className="icon" title="Reload" onClick={load}>↻</button>
-        <button onClick={() => onEdit(path)}>Edit</button>
+        <span className="grow mono" title={path}>{path}</span>
+        <button className="icon" title="Reload" onClick={() => setReload((n) => n + 1)}>↻</button>
+        <button onClick={() => ade.artifactMenu(worktree.id, path).catch((e) => setErr(e.message))}>Actions</button>
+        {preview && ["text", "markdown", "html"].includes(preview.kind) && <button onClick={() => onEdit(path)}>Edit</button>}
       </div>
-      {err ? <div className="error">{err}</div> : html === undefined ? <div className="m">loading…</div> : <article className="md" onClick={onClick} dangerouslySetInnerHTML={{ __html: html }} />}
+      {err ? <div className="error">{err}</div> : !preview ? <div className="m">loading…</div>
+        : preview.kind === "markdown" ? <article className="md" onClick={onClick} dangerouslySetInnerHTML={{ __html: marked.parse(preview.content) as string }} />
+        : preview.kind === "image" ? <img className="artifact-image" src={preview.content} alt={path} />
+        : preview.kind === "html" ? <iframe className="artifact-frame" title={path} sandbox="" srcDoc={preview.content} />
+        : preview.kind === "url" || preview.kind === "pdf" ? <iframe className="artifact-frame" title={path} sandbox="" src={preview.content} />
+        : <pre className="artifact-text">{preview.content}</pre>}
     </div>
   );
 }

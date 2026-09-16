@@ -16,11 +16,11 @@ export class Store {
     try {
       this.data = { ...empty(), ...JSON.parse(readFileSync(file(), "utf8")) };
     } catch {}
-    for (const c of this.data.chats) c.running = false;
+    for (const c of this.data.chats) { c.running = false; c.permissions = []; }
     for (const k of this.data.keys) { k.phiAllowed ??= false; k.auth ??= this.data.secrets[k.id] ? "key" : "login"; }
-    // main checkouts are not worktrees; drop any imported earlier
+    // Root scopes are opt-in; retain them and their chat IDs across restarts.
     const roots = new Set(this.data.projects.map((p) => p.path));
-    this.data.worktrees = this.data.worktrees.filter((w) => !roots.has(w.path));
+    this.data.worktrees = this.data.worktrees.filter((w) => w.root || !roots.has(w.path));
     for (const w of this.data.worktrees) { w.title ??= w.name; w.archived ??= false; }
   }
 

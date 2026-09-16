@@ -1,15 +1,20 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
-import { join, basename } from "node:path";
+import { app, BrowserWindow, dialog, ipcMain, shell, Notification, Menu } from "electron";
+import { join, basename, resolve, extname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { store } from "./store";
 import * as git from "./git";
+import { ensureRootWorktree, isRootWorktree } from "./rootWorktree";
 import * as agents from "./agents";
 import { humanize, suggestTitle } from "./namer";
 import { authStatus } from "./auth";
 import * as jobs from "./jobs";
+import { chatStatus } from "../shared/chatStatus";
 import { MODELS, type Api, type Appearance } from "../shared/types";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { homedir } from "node:os";
+import { execFile } from "node:child_process";
 
 // ADE_DATA_DIR isolates state for test instances
 // GUI apps get a bare PATH; borrow the login shell's so git/gh/claude resolve like in a terminal
@@ -24,6 +29,16 @@ for (const d of ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/us
 app.setPath("userData", process.env.ADE_DATA_DIR ?? join(app.getPath("appData"), "ade"));
 
 let win: BrowserWindow;
+let activeChat: string | null = null;
+const isViewing = (id: string) => activeChat === id && !!win && !win.isDestroyed() && win.isFocused() && win.isVisible() && !win.isMinimized();
+function acknowledgeChat() {
+  const chat = store.data.chats.find((c) => c.id === activeChat);
+  if (chat?.unreadCompletion && isViewing(chat.id)) {
+    chat.unreadCompletion = false;
+    store.save();
+  }
+}
+
 
 // macOS vibrancy: the renderer paints translucent backgrounds when frosted
 const VIBRANCY: Record<Appearance["background"], Parameters<BrowserWindow["setVibrancy"]>[0]> = { opaque: null, frost: "under-window", frost2: "hud" };
@@ -42,8 +57,18 @@ function createWindow() {
     backgroundColor: a.background === "opaque" ? (a.theme === "light" ? "#f3ead6" : "#0a0a0a") : "#00000000",
     webPreferences: { preload: join(import.meta.dirname, "../preload/index.mjs"), sandbox: false },
   });
+  win.on("blur", () => { activeChat = null; });
+  win.webContents.on("did-start-loading", () => { activeChat = null; });
   if (process.env.ELECTRON_RENDERER_URL) win.loadURL(process.env.ELECTRON_RENDERER_URL);
   else win.loadFile(join(import.meta.dirname, "../renderer/index.html"));
+}
+
+function artifactPath(id: string, target: string) {
+  let path = target.replace(/:\d+(?::\d+)?$/, "").split("#")[0];
+  if (path.startsWith("file:")) return fileURLToPath(path);
+  path = decodeURIComponent(path);
+  if (path.startsWith("~/")) path = join(homedir(), path.slice(2));
+  return resolve(wt(id).path, path);
 }
 
 const statusCache = new Map<string, { t: number; p: Promise<unknown> }>();
@@ -53,7 +78,7 @@ const project = (id: string) => store.data.projects.find((p) => p.id === id)!;
 
 async function syncWorktrees(projectId: string) {
   const p = project(projectId);
-  const live = (await git.listWorktrees(p.path)).filter((l) => l.path !== p.path);
+  const live = (await git.listWorktrees(p.path)).filter((l) => l.path !== p.path || store.data.worktrees.some((w) => w.projectId === projectId && w.root));
   const mine = store.data.worktrees.filter((w) => w.projectId === projectId);
   for (const l of live) {
     const w = mine.find((w) => w.path === l.path);
@@ -65,7 +90,7 @@ async function syncWorktrees(projectId: string) {
     }
   }
   store.data.worktrees = store.data.worktrees.filter(
-    (w) => w.projectId !== projectId || live.some((l) => l.path === w.path),
+    (w) => w.projectId !== projectId || w.root || live.some((l) => l.path === w.path),
   );
   const alive = new Set(store.data.worktrees.map((w) => w.id));
   store.data.chats = store.data.chats.filter((c) => alive.has(c.worktreeId));
@@ -73,6 +98,46 @@ async function syncWorktrees(projectId: string) {
 
 const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   getState: () => store.public(),
+  rootStatus: (id: string) => git.rootStatus(project(id).path),
+  checkoutAtRoot: async (id: string, commitMessage?: string) => {
+    const w = wt(id);
+    if (!w) throw new Error("Worktree no longer exists.");
+    if (isRootWorktree(w, project(w.projectId))) throw new Error("This entry already works at root.");
+    const rootIds = new Set(store.data.worktrees.filter((entry) => entry.projectId === w.projectId && isRootWorktree(entry, project(w.projectId))).map((entry) => entry.id));
+    if (store.data.chats.some((c) => (c.worktreeId === id || rootIds.has(c.worktreeId)) && c.running)) throw new Error("Wait for chats in this worktree and root to finish before checking out at root.");
+    try {
+      return await git.checkoutAtRoot(project(w.projectId).path, w.path, commitMessage);
+    } finally {
+      statusCache.delete(id);
+      const current = await git.rootStatus(w.path).catch(() => null);
+      if (current) w.branch = current.branch ?? "(detached)";
+      const root = store.data.worktrees.find((entry) => entry.projectId === w.projectId && entry.root);
+      if (root) {
+        statusCache.delete(root.id);
+        const status = await git.rootStatus(root.path).catch(() => null);
+        if (status) root.branch = status.branch ?? "(detached)";
+      }
+      store.save();
+    }
+  },
+  commitWorktree: async (id: string, branch: string, message: string) => {
+    const w = wt(id);
+    if (!w) throw new Error("Worktree no longer exists.");
+    if (store.data.chats.some((c) => c.worktreeId === id && c.running)) throw new Error("Wait for this worktree's chats to finish before committing.");
+    try { return await git.commitWorktree(w.path, branch, message); }
+    finally { statusCache.delete(id); }
+  },
+  pushWorktree: async (id: string, branch: string) => {
+    const w = wt(id);
+    if (!w) throw new Error("Worktree no longer exists.");
+    if (store.data.chats.some((c) => c.worktreeId === id && c.running)) throw new Error("Wait for this worktree's chats to finish before pushing.");
+    try { return await git.pushWorktree(w.path, branch); }
+    finally { statusCache.delete(id); }
+  },
+  setActiveChat: (id: string | null) => {
+    activeChat = id;
+    acknowledgeChat();
+  },
   pickFolder: async () => {
     const r = await dialog.showOpenDialog(win, { properties: ["openDirectory"] });
     return r.canceled ? null : r.filePaths[0];
@@ -100,6 +165,14 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     await syncWorktrees(id);
     store.save();
   },
+  openRootWorktree: async (projectId: string) => {
+    const p = project(projectId);
+    if (!p) throw new Error("Project no longer exists.");
+    const current = await git.rootStatus(p.path);
+    const root = ensureRootWorktree(store.data.worktrees, p, current.branch ?? "(detached)");
+    store.save();
+    return root.id;
+  },
   addWorktree: async (projectId: string, name: string, branch: string, base: string) => {
     await git.addWorktree(project(projectId).path, name, branch, base);
     await syncWorktrees(projectId);
@@ -107,6 +180,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   },
   removeWorktree: async (id: string) => {
     const w = store.data.worktrees.find((w) => w.id === id)!;
+    if (isRootWorktree(w, project(w.projectId))) throw new Error("The project root cannot be deleted as a worktree. Archive it to hide it.");
     await git.removeWorktree(project(w.projectId).path, w.path);
     store.data.chats = store.data.chats.filter((c) => c.worktreeId !== id);
     await syncWorktrees(w.projectId);
@@ -114,10 +188,12 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   },
   autoTitle: async (id: string) => {
     const w = wt(id);
+    if (w.root) return;
     w.title = await suggestTitle(w.path, w.branch);
     store.save();
   },
   renameWorktree: (id: string, title: string) => {
+    if (wt(id).root) return;
     wt(id).title = title.trim() || wt(id).name;
     store.save();
   },
@@ -136,6 +212,40 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     return p;
   },
   openExternal: (url: string) => shell.openExternal(url),
+  artifactMenu: (id: string, target: string) => new Promise<"open" | null>((done) => {
+    const remote = /^https?:\/\//i.test(target);
+    if (!remote && /^[a-z][a-z0-9+.-]*:/i.test(target.replace(/:\d+(?::\d+)?$/, "")) && !target.startsWith("file:")) throw new Error("Unsupported link");
+    const path = remote ? undefined : artifactPath(id, target);
+    const report = (error: unknown) => dialog.showErrorBox("Could not open artifact", String(error));
+    const menu = Menu.buildFromTemplate([
+      { label: "Open", click: () => done("open") },
+      { label: "Show in Finder", enabled: !!path, click: () => { if (path) { try { statSync(path); shell.showItemInFolder(path); } catch (e) { report(e); } } } },
+      { label: "Open in Browser", click: () => {
+        if (remote) { shell.openExternal(target).catch(report); return; }
+        try {
+          statSync(path!);
+          // Ask Launch Services for the default HTTPS browser, even for local files.
+          const browser = shell.openExternal;
+          if (process.platform === "darwin") execFile("/usr/bin/osascript", ["-e", 'POSIX path of (path to default application for URL "https://example.com")'], (err, stdout) => {
+            if (err) return report(err);
+            execFile("/usr/bin/open", ["-a", stdout.trim(), path!], (e) => { if (e) report(e); });
+          });
+          else browser(pathToFileURL(path!).href).catch(report);
+        } catch (e) { report(e); }
+      } },
+    ]);
+    menu.popup({ window: win, callback: () => done(null) });
+  }),
+  previewArtifact: (id: string, target: string) => {
+    if (/^https?:\/\//i.test(target)) return { kind: "url" as const, content: target };
+    const path = artifactPath(id, target);
+    if (statSync(path).size > 20 * 1024 * 1024) throw new Error("This file is too large to preview. Use Show in Finder or Open in Browser.");
+    const ext = extname(path).toLowerCase();
+    const mime: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml", ".pdf": "application/pdf" };
+    if (mime[ext]) return { kind: ext === ".pdf" ? "pdf" as const : "image" as const, content: `data:${mime[ext]};base64,${readFileSync(path).toString("base64")}` };
+    if ([".docx", ".xlsx", ".pptx", ".zip"].includes(ext)) return { kind: "unsupported" as const, content: "Preview unavailable for this file type. Use Show in Finder to open it in its application." };
+    return { kind: ext === ".md" ? "markdown" as const : [".html", ".htm"].includes(ext) ? "html" as const : "text" as const, content: readFileSync(path, "utf8") };
+  },
   jobStart: (scopeId: string, cwd: string, cmd: string, termId: string) => jobs.start(scopeId, cwd, cmd, termId),
   jobStop: (id: string) => jobs.stop(id),
   jobWrite: (id: string, text: string) => jobs.write(id, text),
@@ -245,7 +355,37 @@ app.whenReady().then(() => {
   for (const [name, fn] of Object.entries(handlers)) ipcMain.handle(name, (_e, ...args) => fn!(...args));
   // the window can be gone while jobs/agents are still winding down
   const send = (ch: string, data: unknown) => { if (win && !win.isDestroyed()) win.webContents.send(ch, data); };
-  store.onChange((s) => send("state", s));
+  const previous = new Map(store.data.chats.map((c) => [c.id, eventKey(c)]));
+  function eventKey(c: (typeof store.data.chats)[number]) {
+    const status = chatStatus(c);
+    return c.permissions?.length ? `permission:${c.permissions.map((p) => p.id).join(",")}`
+      : c.error ? `error:${c.error}` : status ?? "idle";
+  }
+  store.onChange((s) => {
+    for (const c of s.chats) {
+      const key = eventKey(c);
+      const changed = previous.get(c.id) !== key;
+      previous.set(c.id, key);
+      if (!changed || key === "idle" || isViewing(c.id) || !Notification.isSupported()) continue;
+      const status = chatStatus(c);
+      const notification = new Notification({
+        title: status === "attention" ? "Chat needs your attention" : status === "complete" ? "Chat complete" : "Chat started working",
+        body: c.permissions?.length ? "A chat is waiting for permission." : c.error ? "A chat encountered an error." : status === "attention" ? "A chat is waiting for your response." : status === "complete" ? "Your chat is ready to review." : "Your chat is running.",
+      });
+      notification.on("click", () => {
+        if (!store.data.chats.some((chat) => chat.id === c.id) || !win || win.isDestroyed()) return;
+        if (win.isMinimized()) win.restore();
+        win.show();
+        win.focus();
+        send("openChat", c.id);
+      });
+      notification.on("failed", (_event, error) => console.warn("Chat notification failed:", error));
+      notification.show();
+    }
+    for (const id of previous.keys()) if (!s.chats.some((c) => c.id === id)) previous.delete(id);
+    send("state", s);
+    acknowledgeChat();
+  });
   agents.onPermission((r) => send("permission", r));
   jobs.onJobs((j) => send("jobs", j));
   process.on("uncaughtException", (e) => console.error("[main]", e));
