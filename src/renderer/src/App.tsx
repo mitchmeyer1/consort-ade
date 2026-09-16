@@ -1,11 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
-import { MODELS, PHASES, type Api, type Chat, type Phase, type PermissionRequest, type Project, type RepoInfo, type State, type Worktree, type WorktreeStatus } from "../../shared/types";
+import { MODELS, PHASES, type Api, type Chat, type Job, type Phase, type PermissionRequest, type Project, type RepoInfo, type State, type Worktree, type WorktreeStatus } from "../../shared/types";
 import { Lockup, Mark } from "./Logo";
 import { marked } from "marked";
 
 const ade = (window as any).ade as Api;
 const EMPTY: State = { projects: [], worktrees: [], chats: [], keys: [], appearance: { theme: "dark", background: "opaque" } };
 type Tab = "terminal" | "diff" | "editor" | "markdown" | "settings";
+const PHASE_ICON: Record<Phase, string> = { waiting: "candle", planning: "scroll", executing: "sun", validating: "chalice", complete: "wreath" };
 const MD_PATH = /(?:\/?[\w.@~-]+\/)*[\w.@-]+\.md\b/g;
 type Sel = { type: "chat"; id: string } | { type: "worktree"; id: string; form?: boolean } | { type: "project"; id: string; form?: boolean };
 
@@ -40,6 +41,21 @@ const Badges = ({ st, pr = true }: { st: WorktreeStatus | null; pr?: boolean }) 
     </span>
   );
 
+// a non-zero exit the user hasn't looked at yet; user-stopped (-1) doesn't count
+const isUnseenFailure = (j: Job) => j.status === "exited" && j.code != null && j.code > 0 && !j.seen;
+const Dots = ({ id, running, failed }: { id: string; running: Set<string>; failed: Set<string> }) => (
+  <>{running.has(id) && <span className="live" title="a process is running here" />}{failed.has(id) && <span className="live dead" title="a process failed — open its terminal" />}</>
+);
+const PanelIcon = () => (
+  <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+    <rect x="3" y="4.5" width="18" height="15" rx="3" /><path d="M9.5 4.5v15" />
+  </svg>
+);
+const Flame = () => (
+  <svg className="flame" viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden>
+    <path d="M12 2c.6 3.2 3.4 4.6 4.9 7.3 1.6 2.9 1.2 6.6-1.3 8.9A7 7 0 0 1 5.3 13c.3-2 1.6-3.4 2.5-4.8.3 1.3.9 2.3 1.9 2.9-.4-3.3.7-6.4 2.3-9.1zm0 9.5c-1.6 1.4-2.6 3-2.4 4.8.2 1.6 1.2 2.7 2.6 2.7 1.5 0 2.5-1.2 2.5-2.8 0-1.8-1.2-3.2-2.7-4.7z" />
+  </svg>
+);
 const Ico = ({ n, className }: { n: string; className?: string }) => <i className={`ico ico-${n} ${className ?? ""}`} aria-hidden />;
 
 function Dialog({ title, onClose, children, footer }: { title: string; onClose: () => void; children: React.ReactNode; footer: React.ReactNode }) {
@@ -80,12 +96,17 @@ export function App() {
   const openMd = (path: string) => { setFile(path); setTab("markdown"); };
   const openEditor = (path: string) => { setFile(path); setTab("editor"); };
   const [perms, setPerms] = useState<PermissionRequest[]>([]);
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const running = React.useMemo(() => new Set(jobs.filter((j) => j.status === "running").map((j) => j.scopeId)), [jobs]);
+  const failed = React.useMemo(() => new Set(jobs.filter(isUnseenFailure).map((j) => j.scopeId)), [jobs]);
 
   useEffect(() => {
     ade.getState().then(setState);
+    ade.jobs().then(setJobs);
     const a = ade.onState(setState);
     const b = ade.onPermission((r) => setPerms((p) => [...p, r]));
-    return () => { a(); b(); };
+    const c = ade.onJobs(setJobs);
+    return () => { a(); b(); c(); };
   }, []);
 
   const [leftW, setLeftW] = useState(() => +(localStorage.getItem("leftW") ?? 280));
@@ -122,11 +143,11 @@ export function App() {
 
   return (
     <div className="app" style={{ gridTemplateColumns: `${collapsed ? 0 : leftW}px 1fr auto` }}>
-      {collapsed ? <div /> : <Sidebar state={state} sel={sel} onSelect={setSel} onCollapse={() => setCollapsed(true)} />}
+      {collapsed ? <div /> : <Sidebar state={state} sel={sel} running={running} failed={failed} onSelect={setSel} onCollapse={() => setCollapsed(true)} />}
       {!collapsed && <div className="resizer left" style={{ left: leftW - 3 }} onMouseDown={drag("left")} />}
       <div className="main">
         <div className={"topbar" + (collapsed ? " collapsed" : "") + (chat ? " haschat" : "")}>
-          {collapsed && <button className="icon expand" title="Show sidebar" onClick={() => setCollapsed(false)}>»</button>}
+          {collapsed && <button className="icon panel" title="Show sidebar" onClick={() => setCollapsed(false)}><PanelIcon /></button>}
           {chat ? (
             <>
               <span className="crumb" title={worktree?.path}>{crumb}</span>
@@ -137,7 +158,7 @@ export function App() {
                 {state.keys.filter((k) => k.provider === chat.provider).map((k) => <option key={k.id} value={k.id}>{k.name}{k.phiAllowed ? " · PHI" : ""}</option>)}
               </select>
               <label className={"phimode" + (state.keys.find((k) => k.id === chat.keyId)?.phiAllowed ? " on" : "")} title="PHI mode: use a PHI-approved key. Flips on automatically for suspicious uploads or prompts.">
-                <input type="checkbox" checked={!!state.keys.find((k) => k.id === chat.keyId)?.phiAllowed} onChange={(e) => ade.setPhiMode(chat.id, e.target.checked)} /> PHI mode
+                <input type="checkbox" checked={!!state.keys.find((k) => k.id === chat.keyId)?.phiAllowed} onChange={(e) => ade.setPhiMode(chat.id, e.target.checked)} /> <Ico n="cross" />PHI mode
               </label>
               <label><input type="checkbox" checked={chat.autoApprove} onChange={(e) => ade.setAutoApprove(chat.id, e.target.checked)} /> <span>auto-approve</span></label>
               {chat.running && <button onClick={() => ade.stop(chat.id)}>Stop</button>}
@@ -162,7 +183,7 @@ export function App() {
               <Mark />
               <div className="word">Consort</div>
               <div className="sub">AGENTIC DEVELOPMENT ENVIRONMENT</div>
-              <div className="est">EST · 2026 · DAL-TX</div>
+              <div className="est">AN AGENTIC WORKSPACE · NEW YORK</div>
               <div className="ornament rose" />
             </div>
           </div>
@@ -170,7 +191,8 @@ export function App() {
       </div>
       {tab && <>
         <div className="resizer right" style={{ right: rightW - 3 }} onMouseDown={drag("right")} />
-        <Drawer tab={tab} state={state} worktree={worktree} width={rightW} file={file} onEdit={openEditor} onView={openMd} onClose={() => setTab(undefined)} />
+        <Drawer tab={tab} state={state} worktree={worktree} scope={worktree ? { id: worktree.id, cwd: worktree.path, title: worktree.title } : project ? { id: project.id, cwd: project.path, title: project.name } : undefined}
+          jobs={jobs} width={rightW} file={file} onEdit={openEditor} onView={openMd} onClose={() => setTab(undefined)} />
       </>}
     </div>
   );
@@ -178,7 +200,7 @@ export function App() {
 
 /* ---------- sidebar ---------- */
 
-function Sidebar({ state, sel, onSelect, onCollapse }: { state: State; sel?: Sel; onSelect: (s: Sel) => void; onCollapse: () => void }) {
+function Sidebar({ state, sel, running, failed, onSelect, onCollapse }: { state: State; sel?: Sel; running: Set<string>; failed: Set<string>; onSelect: (s: Sel) => void; onCollapse: () => void }) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const toggle = (id: string) => setCollapsed((c) => ({ ...c, [id]: !c[id] }));
   const addProject = async () => {
@@ -187,13 +209,13 @@ function Sidebar({ state, sel, onSelect, onCollapse }: { state: State; sel?: Sel
   };
   return (
     <div className="sidebar">
-      <div className="brandrow"><Lockup /><button className="icon" title="Hide sidebar" onClick={onCollapse}>«</button></div>
+      <div className="brandrow"><Lockup /><button className="icon panel" title="Hide sidebar" onClick={onCollapse}><PanelIcon /></button></div>
       <div className="sect">
         <span>Projects</span>
         <button className="icon" title="Add project" onClick={addProject}>＋</button>
       </div>
       {state.projects.map((p) => (
-        <ProjectNode key={p.id} project={p} state={state} sel={sel} onSelect={onSelect} collapsed={collapsed} toggle={toggle} />
+        <ProjectNode key={p.id} project={p} state={state} sel={sel} running={running} failed={failed} onSelect={onSelect} collapsed={collapsed} toggle={toggle} />
       ))}
     </div>
   );
@@ -223,8 +245,8 @@ function NewWorktreeDialog({ p, onClose, branchPreset }: { p: Project; onClose: 
   );
 }
 
-function ProjectNode({ project: p, state, sel, onSelect, collapsed, toggle }: {
-  project: Project; state: State; sel?: Sel; onSelect: (s: Sel) => void;
+function ProjectNode({ project: p, state, sel, running, failed, onSelect, collapsed, toggle }: {
+  project: Project; state: State; sel?: Sel; running: Set<string>; failed: Set<string>; onSelect: (s: Sel) => void;
   collapsed: Record<string, boolean>; toggle: (id: string) => void;
 }) {
   const [showArchived, setShowArchived] = useState(false);
@@ -235,7 +257,7 @@ function ProjectNode({ project: p, state, sel, onSelect, collapsed, toggle }: {
     <div>
       <div className={"row project" + (sel?.type === "project" && sel.id === p.id ? " active" : "")} onClick={() => onSelect({ type: "project", id: p.id })}>
         <span onClick={(e) => { e.stopPropagation(); toggle(p.id); }}>{collapsed[p.id] ? "▸" : "▾"}</span>
-        <span className="grow" title={p.path}>{p.name}</span>
+        <span className="grow" title={p.path}><Ico n="arch" className="proj" />{p.name}<Dots id={p.id} running={running} failed={failed} /></span>
         <span className="tools" onClick={(e) => e.stopPropagation()}>
           <button className="icon" title="New worktree" onClick={() => onSelect({ type: "project", id: p.id, form: true })}>＋</button>
           <button className="icon" title="Re-scan worktrees" onClick={() => ade.syncWorktrees(p.id)}>↻</button>
@@ -243,7 +265,7 @@ function ProjectNode({ project: p, state, sel, onSelect, collapsed, toggle }: {
         </span>
       </div>
       {!collapsed[p.id] && <div className="wtlist">{wts.map((w) => (
-        <WorktreeNode key={w.id} wt={w} state={state} sel={sel} onSelect={onSelect} collapsed={collapsed} toggle={toggle} />
+        <WorktreeNode key={w.id} wt={w} state={state} sel={sel} running={running} failed={failed} onSelect={onSelect} collapsed={collapsed} toggle={toggle} />
       ))}</div>}
       {!collapsed[p.id] && archivedN > 0 && (
         <div className="row worktree archived-toggle" onClick={() => setShowArchived((x) => !x)}>
@@ -254,8 +276,8 @@ function ProjectNode({ project: p, state, sel, onSelect, collapsed, toggle }: {
   );
 }
 
-function WorktreeNode({ wt, state, sel, onSelect, collapsed, toggle }: {
-  wt: Worktree; state: State; sel?: Sel; onSelect: (s: Sel) => void;
+function WorktreeNode({ wt, state, sel, running, failed, onSelect, collapsed, toggle }: {
+  wt: Worktree; state: State; sel?: Sel; running: Set<string>; failed: Set<string>; onSelect: (s: Sel) => void;
   collapsed: Record<string, boolean>; toggle: (id: string) => void;
 }) {
   const st = useStatus(wt.id);
@@ -264,13 +286,13 @@ function WorktreeNode({ wt, state, sel, onSelect, collapsed, toggle }: {
   return (
     <div>
       <div className={"row worktree" + (active ? " active" : "") + (wt.archived ? " dim" : "")} onClick={() => onSelect({ type: "worktree", id: wt.id })}>
-        <span className="grow"><Editable value={wt.title} onSave={(t) => ade.renameWorktree(wt.id, t)} /></span>
+        <span className="grow"><Editable value={wt.title} onSave={(t) => ade.renameWorktree(wt.id, t)} /><Dots id={wt.id} running={running} failed={failed} /></span>
         <small className="branch">{st?.branch ?? wt.branch}</small>
         {st && (st.dirty > 0 || st.ahead > 0 || st.behind > 0 || st.pr || st.inBase) && <Badges st={st} />}
         <span className="tools" onClick={(e) => e.stopPropagation()}>
           <button className="icon" title="New chat here" onClick={() => onSelect({ type: "worktree", id: wt.id, form: true })}>＋</button>
-          <button className="icon" title={wt.archived ? "Unarchive" : "Archive (hide from list)"} onClick={() => ade.archiveWorktree(wt.id, !wt.archived)}>{wt.archived ? "⊕" : "⊖"}</button>
-          <button className="icon" title="Delete worktree from disk" onClick={() => confirm(`Delete worktree ${wt.title}?\n\nRuns: git worktree remove --force ${wt.path}\n${chats.length ? `Also deletes ${chats.length} chat(s).` : ""}`) && ade.removeWorktree(wt.id).catch((e) => alert(e.message))}>×</button>
+          <button className="icon" title={wt.archived ? "Unarchive" : "Archive (hide from list)"} onClick={() => ade.archiveWorktree(wt.id, !wt.archived)}><Ico n="vase" className="solo" /></button>
+          <button className="icon" title="Delete worktree from disk" onClick={() => confirm(`Delete worktree ${wt.title}?\n\nRuns: git worktree remove --force ${wt.path}\n${chats.length ? `Also deletes ${chats.length} chat(s).` : ""}`) && ade.removeWorktree(wt.id).catch((e) => alert(e.message))}><Flame /></button>
           <button className="icon" title={collapsed[wt.id] ? "Expand" : "Collapse"} onClick={() => toggle(wt.id)}>{collapsed[wt.id] ? "▸" : "▾"}</button>
         </span>
       </div>
@@ -433,9 +455,11 @@ function WorktreePage({ wt, state, openForm, onSelect }: { wt: Worktree; state: 
     <div className="page">
       <div>
         <h1><Editable value={wt.title} onSave={(t) => ade.renameWorktree(wt.id, t)} trigger="click" /> <button className="icon" title="Name with AI" onClick={() => ade.autoTitle(wt.id)}><Ico n="star" className="big" /></button></h1>
-        <div className="m" style={{ marginTop: 6 }}><span className="badge">{st?.branch ?? wt.branch}</span></div>
-        <Badges st={st} />
-        <div className="path">{wt.path}</div>
+        <div className="meta-rows">
+          <div><span className="badge">{st?.branch ?? wt.branch}</span></div>
+          <Badges st={st} />
+          <div className="path">{wt.path}</div>
+        </div>
       </div>
       <div className="actions">
         <button className="primary" onClick={() => !needKey() && setForm((f) => !f)}><Ico n="quill" /> New chat</button>
@@ -470,11 +494,11 @@ function GitCard({ st }: { st: WorktreeStatus }) {
   return (
     <div className="card git">
       <div className="gitgrid">
-        <div><h4>Branch</h4><div className="mono">{st.branch}</div><div className="m">vs {st.base}: {st.merged ? "merged" : st.inBase ? "in base" : `↑${st.ahead} ↓${st.behind}`}</div></div>
-        <div><h4>Working tree</h4><div>{st.dirty ? `${st.dirty} changed file${st.dirty === 1 ? "" : "s"}` : "clean"}</div>{st.files && <pre className="files">{st.files.split("\n").slice(0, 8).join("\n")}{st.dirty > 8 ? "\n…" : ""}</pre>}</div>
-        <div><h4>Last commit</h4>{st.last ? <><div>{st.last.subject}</div><div className="m">{st.last.author} · {st.last.age}</div></> : <div className="m">none</div>}</div>
+        <div><h4><Ico n="olive" />Branch</h4><div className="mono">{st.branch}</div><div className="m">vs {st.base}: {st.merged ? "merged" : st.inBase ? "in base" : `↑${st.ahead} ↓${st.behind}`}</div></div>
+        <div><h4><Ico n="cypress" />Working tree</h4><div>{st.dirty ? `${st.dirty} changed file${st.dirty === 1 ? "" : "s"}` : "clean"}</div>{st.files && <pre className="files">{st.files.split("\n").slice(0, 8).join("\n")}{st.dirty > 8 ? "\n…" : ""}</pre>}</div>
+        <div><h4><Ico n="wheat" />Last commit</h4>{st.last ? <><div>{st.last.subject}</div><div className="m">{st.last.author} · {st.last.age}</div></> : <div className="m">none</div>}</div>
         <div>
-          <h4>Pull request</h4>
+          <h4><Ico n="grapes" />Pull request</h4>
           {pr ? (
             <>
               <a href="#" onClick={(e) => { e.preventDefault(); ade.openExternal(pr.url); }}>#{pr.number} {pr.title}</a>
@@ -507,8 +531,9 @@ function NewChatForm({ wt, state, onClose, onDone }: { wt: Worktree; state: Stat
   const [keyId, setKeyId] = useState(state.keys[0]?.id ?? "");
   const provider = state.keys.find((k) => k.id === keyId)?.provider ?? "claude";
   const [model, setModel] = useState(MODELS[provider][0]);
+  const [custom, setCustom] = useState(false);
   const [prompt, setPrompt] = useState("");
-  useEffect(() => setModel(MODELS[provider][0]), [provider]);
+  useEffect(() => { setModel(MODELS[provider][0]); setCustom(false); }, [provider]);
   const start = async () => {
     const id = await ade.addChat(wt.id, keyId, { name, model });
     if (prompt.trim()) ade.send(id, prompt).catch((e) => alert(e.message));
@@ -517,7 +542,7 @@ function NewChatForm({ wt, state, onClose, onDone }: { wt: Worktree; state: Stat
   return (
     <Dialog title="Create a chat" onClose={onClose} footer={<>
       <button onClick={onClose}>Cancel</button>
-      <button className="primary" disabled={!keyId || !name} onClick={start}>Create</button>
+      <button className="primary" disabled={!keyId || !name || !model} onClick={start}>Create</button>
     </>}>
       <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} autoFocus /></Field>
       <div className="two">
@@ -527,8 +552,14 @@ function NewChatForm({ wt, state, onClose, onDone }: { wt: Worktree; state: Stat
           </select>
         </Field>
         <Field label="Model">
-          <input list="models" value={model} onChange={(e) => setModel(e.target.value)} />
-          <datalist id="models">{MODELS[provider].map((m) => <option key={m} value={m} />)}</datalist>
+          {custom ? (
+            <input autoFocus value={model} placeholder="model id" onChange={(e) => setModel(e.target.value)} onBlur={() => !model && setCustom(false)} />
+          ) : (
+            <select value={model} onChange={(e) => { if (e.target.value === "__other") { setCustom(true); setModel(""); } else setModel(e.target.value); }}>
+              {MODELS[provider].map((m) => <option key={m} value={m}>{m}</option>)}
+              <option value="__other">other…</option>
+            </select>
+          )}
         </Field>
       </div>
       <Field label="Initial prompt" optional info="⌘↩ to create and send">
@@ -571,7 +602,7 @@ function ChatPane({ chat, perms, answer, onOpenMd }: { chat: Chat; perms: Permis
   return (
     <>
       <div className="phases">
-        {PHASES.map((p, j) => <div key={p} className={j < i ? "done" : j === i ? "on" : ""} onClick={() => ade.setPhase(chat.id, p)}>{p}</div>)}
+        {PHASES.map((p, j) => <div key={p} className={j < i ? "done" : j === i ? "on" : ""} onClick={() => ade.setPhase(chat.id, p)}><Ico n={PHASE_ICON[p]} />{p}</div>)}
       </div>
       <div className="messages">
         {chat.messages.filter((m) => m.blocks.length).map((m) => (
@@ -595,7 +626,7 @@ function ChatPane({ chat, perms, answer, onOpenMd }: { chat: Chat; perms: Permis
         ))}
         {perms.map((p) => (
           <div key={p.id} className="perm">
-            <b>Allow {p.tool}?</b>
+            <b><Ico n="celtic" className="big" />Allow {p.tool}?</b>
             <pre>{JSON.stringify(p.input, null, 2)}</pre>
             <button className="primary" onClick={() => answer(p.id, true)}>Allow</button> <button onClick={() => answer(p.id, false)}>Deny</button>
           </div>
@@ -623,17 +654,18 @@ function ChatPane({ chat, perms, answer, onOpenMd }: { chat: Chat; perms: Permis
 
 /* ---------- drawer ---------- */
 
-function Drawer({ tab, state, worktree, width, file, onEdit, onView, onClose }: { tab: Tab; state: State; worktree?: Worktree; width: number; file?: string; onEdit: (p: string) => void; onView: (p: string) => void; onClose: () => void }) {
+type Scope = { id: string; cwd: string; title: string };
+function Drawer({ tab, state, worktree, scope, jobs, width, file, onEdit, onView, onClose }: { tab: Tab; state: State; worktree?: Worktree; scope?: Scope; jobs: Job[]; width: number; file?: string; onEdit: (p: string) => void; onView: (p: string) => void; onClose: () => void }) {
   return (
     <div className="drawer" style={{ width }}>
       <div className="dhead">
-        <span><Ico n={{ terminal: "terminal", diff: "branch", editor: "pencil", markdown: "scroll", settings: "gear" }[tab]} className="big" /> {tab}{worktree && tab !== "settings" ? ` · ${worktree.title}` : ""}</span>
+        <span><Ico n={{ terminal: "terminal", diff: "branch", editor: "pencil", markdown: "scroll", settings: "gear" }[tab]} className="big" /> {tab[0].toUpperCase() + tab.slice(1)}{scope && tab !== "settings" ? ` · ${scope.title}` : ""}</span>
         <button className="icon" onClick={onClose}>×</button>
       </div>
       <div className="dbody">
         {tab === "settings" ? <Settings state={state} />
+          : tab === "terminal" ? (scope ? <Terminals key={scope.id} scope={scope} jobs={jobs.filter((j) => j.scopeId === scope.id)} /> : <div className="card">Select a project, worktree or chat first.</div>)
           : !worktree ? <div className="card">Select a worktree or chat first.</div>
-          : tab === "terminal" ? <Terminal key={worktree.id} worktree={worktree} />
           : tab === "editor" ? <Editor key={worktree.id + (file ?? "")} worktree={worktree} initial={file} onView={onView} />
           : tab === "markdown" ? <MarkdownView key={worktree.id + (file ?? "")} worktree={worktree} path={file} onEdit={onEdit} />
           : <Diff key={worktree.id} worktree={worktree} />}
@@ -642,25 +674,81 @@ function Drawer({ tab, state, worktree, width, file, onEdit, onView, onClose }: 
   );
 }
 
-function Terminal({ worktree }: { worktree: Worktree }) {
-  const [log, setLog] = useState<{ cmd: string; out: string; code: number }[]>([]);
-  const [cmd, setCmd] = useState("");
-  const [busy, setBusy] = useState(false);
-  const run = async () => {
-    if (!cmd.trim()) return;
-    setBusy(true);
-    const r = await ade.runCommand(worktree.id, cmd);
-    setLog((l) => [...l, { cmd, ...r }]);
-    setCmd(""); setBusy(false);
+const termTabs = new Map<string, string[]>(); // scopeId -> terminal ids (session-lived)
+function Terminals({ scope, jobs }: { scope: Scope; jobs: Job[] }) {
+  const [tabs, setTabs] = useState<string[]>(() => termTabs.get(scope.id) ?? ["t1"]);
+  const [cur, setCur] = useState(tabs[0]);
+  useEffect(() => { termTabs.set(scope.id, tabs); if (!tabs.includes(cur)) setCur(tabs[tabs.length - 1]); }, [tabs]);
+  const add = () => { const id = "t" + (Date.now() % 100000); setTabs((t) => [...t, id]); setCur(id); };
+  const close = (id: string) => {
+    jobs.filter((j) => j.termId === id).forEach((j) => ade.jobRemove(j.id));
+    setTabs((t) => (t.length > 1 ? t.filter((x) => x !== id) : t));
   };
   return (
-    <div className="card term">
-      <h4>{worktree.path}</h4>
-      {log.map((l, i) => (
-        <div key={i}><div className="cmd">{l.cmd}</div><pre className={l.code ? "fail" : ""}>{l.out || `(exit ${l.code})`}</pre></div>
-      ))}
-      <input value={cmd} disabled={busy} placeholder={busy ? "running…" : "command, ↩ to run"} onChange={(e) => setCmd(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && run()} autoFocus />
+    <div className="terms">
+      <div className="termtabs">
+        {tabs.map((id, i) => {
+          const live = jobs.some((j) => j.termId === id && j.status === "running");
+          const bad = id !== cur && jobs.some((j) => j.termId === id && isUnseenFailure(j));
+          return (
+            <span key={id} className={"termtab" + (id === cur ? " on" : "")} onClick={() => setCur(id)}>
+              {live && <span className="live" />}{bad && <span className="live dead" />}{i + 1}
+              {tabs.length > 1 && <button className="icon" title="Close terminal" onClick={(e) => { e.stopPropagation(); close(id); }}>×</button>}
+            </span>
+          );
+        })}
+        <button className="icon" title="New terminal" onClick={add}>＋</button>
+      </div>
+      <Terminal key={cur} scope={scope} termId={cur} jobs={jobs.filter((j) => j.termId === cur)} />
+    </div>
+  );
+}
+
+// ponytail: one transcript + inline prompt over spawned jobs; node-pty + xterm if you need a true shell
+function Terminal({ scope, termId, jobs }: { scope: Scope; termId: string; jobs: Job[] }) {
+  const [line, setLine] = useState("");
+  const [hist, setHist] = useState(-1);
+  const [echo, setEcho] = useState<Record<string, string[]>>({});
+  const box = useRef<HTMLDivElement>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const running = jobs.find((j) => j.status === "running");
+  const cmds = jobs.map((j) => j.cmd);
+  useEffect(() => { const el = box.current; if (el) el.scrollTop = el.scrollHeight; }, [jobs, echo]);
+  useEffect(() => { jobs.filter(isUnseenFailure).forEach((j) => ade.jobSeen(j.id)); }, [jobs]); // viewing the transcript clears the red dot
+  const submit = () => {
+    if (running) { ade.jobWrite(running.id, line + "\n"); setEcho((e) => ({ ...e, [running.id]: [...(e[running.id] ?? []), line] })); }
+    else if (line.trim()) { if (line.trim() === "clear") { jobs.forEach((j) => ade.jobRemove(j.id)); } else ade.jobStart(scope.id, scope.cwd, line, termId); }
+    setLine(""); setHist(-1);
+  };
+  const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && e.key === "c" && !window.getSelection()?.toString()) { e.preventDefault(); if (running) ade.jobStop(running.id); else setLine(""); return; }
+    if (mod && e.key === "k") { e.preventDefault(); jobs.filter((j) => j.status !== "running").forEach((j) => ade.jobRemove(j.id)); return; }
+    if (e.key === "Enter") { e.preventDefault(); submit(); return; }
+    if (!running && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+      e.preventDefault();
+      const n = e.key === "ArrowUp" ? Math.min(hist + 1, cmds.length - 1) : Math.max(hist - 1, -1);
+      setHist(n); setLine(n < 0 ? "" : cmds[cmds.length - 1 - n]);
+    }
+  };
+  return (
+    <div className="tty" onClick={() => input.current?.focus()}>
+      <div className="ttyhead">{scope.cwd}</div>
+      <div className="ttybody" ref={box}>
+        {jobs.map((j) => (
+          <div key={j.id} className="ttyjob">
+            <div className="ttycmd"><span className="prompt">$</span> {j.cmd}{j.status === "running" && <span className="live" />}</div>
+            {j.out && <pre>{j.out}</pre>}
+            {(echo[j.id] ?? []).map((t, i) => <div key={i} className="ttyecho">› {t}</div>)}
+            {j.status === "exited" && j.code !== 0 && <div className="ttyexit">[{j.code === -1 || j.code == null ? "stopped" : `exit ${j.code}`}]</div>}
+          </div>
+        ))}
+        <div className="ttyline">
+          <span className="prompt">{running ? "›" : "$"}</span>
+          <input ref={input} value={line} onChange={(e) => setLine(e.target.value)} onKeyDown={onKey} autoFocus spellCheck={false}
+            placeholder={running ? "stdin · ^C stops" : jobs.length ? "" : "type a command"} />
+        </div>
+      </div>
     </div>
   );
 }
@@ -804,7 +892,7 @@ function Settings({ state }: { state: State }) {
   return (
     <>
       <div className="card">
-        <h4>AI API keys <button className="icon" title="Add key" onClick={() => setAdding(true)}>＋</button></h4>
+        <h4><Ico n="fleur" />AI API keys <button className="icon" title="Add key" onClick={() => setAdding(true)}>＋</button></h4>
         {state.keys.map((k) => (
           <div key={k.id} className="krow">
             <span className="grow">{k.name} <span className="badge">{k.provider}</span> <span className="badge" title={k.auth === "login" ? "Uses the provider CLI's own sign-in (your subscription)" : "API key, billed per token"}>{k.auth === "login" ? "subscription login" : "api key"}</span>
@@ -818,7 +906,7 @@ function Settings({ state }: { state: State }) {
         {!state.keys.length && <div style={{ color: "var(--dim)" }}>No keys yet.</div>}
       </div>
       <div className="card">
-        <h4>Appearance</h4>
+        <h4><Ico n="butterfly" />Appearance</h4>
         <div className="krow">
           <span className="grow">Mode</span>
           <div className="seg">

@@ -11,7 +11,7 @@ export const Lockup = () => (
     <Mark />
     <div>
       <div className="word">Consort</div>
-      <div className="sub">ADE · EST 2026</div>
+      <div className="sub">An Agentic Workspace</div>
     </div>
   </div>
 );

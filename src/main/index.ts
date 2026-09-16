@@ -7,6 +7,7 @@ import * as git from "./git";
 import * as agents from "./agents";
 import { humanize, suggestTitle } from "./namer";
 import { authStatus } from "./auth";
+import * as jobs from "./jobs";
 import { MODELS, type Api, type Appearance } from "../shared/types";
 import { readFileSync } from "node:fs";
 
@@ -135,6 +136,12 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     return p;
   },
   openExternal: (url: string) => shell.openExternal(url),
+  jobStart: (scopeId: string, cwd: string, cmd: string, termId: string) => jobs.start(scopeId, cwd, cmd, termId),
+  jobStop: (id: string) => jobs.stop(id),
+  jobWrite: (id: string, text: string) => jobs.write(id, text),
+  jobRemove: (id: string) => jobs.remove(id),
+  jobSeen: (id: string) => jobs.seen(id),
+  jobs: () => jobs.list(),
   authStatus: (provider) => authStatus(provider),
   listFiles: (id: string) => git.listFiles(wt(id).path),
   readFile: (id: string, rel: string) => git.readFile(wt(id).path, rel),
@@ -236,10 +243,15 @@ app.whenReady().then(() => {
   for (const w of store.data.worktrees)
     if (w.title === w.name) { w.title = humanize(w.branch); suggestTitle(w.path, w.branch).then((t) => { w.title = t; store.save(); }); }
   for (const [name, fn] of Object.entries(handlers)) ipcMain.handle(name, (_e, ...args) => fn!(...args));
-  store.onChange((s) => win?.webContents.send("state", s));
-  agents.onPermission((r) => win?.webContents.send("permission", r));
+  // the window can be gone while jobs/agents are still winding down
+  const send = (ch: string, data: unknown) => { if (win && !win.isDestroyed()) win.webContents.send(ch, data); };
+  store.onChange((s) => send("state", s));
+  agents.onPermission((r) => send("permission", r));
+  jobs.onJobs((j) => send("jobs", j));
+  process.on("uncaughtException", (e) => console.error("[main]", e));
   createWindow();
   // drop worktrees whose folders vanished since last run
   for (const p of store.data.projects) syncWorktrees(p.id).then(() => store.save()).catch(() => {});
 });
+app.on("before-quit", () => jobs.stopAll());
 app.on("window-all-closed", () => app.quit());

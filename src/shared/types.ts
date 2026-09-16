@@ -42,6 +42,7 @@ export type RepoInfo = {
     mine: boolean; role: "author" | "reviewer" | null; turn: "yours" | "theirs" | null; why: string }[];
   runs: { name: string; title: string; branch: string; status: string; conclusion: string; createdAt: string; url: string }[];
 };
+export type Job = { id: string; scopeId: string; termId: string; cwd: string; cmd: string; out: string; status: "running" | "exited"; code?: number; startedAt: number; seen?: boolean };
 export type Appearance = { theme: "dark" | "light"; background: "opaque" | "frost" | "frost2" };
 export type State = { projects: Project[]; worktrees: Worktree[]; chats: Chat[]; keys: ApiKey[]; appearance: Appearance };
 export type PermissionRequest = { id: string; chatId: string; tool: string; input: unknown };
@@ -81,6 +82,13 @@ export type Api = {
   onPermission(cb: (r: PermissionRequest) => void): () => void;
   answerPermission(id: string, allow: boolean): Promise<void>;
   runCommand(worktreeId: string, cmd: string): Promise<{ out: string; code: number }>;
+  jobStart(scopeId: string, cwd: string, cmd: string, termId: string): Promise<string>;
+  jobStop(id: string): Promise<void>;
+  jobWrite(id: string, text: string): Promise<void>;
+  jobRemove(id: string): Promise<void>;
+  jobSeen(id: string): Promise<void>;
+  jobs(): Promise<Job[]>;
+  onJobs(cb: (jobs: Job[]) => void): () => void;
   diff(worktreeId: string): Promise<{ files: string; patch: string }>;
   openExternal(url: string): Promise<void>;
   setAppearance(a: Partial<Appearance>): Promise<void>;
