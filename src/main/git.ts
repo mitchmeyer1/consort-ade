@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { basename, dirname, join, resolve } from "node:path";
 import { promises as fs } from "node:fs";
-import type { PrInfo, RepoInfo, WorktreeStatus } from "../shared/types";
+import type { CommitInfo, PrInfo, RepoInfo, WorktreeStatus } from "../shared/types";
 
 const run = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) =>
@@ -151,3 +151,31 @@ export async function listFiles(cwd: string) {
 }
 export const readFile = (cwd: string, rel: string) => fs.readFile(inside(cwd, rel), "utf8");
 export const writeFile = (cwd: string, rel: string, content: string) => fs.writeFile(inside(cwd, rel), content);
+
+export async function commitInfo(cwd: string): Promise<CommitInfo> {
+  const [files, log, branch, ab] = await Promise.all([
+    git(cwd, "status", "--short"),
+    git(cwd, "log", "-40", "--format=%h%x00%s%x00%an%x00%cr").catch(() => ""),
+    git(cwd, "rev-parse", "--abbrev-ref", "HEAD").then((s) => s.trim()),
+    git(cwd, "rev-list", "--count", "@{upstream}..HEAD").then((s) => +s.trim(), () => 0),
+  ]);
+  return {
+    files, changed: files.split("\n").filter(Boolean).length, branch, ahead: ab,
+    log: log.split("\n").filter(Boolean).map((l) => { const [hash, subject, author, age] = l.split("\0"); return { hash, subject, author, age }; }),
+  };
+}
+
+export async function commit(cwd: string, message: string) {
+  await git(cwd, "add", "-A");
+  const out = await git(cwd, "commit", "-m", message);
+  const line = out.trim().split("\n")[0];
+  // -u origin HEAD works for first push and subsequent ones alike
+  try { await run("git", ["push", "-u", "origin", "HEAD"], { cwd, maxBuffer: 1 << 24 }); return `${line} · pushed`; }
+  catch (e: any) { throw new Error(`${line} · push failed: ${String(e.stderr || e.message).trim().split("\n").pop()}`); }
+}
+
+// diff for the AI summary: tracked changes plus untracked files, capped so the prompt stays small
+export async function diffForSummary(cwd: string) {
+  const { files, patch } = await diff(cwd); // tracked + untracked as patches
+  return `Changed files:\n${files}\n${patch}`.slice(0, 14_000);
+}

@@ -28,3 +28,18 @@ export async function suggestTitle(path: string, branch: string): Promise<string
     return humanize(branch);
   }
 }
+
+// one-shot question through the Agent SDK so it works with the Claude Code login as well as an API key
+export async function askOnce(cwd: string, prompt: string): Promise<string> {
+  const { query } = await import("@anthropic-ai/claude-agent-sdk");
+  const key = store.data.keys.find((k) => k.provider === "claude" && k.auth === "key");
+  const apiKey = key ? store.getSecret(key.id) : "";
+  const { [""]: _x, ...base } = process.env as Record<string, string>;
+  delete (base as any).ANTHROPIC_API_KEY;
+  let text = "";
+  for await (const m of query({ prompt, options: { cwd, model: "claude-haiku-4-5-20251001", tools: [], maxTurns: 1, env: { ...base, ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}) }, systemPrompt: "You answer with only the requested text. No preamble." } }) as AsyncIterable<any>) {
+    if (m.type === "assistant") for (const b of m.message?.content ?? []) if (b.type === "text") text += b.text;
+    if (m.type === "result" && m.subtype !== "success") throw new Error(m.errors?.join("\n") || m.subtype);
+  }
+  return text.trim();
+}

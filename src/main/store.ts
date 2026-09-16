@@ -16,8 +16,17 @@ export class Store {
     try {
       this.data = { ...empty(), ...JSON.parse(readFileSync(file(), "utf8")) };
     } catch {}
-    for (const c of this.data.chats) c.running = false;
+    for (const c of this.data.chats) {
+      // running at shutdown, or a transcript that ends mid-turn (unanswered user message / tool call with no result) = dead
+      const last = c.messages[c.messages.length - 1];
+      const pendingTool = c.messages.some((m) => m.blocks.some((b) => b.type === "tool" && b.ok === undefined));
+      if (c.running || (!c.error && last && (last.role === "user" || pendingTool))) c.interrupted = true;
+      c.running = false;
+    }
     for (const k of this.data.keys) { k.phiAllowed ??= false; k.auth ??= this.data.secrets[k.id] ? "key" : "login"; }
+    // the CLI logins are always-present connectors; API keys are added on top
+    for (const [id, provider, name] of [["login-codex", "codex", "Codex CLI login"], ["login-claude", "claude", "Claude Code login"]] as const)
+      if (!this.data.keys.some((k) => k.id === id)) this.data.keys.unshift({ id, provider, name, phiAllowed: false, auth: "login" });
     // main checkouts are not worktrees; drop any imported earlier
     const roots = new Set(this.data.projects.map((p) => p.path));
     this.data.worktrees = this.data.worktrees.filter((w) => !roots.has(w.path));
@@ -53,7 +62,9 @@ export class Store {
   }
   getSecret(id: string) {
     const enc = this.data.secrets[id];
-    return enc ? safeStorage.decryptString(Buffer.from(enc, "base64")) : "";
+    if (!enc) return "";
+    try { return safeStorage.decryptString(Buffer.from(enc, "base64")); }
+    catch { throw new Error(`Can't decrypt the API key "${this.data.keys.find((k) => k.id === id)?.name ?? id}" — remove it in Settings and add it again.`); }
   }
 }
 

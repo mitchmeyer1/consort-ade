@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
 import { appendFileSync, copyFileSync, mkdirSync, readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { Codex } from "@openai/codex-sdk";
 import { store } from "./store";
@@ -10,7 +10,7 @@ import { PHASES, type Chat, type Block, type Phase, type PermissionRequest } fro
 // ponytail: phase tracked via text markers so claude + codex share one mechanism
 const PHASE_PROMPT = `You are working inside an ADE that shows a 5-step progress bar: ${PHASES.join(" → ")}.
 Whenever you move to a new step, emit the marker [phase:<step>] on its own line (e.g. [phase:executing]).
-Start non-trivial tasks with [phase:planning]; use [phase:validating] while testing; [phase:complete] when done; [phase:waiting] when you need the user.`;
+Use only the steps that apply (a quick answer can go straight to complete). [phase:waiting] means you need the user; otherwise the bar lands on complete when you finish.`;
 const MARKER = /\[phase:(waiting|planning|executing|validating|complete)\]\s*/g;
 const PHI_MARKER = /\[phi-required\]\s*/g;
 const phiPrompt = (allowed: boolean) =>
@@ -64,7 +64,85 @@ export function stop(chatId: string) {
   running.get(chatId)?.abort();
 }
 
-export async function send(chatId: string, text: string, files: string[] = []) {
+// stop a run and wait until it has actually wound down
+export async function stopAndWait(chatId: string) {
+  stop(chatId);
+  for (let i = 0; i < 100 && store.chat(chatId).running; i++) await new Promise((r) => setTimeout(r, 100));
+}
+
+// compact transcript for handing a conversation to a different provider (deterministic, most recent kept)
+export function transcriptDigest(chat: Chat, cap = 9000) {
+  const lines: string[] = [];
+  for (const m of chat.messages) {
+    if (m.role === "system") continue;
+    const parts = m.blocks.map((b) => (b.type === "text" ? b.text.trim() : `[tool ${b.name}: ${b.input.split("\n")[0].slice(0, 120)}${b.ok === false ? " → failed" : ""}]`)).filter(Boolean);
+    if (!parts.length) continue;
+    const body = parts.join("\n");
+    lines.push(`${m.role === "user" ? "USER" : "ASSISTANT"}:\n${body.length > 1200 ? body.slice(0, 1200) + " …[truncated]" : body}`);
+  }
+  let out = lines.join("\n\n");
+  if (out.length > cap) out = "…[earlier conversation omitted]\n\n" + out.slice(-cap);
+  return out;
+}
+
+export async function switchAgent(chatId: string, keyId: string, model: string) {
+  const chat = store.chat(chatId);
+  const key = store.data.keys.find((k) => k.id === keyId);
+  if (!key) throw new Error("unknown connector");
+  const providerChanged = key.provider !== chat.provider;
+  if (chat.running) await stopAndWait(chatId);
+  const digest = providerChanged ? transcriptDigest(chat) : "";
+  chat.keyId = keyId; chat.model = model;
+  if (!providerChanged) { store.save(); return; }
+  chat.provider = key.provider; chat.sessionId = undefined;
+  chat.messages.push({ id: randomUUID(), role: "system", blocks: [{ type: "text", text: `Handed the conversation to ${key.provider} · ${model} (${key.name}).` }], ts: Date.now() });
+  store.save();
+  const prompt = `You are taking over an in-progress conversation from another AI agent working in this same repository/worktree. Transcript so far:\n\n${digest}\n\nPick up where it left off: in one or two sentences say what you understand the task and current status to be, then continue the work. If the last step was a question to the user, ask it again briefly and emit [phase:waiting].`;
+  await send(chatId, prompt, [], { silent: true });
+}
+
+// pick a dead chat back up: what changed on disk since, what the agent produced, and (if the session is gone) the transcript
+export async function continueChat(chatId: string) {
+  const chat = store.chat(chatId);
+  if (chat.running) return;
+  const cwd = store.data.worktrees.find((w) => w.id === chat.worktreeId)!.path;
+  const sh = (args: string[]) => new Promise<string>((res) => execFile("git", args, { cwd, maxBuffer: 1 << 22 }, (_e, out) => res(out || "")));
+  const [status, recent, artifacts] = await Promise.all([
+    sh(["status", "--short"]),
+    sh(["log", "-5", "--format=%h %s (%cr)"]),
+    new Promise<string>((res) => execFile("find", [".consort", "-type", "f", "-newermt", "-2 days"], { cwd }, (_e, out) => res(out || ""))),
+  ]);
+  const why = chat.error ? `Your previous run failed with: ${chat.error}` : "The app was closed while you were mid-task, so your previous run was cut off.";
+  const prompt = `${why}
+Pick up exactly where you left off and finish the task. Do not start over; check the current state first.
+
+` +
+    `Working tree now (git status --short):
+${status.trim() || "(clean)"}
+
+Recent commits:
+${recent.trim() || "(none)"}
+
+` +
+    (artifacts.trim() ? `Files you produced under .consort/ (read them rather than regenerating):
+${artifacts.trim()}
+
+` : "") +
+    (chat.sessionId && chat.provider === "claude" ? `Your earlier context should still be attached to this session; if it is not, here is the transcript:
+
+${transcriptDigest(chat, 6000)}` : `Transcript so far:
+
+${transcriptDigest(chat)}`) +
+    `
+
+Start with one sentence on where things stand, then continue.`;
+  chat.messages.push({ id: randomUUID(), role: "system", blocks: [{ type: "text", text: "Resumed after interruption." }], ts: Date.now() });
+  chat.error = undefined; chat.interrupted = undefined;
+  store.save();
+  await send(chatId, prompt, [], { silent: true });
+}
+
+export async function send(chatId: string, text: string, files: string[] = [], opts: { silent?: boolean } = {}) {
   const chat = store.chat(chatId);
   if (chat.running) throw new Error("chat is busy");
   const cwd = store.data.worktrees.find((w) => w.id === chat.worktreeId)!.path;
@@ -74,9 +152,10 @@ export async function send(chatId: string, text: string, files: string[] = []) {
   const staged = stageFiles(cwd, files);
   const shown = staged.length ? `${text}\n\n${staged.map((f) => `📎 ${basename(f)}`).join("\n")}` : text;
   if (staged.length) text = `${text}\n\nAttached files (read them from disk):\n${staged.map((f) => `- ${f}`).join("\n")}`;
-  chat.messages.push({ id: randomUUID(), role: "user", blocks: [{ type: "text", text: shown }], ts: Date.now() });
+  if (!opts.silent) chat.messages.push({ id: randomUUID(), role: "user", blocks: [{ type: "text", text: shown }], ts: Date.now() });
   chat.running = true;
   chat.error = undefined;
+  chat.interrupted = undefined;
   if (chat.phase === "waiting" || chat.phase === "complete") chat.phase = "planning";
   store.save();
 
@@ -86,6 +165,8 @@ export async function send(chatId: string, text: string, files: string[] = []) {
   try {
     if (chat.provider === "claude") await runClaude(chat, cwd, apiKey, text, ac, ui);
     else await runCodex(chat, cwd, apiKey, text, ac, ui);
+    // a finished turn that isn't asking the user anything is complete, whatever steps it skipped
+    if (!chat.error && !ac.signal.aborted && (chat.phase as Phase) !== "waiting") chat.phase = "complete";
   } catch (e) {
     if (!ac.signal.aborted) chat.error = String((e as Error).message ?? e);
   } finally {

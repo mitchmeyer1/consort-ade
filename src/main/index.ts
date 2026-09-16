@@ -1,15 +1,15 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, shell } from "electron";
 import { join, basename } from "node:path";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { store } from "./store";
 import * as git from "./git";
 import * as agents from "./agents";
-import { humanize, suggestTitle } from "./namer";
-import { authStatus } from "./auth";
-import * as jobs from "./jobs";
+import { askOnce, humanize, suggestTitle } from "./namer";
+import { authStatus, claudeBin, codexBin } from "./auth";
+import * as ptys from "./ptys";
 import { MODELS, type Api, type Appearance } from "../shared/types";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 // ADE_DATA_DIR isolates state for test instances
 // GUI apps get a bare PATH; borrow the login shell's so git/gh/claude resolve like in a terminal
@@ -20,6 +20,8 @@ try {
 for (const d of ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin", join(process.env.HOME ?? "", ".local/bin")])
   if (!process.env.PATH?.split(":").includes(d)) process.env.PATH = `${process.env.PATH}:${d}`;
 
+// keep the pre-productName identity ("ade"): same data dir, and the same "ade Safe Storage" keychain item for secrets
+app.setName("ade");
 // keep the pre-productName data dir ("ade") so existing keys/projects survive the rename
 app.setPath("userData", process.env.ADE_DATA_DIR ?? join(app.getPath("appData"), "ade"));
 
@@ -27,11 +29,15 @@ let win: BrowserWindow;
 
 // macOS vibrancy: the renderer paints translucent backgrounds when frosted
 const VIBRANCY: Record<Appearance["background"], Parameters<BrowserWindow["setVibrancy"]>[0]> = { opaque: null, frost: "under-window", frost2: "hud" };
+const effectiveTheme = () => { const t = store.data.appearance.theme; return t === "auto" ? (nativeTheme.shouldUseDarkColors ? "dark" : "light") : t; };
 function applyAppearance() {
   const a = store.data.appearance;
+  if (!win || win.isDestroyed()) return;
   win.setVibrancy(VIBRANCY[a.background]);
-  win.setBackgroundColor(a.background === "opaque" ? (a.theme === "light" ? "#f3ead6" : "#0a0a0a") : "#00000000");
+  win.setBackgroundColor(a.background === "opaque" ? (effectiveTheme() === "light" ? "#f3ead6" : "#0a0a0a") : "#00000000");
+  win.webContents.send("theme", effectiveTheme());
 }
+nativeTheme.on("updated", () => { if (store.data.appearance.theme === "auto") applyAppearance(); });
 function createWindow() {
   const a = store.data.appearance;
   win = new BrowserWindow({
@@ -39,7 +45,7 @@ function createWindow() {
     height: 900,
     titleBarStyle: "hiddenInset",
     vibrancy: VIBRANCY[a.background] ?? undefined,
-    backgroundColor: a.background === "opaque" ? (a.theme === "light" ? "#f3ead6" : "#0a0a0a") : "#00000000",
+    backgroundColor: a.background === "opaque" ? ((a.theme === "auto" ? (nativeTheme.shouldUseDarkColors ? "dark" : "light") : a.theme) === "light" ? "#f3ead6" : "#0a0a0a") : "#00000000",
     webPreferences: { preload: join(import.meta.dirname, "../preload/index.mjs"), sandbox: false },
   });
   if (process.env.ELECTRON_RENDERER_URL) win.loadURL(process.env.ELECTRON_RENDERER_URL);
@@ -73,6 +79,7 @@ async function syncWorktrees(projectId: string) {
 
 const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   getState: () => store.public(),
+  effectiveTheme: () => effectiveTheme(),
   pickFolder: async () => {
     const r = await dialog.showOpenDialog(win, { properties: ["openDirectory"] });
     return r.canceled ? null : r.filePaths[0];
@@ -136,13 +143,21 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     return p;
   },
   openExternal: (url: string) => shell.openExternal(url),
-  jobStart: (scopeId: string, cwd: string, cmd: string, termId: string) => jobs.start(scopeId, cwd, cmd, termId),
-  jobStop: (id: string) => jobs.stop(id),
-  jobWrite: (id: string, text: string) => jobs.write(id, text),
-  jobRemove: (id: string) => jobs.remove(id),
-  jobSeen: (id: string) => jobs.seen(id),
-  jobs: () => jobs.list(),
+  ptyCreate: (scopeId: string, termId: string, cwd: string, cols: number, rows: number) => ptys.create(scopeId, termId, cwd, cols, rows),
+  ptyWrite: (id: string, data: string) => ptys.write(id, data),
+  ptyResize: (id: string, cols: number, rows: number) => ptys.resize(id, cols, rows),
+  ptyKill: (id: string) => ptys.kill(id),
+  ptySeen: (id: string) => ptys.seen(id),
+  ptys: () => ptys.list(),
   authStatus: (provider) => authStatus(provider),
+  commitInfo: (id: string) => git.commitInfo(wt(id).path),
+  commit: async (id: string, message: string) => { const r = await git.commit(wt(id).path, message); statusCache.delete(id); return r; },
+  suggestCommit: async (id: string) => {
+    const diff = await git.diffForSummary(wt(id).path);
+    if (!diff.trim()) return "";
+    return askOnce(wt(id).path, `Write a git commit message for this diff.\nFormat: a short imperative subject line (max 60 chars), a blank line, then 1 to 5 bullets, each ONE sentence, each starting with "- ". No other text.\n\n${diff}`);
+  },
+  authLoginCmd: (provider) => (provider === "claude" ? `${JSON.stringify(claudeBin())} auth login --claudeai` : `${JSON.stringify(codexBin())} login`),
   listFiles: (id: string) => git.listFiles(wt(id).path),
   readFile: (id: string, rel: string) => git.readFile(wt(id).path, rel),
   writeFile: (id: string, rel: string, content: string) => git.writeFile(wt(id).path, rel, content),
@@ -196,6 +211,15 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     if (c.name === "New chat") c.name = text.slice(0, 40);
     return agents.send(chatId, text, files);
   },
+  // dropped/pasted data with no backing path (screenshot thumbnails, clipboard images) lands in a temp file first
+  stageBlob: (name: string, bytes: ArrayBuffer) => {
+    const dir = join(app.getPath("userData"), "dropped");
+    mkdirSync(dir, { recursive: true });
+    const safe = (name || "image.png").replace(/[^\w.\-]+/g, "_");
+    const p = join(dir, `${Date.now().toString(36)}-${safe}`);
+    writeFileSync(p, Buffer.from(bytes));
+    return p;
+  },
   pickFiles: async () => {
     const r = await dialog.showOpenDialog(win, { properties: ["openFile", "multiSelections"] });
     return r.canceled ? [] : r.filePaths;
@@ -204,6 +228,8 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     store.chat(id).keyId = keyId;
     store.save();
   },
+  switchAgent: (id: string, keyId: string, model: string) => agents.switchAgent(id, keyId, model),
+  continueChat: (id: string) => agents.continueChat(id),
   setPhiMode: (id: string, on: boolean) => {
     agents.setPhiMode(store.chat(id), on, "manual");
     store.save();
@@ -220,6 +246,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     store.save();
   },
   removeKey: (id: string) => {
+    if (id.startsWith("login-")) return;
     store.data.keys = store.data.keys.filter((k) => k.id !== id);
     delete store.data.secrets[id];
     store.save();
@@ -247,11 +274,11 @@ app.whenReady().then(() => {
   const send = (ch: string, data: unknown) => { if (win && !win.isDestroyed()) win.webContents.send(ch, data); };
   store.onChange((s) => send("state", s));
   agents.onPermission((r) => send("permission", r));
-  jobs.onJobs((j) => send("jobs", j));
+  ptys.listen((id, data) => send("pty:data", { id, data }), (s) => send("ptys", s));
   process.on("uncaughtException", (e) => console.error("[main]", e));
   createWindow();
   // drop worktrees whose folders vanished since last run
   for (const p of store.data.projects) syncWorktrees(p.id).then(() => store.save()).catch(() => {});
 });
-app.on("before-quit", () => jobs.stopAll());
+app.on("before-quit", () => ptys.killAll());
 app.on("window-all-closed", () => app.quit());

@@ -4,7 +4,10 @@ import React from "react";
 import mask from "./assets/angel-mask.png"; // pre-thresholded alpha mask (magick: threshold 50%, alpha copy, trim)
 
 const MASK = { WebkitMaskImage: `url(${mask})`, maskImage: `url(${mask})` } as React.CSSProperties;
-export const Mark = ({ className }: { className?: string }) => <div className={"mark " + (className ?? "")} style={MASK} aria-label="Consort" />;
+// the wrapper becomes a dark oval in light mode so the angel stays cream-on-black
+export const Mark = ({ className }: { className?: string }) => (
+  <span className={"markwrap " + (className ?? "")}><span className="mark" style={MASK} aria-label="Consort" /></span>
+);
 
 export const Lockup = () => (
   <div className="brand">

@@ -10,12 +10,14 @@ const on = (channel: string) => (cb: (x: any) => void) => {
 const methods = [
   "getState", "pickFolder", "addProject", "removeProject", "setProjectBase", "syncWorktrees", "addWorktree",
   "removeWorktree", "worktreeStatus", "addChat", "renameChat", "deleteChat", "setAutoApprove", "setPhase",
-  "send", "stop", "addKey", "removeKey", "answerPermission", "runCommand", "diff", "skillPrompt", "pickFiles", "setChatKey", "setKeyPhi", "setPhiMode", "renameWorktree", "archiveWorktree", "autoTitle", "openExternal", "setAppearance", "repoInfo", "listFiles", "readFile", "writeFile", "authStatus", "jobStart", "jobStop", "jobWrite", "jobRemove", "jobSeen", "jobs",
+  "send", "stop", "addKey", "removeKey", "answerPermission", "runCommand", "diff", "skillPrompt", "pickFiles", "stageBlob", "setChatKey", "setKeyPhi", "setPhiMode", "switchAgent", "continueChat", "renameWorktree", "archiveWorktree", "autoTitle", "openExternal", "setAppearance", "effectiveTheme", "repoInfo", "listFiles", "readFile", "writeFile", "authStatus", "authLoginCmd", "commitInfo", "commit", "suggestCommit", "ptyCreate", "ptyWrite", "ptyResize", "ptyKill", "ptySeen", "ptys",
 ];
 contextBridge.exposeInMainWorld("ade", {
   ...Object.fromEntries(methods.map((m) => [m, invoke(m)])),
   onState: on("state"),
   onPermission: on("permission"),
-  onJobs: on("jobs"),
+  onPtyData: on("pty:data"),
+  onPtys: on("ptys"),
+  onTheme: on("theme"),
   pathsFor: (files: File[]) => files.map((f) => webUtils.getPathForFile(f)),
 });
