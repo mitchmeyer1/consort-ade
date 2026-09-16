@@ -1,0 +1,4 @@
+{
+  "version": "0.0.1",
+  "configurations": [{ "name": "ade", "runtimeExecutable": "pnpm", "runtimeArgs": ["dev"], "port": 5173 }]
+}

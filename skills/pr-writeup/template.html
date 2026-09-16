@@ -1,0 +1,254 @@
+<title>PR {{NUMBER}} · {{SHORT_NAME}}</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@450;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  /* ── Canonical pr-writeup stylesheet. Do not edit per PR. ─────────────── */
+  :root {
+    --bg: #faf9f6; --surface: #ffffff; --ink: #20242c; --muted: #5b6270;
+    --line: #e4e1d8; --line-soft: #edeae2;
+    --accent: #0f766e; --accent-soft: #e5f1ef;
+    --crit: #8b1a1a; --crit-soft: #f8e5e5;
+    --high: #a2321c; --high-soft: #f7e9e4;
+    --med: #96660a;  --med-soft: #f6efdd;
+    --low: #5b6577;  --low-soft: #eceef1;
+    --cat: #3b4a8a;  --cat-soft: #e9ecf6;
+    --code-bg: #f1efe9; --comment-bg: #f4f2ec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16181d; --surface: #1d2026; --ink: #e6e4de; --muted: #9aa1ad;
+      --line: #30343d; --line-soft: #272b32;
+      --accent: #4cc4b6; --accent-soft: #1c2f2d;
+      --crit: #f08a8a; --crit-soft: #3a1f1f;
+      --high: #e4785c; --high-soft: #33221d;
+      --med: #d8a94a;  --med-soft: #302a1c;
+      --low: #98a3b5;  --low-soft: #262a31;
+      --cat: #9daaf0;  --cat-soft: #23283a;
+      --code-bg: #23262d; --comment-bg: #212429;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #16181d; --surface: #1d2026; --ink: #e6e4de; --muted: #9aa1ad;
+    --line: #30343d; --line-soft: #272b32;
+    --accent: #4cc4b6; --accent-soft: #1c2f2d;
+    --crit: #f08a8a; --crit-soft: #3a1f1f;
+    --high: #e4785c; --high-soft: #33221d;
+    --med: #d8a94a;  --med-soft: #302a1c;
+    --low: #98a3b5;  --low-soft: #262a31;
+    --cat: #9daaf0;  --cat-soft: #23283a;
+    --code-bg: #23262d; --comment-bg: #212429;
+  }
+
+  body { background: var(--bg); color: var(--ink); font-family: "IBM Plex Serif", Georgia, serif; font-size: 16.5px; line-height: 1.62; margin: 0; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 48px 28px 96px; }
+  h1, h2, h3 { font-family: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif; text-wrap: balance; line-height: 1.2; }
+  h1 { font-size: 34px; font-weight: 700; letter-spacing: -0.015em; margin: 10px 0 8px; }
+  h2 { font-size: 21px; font-weight: 600; margin: 56px 0 14px; padding-top: 22px; border-top: 1px solid var(--line); }
+  h2 .k { color: var(--muted); font-weight: 450; margin-left: 8px; font-size: 15px; }
+  h3 { font-size: 16.5px; font-weight: 600; margin: 0 0 6px; }
+  p { max-width: 70ch; margin: 0 0 14px; }
+  a { color: var(--accent); }
+  ul, ol { max-width: 72ch; padding-left: 24px; }
+  li { margin-bottom: 8px; }
+  code, .fileref { font-family: "IBM Plex Mono", monospace; font-size: 0.86em; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  pre { background: var(--code-bg); border-radius: 6px; padding: 10px 14px; overflow-x: auto; font: 13px/1.5 "IBM Plex Mono", monospace; }
+  .quiet, .empty { color: var(--muted); }
+  .empty { font-style: italic; margin: 0; }
+
+  .eyebrow { font-family: "IBM Plex Mono", monospace; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); }
+  .subtitle { color: var(--muted); font-size: 17px; margin-bottom: 26px; max-width: 62ch; }
+  .meta { display: flex; flex-wrap: wrap; gap: 10px 28px; font-family: "IBM Plex Mono", monospace; font-size: 12.5px; color: var(--muted); border: 1px solid var(--line); border-radius: 8px; background: var(--surface); padding: 14px 18px; }
+  .meta b { color: var(--ink); font-weight: 500; }
+
+  .counts { display: flex; gap: 12px; flex-wrap: wrap; margin: 18px 0 6px; }
+  .count { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); padding: 12px 18px; min-width: 96px; }
+  .count .n { font-family: "IBM Plex Sans", sans-serif; font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .count .l { font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+  .count.crit .n { color: var(--crit); } .count.high .n { color: var(--high); }
+  .count.med .n { color: var(--med); }   .count.low .n { color: var(--low); }
+  .count.cat .n { color: var(--cat); }
+
+  .chip { font-family: "IBM Plex Mono", monospace; font-size: 11px; font-weight: 500; letter-spacing: 0.08em; padding: 2px 8px; border-radius: 4px; white-space: nowrap; }
+  .chip.crit { color: var(--crit); background: var(--crit-soft); outline: 1px solid var(--crit); }
+  .chip.high { color: var(--high); background: var(--high-soft); }
+  .chip.med  { color: var(--med);  background: var(--med-soft); }
+  .chip.low  { color: var(--low);  background: var(--low-soft); }
+  .chip.app  { color: var(--muted); background: var(--low-soft); }
+  .chip.cat  { color: var(--cat);  background: var(--cat-soft); }
+  .legend { display: grid; gap: 8px; margin: 14px 0; }
+  .legend div { display: flex; gap: 12px; align-items: baseline; }
+
+  .flow { border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0; background: var(--surface); padding: 14px 18px; margin: 12px 0; }
+  .flow .tag { float: right; font-family: "IBM Plex Mono", monospace; font-size: 10.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted); background: var(--low-soft); border-radius: 4px; padding: 2px 7px; margin-left: 12px; }
+  .flow .tag.unattended { color: var(--med); background: var(--med-soft); }
+  .flow .tag.gated { color: var(--cat); background: var(--cat-soft); }
+  .flow p { margin: 4px 0 0; font-size: 15.5px; max-width: none; }
+
+  .finding { border: 1px solid var(--line); border-radius: 0 8px 8px 0; background: var(--surface); padding: 18px 20px 16px; margin: 18px 0; }
+  .finding.crit { border-left: 3px solid var(--crit); } .finding.high { border-left: 3px solid var(--high); }
+  .finding.med  { border-left: 3px solid var(--med); }  .finding.low  { border-left: 3px solid var(--low); }
+  .finding.cat  { border-left: 3px solid var(--cat); padding: 14px 18px 12px; }
+  .finding .head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-bottom: 4px; }
+  .finding .num { font-family: "IBM Plex Sans", sans-serif; font-weight: 700; color: var(--muted); }
+  .finding .fileref { margin-bottom: 10px; display: inline-block; }
+  .finding dl { margin: 10px 0 0; }
+  .finding dt { font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin-top: 10px; }
+  .finding dd { margin: 2px 0 0; font-size: 15.5px; max-width: 72ch; }
+  .prc { background: var(--comment-bg); border: 1px dashed var(--line); border-radius: 6px; padding: 10px 14px; margin-top: 4px; font-family: "IBM Plex Mono", monospace; font-size: 13px; line-height: 1.55; }
+
+  .good { border-left: 3px solid var(--accent); padding-left: 16px; margin: 14px 0; }
+  .good p { margin: 2px 0 0; font-size: 15.5px; }
+  @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     SLOTS. Fill every {{…}}; keep every <h2> in this order; delete nothing
+     except the blocks explicitly marked "repeat" or "optional".
+     ═══════════════════════════════════════════════════════════════════════ -->
+<div class="wrap">
+  <div class="eyebrow">Reviewer's writeup</div>
+  <h1>{{PLAIN_TITLE}}</h1>
+  <p class="subtitle">PR <a href="{{PR_URL}}">#{{NUMBER}}</a> — {{ONE_LINE_SUBTITLE}}</p>
+  <div class="meta">
+    <span>review SHA <b>{{HEAD_SHORT}}</b></span>
+    <span>base <b>{{BASE_SHORT}}</b> (merge-base)</span>
+    <span><b>{{FILES}} files</b> · +{{ADD}} / −{{DEL}}</span>
+    <span>state <b>{{STATE}}</b></span>
+    <span>method <b>{{N}}-agent fan-out, every cited line re-verified by hand</b></span>
+  </div>
+
+  <h2>What it does</h2>
+  <p>{{PLAIN_PROSE_NO_CODE_WORDS}}</p>
+  <p><strong>What ships today:</strong> {{GATES_AND_FLAGS}}</p>
+  <p><strong>Headline.</strong> {{ONE_PARAGRAPH_VERDICT_INCLUDING_WHAT_IS_GOOD}}</p>
+
+  <h2>Summary</h2>
+  <div class="counts">
+    <div class="count crit"><div class="n">{{N_CRIT}}</div><div class="l">Critical</div></div>
+    <div class="count high"><div class="n">{{N_HIGH}}</div><div class="l">High</div></div>
+    <div class="count med"><div class="n">{{N_MED}}</div><div class="l">Medium</div></div>
+    <div class="count low"><div class="n">{{N_LOW}}</div><div class="l">Low</div></div>
+  </div>
+  <div class="counts">
+    <div class="count cat"><div class="n">{{N_LOGIC}}</div><div class="l">⛓️ Logic</div></div>
+    <div class="count cat"><div class="n">{{N_REDUNDANT}}</div><div class="l">👯 Redundant</div></div>
+    <div class="count cat"><div class="n">{{N_STYLE}}</div><div class="l">💅 Style</div></div>
+    <div class="count cat"><div class="n">{{N_TESTS}}</div><div class="l">🧪 Tests</div></div>
+    <div class="count cat"><div class="n">{{N_COMMENTS}}</div><div class="l">📜 Comments</div></div>
+  </div>
+
+  <h2>How to read this</h2>
+  <div class="legend">
+    <div><span class="chip crit">Critical</span><span>{{RUBRIC_IN_PR_DOMAIN_TERMS: money moves wrongly / data lands on the wrong person, silently}}</span></div>
+    <div><span class="chip high">High</span><span>{{data loss, a stuck state, a security control that does not hold}}</span></div>
+    <div><span class="chip med">Medium</span><span>{{visible failure, bounded blast radius}}</span></div>
+    <div><span class="chip low">Low</span><span>{{readability or documentation gaps}}</span></div>
+    <div><span class="chip app">Appendix</span><span>questions, not defect claims</span></div>
+    <div><span class="chip cat">Category</span><span>non-defects, unranked: ⛓️ Logic · 👯 Redundant · 💅 Style · 🧪 Tests · 📜 Comments — same labels the CI reviewer posts</span></div>
+  </div>
+
+  <h2>Flows</h2>
+  <!-- repeat per flow; money/data-writing first, reads last -->
+  <div class="flow">
+    <span class="tag {{human|unattended}}">{{human-driven|unattended}}</span>
+    <span class="tag {{gated|live}}">{{reachable today|behind FLAG}}</span>
+    <h3>Flow {{N}} — {{NAME}}</h3>
+    <p><strong>Trigger:</strong> {{who starts it, from where}}</p>
+    <p>{{hop}} <span class="fileref">{{file.ts:line}}</span> → {{hop}} <span class="fileref">{{file.ts:line}}</span> → {{effect}}</p>
+    <p><strong>Ends in:</strong> {{real-world effect}}</p>
+  </div>
+
+  <!-- optional: only when several defects share one shape -->
+  <h2>The pattern worth naming</h2>
+  <p>{{ONE_PARAGRAPH}}</p>
+
+  <h2>Defects <span class="k">{{N_DEFECTS}}</span></h2>
+  <!-- repeat per defect, ordered crit → high → med → low, numbered continuously -->
+  <div class="finding {{crit|high|med|low}}">
+    <div class="head">
+      <span class="num">{{N}}</span>
+      <span class="chip {{crit|high|med|low}}">{{Critical|High|Medium|Low}}</span>
+      <!-- optional origin chip: --><span class="chip cat">⛓️ Logic</span>
+      <h3>{{HEADING_STATES_THE_CONSEQUENCE}}</h3>
+    </div>
+    <span class="fileref">{{path/file.ts:line}}</span>
+    <dl>
+      <dt>Problem</dt><dd>{{1–2 plain sentences, then the ref}}</dd>
+      <dt>Example flow</dt><dd>{{real values, one breath}}</dd>
+      <dt>Fix</dt><dd>{{the smallest one}}</dd>
+      <dt>Ignore if</dt><dd>{{the assumption under which it's fine}}</dd>
+      <dt>PR comment</dt><dd><div class="prc">{{file.ts:line}} — {{one sentence in Mitch's voice}}</div></dd>
+    </dl>
+  </div>
+  <!-- when zero defects: --><p class="empty">None found.</p>
+
+  <h2>⛓️ Logic <span class="k">{{N_LOGIC}}</span></h2>
+  <!-- repeat; category cards use .finding.cat and carry only the fields their Shape names -->
+  <div class="finding cat">
+    <div class="head"><span class="num">L{{N}}</span><h3>{{CLAIM}}</h3></div>
+    <span class="fileref">{{path/file.ts:line}}</span>
+    <dl>
+      <dt>Gap</dt><dd>{{what is missing or dead}}</dd>
+      <dt>Fix</dt><dd>{{…}}</dd>
+    </dl>
+  </div>
+  <p class="empty">None found.</p>
+
+  <h2>👯 Redundant <span class="k">{{N_REDUNDANT}}</span></h2>
+  <div class="finding cat">
+    <div class="head"><span class="num">R{{N}}</span><h3>{{NEW_SYMBOL}} duplicates {{EXISTING_SYMBOL}}</h3></div>
+    <span class="fileref">{{new.ts:line}}</span> ↔ <span class="fileref">{{existing.ts:line}}</span>
+    <dl>
+      <dt>Overlap</dt><dd>{{…}}</dd>
+      <dt>Do</dt><dd>{{drop / merge / reuse}}</dd>
+    </dl>
+  </div>
+  <p class="empty">None found.</p>
+
+  <h2>💅 Style <span class="k">{{N_STYLE}}</span></h2>
+  <div class="finding cat">
+    <div class="head"><span class="num">S{{N}}</span><h3>{{DEVIATION}}</h3></div>
+    <span class="fileref">{{path/file.ts:line}}</span>
+    <dl>
+      <dt>House way</dt><dd>{{what peers do}} — <span class="fileref">{{peer.ts:line}}</span></dd>
+      <dt>Fix</dt><dd>{{…}}</dd>
+    </dl>
+  </div>
+  <p class="empty">None found.</p>
+
+  <h2>🧪 Tests <span class="k">{{N_TESTS}}</span></h2>
+  <p><strong>What exists:</strong> {{one sentence on the PR's test files and what they prove}}</p>
+  <div class="finding cat">
+    <div class="head"><span class="num">T{{N}}</span><h3>{{WHAT_HAS_NO_TEST_OR_IS_WRONG}}</h3></div>
+    <span class="fileref">{{path/file.ts:line}}</span>
+    <dl>
+      <dt>Costs</dt><dd>{{what slips through — cite defect numbers if any}}</dd>
+      <dt>Suite</dt><dd>{{standard|external-service|smoke|frontend}} — <span class="fileref">{{tests/…/x.test.ts}}</span></dd>
+      <dt>Test</dt><dd>{{the one assertion that fails if the logic breaks}}</dd>
+    </dl>
+  </div>
+  <p class="empty">None found.</p>
+
+  <h2>📜 Comments <span class="k">{{N_COMMENTS}}</span></h2>
+  <div class="finding cat">
+    <div class="head"><span class="num">C{{N}}</span><h3>{{WHY_TOO_MUCH}}</h3></div>
+    <span class="fileref">{{path/file.ts:line-range}}</span>
+    <dl>
+      <dt>Trimmed</dt><dd><pre>{{// the one- or two-line replacement, casual voice}}</pre></dd>
+    </dl>
+  </div>
+  <p class="empty">None found.</p>
+
+  <h2>Appendix</h2>
+  <!-- open questions referenced by a finding; else the empty line -->
+  <ul><li><strong>A{{N}}.</strong> {{question}} — bears on #{{defect}}</li></ul>
+  <p class="empty">No open questions.</p>
+
+  <h2>Well built</h2>
+  <!-- repeat; specific, with why; preserve through any refactor -->
+  <div class="good"><h3>{{WHAT}}</h3><p>{{why it matters}} <span class="fileref">{{file.ts:line}}</span></p></div>
+
+  <h2>Order of work</h2>
+  <ol>
+    <li><strong>{{do this}}</strong> — {{why first}} (#{{n}})</li>
+  </ol>
+</div>
