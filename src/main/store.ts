@@ -22,14 +22,15 @@ export class Store {
       const pendingTool = c.messages.some((m) => m.blocks.some((b) => b.type === "tool" && b.ok === undefined));
       if (c.running || (!c.error && last && (last.role === "user" || pendingTool))) c.interrupted = true;
       c.running = false;
+      c.permissions = [];
     }
     for (const k of this.data.keys) { k.phiAllowed ??= false; k.auth ??= this.data.secrets[k.id] ? "key" : "login"; }
     // the CLI logins are always-present connectors; API keys are added on top
     for (const [id, provider, name] of [["login-codex", "codex", "Codex CLI login"], ["login-claude", "claude", "Claude Code login"]] as const)
       if (!this.data.keys.some((k) => k.id === id)) this.data.keys.unshift({ id, provider, name, phiAllowed: false, auth: "login" });
-    // main checkouts are not worktrees; drop any imported earlier
+    // Root scopes are opt-in; retain them and their chat IDs across restarts.
     const roots = new Set(this.data.projects.map((p) => p.path));
-    this.data.worktrees = this.data.worktrees.filter((w) => !roots.has(w.path));
+    this.data.worktrees = this.data.worktrees.filter((w) => w.root || !roots.has(w.path));
     for (const w of this.data.worktrees) { w.title ??= w.name; w.archived ??= false; }
   }
 

@@ -5,6 +5,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { Codex } from "@openai/codex-sdk";
 import { store } from "./store";
+import { startAgentBrowser } from "./agentBrowser";
 import { PHASES, type Chat, type Block, type Phase, type PermissionRequest } from "../shared/types";
 
 // ponytail: phase tracked via text markers so claude + codex share one mechanism
@@ -42,15 +43,15 @@ export function setPhiMode(chat: Chat, on: boolean, reason?: string) {
 
 // copy uploads into the worktree so the agent can Read them; keep them out of git
 function stageFiles(cwd: string, files: string[]) {
-  if (!files.length) return [];
   const dir = join(cwd, ".consort", "uploads");
-  mkdirSync(dir, { recursive: true });
   try {
     // worktrees share the main repo's info/exclude; ask git where it is
     const ex = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"], { cwd }).toString().trim();
     let cur = ""; try { cur = readFileSync(ex, "utf8"); } catch {}
     if (!cur.includes(".consort/")) appendFileSync(ex, "\n.consort/\n");
   } catch {}
+  if (!files.length) return [];
+  mkdirSync(dir, { recursive: true });
   return files.map((f) => { const dest = join(dir, basename(f)); copyFileSync(f, dest); return dest; });
 }
 
@@ -153,6 +154,7 @@ export async function send(chatId: string, text: string, files: string[] = [], o
   const shown = staged.length ? `${text}\n\n${staged.map((f) => `📎 ${basename(f)}`).join("\n")}` : text;
   if (staged.length) text = `${text}\n\nAttached files (read them from disk):\n${staged.map((f) => `- ${f}`).join("\n")}`;
   if (!opts.silent) chat.messages.push({ id: randomUUID(), role: "user", blocks: [{ type: "text", text: shown }], ts: Date.now() });
+  chat.unreadCompletion = false;
   chat.running = true;
   chat.error = undefined;
   chat.interrupted = undefined;
@@ -162,7 +164,14 @@ export async function send(chatId: string, text: string, files: string[] = [], o
   const ac = new AbortController();
   running.set(chatId, ac);
   const ui = new Transcript(chat);
+  let browser: Awaited<ReturnType<typeof startAgentBrowser>> | undefined;
   try {
+    try {
+      browser = await startAgentBrowser(cwd, ac.signal);
+      text = `${browser.prompt}\n\n${text}`;
+    } catch (error) {
+      text = `The Consort screenshot helper could not start: ${(error as Error).message}. Shell/code tools are still available.\n\n${text}`;
+    }
     if (chat.provider === "claude") await runClaude(chat, cwd, apiKey, text, ac, ui);
     else await runCodex(chat, cwd, apiKey, text, ac, ui);
     // a finished turn that isn't asking the user anything is complete, whatever steps it skipped
@@ -170,8 +179,14 @@ export async function send(chatId: string, text: string, files: string[] = [], o
   } catch (e) {
     if (!ac.signal.aborted) chat.error = String((e as Error).message ?? e);
   } finally {
+    await browser?.close().catch(() => {});
     running.delete(chatId);
     chat.running = false;
+    chat.permissions = [];
+    if (!ac.signal.aborted && !chat.error && (chat.phase as Phase) !== "waiting") {
+      chat.phase = "complete";
+      chat.unreadCompletion = true;
+    } else if (ac.signal.aborted) chat.phase = "waiting";
     store.save();
   }
 }
@@ -251,11 +266,23 @@ async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, 
       allowDangerouslySkipPermissions: chat.autoApprove,
       canUseTool: async (tool, input) => {
         const id = randomUUID();
+        const request = { id, chatId: chat.id, tool, input };
         const allow = await new Promise<boolean>((res) => {
-          pending.set(id, res);
-          askPermission({ id, chatId: chat.id, tool, input });
+          const finish = (allow: boolean) => {
+            ac.signal.removeEventListener("abort", abort);
+            pending.delete(id);
+            chat.permissions = chat.permissions?.filter((p) => p.id !== id);
+            store.save();
+            res(allow);
+          };
+          const abort = () => finish(false);
+          pending.set(id, finish);
+          if (ac.signal.aborted) { finish(false); return; }
+          ac.signal.addEventListener("abort", abort, { once: true });
+          chat.permissions = [...(chat.permissions ?? []), request];
+          store.save();
+          askPermission(request);
         });
-        pending.delete(id);
         return allow ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: "User denied" };
       },
     },
@@ -294,7 +321,7 @@ async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, 
 
 async function runCodex(chat: Chat, cwd: string, apiKey: string, text: string, ac: AbortController, ui: Transcript) {
   const codex = new Codex(apiKey ? { apiKey } : { env: envWithout("OPENAI_API_KEY") as Record<string, string> });
-  const opts = { ...(chat.model ? { model: chat.model } : {}), workingDirectory: cwd, skipGitRepoCheck: true, sandboxMode: "workspace-write" as const, approvalPolicy: "never" as const };
+  const opts = { ...(chat.model ? { model: chat.model } : {}), workingDirectory: cwd, skipGitRepoCheck: true, sandboxMode: "workspace-write" as const, networkAccessEnabled: true, approvalPolicy: "never" as const };
   const thread = chat.sessionId ? codex.resumeThread(chat.sessionId, opts) : codex.startThread(opts);
   const prompt = chat.sessionId ? text : `${PHASE_PROMPT}\n\n${phiPrompt(keyAllowsPhi(chat))}\n\n${text}`;
   const { events } = await thread.runStreamed(prompt, { signal: ac.signal });

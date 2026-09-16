@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promises as fs } from "node:fs";
 import type { CommitInfo, PrInfo, RepoInfo, WorktreeStatus } from "../shared/types";
 
@@ -25,7 +25,21 @@ export async function listWorktrees(repo: string) {
 }
 
 export async function addWorktree(repo: string, name: string, branch: string, base: string) {
-  const path = join(dirname(repo), `${basename(repo)}-wt`, name);
+  const directory = resolve(repo, ".consort-worktrees");
+  const path = resolve(directory, name);
+  const child = relative(directory, path);
+  if (!name.trim() || !child || child === ".." || child.startsWith("../") || isAbsolute(child)) {
+    throw new Error("Worktree name must identify a folder inside .consort-worktrees.");
+  }
+  // The common exclude file applies across branches without dirtying .gitignore.
+  const exclude = (await git(repo, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude")).trim();
+  let current = "";
+  try { current = await fs.readFile(exclude, "utf8"); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  if (!current.split(/\r?\n/).includes("/.consort-worktrees/")) {
+    await fs.mkdir(dirname(exclude), { recursive: true });
+    await fs.appendFile(exclude, `${current && !current.endsWith("\n") ? "\n" : ""}/.consort-worktrees/\n`);
+  }
   await git(repo, "fetch", "--quiet").catch(() => {});
   const exists = await git(repo, "rev-parse", "--verify", "--quiet", branch).then(() => true, () => false);
   if (exists) await git(repo, "worktree", "add", path, branch);
@@ -178,4 +192,111 @@ export async function commit(cwd: string, message: string) {
 export async function diffForSummary(cwd: string) {
   const { files, patch } = await diff(cwd); // tracked + untracked as patches
   return `Changed files:\n${files}\n${patch}`.slice(0, 14_000);
+}
+
+export async function rootStatus(path: string) {
+  const [branch, commit, changes] = await Promise.all([
+    git(path, "symbolic-ref", "--quiet", "--short", "HEAD").then((s) => s.trim(), () => null),
+    git(path, "rev-parse", "HEAD").then((s) => s.trim()),
+    git(path, "status", "--porcelain"),
+  ]);
+  return { branch, commit, dirty: !!changes.trim() };
+}
+
+const rootCheckouts = new Set<string>();
+export async function checkoutAtRoot(root: string, source: string, commitMessage?: string) {
+  if (rootCheckouts.has(root)) throw new Error("A checkout at root is already in progress.");
+  rootCheckouts.add(root);
+  try {
+    const common = async (path: string) => fs.realpath((await git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")).trim());
+    if (await common(root) !== await common(source) || await fs.realpath(root) === await fs.realpath(source))
+      throw new Error("Select a linked worktree belonging to this project.");
+    for (const path of [root, source]) {
+      for (const marker of ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer"]) {
+        const location = (await git(path, "rev-parse", "--path-format=absolute", "--git-path", marker)).trim();
+        if (await fs.stat(location).then(() => true, () => false)) throw new Error("Finish the current merge, rebase, or cherry-pick before checking out at root.");
+      }
+    }
+    if ((await rootStatus(root)).dirty) throw new Error("The root has uncommitted changes. Commit or stash them before checking out here.");
+    if ((await git(source, "ls-files", "--unmerged")).trim()) throw new Error("Resolve the worktree's merge conflicts first.");
+    const branch = (await rootStatus(source)).branch;
+    if (!branch) throw new Error("This worktree is detached. Switch it to a branch before committing and pushing.");
+    await git(source, "remote", "get-url", "origin");
+    return await worktreeOperation(source, branch, async () => {
+      if ((await rootStatus(source)).dirty) {
+        if (!commitMessage?.trim()) throw new Error("The worktree has uncommitted changes. Supply a commit message to include them.");
+        await git(source, "add", "--all");
+        await git(source, "commit", "-m", commitMessage.trim());
+      }
+      if ((await rootStatus(source)).dirty) throw new Error("The worktree still has changes after committing. Check its status and retry.");
+      const commit = (await git(source, "rev-parse", "HEAD")).trim();
+      await run("git", ["push", "--set-upstream", "origin", `refs/heads/${branch}:refs/heads/${branch}`], {
+        cwd: source, maxBuffer: 1 << 24, timeout: 120_000, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      }).catch((error) => { throw new Error(`Push failed. Your local commit is saved; root and worktree checkouts are unchanged. ${error.message}`); });
+      if ((await rootStatus(root)).dirty) throw new Error("The root changed during push. Your commit is pushed; commit or stash root changes and retry.");
+      if ((await rootStatus(source)).dirty || (await rootStatus(source)).commit !== commit)
+        throw new Error("The worktree changed during push. Root is unchanged; retry after work has stopped.");
+      // Transfer the branch to root rather than attach it in two working directories.
+      await git(source, "switch", "--detach", commit);
+      try {
+        await git(root, "switch", "--no-guess", branch);
+      } catch (error) {
+        // A failed switch normally leaves root untouched. Reattach the source when safe.
+        if ((await rootStatus(root)).branch !== branch) {
+          await git(source, "switch", "--no-guess", branch).catch(() => {});
+        }
+        throw new Error(`Commit pushed, but checkout at root failed. ${(error as Error).message}`);
+      }
+      try {
+        await run("git", ["pull", "--ff-only", "--no-rebase", "origin", `refs/heads/${branch}`], {
+          cwd: root, maxBuffer: 1 << 24, timeout: 120_000, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+        });
+      } catch (error) {
+        throw new Error(`Commit pushed and root switched to ${branch}, but pull failed. The source worktree is detached. Retry the pull at root. ${(error as Error).message}`);
+      }
+      return rootStatus(root);
+    });
+  } finally {
+    rootCheckouts.delete(root);
+  }
+}
+
+const worktreeOperations = new Set<string>();
+async function worktreeOperation<T>(path: string, expectedBranch: string, action: (branch: string) => Promise<T>) {
+  const canonical = await fs.realpath(path);
+  if (worktreeOperations.has(canonical)) throw new Error("A Git operation is already running for this worktree.");
+  worktreeOperations.add(canonical);
+  try {
+    const branch = (await git(path, "symbolic-ref", "--quiet", "--short", "HEAD").catch(() => "")).trim();
+    if (!branch || branch !== expectedBranch) throw new Error("The worktree branch changed or is detached. Refresh before continuing.");
+    for (const marker of ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer"]) {
+      const location = (await git(path, "rev-parse", "--path-format=absolute", "--git-path", marker)).trim();
+      if (await fs.stat(location).then(() => true, () => false)) throw new Error("Finish the current merge, rebase, or cherry-pick first.");
+    }
+    return await action(branch);
+  } finally {
+    worktreeOperations.delete(canonical);
+  }
+}
+
+export async function commitWorktree(path: string, expectedBranch: string, message: string) {
+  if (!message.trim()) throw new Error("Enter a commit message.");
+  return worktreeOperation(path, expectedBranch, async () => {
+    if ((await git(path, "ls-files", "--unmerged")).trim()) throw new Error("Resolve merge conflicts before committing.");
+    if (!(await git(path, "status", "--porcelain")).trim()) throw new Error("No changes to commit.");
+    await git(path, "add", "--all");
+    await git(path, "commit", "-m", message.trim());
+    return (await git(path, "rev-parse", "HEAD")).trim();
+  });
+}
+
+export async function pushWorktree(path: string, expectedBranch: string) {
+  return worktreeOperation(path, expectedBranch, async (branch) => {
+    // Explicit source and destination avoid push.default or upstream settings
+    // accidentally sending this worktree's commits to another branch.
+    const { stdout, stderr } = await run("git", ["push", "--set-upstream", "origin", `refs/heads/${branch}:refs/heads/${branch}`], {
+      cwd: path, maxBuffer: 1 << 24, timeout: 120_000, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    });
+    return (stdout + stderr).trim();
+  });
 }

@@ -8,7 +8,7 @@ export const MODELS: Record<Provider, string[]> = {
 
 export type ApiKey = { id: string; name: string; provider: Provider; phiAllowed: boolean; auth: "login" | "key" };
 export type Project = { id: string; name: string; path: string; defaultBase: string; baseSetByUser?: boolean };
-export type Worktree = { id: string; projectId: string; name: string; title: string; path: string; branch: string; archived: boolean };
+export type Worktree = { id: string; projectId: string; name: string; title: string; path: string; branch: string; archived: boolean; root?: boolean };
 export type PrInfo = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; draft: boolean; url: string; title: string; review: string; checks: "pass" | "fail" | "pending" | null };
 export type WorktreeStatus = {
   branch: string; dirty: number; ahead: number; behind: number; merged: boolean; inBase: boolean; base: string;
@@ -33,8 +33,12 @@ export type Chat = {
   running: boolean;
   interrupted?: boolean;
   error?: string;
+  unreadCompletion?: boolean;
+  permissions?: PermissionRequest[];
   messages: Message[];
 };
+
+export type RootStatus = { branch: string | null; commit: string; dirty: boolean };
 
 export type RepoInfo = {
   repo?: { nameWithOwner: string; description: string; url: string; defaultBranch: string; pushedAt: string; isPrivate: boolean };
@@ -52,12 +56,19 @@ export type PermissionRequest = { id: string; chatId: string; tool: string; inpu
 
 export type Api = {
   getState(): Promise<State>;
+  rootStatus(projectId: string): Promise<RootStatus>;
+  commitWorktree(worktreeId: string, expectedBranch: string, message: string): Promise<string>;
+  pushWorktree(worktreeId: string, expectedBranch: string): Promise<string>;
+  checkoutAtRoot(worktreeId: string, commitMessage?: string): Promise<RootStatus>;
+  setActiveChat(id: string | null): Promise<void>;
+  onOpenChat(cb: (id: string) => void): () => void;
   onState(cb: (s: State) => void): () => void;
   pickFolder(): Promise<string | null>;
   addProject(path: string): Promise<void>;
   removeProject(id: string): Promise<void>;
   setProjectBase(id: string, base: string): Promise<void>;
   syncWorktrees(projectId: string): Promise<void>;
+  openRootWorktree(projectId: string): Promise<string>;
   addWorktree(projectId: string, name: string, branch: string, base: string): Promise<void>;
   removeWorktree(id: string): Promise<void>;
   renameWorktree(id: string, title: string): Promise<void>;
@@ -97,6 +108,8 @@ export type Api = {
   onPtyData(cb: (m: { id: string; data: string }) => void): () => void;
   onPtys(cb: (s: PtyState[]) => void): () => void;
   diff(worktreeId: string): Promise<{ files: string; patch: string }>;
+  artifactMenu(worktreeId: string, target: string): Promise<"open" | null>;
+  previewArtifact(worktreeId: string, target: string): Promise<{ kind: "url" | "image" | "pdf" | "markdown" | "html" | "text" | "unsupported"; content: string }>;
   openExternal(url: string): Promise<void>;
   setAppearance(a: Partial<Appearance>): Promise<void>;
   effectiveTheme(): Promise<"dark" | "light">;
