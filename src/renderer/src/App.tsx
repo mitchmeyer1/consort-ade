@@ -810,7 +810,7 @@ function AgentPicker({ chat, keys }: { chat: Chat; keys: State["keys"] }) {
   };
   return <div className="agent-picker" ref={root} onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); close(); } }}>
     <button ref={trigger} className="agent-picker-trigger" aria-expanded={open} aria-haspopup="dialog" title="Choose AI and model" onClick={() => { setSelected(null); setOpen(!open); }}>
-      <span>{providerName(chat.provider)} · {chat.model}</span><span aria-hidden="true">⌄</span>
+      <span>{providerName(chat.provider)} · {chat.model}</span><svg className="agent-picker-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m3 4.5 3 3 3-3" /></svg>
     </button>
     {open && <div className="agent-picker-popover" role="dialog" aria-label={key ? "Choose model" : "Choose AI"} aria-busy={busy}>
       <div className="agent-picker-heading">{key ? <button disabled={busy} onClick={() => setSelected(null)}>← Choose AI</button> : <strong>Choose AI</strong>}<button aria-label="Close AI picker" onClick={close}>×</button></div>

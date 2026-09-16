@@ -564,3 +564,5 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 .composer .agent-picker-option:hover, .composer .agent-picker-option:focus-visible { background: var(--line); }
 .composer .agent-picker-option[aria-pressed="true"] { color: var(--cream); background: var(--line); }
 @media (max-width: 700px) { .composer .cbar .hint { display: none; } .composer-wrap { padding-inline: 14px; } }
+
+.agent-picker-chevron { display: block; flex: 0 0 12px; }

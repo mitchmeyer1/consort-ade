@@ -6,6 +6,7 @@ import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { Codex } from "@openai/codex-sdk";
 import { store } from "./store";
 import { startAgentBrowser } from "./agentBrowser";
+import { agentEnvironment, TESTING_PROMPT } from "./agentEnvironment";
 import { PHASES, type Chat, type Block, type Phase, type PermissionRequest } from "../shared/types";
 
 // ponytail: phase tracked via text markers so claude + codex share one mechanism
@@ -166,6 +167,7 @@ export async function send(chatId: string, text: string, files: string[] = [], o
   const ui = new Transcript(chat);
   let browser: Awaited<ReturnType<typeof startAgentBrowser>> | undefined;
   try {
+    text = `${TESTING_PROMPT}\n\n${text}`;
     try {
       browser = await startAgentBrowser(cwd, ac.signal);
       text = `${browser.prompt}\n\n${text}`;
@@ -261,7 +263,7 @@ async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, 
       includePartialMessages: true,
       settingSources: ["user", "project", "local"],
       systemPrompt: { type: "preset", preset: "claude_code", append: `${PHASE_PROMPT}\n\n${phiPrompt(keyAllowsPhi(chat))}` },
-      env: { ...envWithout("ANTHROPIC_API_KEY"), ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}) },
+      env: agentEnvironment(cwd, { ...envWithout("ANTHROPIC_API_KEY"), ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}) }),
       permissionMode: chat.autoApprove ? "bypassPermissions" : "acceptEdits",
       allowDangerouslySkipPermissions: chat.autoApprove,
       canUseTool: async (tool, input) => {
@@ -320,7 +322,7 @@ async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, 
 }
 
 async function runCodex(chat: Chat, cwd: string, apiKey: string, text: string, ac: AbortController, ui: Transcript) {
-  const codex = new Codex(apiKey ? { apiKey } : { env: envWithout("OPENAI_API_KEY") as Record<string, string> });
+  const codex = new Codex({ ...(apiKey ? { apiKey } : {}), env: agentEnvironment(cwd, envWithout("OPENAI_API_KEY")) });
   const opts = { ...(chat.model ? { model: chat.model } : {}), workingDirectory: cwd, skipGitRepoCheck: true, sandboxMode: "workspace-write" as const, networkAccessEnabled: true, approvalPolicy: "never" as const };
   const thread = chat.sessionId ? codex.resumeThread(chat.sessionId, opts) : codex.startThread(opts);
   const prompt = chat.sessionId ? text : `${PHASE_PROMPT}\n\n${phiPrompt(keyAllowsPhi(chat))}\n\n${text}`;
