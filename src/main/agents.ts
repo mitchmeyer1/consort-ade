@@ -6,7 +6,7 @@ import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { Codex } from "@openai/codex-sdk";
 import { store } from "./store";
 import { startAgentBrowser } from "./agentBrowser";
-import { agentEnvironment, TESTING_PROMPT } from "./agentEnvironment";
+import { agentEnvironment, isInstallCommand, TESTING_PROMPT } from "./agentEnvironment";
 import { PHASES, type Chat, type Block, type Phase, type PermissionRequest } from "../shared/types";
 
 // ponytail: phase tracked via text markers so claude + codex share one mechanism
@@ -267,6 +267,8 @@ async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, 
       permissionMode: chat.autoApprove ? "bypassPermissions" : "acceptEdits",
       allowDangerouslySkipPermissions: chat.autoApprove,
       canUseTool: async (tool, input) => {
+        // dependency installs never wait on the user (see isInstallCommand); everything else asks
+        if (tool === "Bash" && isInstallCommand((input as any)?.command)) return { behavior: "allow", updatedInput: input };
         const id = randomUUID();
         const request = { id, chatId: chat.id, tool, input };
         const allow = await new Promise<boolean>((res) => {
