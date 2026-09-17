@@ -205,7 +205,7 @@ export function App() {
           </div>
         </div>
         {chat ? (
-          <ChatPane chat={chat} keys={state.keys} perms={perms.filter((p) => p.chatId === chat.id)} answer={answer} onOpenMd={(target) => { if (worktree) ade.artifactMenu(worktree.id, target).then((action) => { if (action === "open") openMd(target); }).catch((e) => alert(e.message)); }} />
+          <ChatPane chat={chat} worktree={worktree} keys={state.keys} perms={perms.filter((p) => p.chatId === chat.id)} answer={answer} onOpenMd={(target) => { if (worktree) ade.artifactMenu(worktree.id, target).then((action) => { if (action === "open") openMd(target); }).catch((e) => alert(e.message)); }} />
         ) : worktree ? (
           <WorktreePage key={worktree.id} wt={worktree} state={state} openForm={sel?.type === "worktree" && !!sel.form} onSelect={setSel} />
         ) : project ? (
@@ -968,7 +968,9 @@ function AgentPicker({ chat, keys }: { chat: Chat; keys: State["keys"] }) {
   </div>;
 }
 
-function ChatPane({ chat, keys, perms, answer, onOpenMd }: { chat: Chat; keys: State["keys"]; perms: PermissionRequest[]; answer: (id: string, ok: boolean) => void; onOpenMd: (p: string) => void }) {
+function ChatPane({ chat, worktree, keys, perms, answer, onOpenMd }: { chat: Chat; worktree?: Worktree; keys: State["keys"]; perms: PermissionRequest[]; answer: (id: string, ok: boolean) => void; onOpenMd: (p: string) => void }) {
+  const [codeModes, setCodeModes] = useState<Record<string, boolean>>({});
+  const code = !!worktree && !!codeModes[chat.id];
   const [text, setText] = useState("");
   const [files, setFiles] = useState<string[]>([]);
   const [over, setOver] = useState(false);
@@ -1043,13 +1045,17 @@ function ChatPane({ chat, keys, perms, answer, onOpenMd }: { chat: Chat; keys: S
       <div className="composer-wrap">
         <div className="composer-options">
           <span className="left">
-            <button className={"commitbtn" + (commit ? " armed" : "")} title="Stage everything, commit, and push. Type a message or let the AI write one." disabled={chat.running || !!commit} onClick={armCommit}><Ico n="wheat" />{commit && !commit.typed ? `commit ${commit.count}` : "commit"}</button>
+            <button className={"commitbtn" + (commit ? " armed" : "")} title="Stage everything, commit, and push. Type a message or let the AI write one." disabled={code || chat.running || !!commit} onClick={armCommit}><Ico n="wheat" />{commit && !commit.typed ? `commit ${commit.count}` : "commit"}</button>
+            <button className="commitbtn" disabled={!worktree} aria-pressed={code} title={code ? "Return to AI chat" : "Run commands in this worktree"} onClick={() => { setCommit(null); setCodeModes((modes) => ({ ...modes, [chat.id]: !code })); if (code) requestAnimationFrame(() => box.current?.focus()); }}><Ico n={code ? "quill" : "terminal"} />{code ? "CHAT" : "CODE"}</button>
             {chatStatus(chat) === "running" && <div className="composer-working" role="status"><span className="working-circle" aria-hidden="true" />Working…</div>}
           </span>
           <label><input type="checkbox" checked={chat.autoApprove} onChange={(e) => ade.setAutoApprove(chat.id, e.target.checked).catch((e) => alert(e.message))} /> Auto-approve</label>
           <label title="Use a PHI-approved key for this chat"><input type="checkbox" checked={!!keys.find((k) => k.id === chat.keyId)?.phiAllowed} onChange={(e) => ade.setPhiMode(chat.id, e.target.checked).catch((e) => alert(e.message))} /> PHI mode</label>
         </div>
-        <div className={"composer card" + (over ? " over" : "") + (commit ? " committing" : "")}>
+        {code && worktree && <div className="composer-terminal card">
+          <XTermPane key={chat.id} scope={{ id: worktree.id, cwd: worktree.path, title: worktree.title }} termId={`composer-${chat.id}`} active failed={false} />
+        </div>}
+        <div style={code ? { display: "none" } : undefined} className={"composer card" + (over ? " over" : "") + (commit ? " committing" : "")}>
           <textarea ref={box} value={text} rows={1} onChange={(e) => { setText(e.target.value); if (commit && !commit.typed && e.target.value) setCommit({ ...commit, typed: true }); }} placeholder={placeholder}
             onInput={(e) => { const t = e.currentTarget; t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 240) + "px"; }}
             onKeyDown={(e) => {

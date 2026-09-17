@@ -24,7 +24,8 @@ function zdotdir() {
   writeFileSync(join(dir, ".zlogin"), `[ -f "$HOME/.zlogin" ] && source "$HOME/.zlogin"\n`);
   writeFileSync(join(dir, ".zshrc"), `export ZDOTDIR="$HOME"\n[ -f "$HOME/.zshrc" ] && source "$HOME/.zshrc"\n` +
     `autoload -Uz add-zsh-hook\n_consort_pre() { printf '\\e]7777;start\\a' }\n_consort_post() { printf '\\e]7777;exit;%s\\a' $? }\n` +
-    `add-zsh-hook preexec _consort_pre\nadd-zsh-hook precmd _consort_post\n`);
+    `add-zsh-hook preexec _consort_pre\nadd-zsh-hook precmd _consort_post\n` +
+    `if [[ "$CONSORT_COMPOSER" == 1 ]]; then\n_consort_prompt() { PROMPT=$'%/\\n❯ '; RPROMPT='' }\nadd-zsh-hook precmd _consort_prompt\nfi\n`);
   return dir;
 }
 
@@ -32,8 +33,9 @@ export async function create(scopeId: string, termId: string, cwd: string, cols:
   const { spawn } = await import("node-pty");
   const id = `${scopeId}:${termId}`;
   if (sessions.has(id)) return id;
-  const env = { ...process.env, ZDOTDIR: zdotdir(), TERM: "xterm-256color", COLORTERM: "truecolor", LANG: process.env.LANG || "en_US.UTF-8", CONSORT: "1" } as Record<string, string>;
-  const pty = spawn(process.env.SHELL || "/bin/zsh", ["-l"], { name: "xterm-256color", cols, rows, cwd, env });
+  const composer = termId.startsWith("composer-");
+  const env = { ...process.env, ZDOTDIR: zdotdir(), TERM: "xterm-256color", COLORTERM: "truecolor", LANG: process.env.LANG || "en_US.UTF-8", CONSORT: "1", CONSORT_COMPOSER: composer ? "1" : "0" } as Record<string, string>;
+  const pty = spawn(composer ? "/bin/zsh" : process.env.SHELL || "/bin/zsh", ["-l"], { name: "xterm-256color", cols, rows, cwd, env });
   const s: Session = { id, scopeId, termId, pty, running: false, failed: false, buf: "" };
   sessions.set(id, s);
   pty.onData((d) => {
