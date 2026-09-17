@@ -361,3 +361,13 @@ export async function switchRootBranch(path: string, expectedBranch: string | nu
     });
   } finally { rootCheckouts.delete(path); }
 }
+
+export async function pullWorktree(path: string, expectedBranch: string) {
+  return worktreeOperation(path, expectedBranch, async (branch) => {
+    if ((await git(path, "status", "--porcelain")).trim()) throw new Error("Commit or stash changes before pulling.");
+    const { stdout, stderr } = await run("git", ["pull", "--ff-only", "--no-rebase", "--no-autostash", "origin", `refs/heads/${branch}`], {
+      cwd: path, maxBuffer: 1 << 24, timeout: 120_000, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    });
+    return (stdout + stderr).trim();
+  });
+}

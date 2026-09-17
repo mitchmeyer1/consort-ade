@@ -149,6 +149,13 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     try { return await git.commitWorktree(w.path, branch, message); }
     finally { statusCache.delete(id); }
   },
+  pullWorktree: async (id: string, branch: string) => {
+    const w = wt(id);
+    if (!w) throw new Error("Worktree no longer exists.");
+    if (store.data.chats.some((c) => c.worktreeId === id && c.running)) throw new Error("Wait for this worktree's chats to finish before pulling.");
+    try { return await git.pullWorktree(w.path, branch); }
+    finally { statusCache.delete(id); repoCache.delete(w.projectId); store.save(); }
+  },
   pushWorktree: async (id: string, branch: string) => {
     const w = wt(id);
     if (!w) throw new Error("Worktree no longer exists.");
@@ -294,7 +301,8 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   commitChat: async (chatId: string, message?: string) => {
     const chat = store.data.chats.find((c) => c.id === chatId);
     try { return await commitFromChat(chatId, message); }
-    finally { if (chat) statusCache.delete(chat.worktreeId); }
+    catch (error) { if (chat) { chat.queuePaused = true; store.save(); } throw error; }
+    finally { if (chat) { statusCache.delete(chat.worktreeId); void agents.flushQueued(chatId); } }
   },
   authLoginCmd: (provider) => (provider === "claude" ? `${JSON.stringify(claudeBin())} auth login --claudeai` : `${JSON.stringify(codexBin())} login`),
   listFiles: (id: string) => git.listFiles(wt(id).path),
@@ -349,6 +357,16 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     const c = store.chat(chatId);
     if (c.name === "New chat") c.name = text.slice(0, 40);
     return agents.send(chatId, text, files);
+  },
+  resumeQueue: (chatId: string) => {
+    store.chat(chatId).queuePaused = false;
+    store.save();
+    void agents.flushQueued(chatId);
+  },
+  removeQueuedMessage: (chatId: string, messageId: string) => {
+    const chat = store.chat(chatId);
+    chat.queuedMessages = chat.queuedMessages?.filter((m) => m.id !== messageId);
+    store.save();
   },
   // dropped/pasted data with no backing path (screenshot thumbnails, clipboard images) lands in a temp file first
   stageBlob: (name: string, bytes: ArrayBuffer) => {

@@ -23,6 +23,7 @@ export class Store {
       const pendingTool = c.messages.some((m) => m.blocks.some((b) => b.type === "tool" && b.ok === undefined));
       if (c.running || (!c.error && last && (last.role === "user" || pendingTool))) c.interrupted = true;
       c.running = false;
+      if (c.queuedMessages?.length) c.queuePaused = true;
       c.permissions = [];
     }
     for (const k of this.data.keys) { k.phiAllowed ??= false; k.auth ??= this.data.secrets[k.id] ? "key" : "login"; }

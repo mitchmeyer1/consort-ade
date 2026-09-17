@@ -169,14 +169,19 @@ export function App() {
   };
   const toggle = (t: Tab) => setTab((cur) => (cur === t ? undefined : t));
   const signIn = async (provider: "claude" | "codex") => {
-    const sc = worktree ? { id: worktree.id, cwd: worktree.path } : project ? { id: project.id, cwd: project.path } : state.projects[0] ? { id: state.projects[0].id, cwd: state.projects[0].path } : null;
-    if (!sc) return alert("Add a project first so there is somewhere to run the login.");
-    if (!worktree && !project) setSel({ type: "project", id: sc.id });
+    let sc = worktree ? { id: worktree.id, cwd: worktree.path } : null;
+    if (!sc) {
+      const p = project ?? state.projects[0];
+      if (!p) return alert("Add a project first so there is somewhere to run the login.");
+      const id = await ade.openRootWorktree(p.id);
+      sc = { id, cwd: p.path };
+      setSel({ type: "worktree", id });
+    }
     const tabs = termTabs.get(sc.id) ?? ["t1"];
     if (!tabs.includes("auth")) termTabs.set(sc.id, [...tabs, "auth"]);
     wantTab = "auth";
     pendingCmd.set(`${sc.id}:auth`, await ade.authLoginCmd(provider));
-    setTab("terminal", !worktree && !project ? `project:${sc.id}` : viewKey);
+    setTab("terminal", worktree ? viewKey : `worktree:${sc.id}`);
     const x = xterms.get(`${sc.id}:auth`);
     if (x) { const c = pendingCmd.get(x.id); if (c) { pendingCmd.delete(x.id); ade.ptyWrite(x.id, c + "\r"); } }
   };
@@ -196,9 +201,9 @@ export function App() {
             </>
           ) : <span className="title">{crumb}</span>}
           <div className="tabs">
-            <button className={tab === "terminal" ? "on" : ""} onClick={() => toggle("terminal")}><Ico n="terminal" /><span>Terminal</span></button>
-            <button className={tab === "diff" ? "on" : ""} onClick={() => toggle("diff")}><Ico n="branch" /><span>Diff</span></button>
-            <button className={tab === "editor" ? "on" : ""} onClick={() => toggle("editor")}><Ico n="pencil" /><span>Editor</span></button>
+            {worktree && <button className={tab === "terminal" ? "on" : ""} onClick={() => toggle("terminal")}><Ico n="terminal" /><span>Terminal</span></button>}
+            {worktree && <button className={tab === "diff" ? "on" : ""} onClick={() => toggle("diff")}><Ico n="branch" /><span>Diff</span></button>}
+            {worktree && <button className={tab === "editor" ? "on" : ""} onClick={() => toggle("editor")}><Ico n="pencil" /><span>Editor</span></button>}
             {worktree && <button className={tab === "commit" ? "on" : ""} onClick={() => toggle("commit")}><Ico n="wheat" /><span>Commit</span></button>}
             {chat && <button className={tab === "artifacts" ? "on" : ""} aria-pressed={tab === "artifacts"} onClick={() => toggle("artifacts")}><Ico n="scroll" /><span>Artifacts</span></button>}
             <button className={tab === "settings" ? "on" : ""} onClick={() => toggle("settings")}><Ico n="gear" /><span>Settings</span></button>
@@ -222,7 +227,7 @@ export function App() {
           </div>
         )}
       </div>
-      {tab && <>
+      {tab && (!["terminal", "editor", "diff"].includes(tab) || worktree) && <>
         <div className="resizer right" style={{ right: rightW - 3 }} onMouseDown={drag("right")} />
         <Drawer key={viewKey} tab={tab} state={state} chat={chat} worktree={worktree} scope={worktree ? { id: worktree.id, cwd: worktree.path, title: worktree.title } : project ? { id: project.id, cwd: project.path, title: project.name } : undefined}
           ptys={ptys} width={rightW} file={file} onEdit={openEditor} onView={openMd} onSignIn={signIn} onClose={() => setTab(undefined)} />
@@ -656,11 +661,12 @@ function WorktreePage({ wt, state, openForm, onSelect }: { wt: Worktree; state: 
   const [busy, setBusy] = useState(false);
   const [gitError, setGitError] = useState("");
   const [gitResult, setGitResult] = useState("");
-  const runGit = async (push: boolean) => {
+  const runGit = async (action: "commit" | "push" | "pull") => {
     if (!st || busy) return;
     setBusy(true); setGitError(""); setGitResult("");
     try {
-      if (push) { await ade.pushWorktree(wt.id, st.branch); setGitResult(`Pushed to origin/${st.branch}.`); }
+      if (action === "pull") { await ade.pullWorktree(wt.id, st.branch); setGitResult(`Pulled from origin/${st.branch}.`); }
+      else if (action === "push") { await ade.pushWorktree(wt.id, st.branch); setGitResult(`Pushed to origin/${st.branch}.`); }
       else {
         const commit = await ade.commitWorktree(wt.id, st.branch, message);
         setGitResult(`Committed ${commit.slice(0, 7)} on ${st.branch}.`);
@@ -698,14 +704,15 @@ function WorktreePage({ wt, state, openForm, onSelect }: { wt: Worktree; state: 
       {st && <GitCard st={st} />}
       <div className="actions">
         <button disabled={busy || !st?.dirty || chats.some((c) => c.running)} onClick={() => { setCommitting(true); setGitError(""); }}>Commit…</button>
-        <button disabled={busy || !st || chats.some((c) => c.running)} onClick={() => runGit(true)}>{busy ? "Working…" : `Push to origin/${st?.branch ?? wt.branch}`}</button>
+        <button disabled={busy || !st || st.branch === "(detached)" || chats.some((c) => c.running)} onClick={() => runGit("pull")}>{busy ? "Working…" : `Pull from origin/${st?.branch ?? wt.branch}`}</button>
+        <button disabled={busy || !st || chats.some((c) => c.running)} onClick={() => runGit("push")}>{busy ? "Working…" : `Push to origin/${st?.branch ?? wt.branch}`}</button>
       </div>
-      {chats.some((c) => c.running) && <div className="m">Commit and push are available when this worktree's chats finish.</div>}
+      {chats.some((c) => c.running) && <div className="m">Commit, pull, and push are available when this worktree's chats finish.</div>}
       {!committing && gitError && <div className="error">{gitError}</div>}
       {gitResult && <div role="status">{gitResult}</div>}
       {committing && <Dialog title={`Commit to ${st?.branch ?? wt.branch}`} onClose={() => { if (!busy) setCommitting(false); }} footer={<>
         <button disabled={busy} onClick={() => setCommitting(false)}>Cancel</button>
-        <button className="primary" disabled={busy || !message.trim() || chats.some((c) => c.running)} onClick={() => runGit(false)}>{busy ? "Committing…" : "Commit changes"}</button>
+        <button className="primary" disabled={busy || !message.trim() || chats.some((c) => c.running)} onClick={() => runGit("commit")}>{busy ? "Committing…" : "Commit changes"}</button>
       </>}>
         <p>Include all tracked and untracked changes in this worktree. Ignored files are excluded.</p>
         <pre className="files">{st?.files}</pre>
@@ -996,7 +1003,7 @@ function ChatPane({ chat, worktree, keys, perms, answer, onOpenMd }: { chat: Cha
   useEffect(() => { if (commit && chat.running) setCommit(null); }, [chat.running]);
   const send = () => {
     if (commit) { if (text.trim() || !commit.typed) fireCommit(text.trim() || undefined); return; }
-    if ((!text.trim() && !files.length) || chat.running) return;
+    if (!text.trim() && !files.length) return;
     ade.send(chat.id, text.trim() || "See attached files.", files).catch((e) => alert(e.message));
     setText(""); setFiles([]);
   };
@@ -1043,6 +1050,15 @@ function ChatPane({ chat, worktree, keys, perms, answer, onOpenMd }: { chat: Cha
         <div className="chips">{files.map((f) => <span key={f} className="chip">📎 {f.split("/").pop()}<button onClick={() => setFiles((x) => x.filter((y) => y !== f))}>×</button></span>)}</div>
       )}
       <div className="composer-wrap">
+        {!!chat.queuedMessages?.length && <div className="message-queue" aria-label="Queued messages">
+          <div className="queue-heading"><span>{chat.queuedMessages.length} queued{chat.queuePaused ? " · paused" : " · runs after the current task"}</span>
+            {!chat.running && <button onClick={() => ade.resumeQueue(chat.id).catch((e) => alert(e.message))}>Resume queue</button>}
+          </div>
+          {chat.queuedMessages.map((message, index) => <div className="queued-message" key={message.id}>
+            <span>{index + 1}. {message.text}{message.files.length > 0 && ` · ${message.files.length} attachment${message.files.length === 1 ? "" : "s"}`}</span>
+            <button title="Remove queued message" aria-label={`Remove queued message ${index + 1}`} onClick={() => ade.removeQueuedMessage(chat.id, message.id).catch((e) => alert(e.message))}>×</button>
+          </div>)}
+        </div>}
         <div className="composer-options">
           <span className="left">
             <button className={"commitbtn" + (commit ? " armed" : "")} title="Stage everything, commit, and push. Type a message or let the AI write one." disabled={code || chat.running || !!commit} onClick={armCommit}><Ico n="wheat" />{commit && !commit.typed ? `commit ${commit.count}` : "commit"}</button>
@@ -1068,8 +1084,8 @@ function ChatPane({ chat, worktree, keys, perms, answer, onOpenMd }: { chat: Cha
             </button>
             <AgentPicker key={chat.id} chat={chat} keys={keys} />
             <span className="grow" />
-            <span className="m hint">{commit ? "↩ commit + push · esc cancel" : "↩ send · ⇧↩ newline"}</span>
-            <button className="icon enter" title={commit ? "Commit and push (↩)" : "Send (↩)"} disabled={commit ? (commit.typed && !text.trim()) : chat.running || (!text.trim() && !files.length)} onClick={send}>
+            <span className="m hint">{commit ? "↩ commit + push · esc cancel" : chat.running ? "↩ queue · ⇧↩ newline" : "↩ send · ⇧↩ newline"}</span>
+            <button className="icon enter" title={commit ? "Commit and push (↩)" : chat.running ? "Queue message (↩)" : "Send (↩)"} disabled={commit ? (commit.typed && !text.trim()) : (!text.trim() && !files.length)} onClick={send}>
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19V5" /><path d="M6 11l6-6 6 6" /></svg>
             </button>
           </div>
@@ -1092,7 +1108,7 @@ function Drawer({ tab, state, chat, worktree, scope, ptys, width, file, onEdit, 
       <div className="dbody">
         {tab === "settings" ? <Settings state={state} onSignIn={onSignIn} />
           : tab === "artifacts" ? (chat ? <ArtifactsView key={chat.id} chat={chat} onOpen={onView} /> : <div className="card">Select a chat to see its artifacts.</div>)
-          : tab === "terminal" ? (scope ? <Terminals key={scope.id} scope={scope} ptys={ptys.filter((p) => p.scopeId === scope.id)} /> : <div className="card">Select a project, worktree or chat first.</div>)
+          : tab === "terminal" ? (worktree && scope ? <Terminals key={scope.id} scope={scope} ptys={ptys.filter((p) => p.scopeId === scope.id)} /> : <div className="card">Select Root, a worktree or a chat first.</div>)
           : !worktree ? <div className="card">Select a worktree or chat first.</div>
           : tab === "editor" ? <Editor key={worktree.id + (file ?? "")} worktree={worktree} initial={file} onView={onView} />
           : tab === "markdown" ? <MarkdownView key={worktree.id + (file ?? "")} worktree={worktree} path={file} onEdit={onEdit} />

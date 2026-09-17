@@ -44,7 +44,7 @@ export function setPhiMode(chat: Chat, on: boolean, reason?: string) {
 
 // copy uploads into the worktree so the agent can Read them; keep them out of git
 function stageFiles(cwd: string, files: string[]) {
-  const dir = join(cwd, ".consort", "uploads");
+  const dir = join(cwd, ".consort", "uploads", randomUUID());
   try {
     // worktrees share the main repo's info/exclude; ask git where it is
     const ex = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"], { cwd }).toString().trim();
@@ -63,6 +63,8 @@ export const onPermission = (cb: typeof askPermission) => (askPermission = cb);
 export const answerPermission = (id: string, allow: boolean) => pending.get(id)?.(allow);
 
 export function stop(chatId: string) {
+  store.chat(chatId).queuePaused = true;
+  store.save();
   running.get(chatId)?.abort();
 }
 
@@ -144,17 +146,50 @@ Start with one sentence on where things stand, then continue.`;
   await send(chatId, prompt, [], { silent: true });
 }
 
+const drainingQueues = new Set<string>();
+export async function flushQueued(chatId: string) {
+  if (drainingQueues.has(chatId)) return;
+  const chat = store.data.chats.find((c) => c.id === chatId);
+  if (!chat || chat.running || chat.queuePaused || !chat.queuedMessages?.length) return;
+  drainingQueues.add(chatId);
+  try {
+    while (!chat.running && !chat.queuePaused && chat.queuedMessages?.length) {
+      const next = chat.queuedMessages[0];
+      await runSend(chatId, next.text, next.files, { queuedId: next.id });
+      if (chat.error || chat.interrupted) chat.queuePaused = true;
+    }
+  } catch (error) {
+    chat.error = (error as Error).message;
+    chat.queuePaused = true;
+  } finally {
+    drainingQueues.delete(chatId);
+    store.save();
+  }
+}
+
 export async function send(chatId: string, text: string, files: string[] = [], opts: { silent?: boolean } = {}) {
+  if (opts.silent) return runSend(chatId, text, files, opts);
+  const chat = store.chat(chatId);
+  const cwd = store.data.worktrees.find((w) => w.id === chat.worktreeId)!.path;
+  const staged = stageFiles(cwd, files);
+  (chat.queuedMessages ??= []).push({ id: randomUUID(), text, files: staged });
+  if (!chat.running) chat.queuePaused = false;
+  store.save();
+  void flushQueued(chatId);
+}
+
+async function runSend(chatId: string, text: string, files: string[] = [], opts: { silent?: boolean; queuedId?: string } = {}) {
   const chat = store.chat(chatId);
   if (chat.running) throw new Error("chat is busy");
   const cwd = store.data.worktrees.find((w) => w.id === chat.worktreeId)!.path;
   const reason = phiSuspect(text, files);
   if (reason && !keyAllowsPhi(chat)) setPhiMode(chat, true, reason);
   const apiKey = store.getSecret(chat.keyId);
-  const staged = stageFiles(cwd, files);
+  const staged = opts.queuedId ? files : stageFiles(cwd, files);
   const shown = staged.length ? `${text}\n\n${staged.map((f) => `📎 ${basename(f)}`).join("\n")}` : text;
   if (staged.length) text = `${text}\n\nAttached files (read them from disk):\n${staged.map((f) => `- ${f}`).join("\n")}`;
   if (!opts.silent) chat.messages.push({ id: randomUUID(), role: "user", blocks: [{ type: "text", text: shown }], ts: Date.now() });
+  if (opts.queuedId) chat.queuedMessages = chat.queuedMessages?.filter((m) => m.id !== opts.queuedId);
   chat.unreadCompletion = false;
   chat.running = true;
   chat.error = undefined;
@@ -187,9 +222,11 @@ export async function send(chatId: string, text: string, files: string[] = [], o
     chat.permissions = [];
     if (!ac.signal.aborted && !chat.error && (chat.phase as Phase) !== "waiting") {
       chat.phase = "complete";
-      chat.unreadCompletion = true;
+      chat.unreadCompletion = !chat.queuedMessages?.length;
     } else if (ac.signal.aborted) chat.phase = "waiting";
+    if (ac.signal.aborted || chat.error) chat.queuePaused = true;
     store.save();
+    void flushQueued(chatId);
   }
 }
 

@@ -1,5 +1,5 @@
 :root {
-  --bg: #0a0a0a; --bg-solid: #0a0a0a; --panel: #121110; --card: #161513; --line: rgba(243,234,214,.14); --line2: rgba(243,234,214,.3);
+  --bg: #0a0a0a; --bg-solid: #0a0a0a; --panel: #121110; --card: #161513; --popover: #1d1b19; --line: rgba(243,234,214,.14); --line2: rgba(243,234,214,.3);
   --fg: #f3ead6; --dim: rgba(243,234,214,.55); --cream: #f3ead6; --ink: #0a0a0a; --err: #e0a08f; --ok: #cfe0b8;
   --display: "Newsreader", Georgia, "Times New Roman", serif;
   --body: "Avenir Next", "Helvetica Neue", sans-serif;
@@ -212,7 +212,7 @@ input.edit { padding: 1px 6px; font: inherit; width: 100%; min-width: 0; backgro
 
 /* appearance: light = cream paper with near-black ink; accent roles swap */
 :root[data-theme="light"] {
-  --bg: #f3ead6; --bg-solid: #f3ead6; --panel: #ece2cb; --card: #e7dcc3; --line: rgba(20,19,17,.14); --line2: rgba(20,19,17,.32);
+  --bg: #f3ead6; --bg-solid: #f3ead6; --panel: #ece2cb; --card: #e7dcc3; --popover: #e3d7bd; --line: rgba(20,19,17,.14); --line2: rgba(20,19,17,.32);
   --fg: #141311; --dim: rgba(20,19,17,.58); --cream: #141311; --ink: #f3ead6; --err: #a33d2c; --ok: #3f6b2a;
 }
 :root[data-bg="frost"]  { --bg: rgba(10,10,10,.72); --panel: rgba(18,17,16,.62); --card: rgba(22,21,19,.6); }
@@ -459,6 +459,11 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 .trbody pre.out { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--line); color: var(--fg); opacity: .85; }
 /* composer card */
 .composer-wrap { padding: 8px 28px 18px; }
+.message-queue { max-width: 860px; max-height: 160px; overflow-y: auto; margin: 0 auto 10px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; }
+.queue-heading, .queued-message { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.queue-heading { color: var(--dim); margin-bottom: 6px; }
+.queued-message > span { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+.message-queue button { flex-shrink: 0; padding: 2px 7px; }
 .composer.card { max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 6px; padding: 10px 12px 8px; border-radius: 12px; background: var(--card); align-items: stretch; }
 .composer.card.over { border-color: var(--cream); }
 .composer-terminal.card { max-width: 860px; margin: 0 auto; height: 200px; padding: 10px 12px; display: flex; border-radius: 12px; background: var(--bg-solid); }
@@ -584,7 +589,7 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 .composer .agent-picker-trigger { display: flex; align-items: center; gap: 7px; max-width: 100%; padding: 4px 6px; border: none; background: transparent; color: var(--dim); font-size: 11px; }
 .agent-picker-trigger > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer .agent-picker-trigger:hover, .composer .agent-picker-trigger[aria-expanded="true"] { color: var(--fg); background: var(--line); }
-.agent-picker-popover { position: absolute; bottom: calc(100% + 10px); left: 0; z-index: 30; width: 300px; max-width: calc(100vw - 100px); max-height: min(420px, 60vh); overflow-y: auto; padding: 8px; border: 1px solid var(--line2); border-radius: 10px; background: var(--card); box-shadow: 0 10px 32px #0005; }
+.agent-picker-popover { position: absolute; bottom: calc(100% + 10px); left: 0; z-index: 30; width: 300px; max-width: calc(100vw - 100px); max-height: min(420px, 60vh); overflow-y: auto; padding: 8px; border: 1px solid var(--line2); border-radius: 10px; background: var(--popover); color: var(--fg); box-shadow: 0 12px 36px #0009; }
 .agent-picker-heading { display: flex; justify-content: space-between; align-items: center; padding: 2px 4px 6px; font-size: 12px; }
 .composer .agent-picker-heading button { padding: 4px 6px; border: none; background: transparent; font-size: 12px; }
 .agent-picker-caption { padding: 8px; color: var(--dim); font-size: 11px; }
@@ -623,7 +628,8 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 .root-branch-trigger { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; text-align: left; font-family: var(--mono); font-size: 12px; }
 .root-branch-trigger span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .root-branch-trigger svg { flex-shrink: 0; }
-.root-branch-popover { position: absolute; top: 100%; left: 0; width: 100%; z-index: 30; padding: 8px; border: 1px solid var(--line2); border-radius: 8px; background: var(--card); box-shadow: 0 10px 30px #0006; }
+.root-branch-popover { position: absolute; top: calc(100% + 4px); left: 0; width: 100%; z-index: 30; padding: 8px; border: 1px solid var(--line2); border-radius: 8px; background: var(--popover); color: var(--fg); box-shadow: 0 12px 36px #0009; }
+.root-branch-popover input { background: var(--bg-solid); }
 .root-branch-popover input { width: 100%; margin-bottom: 6px; font-size: 12px; }
 .root-branch-results { max-height: 260px; overflow-y: auto; }
 .root-branch-option { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; padding: 9px 8px; border: none; background: transparent; text-align: left; font-size: 12px; }

@@ -36,6 +36,8 @@ export type Chat = {
   unreadCompletion?: boolean;
   permissions?: PermissionRequest[];
   messages: Message[];
+  queuedMessages?: { id: string; text: string; files: string[] }[];
+  queuePaused?: boolean;
 };
 
 export type RootBranch = { ref: string; name: string; occupied?: string };
@@ -62,6 +64,7 @@ export type Api = {
   rootStatus(projectId: string): Promise<RootStatus>;
   commitAndPushRoot(worktreeId: string, expectedBranch: string, message: string): Promise<string>;
   commitWorktree(worktreeId: string, expectedBranch: string, message: string): Promise<string>;
+  pullWorktree(worktreeId: string, expectedBranch: string): Promise<string>;
   pushWorktree(worktreeId: string, expectedBranch: string): Promise<string>;
   checkoutAtRoot(worktreeId: string, commitMessage?: string): Promise<RootStatus>;
   setActiveChat(id: string | null): Promise<void>;
@@ -89,6 +92,8 @@ export type Api = {
   setAutoApprove(id: string, on: boolean): Promise<void>;
   setPhase(id: string, phase: Phase): Promise<void>;
   send(chatId: string, text: string, files?: string[]): Promise<void>;
+  resumeQueue(chatId: string): Promise<void>;
+  removeQueuedMessage(chatId: string, messageId: string): Promise<void>;
   pickFiles(): Promise<string[]>;
   pathsFor(files: File[]): string[];
   stageBlob(name: string, bytes: ArrayBuffer): Promise<string>;
