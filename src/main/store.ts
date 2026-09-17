@@ -25,6 +25,7 @@ export class Store {
       const pendingTool = c.messages.some((m) => m.blocks.some((b) => b.type === "tool" && b.ok === undefined));
       if (c.running || (!c.error && last && (last.role === "user" || pendingTool))) c.interrupted = true;
       c.running = false;
+      c.assessingPrompt = false;
       if (c.queuedMessages?.length) c.queuePaused = true;
       c.permissions = [];
     }

@@ -25,6 +25,33 @@ explains. Twenty real findings earn a long document; two earn a short one. Banne
 size: filler, hedging, restating the diff, or a second sentence saying what the first
 already said.
 
+## Keep the user informed throughout the review
+
+The coordinator owns user-facing progress, including while file agents work. Before the
+first tool call, give a one- or two-sentence overview of the behavior being reviewed and
+what you will check first. On resume, say what is already finished and what remains.
+
+Send a brief chat update about every **30–45 seconds or five tool calls**, whichever comes
+first, and when moving from investigation to verification or writing. Tool rows, shell
+output, coverage files, and phase markers do not count as updates. Use short waits (at most
+30 seconds when supported) for agents or long-running commands so you can keep reporting.
+If a tool blocks longer, give an update as soon as it returns.
+
+In one or two plain-language sentences, explain what you learned, why the current check
+matters to someone using the feature, and what remains uncertain or comes next. Describe
+behavior and consequences rather than listing commands, filenames, or internal bookkeeping.
+For example: “The form saves the new default correctly. I’m checking whether existing
+records inherit it or keep their previous selection.” Use examples only when supported by
+the actual review; distinguish a suspected issue from a confirmed finding.
+
+When delegating, summarize the review areas and report meaningful results as they arrive.
+Use coverage counts only from the ledger; do not invent percentages, findings, or ETAs.
+If nothing has resolved yet, name the open question and the evidence still needed rather
+than repeating “still working.” Explain delays, failed checks, and their effect on coverage.
+Before writing the HTML, summarize the verified findings and remaining limits. Keep the
+final operational summary and report link required below. Progress updates do not replace
+review work or require user approval to continue.
+
 ## Phase 0 — scope
 
 **Resolve the repo first.** Default is the repo of the current working directory. A full PR

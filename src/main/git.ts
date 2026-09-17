@@ -160,8 +160,29 @@ const inside = (cwd: string, rel: string) => {
   return abs;
 };
 export async function listFiles(cwd: string) {
-  const out = await git(cwd, "ls-files", "--cached", "--others", "--exclude-standard");
-  return out.split("\n").filter(Boolean);
+  const files: string[] = [];
+  const directories = [""];
+  // Walk the filesystem, including hidden and ignored files, without consulting Git.
+  // Do not follow directory symlinks: they can cycle or point outside this workspace.
+  while (directories.length) {
+    const dir = directories.pop()!;
+    let entries;
+    try { entries = await fs.readdir(join(cwd, dir), { withFileTypes: true }); }
+    catch (error: any) {
+      if (dir && error.code === "ENOENT") continue; // a directory disappeared during the scan
+      throw error;
+    }
+    for (const entry of entries) {
+      const rel = dir ? `${dir}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) directories.push(rel);
+      else if (entry.isFile()) files.push(rel);
+      else if (entry.isSymbolicLink()) {
+        const target = await fs.stat(join(cwd, rel)).catch(() => undefined);
+        if (target?.isFile()) files.push(rel);
+      }
+    }
+  }
+  return files.sort();
 }
 export const readFile = (cwd: string, rel: string) => fs.readFile(inside(cwd, rel), "utf8");
 export const writeFile = (cwd: string, rel: string, content: string) => fs.writeFile(inside(cwd, rel), content);

@@ -26,3 +26,8 @@ test('resolving the last permission restores running status', () => {
   pending.permissions = [];
   assert.equal(chatStatus(pending), 'running');
 });
+
+test('initial waiting assessment is running, while a user-input wait still needs attention', () => {
+  assert.equal(chatStatus(chat({ phase: 'waiting', running: true, assessingPrompt: true, messages: [{}] })), 'running');
+  assert.equal(chatStatus(chat({ phase: 'waiting', running: true, assessingPrompt: false, messages: [{}] })), 'attention');
+});

@@ -1,6 +1,8 @@
-import { defaultConnector } from "../../shared/defaultConnector";
-import React, { useEffect, useRef, useState } from "react";
-import { MODELS, PHASES, type Api, type Block, type Chat, type CommitInfo, type Phase, type PtyState, type PermissionRequest, type Project, type RepoInfo, type RootStatus, type State, type Worktree, type WorktreeStatus } from "../../shared/types";
+import { chatDrafts } from "../../shared/chatDrafts";
+import { PhaseStrip } from "./PhaseStrip";
+import { defaultConnector, selectedModel } from "../../shared/defaultConnector";
+import React, { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { MODELS, PHASES, phasesFor, type Api, type Block, type Chat, type CommitInfo, type Phase, type PtyState, type PermissionRequest, type Project, type RepoInfo, type RootStatus, type State, type Worktree, type WorktreeStatus } from "../../shared/types";
 import { chatStatus } from "../../shared/chatStatus";
 import { recentChats, recentWorktrees } from "../../shared/conversationOrder";
 import { Lockup, Mark } from "./Logo";
@@ -14,7 +16,6 @@ import "@xterm/xterm/css/xterm.css";
 const ade = (window as any).ade as Api;
 const EMPTY: State = { projects: [], worktrees: [], chats: [], keys: [], appearance: { theme: "dark", background: "opaque" } };
 type Tab = "terminal" | "diff" | "editor" | "markdown" | "commit" | "artifacts" | "settings";
-const PHASE_ICON: Record<Phase, string> = { waiting: "candle", planning: "scroll", executing: "sun", validating: "chalice", complete: "wreath" };
 type Sel = { type: "chat"; id: string } | { type: "worktree"; id: string; form?: boolean } | { type: "project"; id: string; form?: boolean };
 
 function useStatus(id?: string, revision = 0) {
@@ -170,6 +171,16 @@ export function App() {
 
   };
   const toggle = (t: Tab) => setTab((cur) => (cur === t ? undefined : t));
+  const runQuickAction = (wt: Worktree, action: { title: string; command: string }) => {
+    const termId = `action-${crypto.randomUUID()}`;
+    termTabs.set(wt.id, [...(termTabs.get(wt.id) ?? ["t1"]), termId]);
+    termLabels.set(`${wt.id}:${termId}`, action.title);
+    wantTab = termId;
+    // Quote the complete script as one Bash argument, preserving multiline commands.
+    pendingCmd.set(`${wt.id}:${termId}`, "bash -lc '" + action.command.replace(/'/g, "'\"'\"'") + "'");
+    setTab("terminal");
+    window.dispatchEvent(new CustomEvent("consort-terminal-added", { detail: { scopeId: wt.id, termId } }));
+  };
   const signIn = async (keyId: string) => {
     let sc = worktree ? { id: worktree.id, cwd: worktree.path } : null;
     if (!sc) {
@@ -197,12 +208,17 @@ export function App() {
           <button className="icon panel" title={collapsed ? "Show sidebar" : "Hide sidebar"} onClick={() => setCollapsed((c) => !c)}><PanelIcon /></button>
           {chat ? (
             <>
-              <span className="crumb" title={worktree?.path}>{crumb}</span>
-              <input className="name" defaultValue={chat.name} key={chat.id} onBlur={(e) => ade.renameChat(chat.id, e.target.value)} />
+              <div className="chat-heading">
+                <input className="name" aria-label="Chat name" title={chat.name} defaultValue={chat.name} key={chat.id} onBlur={(e) => ade.renameChat(chat.id, e.target.value)} />
+                <span className="crumb" title={worktree?.path}>{crumb}</span>
+              </div>
               {chat.running && <button onClick={() => ade.stop(chat.id)}>Stop</button>}
             </>
           ) : <span className="title">{crumb}</span>}
           <div className="tabs">
+            {worktree?.quickActions?.filter((action) => action.pinned).map((action) => (
+              <button key={action.id} className="pinned-action" title={`Run ${action.title} in ${worktree.path}`} onClick={() => runQuickAction(worktree, action)}><Ico n="star" />{action.title}</button>
+            ))}
             {worktree && <button className={tab === "terminal" ? "on" : ""} onClick={() => toggle("terminal")}><Ico n="terminal" /><span>Terminal</span></button>}
             {worktree && <button className={tab === "diff" ? "on" : ""} onClick={() => toggle("diff")}><Ico n="branch" /><span>Diff</span></button>}
             {worktree && <button className={tab === "editor" ? "on" : ""} onClick={() => toggle("editor")}><Ico n="pencil" /><span>Editor</span></button>}
@@ -212,9 +228,9 @@ export function App() {
           </div>
         </div>
         {chat ? (
-          <ChatPane chat={chat} worktree={worktree} keys={state.keys} perms={perms.filter((p) => p.chatId === chat.id)} answer={answer} onOpenMd={(target) => { if (worktree) ade.artifactMenu(worktree.id, target).then((action) => { if (action === "open") openMd(target); }).catch((e) => alert(e.message)); }} />
+          <ChatPane key={chat.id} chat={chat} worktree={worktree} keys={state.keys} perms={perms.filter((p) => p.chatId === chat.id)} answer={answer} onOpenMd={(target) => { if (worktree) ade.artifactMenu(worktree.id, target).then((action) => { if (action === "open") openMd(target); }).catch((e) => alert(e.message)); }} />
         ) : worktree ? (
-          <WorktreePage key={worktree.id} wt={worktree} state={state} openForm={sel?.type === "worktree" && !!sel.form} onSelect={setSel} />
+          <WorktreePage key={worktree.id} wt={worktree} state={state} openForm={sel?.type === "worktree" && !!sel.form} onRunAction={runQuickAction} onSelect={setSel} />
         ) : project ? (
           <ProjectPage key={project.id} project={project} state={state} openForm={sel?.type === "project" && !!sel.form} onSelect={setSel} />
         ) : (
@@ -352,7 +368,7 @@ function WorktreeNode({ wt, state, sel, running, failed, onSelect, collapsed, to
           <div key={c.id} className={"row chat" + (sel?.type === "chat" && c.id === sel.id ? " active" : "") + (status ? ` st-${status}` : "")} onClick={() => onSelect({ type: "chat", id: c.id })}>
             <span className="slot chat-symbol"><Ico n="celtic" />{status && <span role="img" aria-label={status} title={status} className={`chat-dot ${status}`} />}</span>
             <span className="grow"><Editable value={c.name} onSave={(n) => ade.renameChat(c.id, n)} /></span>
-            <MiniBar phase={c.phase} />
+            <MiniBar phase={c.phase} steps={c.phaseSteps} />
             <span className="tools" onClick={(e) => e.stopPropagation()}>
               <button className="icon" onClick={() => confirm("Delete chat?") && ade.deleteChat(c.id)}>×</button>
             </span>
@@ -363,9 +379,10 @@ function WorktreeNode({ wt, state, sel, running, failed, onSelect, collapsed, to
   );
 }
 
-const MiniBar = ({ phase }: { phase: Phase }) => {
-  const i = PHASES.indexOf(phase), all = phase === "complete";
-  return <span className="mini">{PHASES.map((p, j) => <i key={p} className={all && j === PHASES.length - 1 ? "done final" : all || j < i ? "done" : j === i ? "on" : ""} />)}</span>;
+const MiniBar = ({ phase, steps }: { phase: Phase; steps?: 3 | 5 }) => {
+  const phases = phasesFor(steps);
+  const i = phases.indexOf(phase), all = phase === "complete";
+  return <span className="mini">{phases.map((p, j) => <i key={p} className={all && j === phases.length - 1 ? "done final" : all || j < i ? "done" : j === i ? "on" : ""} />)}</span>;
 };
 
 /* ---------- project page ---------- */
@@ -425,7 +442,7 @@ function ProjectPage({ project: p, state, openForm, onSelect }: { project: Proje
         wt = (await ade.getState()).worktrees.find((w) => w.projectId === p.id && w.branch === pr.branch);
       }
       if (!wt) throw new Error("worktree not found after create");
-      const id = await ade.addChat(wt.id, key.id, { name: `Review #${pr.number}` });
+      const id = await ade.addChat(wt.id, key.id, { name: `Review #${pr.number}`, model: selectedModel(state, key, MODELS[key.provider][0]) });
       onSelect({ type: "chat", id });
       ade.send(id, await ade.skillPrompt("pr-writeup", wt.id, `${pr.number}`)).catch((e) => alert(e.message));
     } catch (e: any) { alert(e.message); } finally { setBusyPr(undefined); }
@@ -655,7 +672,7 @@ const lastText = (c: Chat) => {
   return "";
 };
 
-function WorktreePage({ wt, state, openForm, onSelect }: { wt: Worktree; state: State; openForm: boolean; onSelect: (s: Sel) => void }) {
+function WorktreePage({ wt, state, openForm, onSelect, onRunAction }: { wt: Worktree; state: State; openForm: boolean; onSelect: (s: Sel) => void; onRunAction: (wt: Worktree, action: { title: string; command: string }) => void }) {
   const [revision, setRevision] = useState(0);
   const st = useStatus(wt.id, revision);
   const [committing, setCommitting] = useState(false);
@@ -691,13 +708,16 @@ function WorktreePage({ wt, state, openForm, onSelect }: { wt: Worktree; state: 
   };
   return (
     <div className="page">
-      <div>
+      <div className="workspace-heading">
+        <div className="workspace-heading-info">
         <h1>{wt.root ? "Root" : <><Editable value={wt.title} onSave={(t) => ade.renameWorktree(wt.id, t)} trigger="click" /> <button className="icon" title="Name with AI" onClick={() => ade.autoTitle(wt.id)}><Ico n="star" className="big" /></button></>}</h1>
         <div className="meta-rows">
           {wt.root ? <RootBranchPicker wt={wt} disabled={busy || chats.some((c) => c.running)} onChanged={() => { setRevision((n) => n + 1); setGitResult(""); setGitError(""); }} /> : <div><span className="badge">{st?.branch ?? wt.branch}</span></div>}
           <Badges st={st} />
           <div className="path">{wt.path}</div>
         </div>
+        </div>
+        <QuickActions key={wt.id} wt={wt} onRun={(action) => onRunAction(wt, action)} />
       </div>
       <div className="actions">
         <button className="primary" onClick={() => !needKey() && setForm((f) => !f)}><Ico n="quill" /> New chat</button>
@@ -730,7 +750,7 @@ function WorktreePage({ wt, state, openForm, onSelect }: { wt: Worktree; state: 
             <div className="t">{c.running && <span className="spin" />} <Editable value={c.name} onSave={(n) => ade.renameChat(c.id, n)} /></div>
             <div className="m">{c.provider} · {c.model} · {c.messages.length} msgs{c.error ? " · error" : ""}</div>
             <div className="snip">{lastText(c) || "—"}</div>
-            <MiniBar phase={c.phase} />
+            <MiniBar phase={c.phase} steps={c.phaseSteps} />
           </div>
         ))}
       </div>
@@ -742,6 +762,63 @@ function WorktreePage({ wt, state, openForm, onSelect }: { wt: Worktree; state: 
       )}
     </div>
   );
+}
+
+function QuickActions({ wt, onRun }: { wt: Worktree; onRun: (action: { title: string; command: string }) => void }) {
+  const [adding, setAdding] = useState(false);
+  const [title, setTitle] = useState("");
+  const [command, setCommand] = useState("");
+  const [deleting, setDeleting] = useState<{ id: string; title: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const save = async () => {
+    if (busy || !title.trim() || !command.trim()) return;
+    setBusy(true); setError("");
+    try { await ade.addQuickAction(wt.id, title, command); setAdding(false); setTitle(""); setCommand(""); }
+    catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  };
+  const remove = async () => {
+    if (!deleting || busy) return;
+    setBusy(true); setError("");
+    try { await ade.deleteQuickAction(wt.id, deleting.id); setDeleting(null); }
+    catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  };
+  return <section className="quick-actions" aria-label="Quick actions">
+    <h4>Quick actions</h4>
+    <div className="quick-action-tiles">
+      {(wt.quickActions ?? []).map(action => <div className="quick-action-tile" key={action.id}>
+        <button className="quick-action-run" title={`Run ${action.title} in ${wt.path}`} onClick={() => onRun(action)}>
+          <Ico n="terminal" /><span>{action.title}</span>
+        </button>
+        <details className="quick-action-menu">
+          <summary aria-label={`Options for ${action.title}`}>⋯</summary>
+          <div className="quick-action-menu-items">
+            <button onClick={(e) => {
+              e.currentTarget.closest("details")?.removeAttribute("open");
+              ade.setQuickActionPinned(wt.id, action.id, !action.pinned).catch((e) => alert(e.message));
+            }}>{action.pinned ? "Unpin from header" : "Pin to header"}</button>
+            <button onClick={(e) => { e.currentTarget.closest("details")?.removeAttribute("open"); setError(""); setDeleting(action); }}>Delete action…</button>
+          </div>
+        </details>
+      </div>)}
+      <button className="quick-action-new" onClick={() => { setError(""); setAdding(true); }}><span aria-hidden="true">＋</span>New Action</button>
+    </div>
+    {adding && <Dialog title="New quick action" onClose={() => { if (!busy) setAdding(false); }} footer={<>
+      <button disabled={busy} onClick={() => setAdding(false)}>Cancel</button>
+      <button className="primary" disabled={busy || !title.trim() || !command.trim()} onClick={save}>{busy ? "Saving…" : "Save action"}</button>
+    </>}>
+      <Field label="Title"><input aria-label="Action title" autoFocus value={title} onChange={e => setTitle(e.target.value)} placeholder="BUILD" disabled={busy} /></Field>
+      <Field label="Bash command"><textarea aria-label="Bash command" className="quick-action-code" rows={6} spellCheck={false} value={command} onChange={e => setCommand(e.target.value)} placeholder="pnpm package:mac" disabled={busy} /></Field>
+      <div className="m">Saved only for {wt.root ? "Root" : wt.title}. Runs in {wt.path}.</div>
+      {error && <div className="error" role="alert">{error}</div>}
+    </Dialog>}
+    {deleting && <Dialog title="Delete quick action" onClose={() => { if (!busy) setDeleting(null); }} footer={<>
+      <button disabled={busy} onClick={() => setDeleting(null)}>Cancel</button>
+      <button disabled={busy} onClick={remove}>{busy ? "Deleting…" : "Delete action"}</button>
+    </>}><p>Delete “{deleting.title}” from this workspace? Running terminals will stay open.</p>{error && <div className="error" role="alert">{error}</div>}</Dialog>}
+  </section>;
 }
 
 function GitCard({ st }: { st: WorktreeStatus }) {
@@ -783,15 +860,16 @@ function SiblingCard({ wt, state, onSelect }: { wt: Worktree; state: State; onSe
 
 function NewChatForm({ wt, state, onClose, onDone }: { wt: Worktree; state: State; onClose: () => void; onDone: (id: string) => void }) {
   const [name, setName] = useState(wt.title);
-  const [keyId, setKeyId] = useState(state.keys[0]?.id ?? "");
+  const [keyId, setKeyId] = useState(defaultConnector(state)?.id ?? "");
   const provider = state.keys.find((k) => k.id === keyId)?.provider ?? "claude";
-  const [model, setModel] = useState(MODELS[provider][0]);
+  const preferredModel = () => { const key = state.keys.find((k) => k.id === keyId); return key ? selectedModel(state, key, MODELS[provider][0]) : MODELS[provider][0]; };
+  const [model, setModel] = useState(preferredModel);
   const [custom, setCustom] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [files, setFiles] = useState<string[]>([]);
   const [over, setOver] = useState(false);
   const addFiles = (paths: string[]) => setFiles((f) => [...new Set([...f, ...paths])]);
-  useEffect(() => { setModel(MODELS[provider][0]); setCustom(false); }, [provider]);
+  useEffect(() => { const next = preferredModel(); setModel(next); setCustom(!MODELS[provider].includes(next)); }, [keyId]);
   const start = async () => {
     const id = await ade.addChat(wt.id, keyId, { name, model });
     if (prompt.trim() || files.length) ade.send(id, prompt.trim() || "See attached files.", files).catch((e) => alert(e.message));
@@ -854,8 +932,7 @@ function MdLinks({ text, onOpen }: { text: string; onOpen: (p: string) => void }
 }
 
 // Assistant prose: Markdown, with bare file paths turned into artifact links.
-function Prose({ text, onOpen, raw }: { text: string; onOpen: (p: string) => void; raw?: boolean }) {
-  if (raw) return <div className="prose rawtext"><MdLinks text={text} onOpen={onOpen} /></div>;
+function Prose({ text, onOpen }: { text: string; onOpen: (p: string) => void }) {
   return <ProseMd text={text} onOpen={onOpen} />;
 }
 function ProseMd({ text, onOpen }: { text: string; onOpen: (p: string) => void }) {
@@ -958,7 +1035,7 @@ function AgentPicker({ chat, keys }: { chat: Chat; keys: State["keys"] }) {
   };
   return <div className="agent-picker" ref={root} onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); close(); } }}>
     <button ref={trigger} className="agent-picker-trigger" aria-expanded={open} aria-haspopup="dialog" title="Choose AI and model" onClick={() => { setSelected(null); setOpen(!open); }}>
-      <span>{providerName(chat.provider)} · {chat.model}</span><svg className="agent-picker-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m3 4.5 3 3 3-3" /></svg>
+      <span>{keys.find((key) => key.id === chat.keyId)?.name ?? providerName(chat.provider)} · {chat.model}</span><svg className="agent-picker-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m3 4.5 3 3 3-3" /></svg>
     </button>
     {open && <div className="agent-picker-popover" role="dialog" aria-label={key ? "Choose model" : "Choose AI"} aria-busy={busy}>
       <div className="agent-picker-heading">{key ? <button disabled={busy} onClick={() => setSelected(null)}>← Choose AI</button> : <strong>Choose AI</strong>}<button aria-label="Close AI picker" onClick={close}>×</button></div>
@@ -989,19 +1066,25 @@ function ChatPane({ chat, worktree, keys, perms, answer, onOpenMd }: { chat: Cha
   }, [errorDetails]);
   const [codeModes, setCodeModes] = useState<Record<string, boolean>>({});
   const code = !!worktree && !!codeModes[chat.id];
-  const [text, setText] = useState("");
-  const [files, setFiles] = useState<string[]>([]);
+  const draft = useSyncExternalStore(chatDrafts.subscribe, () => chatDrafts.get(chat.id));
+  const files = draft.files;
+  const setFiles = (update: (files: string[]) => string[]) => chatDrafts.update(chat.id, { files: update(chatDrafts.get(chat.id).files) });
+  const [commitText, setCommitText] = useState("");
   const [over, setOver] = useState(false);
-  const [raw, setRaw] = useState(() => localStorage.getItem("chatRaw") === "1");
-  useEffect(() => localStorage.setItem("chatRaw", raw ? "1" : "0"), [raw]);
   const bottom = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLTextAreaElement>(null);
   useEffect(() => { bottom.current?.scrollIntoView({ block: "end" }); }, [chat.messages, perms.length]);
   // Commit shortcut: the composer becomes a commit-message box with a 5s fuse. Typing defuses it; silence lets the AI write the message.
   const [commit, setCommit] = useState<{ count: number; typed: boolean } | null>(null);
-  const armCommit = () => { if (chat.running || commit) return; setText(""); setCommit({ count: 5, typed: false }); requestAnimationFrame(() => box.current?.focus()); };
+  const text = commit ? commitText : draft.text;
+  const setText = (value: string) => { if (commit) setCommitText(value); else chatDrafts.update(chat.id, { text: value }); };
+  useEffect(() => {
+    const input = box.current;
+    if (input) { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 240) + "px"; }
+  }, [text]);
+  const armCommit = () => { if (chat.running || commit) return; setCommitText(""); setCommit({ count: 5, typed: false }); requestAnimationFrame(() => box.current?.focus()); };
   const fireCommit = (message?: string) => {
-    setCommit(null); setText("");
+    setCommit(null); setCommitText("");
     // failures are narrated into the transcript by main, so nothing to surface here
     ade.commitChat(chat.id, message).catch(() => {});
   };
@@ -1015,8 +1098,7 @@ function ChatPane({ chat, worktree, keys, perms, answer, onOpenMd }: { chat: Cha
   const send = () => {
     if (commit) { if (text.trim() || !commit.typed) fireCommit(text.trim() || undefined); return; }
     if (!text.trim() && !files.length) return;
-    ade.send(chat.id, text.trim() || "See attached files.", files).catch((e) => alert(e.message));
-    setText(""); setFiles([]);
+    chatDrafts.submit(chat.id, (draft) => ade.send(chat.id, draft.text.trim() || "See attached files.", draft.files)).catch((e) => alert(e.message));
   };
   const placeholder = commit
     ? commit.typed ? "commit message · ↩ to commit and push · esc to cancel" : `start typing commit or ai will decide ${commit.count}…`
@@ -1024,21 +1106,17 @@ function ChatPane({ chat, worktree, keys, perms, answer, onOpenMd }: { chat: Cha
   const addFiles = (paths: string[]) => setFiles((f) => [...new Set([...f, ...paths])]);
   const onDrop = async (e: React.DragEvent) => { e.preventDefault(); setOver(false); addFiles(await filesFromTransfer(e.dataTransfer)); };
   const onPaste = async (e: React.ClipboardEvent) => { if ([...e.clipboardData.items].some((i) => i.kind === "file")) { e.preventDefault(); addFiles(await filesFromTransfer(e.clipboardData)); } };
-  const i = PHASES.indexOf(chat.phase);
   return (
     <div className={"chatpane" + (over ? " over" : "")} onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setOver(false); }} onDrop={onDrop} onPaste={onPaste}>
       {over && <div className="dropveil">Drop to attach</div>}
-      <div className="phases">
-        {PHASES.map((p, j) => <div key={p} className={chat.phase === "complete" && j === PHASES.length - 1 ? "done final" : chat.phase === "complete" || j < i ? "done" : j === i ? "on" : ""} onClick={() => ade.setPhase(chat.id, p)}><Ico n={PHASE_ICON[p]} />{p}</div>)}
-        <button className={"rawtoggle" + (raw ? " on" : "")} title="Show the assistant's text unformatted" onClick={() => setRaw((r) => !r)}>raw</button>
-      </div>
+      <PhaseStrip phase={chat.phase} steps={chat.phaseSteps} onSelect={(phase) => ade.setPhase(chat.id, phase)} />
       <div className="messages">
         <div className="column">
         {chat.messages.filter((m) => m.blocks.length).map((m) =>
           m.role === "user" ? <UserBubble key={m.id} text={m.blocks.map((b) => (b.type === "text" ? b.text : "")).join("\n")} /> :
           m.role === "system" ? <div key={m.id} className="msg system">{m.blocks.map((b) => (b.type === "text" ? b.text : "")).join(" ")}</div> : (
           <div key={m.id} className="msg assistant">
-            {m.blocks.map((b, k) => b.type === "text" ? <Prose key={k} text={b.text} onOpen={onOpenMd} raw={raw} /> : <ToolRow key={b.id} b={b} onOpen={onOpenMd} live={chat.running} />)}
+            {m.blocks.map((b, k) => b.type === "text" ? <Prose key={k} text={b.text} onOpen={onOpenMd} /> : <ToolRow key={b.id} b={b} onOpen={onOpenMd} live={chat.running} />)}
           </div>
         ))}
         {perms.map((p) => (
@@ -1098,7 +1176,7 @@ function ChatPane({ chat, worktree, keys, perms, answer, onOpenMd }: { chat: Cha
           <textarea ref={box} value={text} rows={1} onChange={(e) => { setText(e.target.value); if (commit && !commit.typed && e.target.value) setCommit({ ...commit, typed: true }); }} placeholder={placeholder}
             onInput={(e) => { const t = e.currentTarget; t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 240) + "px"; }}
             onKeyDown={(e) => {
-              if (e.key === "Escape" && commit) { e.preventDefault(); setCommit(null); setText(""); return; }
+              if (e.key === "Escape" && commit) { e.preventDefault(); setCommit(null); setCommitText(""); return; }
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); }
             }} />
           <div className="cbar">
@@ -1162,6 +1240,7 @@ function ArtifactsView({ chat, onOpen }: { chat: Chat; onOpen: (path: string) =>
   </div>;
 }
 
+const termLabels = new Map<string, string>();
 const termTabs = new Map<string, string[]>(); // scopeId -> terminal ids (session-lived)
 let wantTab: string | undefined; // tab to focus when the drawer next opens (e.g. "auth")
 const pendingCmd = new Map<string, string>(); // pty id -> command to type once the shell is up
@@ -1180,6 +1259,15 @@ function Terminals({ scope, ptys }: { scope: Scope; ptys: PtyState[] }) {
   const [tabs, setTabs] = useState<string[]>(() => termTabs.get(scope.id) ?? ["t1"]);
   const [cur, setCur] = useState(() => { const w = wantTab && tabs.includes(wantTab) ? wantTab : tabs[0]; wantTab = undefined; return w; });
   useEffect(() => { termTabs.set(scope.id, tabs); if (!tabs.includes(cur)) setCur(tabs[tabs.length - 1]); }, [tabs]);
+  useEffect(() => {
+    const added = (event: Event) => {
+      const { scopeId, termId } = (event as CustomEvent).detail;
+      if (scopeId !== scope.id) return;
+      setTabs(termTabs.get(scope.id) ?? [termId]); setCur(termId); wantTab = undefined;
+    };
+    window.addEventListener("consort-terminal-added", added);
+    return () => window.removeEventListener("consort-terminal-added", added);
+  }, [scope.id]);
   const add = () => { const id = "t" + (Date.now() % 100000); setTabs((t) => [...t, id]); setCur(id); };
   const close = (termId: string) => {
     const id = `${scope.id}:${termId}`;
@@ -1193,7 +1281,7 @@ function Terminals({ scope, ptys }: { scope: Scope; ptys: PtyState[] }) {
           const st = ptys.find((p) => p.termId === termId);
           return (
             <span key={termId} className={"termtab" + (termId === cur ? " on" : "")} onClick={() => setCur(termId)}>
-              {st?.running && <span className="live" />}{st?.failed && termId !== cur && <span className="live dead" />}{termId === "auth" ? "sign-in" : i + 1}
+              {st?.running && <span className="live" />}{st?.failed && termId !== cur && <span className="live dead" />}{termLabels.get(`${scope.id}:${termId}`) ?? (termId === "auth" ? "sign-in" : i + 1)}
               {tabs.length > 1 && <button className="icon" title="Close terminal" onClick={(e) => { e.stopPropagation(); close(termId); }}>×</button>}
             </span>
           );
@@ -1246,13 +1334,14 @@ function XTermPane({ scope, termId, active, failed }: { scope: Scope; termId: st
 type TreeNode = { name: string; path: string; children?: TreeNode[] };
 function buildTree(files: string[]): TreeNode[] {
   const root: TreeNode[] = [];
+  const nodes = new Map<string, TreeNode>();
   for (const f of files) {
     let level = root, acc = "";
     const parts = f.split("/");
     parts.forEach((part, i) => {
       acc = acc ? `${acc}/${part}` : part;
-      let n = level.find((x) => x.name === part);
-      if (!n) { n = i < parts.length - 1 ? { name: part, path: acc, children: [] } : { name: part, path: acc }; level.push(n); }
+      let n = nodes.get(acc);
+      if (!n) { n = i < parts.length - 1 ? { name: part, path: acc, children: [] } : { name: part, path: acc }; level.push(n); nodes.set(acc, n); }
       level = n.children ?? level;
     });
   }
@@ -1283,7 +1372,19 @@ function Editor({ worktree, initial, onView }: { worktree: Worktree; initial?: s
   const [text, setText] = useState("");
   const [saved, setSaved] = useState("");
   const [q, setQ] = useState("");
-  useEffect(() => { ade.listFiles(worktree.id).then(setFiles); if (initial) open(initial); }, [worktree.id]);
+  const [refresh, setRefresh] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [listError, setListError] = useState("");
+  useEffect(() => {
+    let active = true;
+    setLoading(true); setListError(""); setFiles([]);
+    ade.listFiles(worktree.id).then(
+      (files) => { if (active) { setFiles(files); setLoading(false); } },
+      (error) => { if (active) { setListError(error.message); setLoading(false); } },
+    );
+    return () => { active = false; };
+  }, [worktree.id, refresh]);
+  useEffect(() => { if (initial) open(initial); }, [worktree.id]);
   const open = async (p: string) => { const t = await ade.readFile(worktree.id, p).catch((e) => `// ${e.message}`); setPath(p); setText(t); setSaved(t); setQ(""); };
   const save = async () => { await ade.writeFile(worktree.id, path, text); setSaved(text); };
   const dirty = text !== saved;
@@ -1292,10 +1393,13 @@ function Editor({ worktree, initial, onView }: { worktree: Worktree; initial?: s
     <div className="card editor">
       <div className="ebar">
         <input value={q || path} placeholder="find a file…" onChange={(e) => setQ(e.target.value)} onFocus={(e) => e.target.select()} />
+        <button title="Refresh all workspace files" disabled={loading} onClick={() => setRefresh((n) => n + 1)}>Refresh</button>
         {path.endsWith(".md") && <button onClick={() => onView(path)}>View</button>}
         <button className="primary" disabled={!path || !dirty} onClick={save}>{dirty ? "Save ⌘S" : "Saved"}</button>
       </div>
       {hits.length > 0 && <div className="hits">{hits.map((f) => <div key={f} className="hit" onMouseDown={() => open(f)}>{f}</div>)}</div>}
+      {loading && <div className="m">Loading workspace files…</div>}
+      {listError && <div className="error">Could not list files: {listError}</div>}
       {!q && <FileTree files={files} current={path} onOpen={open} />}
       {path && (
         <textarea className="code" value={text} spellCheck={false} onChange={(e) => setText(e.target.value)}
@@ -1304,7 +1408,7 @@ function Editor({ worktree, initial, onView }: { worktree: Worktree; initial?: s
             if (e.key === "Tab") { e.preventDefault(); const t = e.currentTarget, a = t.selectionStart, b = t.selectionEnd; setText(text.slice(0, a) + "  " + text.slice(b)); requestAnimationFrame(() => t.setSelectionRange(a + 2, a + 2)); }
           }} />
       )}
-      {!path && !hits.length && !files.length && <div className="m">No files.</div>}
+      {!loading && !listError && !path && !hits.length && !files.length && <div className="m">No files.</div>}
     </div>
   );
 }
@@ -1418,6 +1522,17 @@ function Diff({ worktree }: { worktree: Worktree }) {
 }
 
 function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string) => void }) {
+  const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
+  const [savingName, setSavingName] = useState(false);
+  const rename = async () => {
+    if (!renaming?.name.trim() || savingName) return;
+    setSavingName(true);
+    try {
+      await ade.renameKey(renaming.id, renaming.name);
+      setRenaming(null);
+    } catch (e) { alert((e as Error).message); }
+    finally { setSavingName(false); }
+  };
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
   const [provider, setProvider] = useState<"claude" | "codex">("claude");
@@ -1452,6 +1567,7 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
             <label className="check" style={{ color: "var(--dim)", fontSize: 12 }}>
               <input type="checkbox" checked={k.phiAllowed} onChange={(e) => ade.setKeyPhi(k.id, e.target.checked)} /> PHI allowed
             </label>
+            <button aria-label={`Rename ${k.name}`} onClick={() => setRenaming({ id: k.id, name: k.name })}>Rename</button>
             {k.id.startsWith("login-") ? <span className="badge">built-in</span> : <button onClick={() => confirm(`Remove ${k.name}?`) && ade.removeKey(k.id)}>remove</button>}
           </div>
         ))}
@@ -1472,6 +1588,16 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
           </div>
         </div>
       </div>
+      {renaming && (
+        <Dialog title="Rename connector" onClose={() => { if (!savingName) setRenaming(null); }} footer={<>
+          <button disabled={savingName} onClick={() => setRenaming(null)}>Cancel</button>
+          <button className="primary" disabled={savingName || !renaming.name.trim()} onClick={rename}>{savingName ? "Saving…" : "Save"}</button>
+        </>}>
+          <Field label="Name"><input aria-label="Connector name" autoFocus value={renaming.name} disabled={savingName}
+            onFocus={(e) => e.target.select()} onChange={(e) => setRenaming({ ...renaming, name: e.target.value })}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); void rename(); } }} /></Field>
+        </Dialog>
+      )}
       {adding && (
         <Dialog title="Add a connector" onClose={() => setAdding(false)} footer={<>
           <button onClick={() => setAdding(false)}>Cancel</button>
@@ -1500,7 +1626,7 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
               <input type="password" placeholder="sk-…" value={key} onChange={(e) => setKey(e.target.value)} />
             </Field>
           )}
-          <Field label="Compliance" info="Chats on a non-PHI key will stop and switch to a PHI key before touching PHI">
+          <Field label="Compliance" info="Marks this connector as approved for PHI. Change PHI mode manually in the chat.">
             <label className="check"><input type="checkbox" checked={phi} onChange={(e) => setPhi(e.target.checked)} /> PHI allowed</label>
           </Field>
         </Dialog>

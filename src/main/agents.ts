@@ -11,25 +11,17 @@ import { loginEnv } from "./auth";
 import { PHASES, type Chat, type Block, type Phase, type PermissionRequest } from "../shared/types";
 
 // ponytail: phase tracked via text markers so claude + codex share one mechanism
-const PHASE_PROMPT = `You are working inside an ADE that shows a 5-step progress bar: ${PHASES.join(" → ")}.
-Whenever you move to a new step, emit the marker [phase:<step>] on its own line (e.g. [phase:executing]).
-Use only the steps that apply (a quick answer can go straight to complete). [phase:waiting] means you need the user; otherwise the bar lands on complete when you finish.`;
-const MARKER = /\[phase:(waiting|planning|executing|validating|complete)\]\s*/g;
+const PHASE_PROMPT = `For EVERY new prompt, first assess the task and plan your approach before doing work. The ADE starts at waiting during this assessment.
+Choose the progress flow before using tools or answering, and emit [steps:3] or [steps:5] on its own line.
+Use 3 steps ONLY for simple factual or conversational questions requiring no code/file changes, substantial research, or validation: waiting → executing → complete. Plan briefly during the initial assessment, then emit [phase:executing] before answering and [phase:complete] when finished. Never jump straight to complete.
+Use 5 steps for all other tasks: ${PHASES.join(" → ")}. Emit [steps:5], then [phase:planning] and describe the plan before acting. Continue through [phase:executing], [phase:validating], and [phase:complete] in order. Do not skip planning or validation. If a simple task grows in scope, upgrade with [steps:5] and plan before continuing.
+Every phase marker belongs on its own line. Emit [phase:waiting] if you need user input; otherwise finish at complete. Select the flow anew for every prompt, including follow-ups and queued messages, regardless of the previous turn's flow.`;
+const PROGRESS_MARKER = /\[(?:steps:(3|5)|phase:(waiting|planning|executing|validating|complete))\]\s*/g;
 const PHI_MARKER = /\[phi-required\]\s*/g;
 const phiPrompt = (allowed: boolean) =>
   allowed
     ? "This chat's API key IS approved for PHI (protected health information)."
-    : `This chat's API key is NOT approved for PHI. Before touching anything that may contain PHI (production databases, patient records, uploaded spreadsheets of people's names/DOBs/contact info), STOP: do not read it, emit [phi-required] and [phase:waiting], and tell the user in one line; the ADE will swap in a PHI-approved key and they will resume.`;
-
-// ponytail: keyword + file-type heuristic; false positives just flip to the safer key
-const PHI_FILES = /\.(csv|tsv|xlsx?|json|sql|parquet)$/i;
-const PHI_WORDS = /\b(prod(uction)?\b|snowflake|live (db|database|data)|patients?\b|\bphi\b|\bpii\b|\bssn\b|date of birth|\bdob\b|medical record|health record)/i;
-export function phiSuspect(text: string, files: string[]) {
-  const f = files.find((f) => PHI_FILES.test(f));
-  if (f) return `attachment ${basename(f)} may contain personal data`;
-  const m = PHI_WORDS.exec(text);
-  return m ? `message mentions "${m[0]}"` : null;
-}
+    : `This chat's API key is NOT approved for PHI. PHI mode is controlled manually by the user. Do not infer or change PHI mode from message keywords or attachment types.`;
 
 export function setPhiMode(chat: Chat, on: boolean, reason?: string) {
   const cur = store.data.keys.find((k) => k.id === chat.keyId);
@@ -140,6 +132,7 @@ export async function switchAgent(chatId: string, keyId: string, model: string) 
     chat.sessionId = undefined;
     chat.sessionKeyId = undefined;
   }
+  key.defaultModel = model;
   chat.keyId = keyId; chat.model = model;
   if (!providerChanged) { store.save(); return; }
   chat.provider = key.provider; chat.sessionId = undefined;
@@ -233,8 +226,6 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
   const chat = store.chat(chatId);
   if (chat.running) throw new Error("chat is busy");
   const cwd = store.data.worktrees.find((w) => w.id === chat.worktreeId)!.path;
-  const reason = phiSuspect(text, files);
-  if (reason && !keyAllowsPhi(chat)) setPhiMode(chat, true, reason);
   // A session belongs to the login that created it, not just to the provider.
   // Also recover chats that hit this bug before session ownership was recorded.
   const missingSession = /(?:no (?:conversation|session) found|(?:session|conversation)[^\n]*(?:not found|does not exist)|(?:could(?: not|n't)|cannot|can't|unable to) find[^\n]*(?:session|conversation))/i.test(chat.error ?? "");
@@ -258,7 +249,9 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
   chat.running = true;
   chat.error = undefined;
   chat.interrupted = undefined;
-  if (chat.phase === "waiting" || chat.phase === "complete") chat.phase = "planning";
+  chat.phase = "waiting";
+  chat.phaseSteps = 5;
+  chat.assessingPrompt = true;
   store.save();
 
   const ac = new AbortController();
@@ -277,13 +270,14 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
     if (chat.provider === "claude") await runClaude(chat, cwd, apiKey, text, ac, ui);
     else await runCodex(chat, cwd, apiKey, text, ac, ui);
     // a finished turn that isn't asking the user anything is complete, whatever steps it skipped
-    if (!chat.error && !ac.signal.aborted && (chat.phase as Phase) !== "waiting") chat.phase = "complete";
+    if (!chat.error && !ac.signal.aborted && (chat.assessingPrompt || (chat.phase as Phase) !== "waiting")) chat.phase = "complete";
   } catch (e) {
     if (!ac.signal.aborted) recordRunError(chat, String((e as Error).message ?? e));
   } finally {
     await browser?.close().catch(() => {});
     running.delete(chatId);
     chat.running = false;
+    chat.assessingPrompt = false;
     chat.permissions = [];
     if (!ac.signal.aborted && !chat.error && (chat.phase as Phase) !== "waiting") {
       chat.phase = "complete";
@@ -333,16 +327,19 @@ class Transcript {
   finalizeText() {
     for (const b of this.assistant().blocks) {
       if (b.type !== "text") continue;
-      for (const m of b.text.matchAll(MARKER)) this.chat.phase = m[1] as Phase;
-      if (b.text.includes("[phi-required]")) this.switchToPhiKey();
-      b.text = b.text.replace(MARKER, "").replace(PHI_MARKER, "");
+      for (const m of b.text.matchAll(PROGRESS_MARKER)) {
+        if (m[1]) this.chat.phaseSteps = Number(m[1]) as 3 | 5;
+        if (m[2]) {
+          this.chat.phase = m[2] as Phase;
+          this.chat.assessingPrompt = false;
+          if (m[2] === "planning" || m[2] === "validating") this.chat.phaseSteps = 5;
+        }
+      }
+      b.text = b.text.replace(PROGRESS_MARKER, "").replace(PHI_MARKER, "");
     }
     const m = this.assistant();
     m.blocks = m.blocks.filter((b) => b.type !== "text" || b.text.trim());
     this.flush(true);
-  }
-  private switchToPhiKey() {
-    if (setPhiMode(this.chat, true, "agent flagged PHI")) this.msg = undefined;
   }
   flush(now = false) {
     if (now) {

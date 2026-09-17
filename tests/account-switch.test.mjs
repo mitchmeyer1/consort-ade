@@ -63,8 +63,9 @@ test('model-only change preserves the same-account session', async () => {
   assert.equal(call.options.resume, 'old-session');
   assert.equal(call.options.model, 'another-model');
 });
-test('automatic PHI connector switch does not resume another account session', async () => {
-  const { chat, send } = fixture();
+test('manual PHI connector switch does not resume another account session', async () => {
+  const { agents, chat, send } = fixture();
+  agents.setPhiMode(chat, true, 'manual');
   const call = await send('Check the patient data');
   assert.equal(chat.keyId, 'work');
   assert.equal(call.options.resume, undefined);
@@ -100,4 +101,11 @@ test('Codex provider diagnostic survives a later SDK process-exit exception', as
   assert.equal(chat.error, 'Account quota exhausted; switch accounts.\n\nCodex Exec exited with code 1: Reading prompt from stdin...');
   assert.equal(chat.running, false);
   assert.equal(chat.queuePaused, true);
+});
+
+test('PHI keywords do not switch the selected connector', async () => {
+  const { chat, send } = fixture();
+  const call = await send('Check production patient data in snowflake, PHI, DOB and medical records');
+  assert.equal(chat.keyId, 'personal');
+  assert.equal(call.options.resume, 'old-session');
 });

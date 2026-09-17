@@ -174,3 +174,36 @@ test('an existing oversized-session error resets the session on the next request
   await until(() => !chat.running);
   assert.equal(chat.error, undefined);
 });
+
+test('each prompt starts assessment afresh and simple progress applies to the current turn only', async t => {
+  const { agents, chat, runs } = await fixture(t);
+  await agents.send(chat.id, 'When was Isaac Newton born?');
+  await until(() => runs.length === 1);
+  assert.equal(chat.phase, 'waiting');
+  assert.equal(chat.assessingPrompt, true);
+  assert.equal(chat.phaseSteps, 5);
+  runs[0].finish({ type: 'item.completed', item: { type: 'agent_message', text: '[steps:3]\n[phase:executing]\nA simple answer.\n[phase:complete]' } });
+  await until(() => !chat.running);
+  assert.equal(chat.phaseSteps, 3);
+  assert.equal(chat.phase, 'complete');
+  assert.ok(!chat.messages.at(-1).blocks[0].text.includes('[steps:'));
+  await agents.send(chat.id, 'Implement a feature');
+  await until(() => runs.length === 2);
+  assert.equal(chat.phaseSteps, 5);
+  assert.equal(chat.phase, 'waiting');
+  runs[1].finish({ type: 'item.completed', item: { type: 'agent_message', text: '[steps:5]\n[phase:planning]\nPlan.\n[phase:executing]\nWork.\n[phase:validating]\nChecked.\n[phase:complete]' } });
+  await until(() => !chat.running);
+  assert.equal(chat.phaseSteps, 5);
+  assert.equal(chat.phase, 'complete');
+});
+
+test('planning or validation upgrades a simple flow to five steps', async t => {
+  const { agents, chat, runs } = await fixture(t);
+  await agents.send(chat.id, 'Task');
+  await until(() => runs.length === 1);
+  runs[0].finish({ type: 'item.completed', item: { type: 'agent_message', text: '[steps:3]\n[phase:planning]\nThis needs a plan.\n[phase:waiting]\nPlease clarify.' } });
+  await until(() => !chat.running);
+  assert.equal(chat.phaseSteps, 5);
+  assert.equal(chat.phase, 'waiting');
+  assert.equal(chat.assessingPrompt, false);
+});

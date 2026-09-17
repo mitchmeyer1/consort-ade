@@ -1,5 +1,7 @@
 export const PHASES = ["waiting", "planning", "executing", "validating", "complete"] as const;
 export type Phase = (typeof PHASES)[number];
+export const SIMPLE_PHASES: readonly Phase[] = ["waiting", "executing", "complete"];
+export const phasesFor = (steps?: 3 | 5): readonly Phase[] => steps === 3 ? SIMPLE_PHASES : PHASES;
 export type Provider = "claude" | "codex";
 export const MODELS: Record<Provider, string[]> = {
   claude: ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
@@ -7,9 +9,10 @@ export const MODELS: Record<Provider, string[]> = {
 };
 
 /** configDir: extra CLI logins keep their own credentials there (CLAUDE_CONFIG_DIR / CODEX_HOME); the built-in login uses the CLI default */
-export type ApiKey = { id: string; name: string; provider: Provider; phiAllowed: boolean; auth: "login" | "key"; configDir?: string };
+export type ApiKey = { id: string; name: string; provider: Provider; phiAllowed: boolean; auth: "login" | "key"; configDir?: string; defaultModel?: string };
 export type Project = { id: string; name: string; path: string; defaultBase: string; baseSetByUser?: boolean };
-export type Worktree = { id: string; projectId: string; name: string; title: string; path: string; branch: string; archived: boolean; root?: boolean };
+export type QuickAction = { id: string; title: string; command: string; pinned?: boolean };
+export type Worktree = { id: string; projectId: string; name: string; title: string; path: string; branch: string; archived: boolean; root?: boolean; quickActions?: QuickAction[] };
 export type PrInfo = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; draft: boolean; url: string; title: string; review: string; checks: "pass" | "fail" | "pending" | null };
 export type WorktreeStatus = {
   branch: string; dirty: number; ahead: number; behind: number; merged: boolean; inBase: boolean; base: string;
@@ -31,6 +34,8 @@ export type Chat = {
   sessionId?: string;
   sessionKeyId?: string; // connector that owns the provider session
   phase: Phase;
+  phaseSteps?: 3 | 5;
+  assessingPrompt?: boolean;
   autoApprove: boolean;
   running: boolean;
   interrupted?: boolean;
@@ -108,9 +113,13 @@ export type Api = {
   addKey(name: string, provider: Provider, key: string, phiAllowed: boolean, auth?: "login" | "key"): Promise<void>;
   setDefaultKey(id: string): Promise<void>;
   setKeyPhi(id: string, on: boolean): Promise<void>;
+  renameKey(id: string, name: string): Promise<void>;
   removeKey(id: string): Promise<void>;
   onPermission(cb: (r: PermissionRequest) => void): () => void;
   answerPermission(id: string, allow: boolean): Promise<void>;
+  addQuickAction(worktreeId: string, title: string, command: string): Promise<void>;
+  setQuickActionPinned(worktreeId: string, actionId: string, pinned: boolean): Promise<void>;
+  deleteQuickAction(worktreeId: string, actionId: string): Promise<void>;
   runCommand(worktreeId: string, cmd: string): Promise<{ out: string; code: number }>;
   ptyCreate(scopeId: string, termId: string, cwd: string, cols: number, rows: number): Promise<string>;
   ptyWrite(id: string, data: string): Promise<void>;

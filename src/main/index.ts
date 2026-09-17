@@ -1,3 +1,4 @@
+import { selectedModel } from "../shared/defaultConnector";
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, shell, Notification, Menu } from "electron";
 import { join, basename, resolve, extname } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -328,9 +329,13 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   },
   addChat: (worktreeId: string, keyId: string, opts: { name?: string; model?: string } = {}) => {
     const id = randomUUID();
-    const provider = store.data.keys.find((k) => k.id === keyId)!.provider;
+    const key = store.data.keys.find((k) => k.id === keyId);
+    if (!key) throw new Error("Connector not found.");
+    const provider = key.provider;
+    const model = opts.model?.trim() || selectedModel(store.data, key, MODELS[provider][0]);
+    key.defaultModel = model;
     store.data.chats.push({
-      id, worktreeId, provider, keyId, model: opts.model ?? MODELS[provider][0], name: opts.name || "New chat",
+      id, worktreeId, provider, keyId, model, name: opts.name || "New chat",
       phase: "waiting", autoApprove: false, running: false, messages: [],
     });
     store.save();
@@ -351,6 +356,8 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   },
   setPhase: (id: string, phase) => {
     store.chat(id).phase = phase;
+    store.chat(id).assessingPrompt = false;
+    if (phase === "planning" || phase === "validating") store.chat(id).phaseSteps = 5;
     store.save();
   },
   send: (chatId: string, text: string, files: string[] = []) => {
@@ -413,6 +420,14 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     }
     store.save();
   },
+  renameKey: (id: string, name: string) => {
+    const key = store.data.keys.find((k) => k.id === id);
+    if (!key) throw new Error("Connector not found.");
+    const label = name.trim();
+    if (!label) throw new Error("Enter a connector name.");
+    key.name = label;
+    store.save();
+  },
   removeKey: (id: string) => {
     if (id.startsWith("login-")) return;
     const key = store.data.keys.find((k) => k.id === id);
@@ -426,10 +441,28 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     const dir = join(app.getAppPath(), "skills", name);
     const skill = readFileSync(join(dir, "SKILL.md"), "utf8").replace(/^---[\s\S]*?---\n/, "");
     const brief = name === "pr-writeup" ? `\n\n## Complete review agent brief — include in every delegated assignment\n\n${readFileSync(join(dir, "categories.md"), "utf8")}` : "";
-    return `Run the following skill${args ? ` with argument: ${args}` : " for the current branch"} in ${wt(worktreeId).path}. Its sibling files live in ${dir}.
+    const progress = name === "pr-writeup" ? "Keep the user informed in chat: explain the review plan before tools, then give a brief plain-language update every 30–45 seconds or five tool calls, whichever comes first. Summarize what you learned and what you are checking next; tool output alone is not an update.\n\n" : "";
+    return `${progress}Run the following skill${args ? ` with argument: ${args}` : " for the current branch"} in ${wt(worktreeId).path}. Its sibling files live in ${dir}.
 The Artifact tool is not available here: write the finished HTML to .consort/pr-writeup.html in the worktree. Print the operational review summary in the terminal/chat, then end with a clickable Markdown link to the saved HTML using its absolute path.
 
 ${skill}${brief}`;
+  },
+  addQuickAction: (worktreeId: string, title: string, command: string) => {
+    const worktree = wt(worktreeId);
+    if (!title.trim() || !command.trim()) throw new Error("Enter a title and Bash command.");
+    (worktree.quickActions ??= []).push({ id: randomUUID(), title: title.trim(), command });
+    store.save();
+  },
+  setQuickActionPinned: (worktreeId: string, actionId: string, pinned: boolean) => {
+    const action = wt(worktreeId).quickActions?.find((action) => action.id === actionId);
+    if (!action) throw new Error("Quick action not found.");
+    action.pinned = pinned;
+    store.save();
+  },
+  deleteQuickAction: (worktreeId: string, actionId: string) => {
+    const worktree = wt(worktreeId);
+    worktree.quickActions = (worktree.quickActions ?? []).filter((action) => action.id !== actionId);
+    store.save();
   },
   runCommand: (worktreeId: string, cmd: string) => git.runCommand(wt(worktreeId).path, cmd),
   diff: (worktreeId: string) => git.diff(wt(worktreeId).path),
