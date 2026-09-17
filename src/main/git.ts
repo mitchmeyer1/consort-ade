@@ -262,13 +262,13 @@ export async function checkoutAtRoot(root: string, source: string, commitMessage
 }
 
 const worktreeOperations = new Set<string>();
-async function worktreeOperation<T>(path: string, expectedBranch: string, action: (branch: string) => Promise<T>) {
+async function worktreeOperation<T>(path: string, expectedBranch: string | null, action: (branch: string) => Promise<T>) {
   const canonical = await fs.realpath(path);
   if (worktreeOperations.has(canonical)) throw new Error("A Git operation is already running for this worktree.");
   worktreeOperations.add(canonical);
   try {
     const branch = (await git(path, "symbolic-ref", "--quiet", "--short", "HEAD").catch(() => "")).trim();
-    if (!branch || branch !== expectedBranch) throw new Error("The worktree branch changed or is detached. Refresh before continuing.");
+    if ((branch || null) !== expectedBranch) throw new Error("The worktree branch changed or is detached. Refresh before continuing.");
     for (const marker of ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer"]) {
       const location = (await git(path, "rev-parse", "--path-format=absolute", "--git-path", marker)).trim();
       if (await fs.stat(location).then(() => true, () => false)) throw new Error("Finish the current merge, rebase, or cherry-pick first.");
@@ -299,4 +299,65 @@ export async function pushWorktree(path: string, expectedBranch: string) {
     });
     return (stdout + stderr).trim();
   });
+}
+
+// Hold the checkout lock across both steps; a retry can push an already saved commit.
+export async function commitAndPushRoot(path: string, expectedBranch: string, message: string) {
+  return worktreeOperation(path, expectedBranch, async (branch) => {
+    if ((await git(path, "ls-files", "--unmerged")).trim()) throw new Error("Resolve merge conflicts before committing.");
+    if ((await git(path, "status", "--porcelain")).trim()) {
+      if (!message.trim()) throw new Error("Enter a commit message.");
+      await git(path, "add", "--all");
+      await git(path, "commit", "-m", message.trim());
+    }
+    try {
+      await run("git", ["push", "--set-upstream", "origin", `refs/heads/${branch}:refs/heads/${branch}`], {
+        cwd: path, maxBuffer: 1 << 24, timeout: 120_000, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      });
+    } catch (error) {
+      throw new Error(`Push failed. Any local commit is saved; retry to push it. ${(error as Error).message}`);
+    }
+    return `Root pushed to origin/${branch}.`;
+  });
+}
+
+export async function rootBranches(path: string) {
+  path = await fs.realpath(path);
+  const [current, refs, worktrees] = await Promise.all([
+    git(path, "symbolic-ref", "--quiet", "--short", "HEAD").then((s) => s.trim(), () => null),
+    git(path, "for-each-ref", "--format=%(refname)\t%(symref)\t%(upstream)", "refs/heads", "refs/remotes"),
+    listWorktrees(path),
+  ]);
+  const entries = refs.trim().split("\n").filter(Boolean).map((line) => line.split("\t"));
+  const locals = entries.filter(([ref]) => ref.startsWith("refs/heads/"));
+  const localNames = new Set(locals.map(([ref]) => ref.slice("refs/heads/".length)));
+  const upstreams = new Set(locals.map(([, , upstream]) => upstream).filter(Boolean));
+  const branches = entries.flatMap(([ref, symbolic]) => {
+    if (symbolic) return [];
+    const local = ref.startsWith("refs/heads/");
+    const name = ref.replace(/^refs\/(heads|remotes)\//, "");
+    // A local branch is the checkout target; its remote counterpart is not a second choice.
+    if (!local && (localNames.has(name.slice(name.indexOf("/") + 1)) || upstreams.has(ref))) return [];
+    return [{ ref, name, occupied: local ? worktrees.find((w) => w.branch === name && w.path !== path)?.path : undefined }];
+  });
+  return { current, branches };
+}
+
+export async function switchRootBranch(path: string, expectedBranch: string | null, ref: string) {
+  if (rootCheckouts.has(path)) throw new Error("A checkout at root is already in progress.");
+  rootCheckouts.add(path);
+  try {
+    return await worktreeOperation(path, expectedBranch, async () => {
+      const choice = (await rootBranches(path)).branches.find((b) => b.ref === ref);
+      if (!choice) throw new Error("Branch no longer exists. Refresh and try again.");
+      if (choice.occupied) throw new Error(`Branch is checked out in ${choice.occupied}.`);
+      if ((await git(path, "status", "--porcelain")).trim()) throw new Error("Commit or stash root changes before switching branches.");
+      if (ref.startsWith("refs/heads/")) await git(path, "switch", "--no-guess", choice.name);
+      else {
+        const name = choice.name.slice(choice.name.indexOf("/") + 1);
+        await git(path, "switch", "--track", "-c", name, ref);
+      }
+      return rootStatus(path);
+    });
+  } finally { rootCheckouts.delete(path); }
 }

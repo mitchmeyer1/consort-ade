@@ -7,6 +7,7 @@ import * as git from "./git";
 import { ensureRootWorktree, isRootWorktree } from "./rootWorktree";
 import * as agents from "./agents";
 import { askOnce, humanize, suggestTitle } from "./namer";
+import { commitFromChat } from "./commitChat";
 import { authStatus, claudeBin, codexBin } from "./auth";
 import * as ptys from "./ptys";
 import { chatStatus } from "../shared/chatStatus";
@@ -83,7 +84,8 @@ const project = (id: string) => store.data.projects.find((p) => p.id === id)!;
 
 async function syncWorktrees(projectId: string) {
   const p = project(projectId);
-  const live = (await git.listWorktrees(p.path)).filter((l) => l.path !== p.path || store.data.worktrees.some((w) => w.projectId === projectId && w.root));
+  const live = await git.listWorktrees(p.path);
+  ensureRootWorktree(store.data.worktrees, p, live.find((w) => w.path === p.path)?.branch ?? "(detached)");
   const mine = store.data.worktrees.filter((w) => w.projectId === projectId);
   for (const l of live) {
     const w = mine.find((w) => w.path === l.path);
@@ -104,6 +106,20 @@ async function syncWorktrees(projectId: string) {
 const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   getState: () => store.public(),
   effectiveTheme: () => effectiveTheme(),
+  rootBranches: (id: string) => git.rootBranches(project(id).path),
+  switchRootBranch: async (id: string, expectedBranch: string | null, ref: string) => {
+    const p = project(id);
+    const roots = store.data.worktrees.filter((w) => w.projectId === id && isRootWorktree(w, p));
+    if (store.data.chats.some((c) => roots.some((w) => w.id === c.worktreeId) && c.running)) throw new Error("Wait for root chats to finish before switching branches.");
+    try { return await git.switchRootBranch(p.path, expectedBranch, ref); }
+    finally {
+      const current = await git.rootStatus(p.path).catch(() => null);
+      if (current) ensureRootWorktree(store.data.worktrees, p, current.branch ?? "(detached)");
+      for (const w of roots) statusCache.delete(w.id);
+      repoCache.delete(id);
+      store.save();
+    }
+  },
   rootStatus: (id: string) => git.rootStatus(project(id).path),
   checkoutAtRoot: async (id: string, commitMessage?: string) => {
     const w = wt(id);
@@ -139,6 +155,13 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     if (store.data.chats.some((c) => c.worktreeId === id && c.running)) throw new Error("Wait for this worktree's chats to finish before pushing.");
     try { return await git.pushWorktree(w.path, branch); }
     finally { statusCache.delete(id); }
+  },
+  commitAndPushRoot: async (id: string, branch: string, message: string) => {
+    const w = wt(id);
+    if (!w || !isRootWorktree(w, project(w.projectId))) throw new Error("Root worktree no longer exists.");
+    if (store.data.chats.some((c) => c.worktreeId === id && c.running)) throw new Error("Wait for root chats to finish before committing and pushing.");
+    try { return await git.commitAndPushRoot(w.path, branch, message); }
+    finally { statusCache.delete(id); repoCache.delete(w.projectId); }
   },
   setActiveChat: (id: string | null) => {
     activeChat = id;
@@ -186,7 +209,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   },
   removeWorktree: async (id: string) => {
     const w = store.data.worktrees.find((w) => w.id === id)!;
-    if (isRootWorktree(w, project(w.projectId))) throw new Error("The project root cannot be deleted as a worktree. Archive it to hide it.");
+    if (isRootWorktree(w, project(w.projectId))) throw new Error("The project root cannot be deleted as a worktree.");
     await git.removeWorktree(project(w.projectId).path, w.path);
     store.data.chats = store.data.chats.filter((c) => c.worktreeId !== id);
     await syncWorktrees(w.projectId);
@@ -204,7 +227,9 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     store.save();
   },
   archiveWorktree: (id: string, on: boolean) => {
-    wt(id).archived = on;
+    const w = wt(id);
+    if (isRootWorktree(w, project(w.projectId))) throw new Error("The project root cannot be archived.");
+    w.archived = on;
     store.save();
   },
   // ponytail: 20s cache so sidebar + page + cards polling don't hammer gh
@@ -265,6 +290,11 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     const diff = await git.diffForSummary(wt(id).path);
     if (!diff.trim()) return "";
     return askOnce(wt(id).path, `Write a git commit message for this diff.\nFormat: a short imperative subject line (max 60 chars), a blank line, then 1 to 5 bullets, each ONE sentence, each starting with "- ". No other text.\n\n${diff}`);
+  },
+  commitChat: async (chatId: string, message?: string) => {
+    const chat = store.data.chats.find((c) => c.id === chatId);
+    try { return await commitFromChat(chatId, message); }
+    finally { if (chat) statusCache.delete(chat.worktreeId); }
   },
   authLoginCmd: (provider) => (provider === "claude" ? `${JSON.stringify(claudeBin())} auth login --claudeai` : `${JSON.stringify(codexBin())} login`),
   listFiles: (id: string) => git.listFiles(wt(id).path),
@@ -375,6 +405,7 @@ ${skill}`;
 
 app.whenReady().then(() => {
   store.load();
+  store.save();
   // first-run titles for worktrees imported before titles existed
   for (const w of store.data.worktrees)
     if (w.title === w.name) { w.title = humanize(w.branch); suggestTitle(w.path, w.branch).then((t) => { w.title = t; store.save(); }); }

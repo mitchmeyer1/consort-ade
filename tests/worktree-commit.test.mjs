@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { commitWorktree, pushWorktree } from '../src/main/git.ts';
+import { commitWorktree, pushWorktree, commitAndPushRoot } from '../src/main/git.ts';
 
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 async function fixture(t) {
@@ -72,4 +72,44 @@ test('failed commit keeps changes and does not advance branch', async (t) => {
   await assert.rejects(commitWorktree(source, 'feature', 'blocked'));
   assert.equal(git(source, 'rev-parse', 'HEAD'), before);
   assert.equal(await readFile(join(source, 'code.txt'), 'utf8'), 'feature');
+});
+
+test('root commit and push includes new files without touching linked worktree changes', async (t) => {
+  const { root, source } = await fixture(t);
+  const remote = join(root, '..', 'remote.git');
+  git(root, 'init', '--bare', remote);
+  git(root, 'remote', 'add', 'origin', remote);
+  await writeFile(join(root, 'code.txt'), 'root update');
+  await writeFile(join(root, 'new.txt'), 'new root file');
+  await writeFile(join(source, 'code.txt'), 'work in progress');
+  const sourceHead = git(source, 'rev-parse', 'HEAD');
+  await commitAndPushRoot(root, 'main', 'Update root');
+  assert.equal(git(remote, 'rev-parse', 'main'), git(root, 'rev-parse', 'HEAD'));
+  assert.equal(git(root, 'status', '--porcelain'), '');
+  assert.equal(git(remote, 'show', 'main:new.txt'), 'new root file');
+  assert.equal(git(source, 'rev-parse', 'HEAD'), sourceHead);
+  assert.equal(await readFile(join(source, 'code.txt'), 'utf8'), 'work in progress');
+});
+test('root push failure preserves commit and retry pushes without another commit', async (t) => {
+  const { root } = await fixture(t);
+  await writeFile(join(root, 'code.txt'), 'root update');
+  await assert.rejects(commitAndPushRoot(root, 'main', 'Saved locally'), /Push failed.*local commit is saved/s);
+  const saved = git(root, 'rev-parse', 'HEAD');
+  assert.equal(git(root, 'log', '-1', '--format=%s'), 'Saved locally');
+  const remote = join(root, '..', 'remote.git');
+  git(root, 'init', '--bare', remote);
+  git(root, 'remote', 'add', 'origin', remote);
+  await commitAndPushRoot(root, 'main', '');
+  assert.equal(git(remote, 'rev-parse', 'main'), saved);
+  assert.equal(git(root, 'rev-parse', 'HEAD'), saved);
+});
+test('root commit and push rejects stale branches, empty messages, and detached HEAD', async (t) => {
+  const { root } = await fixture(t);
+  await writeFile(join(root, 'code.txt'), 'root update');
+  const before = git(root, 'rev-parse', 'HEAD');
+  await assert.rejects(commitAndPushRoot(root, 'other', 'Update'), /branch changed/);
+  await assert.rejects(commitAndPushRoot(root, 'main', ' '), /commit message/);
+  git(root, 'switch', '--detach');
+  await assert.rejects(commitAndPushRoot(root, 'main', 'Update'), /detached/);
+  assert.equal(git(root, 'rev-parse', 'HEAD'), before);
 });

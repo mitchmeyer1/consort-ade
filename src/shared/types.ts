@@ -38,6 +38,7 @@ export type Chat = {
   messages: Message[];
 };
 
+export type RootBranch = { ref: string; name: string; occupied?: string };
 export type RootStatus = { branch: string | null; commit: string; dirty: boolean };
 
 export type RepoInfo = {
@@ -56,7 +57,10 @@ export type PermissionRequest = { id: string; chatId: string; tool: string; inpu
 
 export type Api = {
   getState(): Promise<State>;
+  rootBranches(projectId: string): Promise<{ current: string | null; branches: RootBranch[] }>;
+  switchRootBranch(projectId: string, expectedBranch: string | null, ref: string): Promise<RootStatus>;
   rootStatus(projectId: string): Promise<RootStatus>;
+  commitAndPushRoot(worktreeId: string, expectedBranch: string, message: string): Promise<string>;
   commitWorktree(worktreeId: string, expectedBranch: string, message: string): Promise<string>;
   pushWorktree(worktreeId: string, expectedBranch: string): Promise<string>;
   checkoutAtRoot(worktreeId: string, commitMessage?: string): Promise<RootStatus>;
@@ -120,4 +124,6 @@ export type Api = {
   commitInfo(worktreeId: string): Promise<CommitInfo>;
   commit(worktreeId: string, message: string): Promise<string>;
   suggestCommit(worktreeId: string): Promise<string>;
+  /** commit + push from the composer, narrated into the chat transcript; omit message to let the AI draft one */
+  commitChat(chatId: string, message?: string): Promise<string>;
 };

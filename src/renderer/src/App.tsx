@@ -94,10 +94,17 @@ const Field = ({ label, optional, info, children }: { label: string; optional?: 
 export function App() {
   const [state, setState] = useState<State>(EMPTY);
   const [sel, setSel] = useState<Sel>();
-  const [tab, setTab] = useState<Tab>();
-  const [file, setFile] = useState<string>();
-  const openMd = (path: string) => { setFile(path); setTab("markdown"); };
-  const openEditor = (path: string) => { setFile(path); setTab("editor"); };
+  // Panel state belongs to the selected view, not the underlying terminal scope.
+  // Two chats in the same worktree can therefore keep different panels open.
+  const viewKey = sel ? `${sel.type}:${sel.id}` : "home";
+  const [panels, setPanels] = useState<Record<string, { tab?: Tab; file?: string }>>({});
+  const { tab, file } = panels[viewKey] ?? {};
+  const setTab = (next: React.SetStateAction<Tab | undefined>, key = viewKey) => {
+    setPanels((current) => ({ ...current, [key]: { ...current[key], tab: typeof next === "function" ? next(current[key]?.tab) : next } }));
+  };
+  const openFile = (path: string, tab: Tab) => setPanels((current) => ({ ...current, [viewKey]: { tab, file: path } }));
+  const openMd = (path: string) => openFile(path, "markdown");
+  const openEditor = (path: string) => openFile(path, "editor");
   const perms = state.chats.flatMap((c) => c.permissions ?? []);
   const [ptys, setPtys] = useState<PtyState[]>([]);
   const running = React.useMemo(() => new Set(ptys.filter((p) => p.running).map((p) => p.scopeId)), [ptys]);
@@ -161,7 +168,6 @@ export function App() {
 
   };
   const toggle = (t: Tab) => setTab((cur) => (cur === t ? undefined : t));
-  useEffect(() => { if (tab === "commit" && !worktree) setTab(undefined); }, [worktree?.id]);
   const signIn = async (provider: "claude" | "codex") => {
     const sc = worktree ? { id: worktree.id, cwd: worktree.path } : project ? { id: project.id, cwd: project.path } : state.projects[0] ? { id: state.projects[0].id, cwd: state.projects[0].path } : null;
     if (!sc) return alert("Add a project first so there is somewhere to run the login.");
@@ -170,7 +176,7 @@ export function App() {
     if (!tabs.includes("auth")) termTabs.set(sc.id, [...tabs, "auth"]);
     wantTab = "auth";
     pendingCmd.set(`${sc.id}:auth`, await ade.authLoginCmd(provider));
-    setTab("terminal");
+    setTab("terminal", !worktree && !project ? `project:${sc.id}` : viewKey);
     const x = xterms.get(`${sc.id}:auth`);
     if (x) { const c = pendingCmd.get(x.id); if (c) { pendingCmd.delete(x.id); ade.ptyWrite(x.id, c + "\r"); } }
   };
@@ -218,7 +224,7 @@ export function App() {
       </div>
       {tab && <>
         <div className="resizer right" style={{ right: rightW - 3 }} onMouseDown={drag("right")} />
-        <Drawer tab={tab} state={state} chat={chat} worktree={worktree} scope={worktree ? { id: worktree.id, cwd: worktree.path, title: worktree.title } : project ? { id: project.id, cwd: project.path, title: project.name } : undefined}
+        <Drawer key={viewKey} tab={tab} state={state} chat={chat} worktree={worktree} scope={worktree ? { id: worktree.id, cwd: worktree.path, title: worktree.title } : project ? { id: project.id, cwd: project.path, title: project.name } : undefined}
           ptys={ptys} width={rightW} file={file} onEdit={openEditor} onView={openMd} onSignIn={signIn} onClose={() => setTab(undefined)} />
       </>}
     </div>
@@ -283,13 +289,14 @@ function ProjectNode({ project: p, state, sel, running, failed, onSelect, collap
 }) {
   const [showArchived, setShowArchived] = useState(false);
   const all = state.worktrees.filter((w) => w.projectId === p.id);
-  const wts = all.filter((w) => showArchived || !w.archived);
+  const wts = all.filter((w) => w.root || showArchived || !w.archived).sort((a, b) => Number(!!b.root) - Number(!!a.root));
   const archivedN = all.filter((w) => w.archived).length;
   return (
-    <div>
-      <div className={"row project" + (sel?.type === "project" && sel.id === p.id ? " active" : "")} onClick={() => onSelect({ type: "project", id: p.id })}>
-        <span onClick={(e) => { e.stopPropagation(); toggle(p.id); }}>{collapsed[p.id] ? "▸" : "▾"}</span>
-        <span className="grow" title={p.path}><Ico n="arch" className="proj" />{p.name}<Dots id={p.id} running={running} failed={failed} /></span>
+    <div className="projnode">
+      <div className={"row project" + (sel?.type === "project" && sel.id === p.id ? " active" : "") + (collapsed[p.id] ? " closed" : "")} onClick={() => onSelect({ type: "project", id: p.id })}>
+        {/* the caret lives in the icon slot: icon at rest, caret on hover or while collapsed */}
+        <span className="slot caret" title={collapsed[p.id] ? "Expand" : "Collapse"} onClick={(e) => { e.stopPropagation(); toggle(p.id); }}><Ico n="arch" className="proj" /><span className="chev">{collapsed[p.id] ? "▸" : "▾"}</span></span>
+        <span className="grow" title={p.path}>{p.name}<Dots id={p.id} running={running} failed={failed} /></span>
         <span className="tools" onClick={(e) => e.stopPropagation()}>
           <button className="icon" title="New worktree" onClick={() => onSelect({ type: "project", id: p.id, form: true })}>＋</button>
           <button className="icon" title="Re-scan worktrees" onClick={() => ade.syncWorktrees(p.id)}>↻</button>
@@ -318,26 +325,33 @@ function WorktreeNode({ wt, state, sel, running, failed, onSelect, collapsed, to
   return (
     <div>
       <div className={"row worktree" + (active ? " active" : "") + (wt.archived ? " dim" : "")} onClick={() => onSelect({ type: "worktree", id: wt.id })}>
-        <span className="grow"><Ico n="thorn" className="wt" />{wt.root ? "Root" : <Editable value={wt.title} onSave={(t) => ade.renameWorktree(wt.id, t)} />}<Dots id={wt.id} running={running} failed={failed} /></span>
-        <small className="branch">{st?.branch ?? wt.branch}</small>
-        {st && (st.dirty > 0 || st.ahead > 0 || st.behind > 0 || st.pr || st.inBase) && <Badges st={st} />}
+        <span className="slot"><Ico n="thorn" className="wt" /></span>
+        <span className="grow">{wt.root ? "Root" : <Editable value={wt.title} onSave={(t) => ade.renameWorktree(wt.id, t)} />}<Dots id={wt.id} running={running} failed={failed} /></span>
+        {/* branch + badges share one subtitle line, aligned under the title text rather than the icon */}
+        <span className="meta">
+          <small className="branch" title={st?.branch ?? wt.branch}>{st?.branch ?? wt.branch}</small>
+          {st && (st.dirty > 0 || st.ahead > 0 || st.behind > 0 || st.pr || st.inBase) && <Badges st={st} />}
+        </span>
         <span className="tools" onClick={(e) => e.stopPropagation()}>
           <button className="icon" title="New chat here" onClick={() => onSelect({ type: "worktree", id: wt.id, form: true })}>＋</button>
-          <button className="icon" title={wt.archived ? "Unarchive" : "Archive (hide from list)"} onClick={() => ade.archiveWorktree(wt.id, !wt.archived)}><Ico n="vase" className="solo" /></button>
+          {!wt.root && <button className="icon" title={wt.archived ? "Unarchive" : "Archive (hide from list)"} onClick={() => ade.archiveWorktree(wt.id, !wt.archived)}><Ico n="vase" className="solo" /></button>}
           {!wt.root && <button className="icon" title="Delete worktree from disk" onClick={() => confirm(`Delete worktree ${wt.title}?\n\nRuns: git worktree remove --force ${wt.path}\n${chats.length ? `Also deletes ${chats.length} chat(s).` : ""}`) && ade.removeWorktree(wt.id).catch((e) => alert(e.message))}><Flame /></button>}
           <button className="icon" title={collapsed[wt.id] ? "Expand" : "Collapse"} onClick={() => toggle(wt.id)}>{collapsed[wt.id] ? "▸" : "▾"}</button>
         </span>
       </div>
-      {!collapsed[wt.id] && chats.map((c) => (
-        <div key={c.id} className={"row chat" + (sel?.type === "chat" && c.id === sel.id ? " active" : "")} onClick={() => onSelect({ type: "chat", id: c.id })}>
-          <span className="chat-symbol"><Ico n="celtic" />{chatStatus(c) && <span role="img" aria-label={chatStatus(c)!} title={chatStatus(c)!} className={`chat-dot ${chatStatus(c)}`} />}</span>
-          <span className="grow"><Editable value={c.name} onSave={(n) => ade.renameChat(c.id, n)} /></span>
-          <MiniBar phase={c.phase} />
-          <span className="tools" onClick={(e) => e.stopPropagation()}>
-            <button className="icon" onClick={() => confirm("Delete chat?") && ade.deleteChat(c.id)}>×</button>
-          </span>
-        </div>
-      ))}
+      {!collapsed[wt.id] && chats.length > 0 && <div className="chatlist">{chats.map((c) => {
+        const status = chatStatus(c);
+        return (
+          <div key={c.id} className={"row chat" + (sel?.type === "chat" && c.id === sel.id ? " active" : "") + (status ? ` st-${status}` : "")} onClick={() => onSelect({ type: "chat", id: c.id })}>
+            <span className="slot chat-symbol"><Ico n="celtic" />{status && <span role="img" aria-label={status} title={status} className={`chat-dot ${status}`} />}</span>
+            <span className="grow"><Editable value={c.name} onSave={(n) => ade.renameChat(c.id, n)} /></span>
+            <MiniBar phase={c.phase} />
+            <span className="tools" onClick={(e) => e.stopPropagation()}>
+              <button className="icon" onClick={() => confirm("Delete chat?") && ade.deleteChat(c.id)}>×</button>
+            </span>
+          </div>
+        );
+      })}</div>}
     </div>
   );
 }
@@ -387,7 +401,8 @@ function ProjectPage({ project: p, state, openForm, onSelect }: { project: Proje
 
   const [showArchived, setShowArchived] = useState(false);
   useEffect(() => { ade.repoInfo(p.id).then(setInfo); }, [p.id]);
-  const wts = state.worktrees.filter((w) => w.projectId === p.id && (showArchived || !w.archived));
+  const rootWorktree = state.worktrees.find((w) => w.projectId === p.id && w.root);
+  const wts = state.worktrees.filter((w) => w.projectId === p.id && !w.root && (showArchived || !w.archived));
   const archivedN = state.worktrees.filter((w) => w.projectId === p.id && w.archived).length;
   const localBranches = new Set(state.worktrees.filter((w) => w.projectId === p.id).map((w) => w.branch));
   const [busyPr, setBusyPr] = useState<number>();
@@ -444,6 +459,8 @@ function ProjectPage({ project: p, state, openForm, onSelect }: { project: Proje
       </div>
       {form && <NewWorktreeDialog p={p} branchPreset={form.branch} onClose={() => setForm(false)} onRoot={(id) => onSelect({ type: "worktree", id })} />}
 
+      {rootWorktree && <RootCard wt={rootWorktree} state={state} status={root} error={rootError} onRefresh={() => ade.rootStatus(p.id).then((s) => { setRoot(s); setRootError(""); }, (e) => setRootError(e.message))} onSelect={onSelect} />}
+
       <h2>Worktrees {archivedN > 0 && <button className="icon" onClick={() => setShowArchived((x) => !x)}>{showArchived ? "hide" : "show"} {archivedN} archived</button>}</h2>
       {!wts.length && <div className="m">No worktrees yet — create one above or open a PR below as a worktree.</div>}
       <div className="grid">{wts.map((w) => <WorktreeCard key={w.id} wt={w} state={state} onSelect={onSelect} onCheckout={() => { setCheckout(w); setCommitMessage(""); setCheckoutError(""); }} />)}</div>
@@ -484,6 +501,128 @@ function ProjectPage({ project: p, state, openForm, onSelect }: { project: Proje
       )}
     </div>
   );
+}
+
+function RootBranchPicker({ wt, disabled, onChanged }: { wt: Worktree; disabled?: boolean; onChanged: () => void }) {
+  const [data, setData] = useState<Awaited<ReturnType<Api["rootBranches"]>>>();
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const container = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const listId = React.useId();
+  useEffect(() => { if (disabled || busy) setOpen(false); }, [disabled, busy]);
+  useEffect(() => {
+    if (busy) return;
+    let disposed = false;
+    const refresh = () => ade.rootBranches(wt.projectId).then((value) => { if (!disposed) setData(value); }, (e) => { if (!disposed) setError(e.message); });
+    refresh();
+    const timer = setInterval(refresh, 10000);
+    window.addEventListener("focus", refresh);
+    return () => { disposed = true; clearInterval(timer); window.removeEventListener("focus", refresh); };
+  }, [wt.projectId, wt.branch, busy]);
+  const change = async (ref: string) => {
+    if (!data || busy || disabled) return;
+    setOpen(false); trigger.current?.focus();
+    setBusy(true); setError("");
+    try { await ade.switchRootBranch(wt.projectId, data.current, ref); onChanged(); }
+    catch (e: any) { setError(e.message); }
+    finally {
+      await ade.rootBranches(wt.projectId).then(setData, () => {});
+      setBusy(false);
+    }
+  };
+  const current = data ? data.current : wt.branch;
+  const value = current ? `refs/heads/${current}` : "";
+  const matches = data?.branches.filter((b) => b.name.toLowerCase().includes(query.trim().toLowerCase())) ?? [];
+  return <div className="root-branch-picker" ref={container} onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setOpen(false); }} onKeyDown={(e) => {
+    if (e.key === "Escape") { e.preventDefault(); setOpen(false); trigger.current?.focus(); }
+    if (open && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+      e.preventDefault();
+      const options = Array.from(container.current?.querySelectorAll<HTMLButtonElement>(".root-branch-option:not(:disabled)") ?? []);
+      const index = options.indexOf(document.activeElement as HTMLButtonElement);
+      options[(index + (e.key === "ArrowDown" ? 1 : -1) + options.length) % options.length]?.focus();
+    }
+  }}>
+    <span className="root-branch-label">Root branch</span>
+    <button type="button" className="root-branch-trigger" ref={trigger} disabled={disabled || busy || !data} aria-expanded={open} aria-controls={listId} onClick={() => { setQuery(""); setOpen(!open); }}>
+      <span>{current ?? "Detached HEAD"}</span><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m3 4.5 3 3 3-3" /></svg>
+    </button>
+    {open && <div className="root-branch-popover" id={listId}>
+      <input autoFocus aria-label="Search branches" placeholder="Search branches…" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => {
+        if (e.key === "Enter") { e.preventDefault(); const first = matches.find((b) => !b.occupied); if (first) void change(first.ref); }
+      }} />
+      <div className="root-branch-results" role="group" aria-label="Matching branches">
+        {matches.map((b) => <button type="button" className="root-branch-option" key={b.ref} disabled={!!b.occupied} aria-pressed={b.ref === value} onClick={() => change(b.ref)}>
+          <span>{b.name}</span>{b.occupied ? <small>In another worktree</small> : b.ref === value ? <small>Current</small> : null}
+        </button>)}
+        {!matches.length && <div className="root-branch-empty" role="status">No matching branches</div>}
+      </div>
+    </div>}
+    {busy && <span className="m" role="status">Switching branch…</span>}
+    {error && <div className="err" role="alert">{error}</div>}
+  </div>;
+}
+
+function RootCard({ wt, state, status, error, onRefresh, onSelect }: {
+  wt: Worktree; state: State; status?: RootStatus; error: string; onRefresh: () => Promise<void>; onSelect: (s: Sel) => void;
+}) {
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState("");
+  const [failure, setFailure] = useState("");
+  const [summary, setSummary] = useState<CommitInfo>();
+  const [summaryError, setSummaryError] = useState("");
+  useEffect(() => {
+    let disposed = false;
+    const refresh = () => ade.commitInfo(wt.id).then((value) => { if (!disposed) { setSummary(value); setSummaryError(""); } }, (e) => { if (!disposed) setSummaryError(e.message); });
+    refresh();
+    const timer = setInterval(refresh, 10000);
+    window.addEventListener("focus", refresh);
+    return () => { disposed = true; clearInterval(timer); window.removeEventListener("focus", refresh); };
+  }, [wt.id, wt.branch, status?.branch, status?.commit, status?.dirty, busy]);
+  const chats = state.chats.filter((c) => c.worktreeId === wt.id);
+  const running = chats.some((c) => c.running);
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!status?.branch || busy) return;
+    setBusy(true); setResult(""); setFailure("");
+    try {
+      setResult(await ade.commitAndPushRoot(wt.id, status.branch, message));
+      setMessage("");
+    } catch (e: any) { setFailure(e.message); }
+    finally { await onRefresh(); setBusy(false); }
+  };
+  return <div className="root-panels">
+    <section className="card root-card" aria-label="Root">
+      <h2><Ico n="thorn" />Root</h2>
+      <RootBranchPicker wt={wt} disabled={busy || running} onChanged={() => { setResult(""); setFailure(""); void onRefresh(); }} />
+      <div className="path">{wt.path}</div>
+      <div className="snip">{chats.length} chat{chats.length === 1 ? "" : "s"} · {status ? status.dirty ? "uncommitted changes" : "clean" : "loading…"}</div>
+      <div className="actions">
+        <button onClick={() => onSelect({ type: "worktree", id: wt.id })}>Open root</button>
+        <button disabled={busy} onClick={() => onSelect({ type: "worktree", id: wt.id, form: true })}>New chat</button>
+      </div>
+    </section>
+    <form className="card root-commit" aria-label="Commit root changes" onSubmit={submit}>
+      <h2>Commit and push</h2>
+      <div className="root-change-summary">
+        {summaryError ? <div className="err" role="alert">{summaryError}</div> : !summary ? <div className="m">Loading changes…</div> : <>
+          <div className="root-change-counts"><strong>{summary.changed ? `${summary.changed} changed file${summary.changed === 1 ? "" : "s"}` : "No uncommitted changes"}</strong><span className="m">{summary.ahead} unpushed commit{summary.ahead === 1 ? "" : "s"}</span></div>
+          {summary.changed > 0 && <details><summary>View changed files</summary><pre className="root-changed-files">{summary.files}</pre></details>}
+        </>}
+      </div>
+      <div className="m root-push-target">Push to <span className="mono">{status?.branch ? `origin/${status.branch}` : "the current branch"}</span></div>
+      <label className="sr-only" htmlFor={`root-message-${wt.id}`}>Commit message</label>
+      <input id={`root-message-${wt.id}`} aria-label="Root commit message" placeholder="Commit message" value={message} disabled={busy} onChange={(e) => setMessage(e.target.value)} />
+      <button className="primary" disabled={busy || running || !!error || !status?.branch || (!!status?.dirty && !message.trim())}>{busy ? "Committing and pushing…" : "Commit and push"}</button>
+      {running && <div className="m">Wait for root chats to finish.</div>}
+      {status && !status.branch && <div className="m">Switch root to a branch before pushing.</div>}
+      {(failure || error) && <div className="err" role="alert">{failure || error}</div>}
+      {result && <div className="m" role="status">{result}</div>}
+    </form>
+  </div>;
 }
 
 function WorktreeCard({ wt, state, onSelect, onCheckout }: { wt: Worktree; state: State; onSelect: (s: Sel) => void; onCheckout?: () => void }) {
@@ -547,7 +686,7 @@ function WorktreePage({ wt, state, openForm, onSelect }: { wt: Worktree; state: 
       <div>
         <h1>{wt.root ? "Root" : <><Editable value={wt.title} onSave={(t) => ade.renameWorktree(wt.id, t)} trigger="click" /> <button className="icon" title="Name with AI" onClick={() => ade.autoTitle(wt.id)}><Ico n="star" className="big" /></button></>}</h1>
         <div className="meta-rows">
-          <div><span className="badge">{st?.branch ?? wt.branch}</span></div>
+          {wt.root ? <RootBranchPicker wt={wt} disabled={busy || chats.some((c) => c.running)} onChanged={() => { setRevision((n) => n + 1); setGitResult(""); setGitError(""); }} /> : <div><span className="badge">{st?.branch ?? wt.branch}</span></div>}
           <Badges st={st} />
           <div className="path">{wt.path}</div>
         </div>
@@ -836,12 +975,32 @@ function ChatPane({ chat, keys, perms, answer, onOpenMd }: { chat: Chat; keys: S
   const [raw, setRaw] = useState(() => localStorage.getItem("chatRaw") === "1");
   useEffect(() => localStorage.setItem("chatRaw", raw ? "1" : "0"), [raw]);
   const bottom = useRef<HTMLDivElement>(null);
+  const box = useRef<HTMLTextAreaElement>(null);
   useEffect(() => { bottom.current?.scrollIntoView({ block: "end" }); }, [chat.messages, perms.length]);
+  // Commit shortcut: the composer becomes a commit-message box with a 5s fuse. Typing defuses it; silence lets the AI write the message.
+  const [commit, setCommit] = useState<{ count: number; typed: boolean } | null>(null);
+  const armCommit = () => { if (chat.running || commit) return; setText(""); setCommit({ count: 5, typed: false }); requestAnimationFrame(() => box.current?.focus()); };
+  const fireCommit = (message?: string) => {
+    setCommit(null); setText("");
+    // failures are narrated into the transcript by main, so nothing to surface here
+    ade.commitChat(chat.id, message).catch(() => {});
+  };
+  useEffect(() => {
+    if (!commit || commit.typed) return;
+    if (commit.count <= 0) { fireCommit(); return; }
+    const t = setTimeout(() => setCommit((c) => c && !c.typed ? { ...c, count: c.count - 1 } : c), 1000);
+    return () => clearTimeout(t);
+  }, [commit]);
+  useEffect(() => { if (commit && chat.running) setCommit(null); }, [chat.running]);
   const send = () => {
+    if (commit) { if (text.trim() || !commit.typed) fireCommit(text.trim() || undefined); return; }
     if ((!text.trim() && !files.length) || chat.running) return;
     ade.send(chat.id, text.trim() || "See attached files.", files).catch((e) => alert(e.message));
     setText(""); setFiles([]);
   };
+  const placeholder = commit
+    ? commit.typed ? "commit message · ↩ to commit and push · esc to cancel" : `start typing commit or ai will decide ${commit.count}…`
+    : chat.running ? "Working… (you can queue a message)" : "Reply…";
   const addFiles = (paths: string[]) => setFiles((f) => [...new Set([...f, ...paths])]);
   const onDrop = async (e: React.DragEvent) => { e.preventDefault(); setOver(false); addFiles(await filesFromTransfer(e.dataTransfer)); };
   const onPaste = async (e: React.ClipboardEvent) => { if ([...e.clipboardData.items].some((i) => i.kind === "file")) { e.preventDefault(); addFiles(await filesFromTransfer(e.clipboardData)); } };
@@ -881,24 +1040,30 @@ function ChatPane({ chat, keys, perms, answer, onOpenMd }: { chat: Chat; keys: S
       {files.length > 0 && (
         <div className="chips">{files.map((f) => <span key={f} className="chip">📎 {f.split("/").pop()}<button onClick={() => setFiles((x) => x.filter((y) => y !== f))}>×</button></span>)}</div>
       )}
-      {chatStatus(chat) === "running" && <div className="composer-working" role="status"><span className="working-circle" aria-hidden="true" />Working…</div>}
       <div className="composer-wrap">
         <div className="composer-options">
+          <span className="left">
+            <button className={"commitbtn" + (commit ? " armed" : "")} title="Stage everything, commit, and push. Type a message or let the AI write one." disabled={chat.running || !!commit} onClick={armCommit}><Ico n="wheat" />{commit && !commit.typed ? `commit ${commit.count}` : "commit"}</button>
+            {chatStatus(chat) === "running" && <div className="composer-working" role="status"><span className="working-circle" aria-hidden="true" />Working…</div>}
+          </span>
           <label><input type="checkbox" checked={chat.autoApprove} onChange={(e) => ade.setAutoApprove(chat.id, e.target.checked).catch((e) => alert(e.message))} /> Auto-approve</label>
           <label title="Use a PHI-approved key for this chat"><input type="checkbox" checked={!!keys.find((k) => k.id === chat.keyId)?.phiAllowed} onChange={(e) => ade.setPhiMode(chat.id, e.target.checked).catch((e) => alert(e.message))} /> PHI mode</label>
         </div>
-        <div className={"composer card" + (over ? " over" : "")}>
-          <textarea value={text} rows={1} onChange={(e) => setText(e.target.value)} placeholder={chat.running ? "Working… (you can queue a message)" : "Reply…"}
+        <div className={"composer card" + (over ? " over" : "") + (commit ? " committing" : "")}>
+          <textarea ref={box} value={text} rows={1} onChange={(e) => { setText(e.target.value); if (commit && !commit.typed && e.target.value) setCommit({ ...commit, typed: true }); }} placeholder={placeholder}
             onInput={(e) => { const t = e.currentTarget; t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 240) + "px"; }}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); } }} />
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && commit) { e.preventDefault(); setCommit(null); setText(""); return; }
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); }
+            }} />
           <div className="cbar">
             <button className="icon attach" title="Attach files" onClick={async () => addFiles(await ade.pickFiles())}>
               <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.5l-8.6 8.6a5 5 0 0 1-7-7l9.2-9.2a3.3 3.3 0 0 1 4.7 4.7L10 18.9a1.6 1.6 0 0 1-2.3-2.3l8.5-8.5" /></svg>
             </button>
             <AgentPicker key={chat.id} chat={chat} keys={keys} />
             <span className="grow" />
-            <span className="m hint">↩ send · ⇧↩ newline</span>
-            <button className="icon enter" title="Send (↩)" disabled={chat.running || (!text.trim() && !files.length)} onClick={send}>
+            <span className="m hint">{commit ? "↩ commit + push · esc cancel" : "↩ send · ⇧↩ newline"}</span>
+            <button className="icon enter" title={commit ? "Commit and push (↩)" : "Send (↩)"} disabled={commit ? (commit.typed && !text.trim()) : chat.running || (!text.trim() && !files.length)} onClick={send}>
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19V5" /><path d="M6 11l6-6 6 6" /></svg>
             </button>
           </div>

@@ -8,9 +8,9 @@ const on = (channel: string) => (cb: (x: any) => void) => {
 };
 
 const methods = [
-  "getState", "openRootWorktree", "rootStatus", "checkoutAtRoot", "commitWorktree", "pushWorktree", "setActiveChat", "pickFolder", "addProject", "removeProject", "setProjectBase", "syncWorktrees", "addWorktree",
+  "getState", "openRootWorktree", "rootStatus", "rootBranches", "switchRootBranch", "checkoutAtRoot", "commitAndPushRoot", "commitWorktree", "pushWorktree", "setActiveChat", "pickFolder", "addProject", "removeProject", "setProjectBase", "syncWorktrees", "addWorktree",
   "removeWorktree", "worktreeStatus", "addChat", "renameChat", "deleteChat", "setAutoApprove", "setPhase",
-  "send", "stop", "addKey", "removeKey", "answerPermission", "runCommand", "diff", "skillPrompt", "pickFiles", "stageBlob", "setChatKey", "setKeyPhi", "setPhiMode", "switchAgent", "continueChat", "renameWorktree", "archiveWorktree", "autoTitle", "openExternal", "artifactMenu", "previewArtifact", "setAppearance", "effectiveTheme", "repoInfo", "listFiles", "readFile", "writeFile", "authStatus", "authLoginCmd", "commitInfo", "commit", "suggestCommit", "ptyCreate", "ptyWrite", "ptyResize", "ptyKill", "ptySeen", "ptys",
+  "send", "stop", "addKey", "removeKey", "answerPermission", "runCommand", "diff", "skillPrompt", "pickFiles", "stageBlob", "setChatKey", "setKeyPhi", "setPhiMode", "switchAgent", "continueChat", "renameWorktree", "archiveWorktree", "autoTitle", "openExternal", "artifactMenu", "previewArtifact", "setAppearance", "effectiveTheme", "repoInfo", "listFiles", "readFile", "writeFile", "authStatus", "authLoginCmd", "commitInfo", "commit", "suggestCommit", "commitChat", "ptyCreate", "ptyWrite", "ptyResize", "ptyKill", "ptySeen", "ptys",
 ];
 contextBridge.exposeInMainWorld("ade", {
   ...Object.fromEntries(methods.map((m) => [m, invoke(m)])),

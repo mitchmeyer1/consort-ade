@@ -28,21 +28,41 @@ input:focus, textarea:focus, select:focus { border-color: var(--line2); }
 .brand .word { font-family: var(--display); font-weight: 600; font-size: 24px; letter-spacing: .02em; line-height: 1; }
 .brand .sub { font-size: 9px; letter-spacing: .2em; text-transform: uppercase; color: var(--dim); margin-top: 3px; white-space: nowrap; }
 .sect { display: flex; justify-content: space-between; align-items: center; padding: 6px 8px; font-size: 10px; letter-spacing: .28em; color: var(--dim); text-transform: uppercase; }
-.row { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: 10px; cursor: pointer; }
+/* tree geometry: every row has a fixed icon slot; each nested list is indented so its guide line
+   drops from the centre of the parent's slot (row padding 8px + half the slot) */
+.sidebar { --slot: 22px; --rowpad: 8px; --step: calc(var(--rowpad) + var(--slot) / 2); }
+.row { display: flex; align-items: center; gap: 6px; padding: 5px var(--rowpad); border-radius: 8px; cursor: pointer; }
 .row:hover { background: rgba(243,234,214,.05); }
 .row.active { background: rgba(243,234,214,.1); }
 .row .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row .tools { display: none; gap: 2px; }
 .row:hover .tools { display: flex; }
+.row .slot { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 var(--slot); width: var(--slot); height: 16px; position: relative; }
+.row .slot .ico { margin: 0; }
+/* level 1: project header (serif). Caret shares the icon slot: icon at rest, caret on hover / when collapsed */
 .project { font-family: var(--display); font-weight: 600; font-size: 15px; }
-.worktree { padding-left: 20px; }
+.project .slot .chev { display: none; font-family: var(--body); font-size: 11px; color: var(--dim); }
+.project:hover .slot.caret .ico, .project.closed .slot.caret .ico { display: none; }
+.project:hover .slot.caret .chev, .project.closed .slot.caret .chev { display: block; }
+.projnode + .projnode { margin-top: 14px; }
+.projnode + .projnode::before { content: ""; display: block; height: 14px; margin: 0 24px 6px; background: currentColor; opacity: .22; -webkit-mask: url(./assets/icons/vine.png) center / contain no-repeat; mask: url(./assets/icons/vine.png) center / contain no-repeat; }
+/* level 2: worktree (sans, medium) */
+.wtlist, .chatlist { margin-left: var(--step); border-left: 1px solid var(--line); }
+.wtlist > div + div { margin-top: 8px; }
+.worktree .grow { font-weight: 500; }
 .worktree small, .chat small { color: var(--dim); font-size: 11px; }
-.chat { padding-left: 36px; }
+/* level 3: chat (sans, regular, slightly receded until it's active or has news) */
+.chat { font-size: 12.5px; }
+.chat .grow { opacity: .78; }
+.chat:hover .grow, .chat.active .grow, .chat.st-running .grow, .chat.st-attention .grow { opacity: 1; }
 .badge { font-size: 10px; padding: 0 6px; border-radius: 3px; border: 1px solid var(--line); color: var(--dim); }
+/* progress bars sit quiet unless the chat is live, needs you, or is selected */
 .mini { display: flex; gap: 2px; }
-.mini i { width: 8px; height: 3px; background: var(--line); border-radius: 1px; }
-.mini i.on, .mini i.done { background: var(--cream); }
-.mini i.on { opacity: .6; }
+.mini i { width: 8px; height: 3px; background: var(--line); border-radius: 1px; opacity: .6; }
+.mini i.on, .mini i.done { background: var(--cream); opacity: .38; }
+.mini i.on { opacity: .55; }
+.chat:hover .mini i, .chat.active .mini i, .chat.st-running .mini i, .chat.st-attention .mini i { opacity: 1; }
+.chat:hover .mini i.on, .chat.active .mini i.on, .chat.st-running .mini i.on, .chat.st-attention .mini i.on { opacity: .6; }
 .form { display: flex; flex-direction: column; gap: 5px; padding: 6px 8px 8px 26px; }
 .form input, .form select { padding: 4px 8px; font-size: 12px; }
 .form .actions { display: flex; gap: 4px; }
@@ -176,10 +196,12 @@ input.edit { padding: 1px 6px; font: inherit; width: 100%; min-width: 0; backgro
 .git a { color: var(--cream); text-decoration: none; border-bottom: 1px solid var(--line2); }
 .git a:hover { border-color: var(--cream); }
 
-/* status badges sit on their own line under the title */
-.row.worktree { flex-wrap: wrap; }
-.row.worktree .branch { order: 2; flex-basis: 100%; font-size: 11px; color: var(--dim); font-family: var(--mono); margin-top: -2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.row.worktree .badges { order: 3; flex-basis: 100%; margin-top: 3px; }
+/* branch + badges form one subtitle line, indented to the title text (slot + gap) so they read as a caption of the worktree, not a sibling */
+.row.worktree { flex-wrap: wrap; row-gap: 1px; }
+.row.worktree .meta { order: 2; flex-basis: 100%; min-width: 0; display: flex; align-items: center; gap: 6px; padding-left: calc(var(--slot) + 6px); }
+.row.worktree .branch { flex: 0 1 auto; min-width: 0; font-size: 10.5px; color: var(--dim); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row.worktree .meta:empty { display: none; }
+.row.worktree .badges { flex: 0 0 auto; flex-wrap: nowrap; }
 .badges { display: flex; gap: 4px; flex-wrap: wrap; }
 .card .badges, .page > div > .badges { margin-top: 8px; }
 
@@ -201,10 +223,8 @@ input.edit { padding: 1px 6px; font: inherit; width: 100%; min-width: 0; backgro
 .seg button { border: none; border-radius: 0 !important; padding: 4px 10px; font-size: 12px; }
 .seg button + button { border-left: 1px solid var(--line2); }
 .seg button.on { background: var(--cream); color: var(--ink); }
-/* soft divider between worktree groups */
-.row.worktree { border-radius: 0; margin-top: 2px; padding-top: 4px; }
-.wtlist > div + div::before { content: ""; display: block; height: 18px; margin: 8px 10px 0; background: currentColor; opacity: .32; -webkit-mask: url(./assets/icons/vine.png) center / contain no-repeat; mask: url(./assets/icons/vine.png) center / contain no-repeat; }
-.row.worktree.archived-toggle { border-top: none; }
+/* the archived toggle sits at worktree depth, outside the guide line */
+.row.worktree.archived-toggle { margin-left: var(--step); margin-top: 4px; }
 
 /* project page */
 .page a { color: var(--fg); text-decoration: none; border-bottom: 1px solid var(--line2); }
@@ -317,10 +337,6 @@ textarea.code { min-height: 40vh; }
 .page h2 { display: flex; align-items: center; gap: 12px; }
 .page h2::before { content: ""; width: 44px; height: 14px; background: currentColor; opacity: .45; flex-shrink: 0; -webkit-mask: url(./assets/icons/rule-small.png) center / contain no-repeat; mask: url(./assets/icons/rule-small.png) center / contain no-repeat; }
 
-.topbar.haschat .tabs button span { display: none; }
-.topbar.haschat .tabs button .ico { margin-right: 0; }
-.topbar.haschat .tabs button { padding: 4px 9px; }
-
 /* second icon batch */
 .ico-chalice { --m: url(./assets/icons/chalice.png); } .ico-candle { --m: url(./assets/icons/candle.png); }
 .ico-arch { --m: url(./assets/icons/arch.png); } .ico-lyre { --m: url(./assets/icons/lyre.png); }
@@ -330,7 +346,7 @@ textarea.code { min-height: 40vh; }
 .ico-thorn { --m: url(./assets/icons/thorn.png); } .ico-cross { --m: url(./assets/icons/cross.png); }
 .ico-celtic { --m: url(./assets/icons/celtic.png); } .ico-fleur { --m: url(./assets/icons/fleur.png); }
 .ico.solo { margin: 0; width: 13px; height: 13px; }
-.ico.proj { width: 13px; height: 15px; margin-right: 7px; opacity: .8; }
+.ico.proj { width: 13px; height: 15px; margin-right: 7px; opacity: .9; }
 .ico.lyre { width: 9px; height: 9px; margin: 0 1px; vertical-align: -1px; }
 .phases div .ico { width: 12px; height: 12px; margin-right: 6px; vertical-align: -2px; opacity: .85; }
 .card h4 .ico { width: 12px; height: 12px; margin-right: 6px; vertical-align: -2px; }
@@ -467,7 +483,7 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 
 /* the final segment goes pale green once everything is complete */
 .phases div.final { background: #a8d8a8; border-color: #a8d8a8; color: #14251a; }
-.mini i.final { background: #a8d8a8; }
+.mini i.final { background: #a8d8a8; opacity: .55; }
 /* one bar height across the main pane and the drawer */
 :root { --barh: 58px; }
 .topbar { min-height: var(--barh); height: var(--barh); padding-top: 0; padding-bottom: 0; box-sizing: border-box; }
@@ -512,14 +528,15 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 
 .trhead .cut { color: var(--dim); opacity: .6; }
 
-.ico.wt { width: 15px; height: 12px; margin-right: 7px; opacity: .8; vertical-align: -1px; }
+/* icon weight follows the hierarchy: worktree glyph a touch larger and brighter than the chat knot */
+.ico.wt { width: 17px; height: 14px; margin-right: 7px; opacity: .9; vertical-align: -1px; }
 
 .ico.chatico { width: 12px; height: 12px; margin-right: 7px; opacity: .75; vertical-align: -1px; }
 
-/* Reserve separate icon and status slots so status changes never move the chat title. */
-.chat-symbol { display: inline-flex; align-items: center; gap: 5px; width: 28px; height: 16px; flex: 0 0 28px; }
-.chat-symbol .ico { display: block; width: 16px; height: 16px; flex: 0 0 16px; margin: 0; }
-.chat-dot { flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 5px currentColor; }
+/* The chat icon uses the shared slot; the status dot is pinned to the slot's corner so it never moves the title. */
+.chat-symbol .ico { display: block; width: 12px; height: 12px; flex: 0 0 12px; margin: 0; opacity: .7; }
+.chat:hover .chat-symbol .ico, .chat.active .chat-symbol .ico { opacity: .9; }
+.chat-dot { position: absolute; right: 0; bottom: 0; width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 4px currentColor, 0 0 0 1.5px var(--panel); }
 .chat-dot.running { color: #64adff; animation: chat-pulse 1.8s ease-in-out infinite; }
 .chat-dot.attention { color: #f5a044; }
 .chat-dot.complete { color: #6dcc85; }
@@ -541,15 +558,24 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 .artifact-entry small { display: block; margin-top: 5px; color: var(--dim); font-family: var(--mono); font-size: 11px; }
 
 /* Keep activity visible above the composer, outside the scrolling transcript. */
-.composer-working { display: flex; align-items: center; gap: 9px; flex-shrink: 0; padding: 10px 18px 10px 54px; color: #64adff; font-size: 13px; }
+.composer-working { display: flex; align-items: center; gap: 9px; flex-shrink: 0; margin-right: auto; color: #64adff; font-size: 13px; }
 .working-circle { width: 10px; height: 10px; flex: 0 0 10px; border-radius: 50%; background: currentColor; animation: working-glow 1.6s ease-in-out infinite; }
 @keyframes working-glow { 0%, 100% { opacity: .55; box-shadow: 0 0 0 2px rgba(100,173,255,.12); } 50% { opacity: 1; box-shadow: 0 0 0 5px rgba(100,173,255,.22); } }
 :root[data-theme="light"] .composer-working { color: #246dc2; }
 @media (prefers-reduced-motion: reduce) { .working-circle { animation: none; } }
 
 /* Chat controls live with the message composer. */
-.composer-options { max-width: 860px; margin: 0 auto 7px; display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 16px; color: var(--dim); font-size: 11px; }
+.composer-options { max-width: 860px; margin: 0 auto 7px; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 16px; color: var(--dim); font-size: 11px; }
 .composer-options label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; }
+.composer-options .left { display: flex; align-items: center; gap: 14px; margin-right: auto; min-width: 0; }
+.composer-options .left .composer-working { margin-right: 0; }
+/* commit shortcut: quiet text button that turns into the countdown while armed */
+.composer-options .commitbtn { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); border-color: var(--line); }
+.composer-options .commitbtn .ico { width: 12px; height: 12px; margin: 0; opacity: .8; }
+.composer-options .commitbtn:hover { color: var(--ink); background: var(--cream); border-color: var(--cream); }
+.composer-options .commitbtn.armed { color: var(--cream); border-color: var(--cream); background: none; opacity: 1; font-variant-numeric: tabular-nums; }
+.composer.card.committing { box-shadow: inset 0 0 0 1px var(--line2); }
+.composer.card.committing textarea::placeholder { color: var(--cream); opacity: .7; font-variant-numeric: tabular-nums; }
 .composer-options input { margin: 0; accent-color: var(--cream); }
 .agent-picker { position: relative; min-width: 0; }
 .composer .agent-picker button { align-self: auto; }
@@ -566,3 +592,40 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 @media (max-width: 700px) { .composer .cbar .hint { display: none; } .composer-wrap { padding-inline: 14px; } }
 
 .agent-picker-chevron { display: block; flex: 0 0 12px; }
+
+.root-panels { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: stretch; }
+.root-panels > .card { min-width: 0; padding: 20px; }
+.root-panels h2 { margin: 0 0 14px; font-size: 20px; }
+.root-panels h2::before { display: none; }
+.root-card { display: flex; flex-direction: column; gap: 8px; }
+.root-card .actions { margin-top: auto; padding-top: 14px; }
+.root-card .path, .root-commit .err, .root-push-target { overflow-wrap: anywhere; }
+.root-commit { display: flex; flex-direction: column; gap: 12px; }
+.root-commit h2 { margin-bottom: 2px; }
+.root-change-summary { padding: 12px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.root-change-counts { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; font-size: 13px; }
+.root-change-summary details { margin-top: 10px; font-size: 12px; color: var(--dim); }
+.root-change-summary summary { cursor: pointer; }
+.root-changed-files { max-height: 150px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+.root-commit button { align-self: flex-start; }
+.root-commit .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (max-width: 850px) { .root-panels { grid-template-columns: minmax(0, 1fr); } }
+
+.root-branch-picker { min-width: 0; margin: 8px 0; }
+.root-branch-picker label { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; color: var(--dim); font-size: 12px; }
+.root-branch-picker select { width: 100%; max-width: 480px; min-width: 0; font-family: var(--mono); font-size: 12px; }
+.root-branch-picker .err { margin-top: 6px; overflow-wrap: anywhere; }
+
+.root-branch-picker { position: relative; width: 100%; max-width: 480px; }
+.root-branch-label { display: block; color: var(--dim); font-size: 12px; margin-bottom: 6px; }
+.root-branch-trigger { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; text-align: left; font-family: var(--mono); font-size: 12px; }
+.root-branch-trigger span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.root-branch-trigger svg { flex-shrink: 0; }
+.root-branch-popover { position: absolute; top: 100%; left: 0; width: 100%; z-index: 30; padding: 8px; border: 1px solid var(--line2); border-radius: 8px; background: var(--card); box-shadow: 0 10px 30px #0006; }
+.root-branch-popover input { width: 100%; margin-bottom: 6px; font-size: 12px; }
+.root-branch-results { max-height: 260px; overflow-y: auto; }
+.root-branch-option { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; padding: 9px 8px; border: none; background: transparent; text-align: left; font-size: 12px; }
+.root-branch-option span { overflow-wrap: anywhere; min-width: 0; }
+.root-branch-option small { color: var(--dim); flex-shrink: 0; font-size: 10px; }
+.root-branch-option:hover:not(:disabled), .root-branch-option:focus-visible, .root-branch-option[aria-pressed="true"] { background: var(--line); }
+.root-branch-empty { padding: 12px 8px; color: var(--dim); font-size: 12px; }

@@ -1,6 +1,7 @@
 import { app, safeStorage } from "electron";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { ensureRootWorktree } from "./rootWorktree";
 import type { State, Chat, Appearance } from "../shared/types";
 
 type Persisted = State & { secrets: Record<string, string> };
@@ -28,9 +29,11 @@ export class Store {
     // the CLI logins are always-present connectors; API keys are added on top
     for (const [id, provider, name] of [["login-codex", "codex", "Codex CLI login"], ["login-claude", "claude", "Claude Code login"]] as const)
       if (!this.data.keys.some((k) => k.id === id)) this.data.keys.unshift({ id, provider, name, phiAllowed: false, auth: "login" });
-    // Root scopes are opt-in; retain them and their chat IDs across restarts.
-    const roots = new Set(this.data.projects.map((p) => p.path));
-    this.data.worktrees = this.data.worktrees.filter((w) => w.root || !roots.has(w.path));
+    // Every project has a permanent chat scope at its existing checkout.
+    for (const p of this.data.projects) {
+      const existing = this.data.worktrees.find((w) => w.projectId === p.id && w.path === p.path);
+      ensureRootWorktree(this.data.worktrees, p, existing?.branch ?? "(unknown)");
+    }
     for (const w of this.data.worktrees) { w.title ??= w.name; w.archived ??= false; }
   }
 

@@ -44,3 +44,18 @@ test('opening Root leaves Git branches, worktrees, HEAD, and uncommitted files u
   assert.equal(root.path, dir);
   assert.deepEqual(snapshot(), before);
 });
+test('every repository gets its own persistent root, including legacy unmarked roots', () => {
+  const legacy = { id: 'legacy', projectId: project.id, path: project.path, branch: 'main', name: 'old', title: 'Old', archived: true };
+  const worktrees = [legacy];
+  const projects = [project, { ...project, id: 'second', path: '/second' }];
+  for (const p of projects) ensureRootWorktree(worktrees, p, 'main');
+  for (const p of projects) ensureRootWorktree(worktrees, p, 'feature');
+  assert.equal(worktrees.length, 2);
+  assert.equal(worktrees[0].id, 'legacy');
+  for (const p of projects) {
+    const roots = worktrees.filter((w) => w.projectId === p.id && w.root);
+    assert.equal(roots.length, 1);
+    assert.equal(roots[0].archived, false);
+    assert.equal(roots[0].path, p.path);
+  }
+});
