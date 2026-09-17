@@ -1,6 +1,7 @@
 import { app, safeStorage } from "electron";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { defaultConnector } from "../shared/defaultConnector";
 import { ensureRootWorktree } from "./rootWorktree";
 import type { State, Chat, Appearance } from "../shared/types";
 
@@ -18,6 +19,7 @@ export class Store {
       this.data = { ...empty(), ...JSON.parse(readFileSync(file(), "utf8")) };
     } catch {}
     for (const c of this.data.chats) {
+      if (c.sessionId) c.sessionKeyId ??= c.keyId;
       // running at shutdown, or a transcript that ends mid-turn (unanswered user message / tool call with no result) = dead
       const last = c.messages[c.messages.length - 1];
       const pendingTool = c.messages.some((m) => m.blocks.some((b) => b.type === "tool" && b.ok === undefined));
@@ -30,6 +32,7 @@ export class Store {
     // the CLI logins are always-present connectors; API keys are added on top
     for (const [id, provider, name] of [["login-codex", "codex", "Codex CLI login"], ["login-claude", "claude", "Claude Code login"]] as const)
       if (!this.data.keys.some((k) => k.id === id)) this.data.keys.unshift({ id, provider, name, phiAllowed: false, auth: "login" });
+    this.data.defaultKeyId = defaultConnector(this.data)?.id;
     // Every project has a permanent chat scope at its existing checkout.
     for (const p of this.data.projects) {
       const existing = this.data.worktrees.find((w) => w.projectId === p.id && w.path === p.path);
@@ -50,6 +53,7 @@ export class Store {
 
   // ponytail: full rewrite on every change; fine until transcripts get huge
   save() {
+    this.data.defaultKeyId = defaultConnector(this.data)?.id;
     mkdirSync(app.getPath("userData"), { recursive: true });
     writeFileSync(file(), JSON.stringify(this.data));
     const pub = this.public();

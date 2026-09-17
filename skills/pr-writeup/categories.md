@@ -3,6 +3,8 @@
 Paste this whole file into every fan-out agent. It mirrors the nine labels the CI reviewer
 (`scripts/ci/pr-review.ts`) uses, so a writeup and a bot review speak the same language.
 
+Each primary agent owns one changed file and checks every changed block for security, logic, redundancy, performance/reliability, style, tests, and comments. Follow callers, callees, and equivalent functions across the repository; the assigned file does not limit evidence gathering. Follow-up agents may investigate a specific question. Return coverage for each block and concern (or an evidence-based not-applicable reason), unresolved candidates, and findings. Do not run tests; inspect assertions and use current-head CI for execution evidence.
+
 Every finding has a **severity** (defects) *or* a **category** (everything else), never both
 buckets at once. A category item that has a nameable failure scenario is a defect — give it a
 severity and tag the category as its origin.
@@ -61,7 +63,7 @@ Shape: `file:line | deviation | peer file that shows the house way | fix`.
 ### 🧪 TESTS
 For each meaningful chunk of new logic: is it tested? **Coverage rarely sits next to the code** —
 grep `tests/` and `packages/` for the symbol *and its class/service* before claiming absence; a hit
-for `RetellService` covers `RetellService.placeCall`. No positive evidence of absence → no finding.
+for `RetellService` is only a lead, not proof that `RetellService.placeCall` or its changed paths are tested. Read the actual assertions and mocks. Identify the specific changed behavior left uncovered; record the search and inspected tests. Passing CI does not establish coverage.
 When you do flag, name the suite:
 - new SST infra (queue, Lambda, cron, bucket) → **smoke**, `tests/smoke/`, `pnpm test:smoke`
 - new backend logic (service, controller, cron, worker, model, util) → **standard**,
@@ -95,7 +97,7 @@ Shape: `file:line-range | why it's too much | the trimmed version`.
   types match.
 - **Do not reverse a deliberate refactor made in this same PR.**
 - **No verification findings.** "Worth confirming", "harmless but noting", "no action needed" —
-  that is scratch reasoning. If you argued yourself out of it, drop it.
+  is not a confirmed finding. Disproved claims need counterevidence in the ledger; unresolved claims return as OPEN instead of disappearing.
 - **Well-known crypto/auth primitives reject empty input by construction.** No "add an
   `if (!signature)` guard in case the SDK changes".
 - **Absence claims need positive evidence.** "No test", "unused", "duplicates" — you see a diff
@@ -104,7 +106,7 @@ Shape: `file:line-range | why it's too much | the trimmed version`.
 - **Prove the ordering claim before flagging a fail-fast throw.** "Breaks at import time" needs a
   module-scope call site; "may run before init" needs a concrete path. The guard's *condition*
   being wrong, or a telemetry caller that a throw would mask, is still fair game.
-- Work the PR body calls a follow-up; missing docs; ops work; merge-process advice; guards for
+- Deferred features alone; missing docs unless existing docs become misleading; ops work; merge-process advice; guards for
   states that cannot occur; "no test" for code with no test surface.
 
 ## Return format
@@ -116,6 +118,8 @@ DEFECT | file:line | severity | origin category or "-" | claim | what the code d
   failure scenario (inputs → wrong outcome) | smallest fix | ignore-if
 ITEM   | file:line | category | claim | detail per the category's Shape above
 GOOD   | file:line | what is genuinely well built and why it should survive a refactor
+COVERED | assigned block IDs / ranges | concern | callers/callees and evidence inspected
+OPEN   | file:line | candidate claim | evidence so far | missing evidence | next check
 ```
 
 Include a GOOD line per file where earned. Zero findings for a file is a normal answer.

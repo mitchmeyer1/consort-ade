@@ -19,7 +19,7 @@ Three files in this directory, each with one job:
   traps. Pasted whole into every fan-out agent.
 - `template.html` — the **only** stylesheet and section order the document may have.
 
-**Brief beats thorough-sounding.** Budget per item: ≤60 words a finding, ≤50 a flow,
+**Review broadly; write briefly.** Brevity limits the final prose, never the investigation or number of supported findings. Budget per item: ≤60 words a finding, ≤50 a flow,
 one short paragraph for the headline. One sentence that lands beats a paragraph that
 explains. Twenty real findings earn a long document; two earn a short one. Banned at any
 size: filler, hedging, restating the diff, or a second sentence saying what the first
@@ -46,9 +46,7 @@ refs/pull/<n>/head:refs/remotes/origin/pr/<n>` gets the code but not the descrip
 stop and ask Mitch to paste it. The body says what is out of scope and what the follow-up
 covers; without it you invent the author's intent and then find fault with the invention.
 
-**Then check it earns a document.** Give a verdict in chat and stop if the diff is under
-~50 lines with no new logic, or if its stated purpose is to try something somewhere
-low-stakes. A deliberate first step is not an incomplete feature.
+Review every changed block even for small or exploratory PRs. Respect explicitly deferred scope without overlooking defects in the code that ships. Scale the writeup to the results.
 
 - Pin the **review SHA** (PR head) and base — every `file:line` refers to it. Say so.
 - Later commits that invalidate this PR: `git log <base>..origin/<baseRefName> -- <key files>`
@@ -59,6 +57,9 @@ low-stakes. A deliberate first step is not an incomplete feature.
   the repo's own test layout (aligned-mono: `tests/ packages/` with `*.test.ts|*.spec.ts`;
   a Python repo: `tests/` with `test_*.py`):
   `grep -rln --include='*.test.ts' --include='*.spec.ts' -E '<NewSymbol|OtherSymbol>' tests/ packages/`.
+
+- Read CI at the start: `gh pr checks <n> --repo <owner>/<name>` and the check runs/status for the pinned head SHA. Record passed, failed, pending, missing, or inaccessible checks and their links. Do not report an older SHA's green checks as current.
+- **Do not run tests for this review.** Use CI results as execution evidence. Inspect test code and assertions separately: passing CI does not establish that changed behavior is covered. Pending or inaccessible CI is a stated limitation, not a reason to skip code review.
 
 ## Phase 1 — Flows
 
@@ -78,55 +79,77 @@ unattended — unattended flows have no reviewer as a backstop. Name the gates. 
 
 Every defect's "Example flow" must be an instance of one of these.
 
-## Phase 2 — fan out
+## Phase 2 — one review agent per changed file
 
-Batch the changed files (~4–6, same subsystem), one Agent each, **all in one message**.
-Plus specialists where the PR touches the area: **infra** (timeouts, memory, bundle size,
-native deps) and **frontend** (races, stale state, busy handling, a11y). `--fanout N` caps
-the total. Tests, style, comments, redundancy and logic are **not** specialists — every
-file agent covers all five categories for its own files, because those judgements need the
-file open, not a birds-eye view.
+Create a dedicated review agent for **each changed file**. Ten changed files means ten
+file agents, not three agents sharing groups of files. The coordinator maps scope,
+assigns work, verifies candidates, and writes the report. Use the runtime's agent tool;
+`--fanout N` limits concurrent agents, not total agents or coverage. Queue one-file tasks
+in waves within the runtime limit, releasing finished agents' slots as needed. Do not
+bundle files to fit that limit. If delegation is unavailable, disclose that limitation
+and the resulting partial coverage; never claim agents ran when they did not.
 
-Give each agent, in this order: repo (`owner/name`) + local root + PR number and review
-SHA · its files · the Flows map · the PR body · the relevant `CLAUDE.md` text · the test-coverage grep from Phase 0 · the **whole
-of `categories.md`**. Then the ask:
+Create `.consort/pr-review-coverage.md` before delegation. Pin the head/base SHA and list
+every changed file and block (hunk range, affected symbol), its agent/task ID, and status.
+Include deleted files, migrations, config, tests, and generated files. For generated or
+binary files, the file agent checks the source/generation contract or available metadata
+and records inspection limits. For deleted files, trace remaining callers and behavior.
 
-> Read every one of your files at the review SHA in full, plus any callee you need to
-> judge a call. Report per `categories.md` → Return format. A DEFECT needs a failure
-> scenario with inputs; an ITEM needs the fields its category's Shape names; a GOOD line
-> per file where earned. Lines you did not read do not exist.
+Each file agent reads every changed block, enclosing functions, and relevant before/after
+code. It checks **all** of the following for that file:
+- Security: authorization, tenant isolation, validation, secrets, sensitive-data handling.
+- Logic: inputs, state transitions, reachable paths, guards, errors, and repo architecture.
+  Follow callers and callees into other files to verify the actual end-to-end flow.
+- Redundancy: search the repository for existing equivalent functions and duplicated logic;
+  cite the other definition and verify it can be reused.
+- Performance and reliability: queries, bounds, concurrency, retries, idempotency, timeouts,
+  and partial failures. Trace caller limits and expected scale.
+- Style and comments: compare with repository rules and established peers; identify
+  misleading explanations and excess narration.
+- Tests: inspect assertions and mocks for changed behavior and error paths. Use pinned-head
+  CI as execution evidence; **do not run tests**.
 
-No speculation, no "consider extracting", no style nits dressed as bugs.
+The file boundary keeps assignments focused; it is not a boundary on evidence gathering.
+Require a block-by-concern coverage record with evidence or a concrete not-applicable
+reason. Agents return candidates and coverage, not HTML. Extend the flow map when their
+investigation reveals paths the coordinator missed. A large file may get extra agents for
+specific blocks, but retains its primary file owner. Add targeted cross-file or specialist
+agents when evidence needs further investigation; these supplement the file agents.
 
-## Phase 3 — verify, then cut
+Give **every assignment**: repo/local root, PR number, pinned head/base, assigned file and
+exact blocks (or the specific follow-up question), PR body, flow map, relevant repository
+instructions, test-search evidence, CI status, and the **entire `categories.md` brief**.
+Include its text, not only a path or summary. Require COVERED, DEFECT, ITEM, OPEN, and GOOD
+records as applicable. File agents cover every concern above; follow-up agents may focus
+on the specific unresolved question they receive.
 
-Re-open every cited `file:line` yourself at the review SHA. Drop what does not survive,
-downgrade what is milder than claimed, merge duplicates across agents. Anything resting on
-state you cannot see (a live column, a key policy) is an appendix question, not a claim.
+## Phase 3 — verify and reconcile
 
-Then sort: a DEFECT is **a defect in this diff the author can fix in this diff** and has a
-nameable trigger. An ITEM is a category finding with no failure scenario. An agent's DEFECT
-with no real trigger drops to an ITEM in its origin category or dies; an ITEM that turns out
-to have a trigger promotes to a DEFECT and keeps a category origin chip.
+Maintain a candidate ledger in `.consort/pr-review-coverage.md`: candidate ID, origin agent,
+location, claim, evidence, and disposition. Re-open cited lines at the pinned SHA and trace
+callers/guards before deciding. For each candidate record one of:
+- **confirmed defect** with reachable trigger and consequence;
+- **confirmed category item** with the category's required evidence (no runtime failure needed);
+- **duplicate** with a link to the retained candidate;
+- **disproved** with the specific guard, caller, assertion, or counterexample that rules it out;
+- **open** with the missing evidence and the next concrete check.
 
-### Not a finding
+Uncertainty is not disproof. Send unresolved candidates back for a bounded verification task,
+focused on the missing evidence. In particular, do not discard pagination or query-per-item
+concerns without checking bounds, callers, and expected scale. If the needed evidence remains
+unavailable, retain the candidate as an Appendix question, not as a verified defect. Never
+read production data or PHI to settle a review without the session's required authorization.
 
-These verify clean and are still worthless — cutting them is the most valuable thing this
-phase does. `categories.md` → False-positive traps is the full list; the ones that survive
-most often:
+A defect must be introduced or worsened by this diff and have a nameable trigger. A category
+item need not have a failure scenario: style, redundancy, comments, and test gaps remain
+first-class findings. Respect the PR's stated scope, but a follow-up note does not excuse a
+current reachable defect. Deduplicate the same root cause, not distinct issues in one file.
+Do not impose a finding quota or stop after the first confirmed defect.
 
-- Work the PR body calls a follow-up. The author already flagged it.
-- Missing docs, unless the PR makes an existing doc wrong.
-- Ops work that isn't code — add an alarm, a runbook, a checklist item.
-- Merge-process advice: squash vs merge, commit hygiene, branch naming.
-- "X is now a hard dependency." So is `DATABASE_URL`. Not a defect.
-- Guards for states that cannot occur. Two stages, both handled → a third stage is fiction.
-- "No test exists" without the Phase 0 grep coming back empty for the symbol *and* its class.
-- Consequence-only severity. If you cannot name who triggers it and why, there is no defect.
-
-Re-count. **Zero across every bucket is a normal answer** — say so in chat and write
-nothing. A document with slots for findings will grow findings to fill them; the template's
-"None found." line exists so an empty bucket costs one line, not an invented item.
+Before writing, reconcile every changed file, block, and applicable concern with its file agent’s returned evidence. An unfinished
+assignment means partial coverage; reassign it or disclose it. Record agent/task counts,
+coverage gaps, CI SHA/status, and unresolved candidates. No tests were run locally: say so.
+Zero findings is valid only as a result of completed investigation, never a substitute for it.
 
 ## Phase 4 — severity and category
 
@@ -137,7 +160,7 @@ definitions in `categories.md` → Severities, restated in the PR's own domain t
 
 ## Phase 5 — the document
 
-Only if anything survived. **Do not load `artifact-design`** — the design pass is done and
+Write the report after reconciliation, including when no confirmed findings remain. Use the Appendix for review coverage, CI evidence, and unresolved candidates. **Do not load `artifact-design`** — the design pass is done and
 frozen in `template.html`; loading it is where the drift came from.
 
 1. `cp template.html` to the scratchpad and fill every `{{slot}}`. Repeat the blocks marked
@@ -148,7 +171,7 @@ frozen in `template.html`; loading it is where the drift came from.
    wrong, not the template.
 3. Title is `PR <n> · <Short name>` — two to four plain words; prefix the repo name when it
    isn't aligned-mono (`dagster-snowflake PR 193 · Enrollment pingback`). Favicon is always `📋`.
-4. Publish with `Artifact`. Redeploying the same PR reuses the same scratchpad path.
+4. In Consort, save `.consort/pr-writeup.html` and link it. Use `Artifact` only when that tool is available. Do not post comments to GitHub unless requested.
 
 Section contract (all present, this order): Header · What it does / What ships today /
 Headline · Summary (severity tiles, then category tiles) · How to read this · Flows ·
@@ -168,7 +191,25 @@ Each **category** card carries only the fields the template gives it (Logic: gap
 Redundant: overlap + do · Style: house way with peer file + fix · Tests: costs + suite +
 the one test · Comments: the trimmed comment). No PR-comment block on category cards.
 
-Then give Mitch the link in one line.
+## Phase 6 — terminal summary and final artifact link
+
+After saving and checking the report, print a concise operational summary in the visible
+terminal/chat transcript, even when there are no findings. Derive counts from actual agent
+calls and returned coverage, not the plan. Include:
+- Reviewed PR and head/base SHA; files and changed blocks covered out of total.
+- Actual file-agent count, extra specialist/verification-agent count, total assignments,
+  and concurrency/waves used. Distinguish reused agents from new agents and retries.
+- One short line per agent: assigned file or question, concerns and cross-file flows checked,
+  completion status, and result. List failed, unavailable, or unfinished assignments.
+- Confirmed defects by severity, category items, duplicates/disproved candidates, and open
+  questions; state any remaining coverage gaps.
+- CI status for the reviewed SHA with check links, and “No tests run locally.”
+
+Put the same operational evidence in the report's Appendix. End the response with the
+clickable artifact link on its own line, after the summary:
+`[PR <n> review](<absolute-worktree-path>/.consort/pr-writeup.html)`.
+Use the real saved path (or the actual Artifact URL when available), never a placeholder or
+bare path. If report creation failed, state that failure instead of printing a broken link.
 
 ## Voice — plain English, not code narration
 
@@ -212,7 +253,7 @@ diff. If the plain paragraph and the code paragraph say the same thing, cut the 
 - No ClickUp IDs unless real and in the PR body.
 - Findings the author can act on today. No architecture essays.
 - Cutting weak findings beats padding the count. If the honest answer is 12, ship 12.
-  If it is 0, ship 0 and write no document.
+  If it is 0, report 0 with coverage and CI evidence.
 - Frozen-behind-a-flag write paths are reviewed as live code.
 - The template is law. A writeup that looks different from the last one is a bug.
 - Last pass: read the list as the author. Anything that earns "no shit" / "that's a

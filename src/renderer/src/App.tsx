@@ -1,6 +1,8 @@
+import { defaultConnector } from "../../shared/defaultConnector";
 import React, { useEffect, useRef, useState } from "react";
 import { MODELS, PHASES, type Api, type Block, type Chat, type CommitInfo, type Phase, type PtyState, type PermissionRequest, type Project, type RepoInfo, type RootStatus, type State, type Worktree, type WorktreeStatus } from "../../shared/types";
 import { chatStatus } from "../../shared/chatStatus";
+import { recentChats, recentWorktrees } from "../../shared/conversationOrder";
 import { Lockup, Mark } from "./Logo";
 import { artifactLinkAction, artifactLinks, chatArtifacts } from "../../shared/artifacts";
 import { marked } from "marked";
@@ -168,7 +170,7 @@ export function App() {
 
   };
   const toggle = (t: Tab) => setTab((cur) => (cur === t ? undefined : t));
-  const signIn = async (provider: "claude" | "codex") => {
+  const signIn = async (keyId: string) => {
     let sc = worktree ? { id: worktree.id, cwd: worktree.path } : null;
     if (!sc) {
       const p = project ?? state.projects[0];
@@ -180,7 +182,7 @@ export function App() {
     const tabs = termTabs.get(sc.id) ?? ["t1"];
     if (!tabs.includes("auth")) termTabs.set(sc.id, [...tabs, "auth"]);
     wantTab = "auth";
-    pendingCmd.set(`${sc.id}:auth`, await ade.authLoginCmd(provider));
+    pendingCmd.set(`${sc.id}:auth`, await ade.authLoginCmd(keyId));
     setTab("terminal", worktree ? viewKey : `worktree:${sc.id}`);
     const x = xterms.get(`${sc.id}:auth`);
     if (x) { const c = pendingCmd.get(x.id); if (c) { pendingCmd.delete(x.id); ade.ptyWrite(x.id, c + "\r"); } }
@@ -294,7 +296,7 @@ function ProjectNode({ project: p, state, sel, running, failed, onSelect, collap
 }) {
   const [showArchived, setShowArchived] = useState(false);
   const all = state.worktrees.filter((w) => w.projectId === p.id);
-  const wts = all.filter((w) => w.root || showArchived || !w.archived).sort((a, b) => Number(!!b.root) - Number(!!a.root));
+  const wts = recentWorktrees(all.filter((w) => w.root || showArchived || !w.archived), state.chats);
   const archivedN = all.filter((w) => w.archived).length;
   return (
     <div className="projnode">
@@ -325,7 +327,7 @@ function WorktreeNode({ wt, state, sel, running, failed, onSelect, collapsed, to
   collapsed: Record<string, boolean>; toggle: (id: string) => void;
 }) {
   const st = useStatus(wt.id);
-  const chats = state.chats.filter((c) => c.worktreeId === wt.id);
+  const chats = recentChats(state.chats.filter((c) => c.worktreeId === wt.id));
   const active = sel?.type === "worktree" && sel.id === wt.id;
   return (
     <div>
@@ -407,13 +409,13 @@ function ProjectPage({ project: p, state, openForm, onSelect }: { project: Proje
   const [showArchived, setShowArchived] = useState(false);
   useEffect(() => { ade.repoInfo(p.id).then(setInfo); }, [p.id]);
   const rootWorktree = state.worktrees.find((w) => w.projectId === p.id && w.root);
-  const wts = state.worktrees.filter((w) => w.projectId === p.id && !w.root && (showArchived || !w.archived));
+  const wts = recentWorktrees(state.worktrees.filter((w) => w.projectId === p.id && !w.root && (showArchived || !w.archived)), state.chats);
   const archivedN = state.worktrees.filter((w) => w.projectId === p.id && w.archived).length;
   const localBranches = new Set(state.worktrees.filter((w) => w.projectId === p.id).map((w) => w.branch));
   const [busyPr, setBusyPr] = useState<number>();
   // Review = ensure a worktree for the PR branch, then start a pr-writeup chat in it
   const review = async (pr: RepoInfo["prs"][number]) => {
-    const key = state.keys.find((k) => k.provider === "claude") ?? state.keys[0];
+    const key = defaultConnector(state);
     if (!key) return alert("Add a connector first (Settings)");
     setBusyPr(pr.number);
     try {
@@ -587,7 +589,7 @@ function RootCard({ wt, state, status, error, onRefresh, onSelect }: {
     window.addEventListener("focus", refresh);
     return () => { disposed = true; clearInterval(timer); window.removeEventListener("focus", refresh); };
   }, [wt.id, wt.branch, status?.branch, status?.commit, status?.dirty, busy]);
-  const chats = state.chats.filter((c) => c.worktreeId === wt.id);
+  const chats = recentChats(state.chats.filter((c) => c.worktreeId === wt.id));
   const running = chats.some((c) => c.running);
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -632,7 +634,7 @@ function RootCard({ wt, state, status, error, onRefresh, onSelect }: {
 
 function WorktreeCard({ wt, state, onSelect, onCheckout }: { wt: Worktree; state: State; onSelect: (s: Sel) => void; onCheckout?: () => void }) {
   const st = useStatus(wt.id);
-  const chats = state.chats.filter((c) => c.worktreeId === wt.id);
+  const chats = recentChats(state.chats.filter((c) => c.worktreeId === wt.id));
   const running = chats.filter((c) => c.running).length;
   return (
     <div className={"card click" + (wt.archived ? " dim" : "")} onClick={() => onSelect({ type: "worktree", id: wt.id })}>
@@ -677,12 +679,12 @@ function WorktreePage({ wt, state, openForm, onSelect }: { wt: Worktree; state: 
   };
   const [form, setForm] = useState(openForm);
   useEffect(() => { if (openForm) setForm(true); }, [openForm]);
-  const chats = state.chats.filter((c) => c.worktreeId === wt.id);
-  const siblings = state.worktrees.filter((w) => w.projectId === wt.projectId && w.id !== wt.id && !w.archived);
+  const chats = recentChats(state.chats.filter((c) => c.worktreeId === wt.id));
+  const siblings = recentWorktrees(state.worktrees.filter((w) => w.projectId === wt.projectId && w.id !== wt.id && !w.archived), state.chats);
   const needKey = () => (state.keys.length ? false : (alert("Add a connector first (Settings)"), true));
   const prWriteup = async () => {
     if (needKey()) return;
-    const k = state.keys.find((k) => k.provider === "claude") ?? state.keys[0];
+    const k = defaultConnector(state);
     const id = await ade.addChat(wt.id, k.id, { name: `PR write-up · ${wt.title}` });
     onSelect({ type: "chat", id });
     ade.send(id, await ade.skillPrompt("pr-writeup", wt.id)).catch((e) => alert(e.message));
@@ -766,7 +768,7 @@ function GitCard({ st }: { st: WorktreeStatus }) {
 
 function SiblingCard({ wt, state, onSelect }: { wt: Worktree; state: State; onSelect: (s: Sel) => void }) {
   const st = useStatus(wt.id);
-  const chats = state.chats.filter((c) => c.worktreeId === wt.id);
+  const chats = recentChats(state.chats.filter((c) => c.worktreeId === wt.id));
   const running = chats.filter((c) => c.running).length;
   const done = chats.filter((c) => c.phase === "complete").length;
   return (
@@ -976,6 +978,15 @@ function AgentPicker({ chat, keys }: { chat: Chat; keys: State["keys"] }) {
 }
 
 function ChatPane({ chat, worktree, keys, perms, answer, onOpenMd }: { chat: Chat; worktree?: Worktree; keys: State["keys"]; perms: PermissionRequest[]; answer: (id: string, ok: boolean) => void; onOpenMd: (p: string) => void }) {
+  const [errorDetails, setErrorDetails] = useState<string>();
+  const [copyStatus, setCopyStatus] = useState("");
+  useEffect(() => { setErrorDetails(undefined); setCopyStatus(""); }, [chat.id]);
+  useEffect(() => {
+    if (errorDetails === undefined) return;
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") setErrorDetails(undefined); };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [errorDetails]);
   const [codeModes, setCodeModes] = useState<Record<string, boolean>>({});
   const code = !!worktree && !!codeModes[chat.id];
   const [text, setText] = useState("");
@@ -1042,10 +1053,22 @@ function ChatPane({ chat, worktree, keys, perms, answer, onOpenMd }: { chat: Cha
       </div>
       {!chat.running && (chat.interrupted || chat.error) && (
         <div className="resume">
-          <span>{chat.error ? <>Last run failed: <span className="err">{chat.error}</span></> : "This chat was interrupted when the app closed."}</span>
+          {chat.error ? <button className="resume-error" title="View full error details" onClick={() => { setErrorDetails(chat.error); setCopyStatus(""); }}>
+            <span>Last run failed: <span className="err">{chat.error}</span></span><span className="error-details-link">View details</span>
+          </button> : <span>This chat was interrupted when the app closed.</span>}
           <button className="primary" onClick={() => ade.continueChat(chat.id).catch((e) => alert(e.message))}>Continue where it left off</button>
         </div>
       )}
+      {errorDetails !== undefined && <Dialog title="Run error details" onClose={() => setErrorDetails(undefined)} footer={<>
+        <span role="status">{copyStatus}</span>
+        <button onClick={async () => {
+          try { await navigator.clipboard.writeText(errorDetails); setCopyStatus("Copied"); }
+          catch { setCopyStatus("Could not copy. Select and copy the text below."); }
+        }}>Copy error</button>
+        <button className="primary" onClick={() => setErrorDetails(undefined)}>Close</button>
+      </>}>
+        <pre className="run-error-details" tabIndex={0} aria-label="Full error details">{errorDetails}</pre>
+      </Dialog>}
       {files.length > 0 && (
         <div className="chips">{files.map((f) => <span key={f} className="chip">📎 {f.split("/").pop()}<button onClick={() => setFiles((x) => x.filter((y) => y !== f))}>×</button></span>)}</div>
       )}
@@ -1098,7 +1121,7 @@ function ChatPane({ chat, worktree, keys, perms, answer, onOpenMd }: { chat: Cha
 /* ---------- drawer ---------- */
 
 type Scope = { id: string; cwd: string; title: string };
-function Drawer({ tab, state, chat, worktree, scope, ptys, width, file, onEdit, onView, onSignIn, onClose }: { tab: Tab; state: State; chat?: Chat; worktree?: Worktree; scope?: Scope; ptys: PtyState[]; width: number; file?: string; onEdit: (p: string) => void; onView: (p: string) => void; onSignIn: (p: "claude" | "codex") => void; onClose: () => void }) {
+function Drawer({ tab, state, chat, worktree, scope, ptys, width, file, onEdit, onView, onSignIn, onClose }: { tab: Tab; state: State; chat?: Chat; worktree?: Worktree; scope?: Scope; ptys: PtyState[]; width: number; file?: string; onEdit: (p: string) => void; onView: (p: string) => void; onSignIn: (keyId: string) => void; onClose: () => void }) {
   return (
     <div className="drawer" style={{ width }}>
       <div className="dhead">
@@ -1394,7 +1417,7 @@ function Diff({ worktree }: { worktree: Worktree }) {
   );
 }
 
-function Settings({ state, onSignIn }: { state: State; onSignIn: (p: "claude" | "codex") => void }) {
+function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string) => void }) {
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
   const [provider, setProvider] = useState<"claude" | "codex">("claude");
@@ -1402,24 +1425,30 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (p: "claude" | 
   const [auth, setAuth] = useState<"login" | "key">("key");
   const [phi, setPhi] = useState(false);
   const [status, setStatus] = useState<Record<string, { loggedIn: boolean; detail: string }>>({});
-  const refreshStatus = () => { for (const p of ["claude", "codex"] as const) ade.authStatus(p).then((r) => setStatus((s) => ({ ...s, [p]: r }))); };
-  useEffect(() => { refreshStatus(); const t = setInterval(refreshStatus, 8000); return () => clearInterval(t); }, []);
-  const Status = ({ p }: { p: "claude" | "codex" }) => {
+  // status is per connector: each extra CLI login has its own config dir and therefore its own sign-in state
+  const loginIds = state.keys.filter((k) => k.auth === "login").map((k) => k.id).join("|");
+  const refreshStatus = () => { for (const k of state.keys) if (k.auth === "login") ade.authStatus(k.id).then((r) => setStatus((s) => ({ ...s, [k.id]: r }))); };
+  useEffect(() => { refreshStatus(); const t = setInterval(refreshStatus, 8000); return () => clearInterval(t); }, [loginIds]);
+  const Status = ({ p }: { p: string }) => {
     const st = status[p];
     return <span className={"m status " + (st?.loggedIn ? "ok" : "bad")}>{!st ? "checking…" : (st.loggedIn ? "● signed in" : "○ ") + (st.detail ? ` ${st.detail}` : "")}</span>;
   };
   const add = async () => {
-    await ade.addKey(name || (auth === "login" ? `${provider} login` : provider), provider, auth === "key" ? key : "", phi);
+    const n = state.keys.filter((k) => k.provider === provider && k.auth === "login").length + 1;
+    await ade.addKey(name || (auth === "login" ? `${provider === "claude" ? "Claude Code" : "Codex CLI"} login ${n}` : provider), provider, auth === "key" ? key : "", phi, auth).catch((e) => alert(e.message));
     setName(""); setKey(""); setPhi(false); setAdding(false);
   };
   return (
     <>
       <div className="card">
-        <h4><Ico n="fleur" />AI connectors <button className="icon" title="Add an API key" onClick={() => setAdding(true)}>＋</button></h4>
+        <h4><Ico n="fleur" />AI connectors <button className="icon" title="Add a connector (API key or another CLI login)" onClick={() => setAdding(true)}>＋</button></h4>
         {state.keys.map((k) => (
           <div key={k.id} className="krow">
             <span className="grow">{k.name} <span className="badge">{k.provider}</span> <span className="badge" title={k.auth === "login" ? "Uses the provider CLI's own sign-in (your subscription)" : "API key, billed per token"}>{k.auth === "login" ? "terminal login" : "api key"}</span>
-              {k.auth === "login" && <div><Status p={k.provider} /> {status[k.provider] && !status[k.provider].loggedIn && <button className="signin" onClick={() => onSignIn(k.provider)}>Sign in</button>} <button className="icon" title="Re-check" onClick={refreshStatus}>↻</button></div>}</span>
+              {k.auth === "login" && <div><Status p={k.id} /> {status[k.id] && !status[k.id].loggedIn && <button className="signin" onClick={() => onSignIn(k.id)}>Sign in</button>} {status[k.id]?.loggedIn && k.configDir && <button className="signin" title="Sign in again as a different account" onClick={() => onSignIn(k.id)}>Switch account</button>} <button className="icon" title="Re-check" onClick={refreshStatus}>↻</button></div>}</span>
+            <label className="check" title="Used for built-in PR reviews. Select another connector to change the default." style={{ color: "var(--dim)", fontSize: 12 }}>
+              <input type="checkbox" checked={defaultConnector(state)?.id === k.id} onChange={() => ade.setDefaultKey(k.id).catch((e) => alert(e.message))} /> Default
+            </label>
             <label className="check" style={{ color: "var(--dim)", fontSize: 12 }}>
               <input type="checkbox" checked={k.phiAllowed} onChange={(e) => ade.setKeyPhi(k.id, e.target.checked)} /> PHI allowed
             </label>
@@ -1444,7 +1473,7 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (p: "claude" | 
         </div>
       </div>
       {adding && (
-        <Dialog title="Add an API key" onClose={() => setAdding(false)} footer={<>
+        <Dialog title="Add a connector" onClose={() => setAdding(false)} footer={<>
           <button onClick={() => setAdding(false)}>Cancel</button>
           <button className="primary" disabled={auth === "key" && !key} onClick={add}>Add</button>
         </>}>
@@ -1455,9 +1484,17 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (p: "claude" | 
                 <option value="codex">codex</option>
               </select>
             </Field>
-            <Field label="Label" optional><input placeholder={auth === "login" ? `${provider} login` : "e.g. claude-phi"} value={name} onChange={(e) => setName(e.target.value)} autoFocus /></Field>
+            <Field label="Sign-in method">
+              <div className="seg">
+                <button className={auth === "key" ? "on" : ""} onClick={() => setAuth("key")}>api key</button>
+                <button className={auth === "login" ? "on" : ""} onClick={() => setAuth("login")}>terminal login</button>
+              </div>
+            </Field>
           </div>
-          <div className="m">The terminal logins (Claude Code, Codex CLI) are already listed as built-in connectors; this adds a separate API key, e.g. for PHI-approved billing.</div>
+          <Field label="Label" optional><input placeholder={auth === "login" ? `e.g. ${provider} work account` : "e.g. claude-phi"} value={name} onChange={(e) => setName(e.target.value)} autoFocus /></Field>
+          <div className="m">{auth === "login"
+            ? "Adds another CLI login for this provider with its own credentials, so you can sign in to a second account (say, work and personal) and pick one per chat. The built-in login keeps using the CLI's default sign-in. After adding it, press Sign in to run the login in a terminal tab."
+            : "Adds a separate API key, billed per token, e.g. for PHI-approved billing. The terminal logins are listed as built-in connectors above."}</div>
           {auth === "key" && (
             <Field label="Key" info="Encrypted at rest via macOS keychain.">
               <input type="password" placeholder="sk-…" value={key} onChange={(e) => setKey(e.target.value)} />

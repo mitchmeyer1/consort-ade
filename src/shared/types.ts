@@ -6,7 +6,8 @@ export const MODELS: Record<Provider, string[]> = {
   codex: ["gpt-6-astra"], // ponytail: the ChatGPT-login default as of codex 0.154; add others as you use them
 };
 
-export type ApiKey = { id: string; name: string; provider: Provider; phiAllowed: boolean; auth: "login" | "key" };
+/** configDir: extra CLI logins keep their own credentials there (CLAUDE_CONFIG_DIR / CODEX_HOME); the built-in login uses the CLI default */
+export type ApiKey = { id: string; name: string; provider: Provider; phiAllowed: boolean; auth: "login" | "key"; configDir?: string };
 export type Project = { id: string; name: string; path: string; defaultBase: string; baseSetByUser?: boolean };
 export type Worktree = { id: string; projectId: string; name: string; title: string; path: string; branch: string; archived: boolean; root?: boolean };
 export type PrInfo = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; draft: boolean; url: string; title: string; review: string; checks: "pass" | "fail" | "pending" | null };
@@ -28,6 +29,7 @@ export type Chat = {
   keyId: string;
   model: string;
   sessionId?: string;
+  sessionKeyId?: string; // connector that owns the provider session
   phase: Phase;
   autoApprove: boolean;
   running: boolean;
@@ -36,6 +38,7 @@ export type Chat = {
   unreadCompletion?: boolean;
   permissions?: PermissionRequest[];
   messages: Message[];
+  lastChattedAt?: number;
   queuedMessages?: { id: string; text: string; files: string[] }[];
   queuePaused?: boolean;
 };
@@ -54,7 +57,7 @@ export type Job = { id: string; scopeId: string; termId: string; cwd: string; cm
 export type PtyState = { id: string; scopeId: string; termId: string; running: boolean; failed: boolean };
 export type CommitInfo = { files: string; changed: number; log: { hash: string; subject: string; author: string; age: string }[]; branch: string; ahead: number };
 export type Appearance = { theme: "dark" | "light" | "auto"; background: "opaque" | "frost" | "frost2" };
-export type State = { projects: Project[]; worktrees: Worktree[]; chats: Chat[]; keys: ApiKey[]; appearance: Appearance };
+export type State = { projects: Project[]; worktrees: Worktree[]; chats: Chat[]; keys: ApiKey[]; defaultKeyId?: string; appearance: Appearance };
 export type PermissionRequest = { id: string; chatId: string; tool: string; input: unknown };
 
 export type Api = {
@@ -102,7 +105,8 @@ export type Api = {
   continueChat(id: string): Promise<void>;
   setPhiMode(id: string, on: boolean): Promise<void>;
   stop(chatId: string): Promise<void>;
-  addKey(name: string, provider: Provider, key: string, phiAllowed: boolean): Promise<void>;
+  addKey(name: string, provider: Provider, key: string, phiAllowed: boolean, auth?: "login" | "key"): Promise<void>;
+  setDefaultKey(id: string): Promise<void>;
   setKeyPhi(id: string, on: boolean): Promise<void>;
   removeKey(id: string): Promise<void>;
   onPermission(cb: (r: PermissionRequest) => void): () => void;
@@ -124,8 +128,8 @@ export type Api = {
   effectiveTheme(): Promise<"dark" | "light">;
   onTheme(cb: (t: "dark" | "light") => void): () => void;
   repoInfo(projectId: string): Promise<RepoInfo>;
-  authStatus(provider: Provider): Promise<{ loggedIn: boolean; detail: string }>;
-  authLoginCmd(provider: Provider): Promise<string>;
+  authStatus(keyId: string): Promise<{ loggedIn: boolean; detail: string }>;
+  authLoginCmd(keyId: string): Promise<string>;
   commitInfo(worktreeId: string): Promise<CommitInfo>;
   commit(worktreeId: string, message: string): Promise<string>;
   suggestCommit(worktreeId: string): Promise<string>;

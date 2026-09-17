@@ -8,11 +8,11 @@ import { ensureRootWorktree, isRootWorktree } from "./rootWorktree";
 import * as agents from "./agents";
 import { askOnce, humanize, suggestTitle } from "./namer";
 import { commitFromChat } from "./commitChat";
-import { authStatus, claudeBin, codexBin } from "./auth";
+import { authLoginCmd, authStatus } from "./auth";
 import * as ptys from "./ptys";
 import { chatStatus } from "../shared/chatStatus";
 import { MODELS, type Api, type Appearance } from "../shared/types";
-import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { homedir } from "node:os";
 
@@ -290,7 +290,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     if ([".docx", ".xlsx", ".pptx", ".zip"].includes(ext)) return { kind: "unsupported" as const, content: "Preview unavailable for this file type. Use Show in Finder to open it in its application." };
     return { kind: ext === ".md" ? "markdown" as const : [".html", ".htm"].includes(ext) ? "html" as const : "text" as const, content: readFileSync(path, "utf8") };
   },
-  authStatus: (provider) => authStatus(provider),
+  authStatus: (keyId: string) => authStatus(keyId),
   commitInfo: (id: string) => git.commitInfo(wt(id).path),
   commit: async (id: string, message: string) => { const r = await git.commit(wt(id).path, message); statusCache.delete(id); return r; },
   suggestCommit: async (id: string) => {
@@ -304,7 +304,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     catch (error) { if (chat) { chat.queuePaused = true; store.save(); } throw error; }
     finally { if (chat) { statusCache.delete(chat.worktreeId); void agents.flushQueued(chatId); } }
   },
-  authLoginCmd: (provider) => (provider === "claude" ? `${JSON.stringify(claudeBin())} auth login --claudeai` : `${JSON.stringify(codexBin())} login`),
+  authLoginCmd: (keyId: string) => authLoginCmd(keyId),
   listFiles: (id: string) => git.listFiles(wt(id).path),
   readFile: (id: string, rel: string) => git.readFile(wt(id).path, rel),
   writeFile: (id: string, rel: string, content: string) => git.writeFile(wt(id).path, rel, content),
@@ -381,14 +381,16 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     const r = await dialog.showOpenDialog(win, { properties: ["openFile", "multiSelections"] });
     return r.canceled ? [] : r.filePaths;
   },
-  setChatKey: (id: string, keyId: string) => {
-    store.chat(id).keyId = keyId;
-    store.save();
-  },
+  setChatKey: (id: string, keyId: string) => agents.switchAgent(id, keyId, store.chat(id).model),
   switchAgent: (id: string, keyId: string, model: string) => agents.switchAgent(id, keyId, model),
   continueChat: (id: string) => agents.continueChat(id),
   setPhiMode: (id: string, on: boolean) => {
     agents.setPhiMode(store.chat(id), on, "manual");
+    store.save();
+  },
+  setDefaultKey: (id: string) => {
+    if (!store.data.keys.some((key) => key.id === id)) throw new Error("Connector not found.");
+    store.data.defaultKeyId = id;
     store.save();
   },
   setKeyPhi: (id: string, on: boolean) => {
@@ -396,14 +398,25 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     store.save();
   },
   stop: (id: string) => agents.stop(id),
-  addKey: (name: string, provider, key: string, phiAllowed: boolean) => {
+  addKey: (name: string, provider, key: string, phiAllowed: boolean, auth?: "login" | "key") => {
     const id = randomUUID();
-    store.data.keys.push({ id, name, provider, phiAllowed, auth: key ? "key" : "login" });
-    if (key) store.setSecret(id, key);
+    auth ??= key ? "key" : "login";
+    if (auth === "key") {
+      if (!key) throw new Error("Enter an API key.");
+      store.data.keys.push({ id, name, provider, phiAllowed, auth });
+      store.setSecret(id, key);
+    } else {
+      // a second CLI login for the same provider: give it a private config dir so its credentials don't collide with the built-in one
+      const configDir = join(app.getPath("userData"), "logins", id);
+      mkdirSync(configDir, { recursive: true });
+      store.data.keys.push({ id, name, provider, phiAllowed, auth, configDir });
+    }
     store.save();
   },
   removeKey: (id: string) => {
     if (id.startsWith("login-")) return;
+    const key = store.data.keys.find((k) => k.id === id);
+    if (key?.configDir && key.configDir.startsWith(join(app.getPath("userData"), "logins"))) rmSync(key.configDir, { recursive: true, force: true });
     store.data.keys = store.data.keys.filter((k) => k.id !== id);
     delete store.data.secrets[id];
     store.save();
@@ -412,10 +425,11 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   skillPrompt: (name: string, worktreeId: string, args?: string) => {
     const dir = join(app.getAppPath(), "skills", name);
     const skill = readFileSync(join(dir, "SKILL.md"), "utf8").replace(/^---[\s\S]*?---\n/, "");
+    const brief = name === "pr-writeup" ? `\n\n## Complete review agent brief — include in every delegated assignment\n\n${readFileSync(join(dir, "categories.md"), "utf8")}` : "";
     return `Run the following skill${args ? ` with argument: ${args}` : " for the current branch"} in ${wt(worktreeId).path}. Its sibling files live in ${dir}.
-The Artifact tool is not available here: write the finished HTML to .consort/pr-writeup.html in the worktree and tell me the path.
+The Artifact tool is not available here: write the finished HTML to .consort/pr-writeup.html in the worktree. Print the operational review summary in the terminal/chat, then end with a clickable Markdown link to the saved HTML using its absolute path.
 
-${skill}`;
+${skill}${brief}`;
   },
   runCommand: (worktreeId: string, cmd: string) => git.runCommand(wt(worktreeId).path, cmd),
   diff: (worktreeId: string) => git.diff(wt(worktreeId).path),

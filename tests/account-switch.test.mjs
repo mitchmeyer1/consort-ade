@@ -1,0 +1,103 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import ts from 'typescript';
+const require = createRequire(import.meta.url);
+const compiled = ts.transpileModule(readFileSync(new URL('../src/main/agents.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText;
+function fixture() {
+  const chat = { id: 'chat', worktreeId: 'wt', provider: 'claude', keyId: 'personal', model: 'model', sessionId: 'old-session', sessionKeyId: 'personal', phase: 'waiting', messages: [{ role: 'user', blocks: [{ type: 'text', text: 'Fix the dropdown contrast' }] }] };
+  const keys = [{ id: 'personal', provider: 'claude', phiAllowed: false }, { id: 'work', provider: 'claude', phiAllowed: true, configDir: '/isolated/work' }];
+  const calls = [];
+  const store = { data: { chats: [chat], keys, worktrees: [{ id: 'wt', path: '/nonexistent-test-worktree' }] }, chat: () => chat, save() {}, getSecret: () => '' };
+  const mocks = {
+    './store': { store },
+    './auth': { loginEnv: key => ({ CLAUDE_CONFIG_DIR: key.configDir ?? '/personal' }) },
+    './agentEnvironment': { TESTING_PROMPT: '', agentEnvironment: (_, env) => env },
+    './agentBrowser': { startAgentBrowser: async () => ({ prompt: '', close: async () => {} }) },
+    '../shared/types': { PHASES: [] },
+    '@openai/codex-sdk': { Codex: class {
+      startThread() { return this.resumeThread(); }
+      resumeThread() { return { runStreamed: async () => ({ events: (async function* () {
+        yield { type: 'error', message: 'Account quota exhausted; switch accounts.' };
+        yield { type: 'turn.failed', error: { message: 'Account quota exhausted; switch accounts.' } };
+        throw new Error('Codex Exec exited with code 1: Reading prompt from stdin...');
+      })() }) }; }
+    } },
+    '@anthropic-ai/claude-agent-sdk': { query: args => (async function* () {
+      calls.push(args);
+      yield { type: 'system', subtype: 'init', session_id: 'new-session' };
+    })() },
+    'node:child_process': { execFile: (_cmd, _args, _opts, cb) => cb(null, ''), execFileSync: () => { throw new Error('no git fixture'); } },
+  };
+  const mod = { exports: {} };
+  new Function('require', 'module', 'exports', compiled)(name => mocks[name] ?? require(name), mod, mod.exports);
+  const send = async text => {
+    await mod.exports.send(chat.id, text);
+    for (let i = 0; i < 100 && (chat.running || !calls.length); i++) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(chat.running, false);
+    assert.equal(chat.error, undefined);
+    assert.equal(calls.length, 1);
+    return calls[0];
+  };
+  return { agents: mod.exports, chat, calls, send };
+}
+test('same-provider account switch starts a fresh session with history and the selected credentials', async () => {
+  const { agents, chat, send } = fixture();
+  await agents.switchAgent(chat.id, 'work', 'model');
+  assert.equal(chat.sessionId, undefined);
+  const call = await send('Continue');
+  assert.equal(call.options.resume, undefined);
+  assert.equal(call.options.env.CLAUDE_CONFIG_DIR, '/isolated/work');
+  assert.match(call.prompt, /Fix the dropdown contrast/);
+  assert.match(call.prompt, /Current user message:\nContinue/);
+  assert.equal(chat.messages.at(-1).blocks[0].text, 'Continue');
+  assert.equal(chat.sessionKeyId, 'work');
+});
+test('model-only change preserves the same-account session', async () => {
+  const { agents, chat, send } = fixture();
+  await agents.switchAgent(chat.id, 'personal', 'another-model');
+  const call = await send('Continue');
+  assert.equal(call.options.resume, 'old-session');
+  assert.equal(call.options.model, 'another-model');
+});
+test('automatic PHI connector switch does not resume another account session', async () => {
+  const { chat, send } = fixture();
+  const call = await send('Check the patient data');
+  assert.equal(chat.keyId, 'work');
+  assert.equal(call.options.resume, undefined);
+  assert.match(call.prompt, /Fix the dropdown contrast/);
+});
+test('an existing missing-session error recovers on the next message', async () => {
+  const { chat, send } = fixture();
+  chat.error = 'No conversation found with session ID: old-session';
+  const call = await send('Continue');
+  assert.equal(call.options.resume, undefined);
+  assert.match(call.prompt, /Fix the dropdown contrast/);
+});
+test('unrelated failures retain the session', async () => {
+  const { chat, send } = fixture();
+  chat.error = 'Rate limit exceeded';
+  assert.equal((await send('Continue')).options.resume, 'old-session');
+});
+
+test('Continue recovers a missing session with a transcript handoff', async () => {
+  const { agents, chat, calls } = fixture();
+  chat.error = "Couldn't find the session old-session";
+  await agents.continueChat(chat.id);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.resume, undefined);
+  assert.match(calls[0].prompt, /Fix the dropdown contrast/);
+  assert.equal(chat.error, undefined);
+});
+
+test('Codex provider diagnostic survives a later SDK process-exit exception', async () => {
+  const { agents, chat } = fixture();
+  chat.provider = 'codex';
+  await agents.send(chat.id, 'Continue', [], { silent: true });
+  assert.equal(chat.error, 'Account quota exhausted; switch accounts.\n\nCodex Exec exited with code 1: Reading prompt from stdin...');
+  assert.equal(chat.running, false);
+  assert.equal(chat.queuePaused, true);
+});

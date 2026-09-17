@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
-import { appendFileSync, copyFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFile, execFileSync } from "node:child_process";
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { Codex } from "@openai/codex-sdk";
 import { store } from "./store";
 import { startAgentBrowser } from "./agentBrowser";
 import { agentEnvironment, isInstallCommand, TESTING_PROMPT } from "./agentEnvironment";
+import { loginEnv } from "./auth";
 import { PHASES, type Chat, type Block, type Phase, type PermissionRequest } from "../shared/types";
 
 // ponytail: phase tracked via text markers so claude + codex share one mechanism
@@ -37,7 +38,10 @@ export function setPhiMode(chat: Chat, on: boolean, reason?: string) {
   const note = next
     ? `PHI mode ${on ? "on" : "off"} — switched to key "${next.name}"${reason ? ` (${reason})` : ""}.`
     : `No ${on ? "PHI-approved" : "non-PHI"} ${chat.provider} key configured — add one in Settings.`;
-  if (next) chat.keyId = next.id;
+  if (next) {
+    if (chat.sessionId) chat.sessionKeyId ??= chat.keyId;
+    chat.keyId = next.id;
+  }
   chat.messages.push({ id: randomUUID(), role: "system", blocks: [{ type: "text", text: note }], ts: Date.now() });
   return !!next;
 }
@@ -72,21 +76,56 @@ export function stop(chatId: string) {
 export async function stopAndWait(chatId: string) {
   stop(chatId);
   for (let i = 0; i < 100 && store.chat(chatId).running; i++) await new Promise((r) => setTimeout(r, 100));
+  if (store.chat(chatId).running) throw new Error("The agent is still stopping. Try switching again once it has stopped.");
 }
 
-// compact transcript for handing a conversation to a different provider (deterministic, most recent kept)
+// Bound transport input independently of the provider's token/context budget.
+export const PROMPT_CHAR_BUDGET = 120_000;
+export function isContextSizeError(message: string) {
+  return /input_too_large|context_length_exceeded|maximum context length|context window[^\n]*(?:exceed|full)|Input exceeds the maximum length|prompt is too long/i.test(message);
+}
+
+function excerpt(text: string, cap: number) {
+  if (text.length <= cap) return text;
+  const marker = "\n…[middle omitted; full text archived]…\n";
+  const head = Math.floor((cap - marker.length) / 3);
+  return text.slice(0, head) + marker + text.slice(-(cap - marker.length - head));
+}
+
+function archiveContext(cwd: string, content: string, extension: string) {
+  const dir = join(cwd, ".consort", "context");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${randomUUID()}.${extension}`);
+  writeFileSync(path, content, { mode: 0o600 });
+  return path;
+}
+
+export function boundedPrompt(cwd: string, text: string) {
+  if (text.length <= PROMPT_CHAR_BUDGET) return text;
+  const path = archiveContext(cwd, text, "txt");
+  const notice = `ADE shortened this oversized input. Full input: ${path}. Read needed sections in bounded chunks before acting; omitted text may contain requirements. Do not load the entire archive at once.\n\n`;
+  return notice + excerpt(text, PROMPT_CHAR_BUDGET - notice.length);
+}
+
+// Preserve the original task as well as recent decisions; never change the stored chat.
 export function transcriptDigest(chat: Chat, cap = 9000) {
-  const lines: string[] = [];
-  for (const m of chat.messages) {
-    if (m.role === "system") continue;
-    const parts = m.blocks.map((b) => (b.type === "text" ? b.text.trim() : `[tool ${b.name}: ${b.input.split("\n")[0].slice(0, 120)}${b.ok === false ? " → failed" : ""}]`)).filter(Boolean);
-    if (!parts.length) continue;
-    const body = parts.join("\n");
-    lines.push(`${m.role === "user" ? "USER" : "ASSISTANT"}:\n${body.length > 1200 ? body.slice(0, 1200) + " …[truncated]" : body}`);
-  }
-  let out = lines.join("\n\n");
-  if (out.length > cap) out = "…[earlier conversation omitted]\n\n" + out.slice(-cap);
-  return out;
+  const lines = chat.messages.filter(m => m.role !== "system").map(m => {
+    const parts = m.blocks.map(b => b.type === "text" ? b.text.trim() : `[tool ${b.name}: ${b.input.split("\n")[0].slice(0, 120)}${b.ok === false ? " → failed" : ""}]`).filter(Boolean);
+    return parts.length ? `${m.role.toUpperCase()}:\n${excerpt(parts.join("\n"), 2400)}` : "";
+  }).filter(Boolean);
+  if (lines.join("\n\n").length <= cap) return lines.join("\n\n");
+  const anchor = excerpt(lines[0], Math.floor(cap / 3));
+  const marker = "\n\n…[older messages omitted]…\n\n";
+  return anchor + marker + lines.slice(1).join("\n\n").slice(-(cap - anchor.length - marker.length));
+}
+
+function contextHandoff(chat: Chat, cwd: string) {
+  const path = archiveContext(cwd, JSON.stringify(chat.messages), "json");
+  chat.sessionId = undefined;
+  chat.sessionKeyId = undefined;
+  chat.messages.push({ id: randomUUID(), role: "system", blocks: [{ type: "text", text: "Context size limit reached. Continuing in a fresh session with a compact handoff; full history is preserved." }], ts: Date.now() });
+  store.save();
+  return `Continue the same task after a context-size failure. Check current files and completed tool actions before doing work again. Full prior transcript: ${path}; search/read only needed portions, never the whole archive. The following is a truncated handoff, not a complete summary:\n\n${transcriptDigest(chat, 24000)}`;
 }
 
 export async function switchAgent(chatId: string, keyId: string, model: string) {
@@ -94,8 +133,13 @@ export async function switchAgent(chatId: string, keyId: string, model: string) 
   const key = store.data.keys.find((k) => k.id === keyId);
   if (!key) throw new Error("unknown connector");
   const providerChanged = key.provider !== chat.provider;
+  const connectorChanged = keyId !== chat.keyId;
   if (chat.running) await stopAndWait(chatId);
   const digest = providerChanged ? transcriptDigest(chat) : "";
+  if (connectorChanged || providerChanged) {
+    chat.sessionId = undefined;
+    chat.sessionKeyId = undefined;
+  }
   chat.keyId = keyId; chat.model = model;
   if (!providerChanged) { store.save(); return; }
   chat.provider = key.provider; chat.sessionId = undefined;
@@ -141,9 +185,15 @@ ${transcriptDigest(chat)}`) +
 
 Start with one sentence on where things stand, then continue.`;
   chat.messages.push({ id: randomUUID(), role: "system", blocks: [{ type: "text", text: "Resumed after interruption." }], ts: Date.now() });
-  chat.error = undefined; chat.interrupted = undefined;
+  chat.interrupted = undefined;
   store.save();
   await send(chatId, prompt, [], { silent: true });
+}
+
+// Keep provider diagnostics when the SDK subsequently throws a generic process-exit error.
+function recordRunError(chat: Chat, message: string) {
+  if (!message || chat.error === message) return;
+  chat.error = chat.error ? `${chat.error}\n\n${message}` : message;
 }
 
 const drainingQueues = new Set<string>();
@@ -159,7 +209,7 @@ export async function flushQueued(chatId: string) {
       if (chat.error || chat.interrupted) chat.queuePaused = true;
     }
   } catch (error) {
-    chat.error = (error as Error).message;
+    recordRunError(chat, String((error as Error).message ?? error));
     chat.queuePaused = true;
   } finally {
     drainingQueues.delete(chatId);
@@ -173,6 +223,7 @@ export async function send(chatId: string, text: string, files: string[] = [], o
   const cwd = store.data.worktrees.find((w) => w.id === chat.worktreeId)!.path;
   const staged = stageFiles(cwd, files);
   (chat.queuedMessages ??= []).push({ id: randomUUID(), text, files: staged });
+  chat.lastChattedAt = Date.now();
   if (!chat.running) chat.queuePaused = false;
   store.save();
   void flushQueued(chatId);
@@ -184,9 +235,22 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
   const cwd = store.data.worktrees.find((w) => w.id === chat.worktreeId)!.path;
   const reason = phiSuspect(text, files);
   if (reason && !keyAllowsPhi(chat)) setPhiMode(chat, true, reason);
+  // A session belongs to the login that created it, not just to the provider.
+  // Also recover chats that hit this bug before session ownership was recorded.
+  const missingSession = /(?:no (?:conversation|session) found|(?:session|conversation)[^\n]*(?:not found|does not exist)|(?:could(?: not|n't)|cannot|can't|unable to) find[^\n]*(?:session|conversation))/i.test(chat.error ?? "");
+  if ((chat.sessionKeyId && chat.sessionKeyId !== chat.keyId) || missingSession) {
+    chat.sessionId = undefined;
+    chat.sessionKeyId = undefined;
+  }
+  if (chat.provider === "codex" && isContextSizeError(chat.error ?? "")) {
+    text = `${contextHandoff(chat, cwd)}\n\nCurrent request:\n${text}`;
+  }
   const apiKey = store.getSecret(chat.keyId);
   const staged = opts.queuedId ? files : stageFiles(cwd, files);
   const shown = staged.length ? `${text}\n\n${staged.map((f) => `📎 ${basename(f)}`).join("\n")}` : text;
+  if (!chat.sessionId && chat.messages.length && !opts.silent) {
+    text = `This is a fresh provider session for an existing chat in the same worktree. Use this transcript to retain the task and decisions; check the current files before repeating work.\n\n${transcriptDigest(chat)}\n\nCurrent user message:\n${text}`;
+  }
   if (staged.length) text = `${text}\n\nAttached files (read them from disk):\n${staged.map((f) => `- ${f}`).join("\n")}`;
   if (!opts.silent) chat.messages.push({ id: randomUUID(), role: "user", blocks: [{ type: "text", text: shown }], ts: Date.now() });
   if (opts.queuedId) chat.queuedMessages = chat.queuedMessages?.filter((m) => m.id !== opts.queuedId);
@@ -209,12 +273,13 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
     } catch (error) {
       text = `The Consort screenshot helper could not start: ${(error as Error).message}. Shell/code tools are still available.\n\n${text}`;
     }
+    text = boundedPrompt(cwd, text);
     if (chat.provider === "claude") await runClaude(chat, cwd, apiKey, text, ac, ui);
     else await runCodex(chat, cwd, apiKey, text, ac, ui);
     // a finished turn that isn't asking the user anything is complete, whatever steps it skipped
     if (!chat.error && !ac.signal.aborted && (chat.phase as Phase) !== "waiting") chat.phase = "complete";
   } catch (e) {
-    if (!ac.signal.aborted) chat.error = String((e as Error).message ?? e);
+    if (!ac.signal.aborted) recordRunError(chat, String((e as Error).message ?? e));
   } finally {
     await browser?.close().catch(() => {});
     running.delete(chatId);
@@ -289,6 +354,7 @@ class Transcript {
 }
 
 async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, ac: AbortController, ui: Transcript) {
+  chat.sessionKeyId = chat.keyId;
   const partialJson = new Map<number, { id: string; name: string; json: string }>();
   const q = query({
     prompt: text,
@@ -300,7 +366,7 @@ async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, 
       includePartialMessages: true,
       settingSources: ["user", "project", "local"],
       systemPrompt: { type: "preset", preset: "claude_code", append: `${PHASE_PROMPT}\n\n${phiPrompt(keyAllowsPhi(chat))}` },
-      env: agentEnvironment(cwd, { ...envWithout("ANTHROPIC_API_KEY"), ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}) }),
+      env: agentEnvironment(cwd, { ...envWithout("ANTHROPIC_API_KEY"), ...loginEnv(keyOf(chat)), ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}) }),
       permissionMode: chat.autoApprove ? "bypassPermissions" : "acceptEdits",
       allowDangerouslySkipPermissions: chat.autoApprove,
       canUseTool: async (tool, input) => {
@@ -354,39 +420,53 @@ async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, 
         for (const c of content)
           if (c.type === "tool_result") ui.toolResult(c.tool_use_id, flatten(c.content), !c.is_error);
     } else if (m.type === "result") {
-      if (m.subtype !== "success") chat.error = (m as any).errors?.join("\n") || m.subtype;
+      if (m.subtype !== "success") recordRunError(chat, (m as any).errors?.join("\n") || m.subtype);
       ui.finalizeText();
     }
   }
 }
 
 async function runCodex(chat: Chat, cwd: string, apiKey: string, text: string, ac: AbortController, ui: Transcript) {
-  const codex = new Codex({ ...(apiKey ? { apiKey } : {}), env: agentEnvironment(cwd, envWithout("OPENAI_API_KEY")) });
+  chat.sessionKeyId = chat.keyId;
+  const codex = new Codex({ ...(apiKey ? { apiKey } : {}), env: agentEnvironment(cwd, { ...envWithout("OPENAI_API_KEY"), ...loginEnv(keyOf(chat)) }) });
   const opts = { ...(chat.model ? { model: chat.model } : {}), workingDirectory: cwd, skipGitRepoCheck: true, sandboxMode: "workspace-write" as const, networkAccessEnabled: true, approvalPolicy: "never" as const };
-  const thread = chat.sessionId ? codex.resumeThread(chat.sessionId, opts) : codex.startThread(opts);
-  const prompt = chat.sessionId ? text : `${PHASE_PROMPT}\n\n${phiPrompt(keyAllowsPhi(chat))}\n\n${text}`;
-  const { events } = await thread.runStreamed(prompt, { signal: ac.signal });
-  for await (const ev of events) {
-    if (ev.type === "thread.started") chat.sessionId = ev.thread_id;
-    else if (ev.type === "item.started" || ev.type === "item.updated" || ev.type === "item.completed") {
-      const it = ev.item;
-      if (it.type === "agent_message") {
-        ui.newMessage();
-        ui.text(it.text, false);
-        ui.finalizeText();
-      } else if (it.type === "command_execution")
-        ui.tool({ type: "tool", id: it.id, name: "Bash", input: it.command, output: it.aggregated_output, ok: it.exit_code === undefined ? undefined : it.exit_code === 0 });
-      else if (it.type === "file_change")
-        ui.tool({ type: "tool", id: it.id, name: "Edit", input: it.changes.map((c) => `${c.kind} ${c.path}`).join("\n"), ok: it.status === "completed" });
-      else if (it.type === "error") chat.error = it.message;
-    } else if (ev.type === "turn.failed") chat.error = ev.error.message;
-    else if (ev.type === "error") chat.error = ev.message;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+    const thread = chat.sessionId ? codex.resumeThread(chat.sessionId, opts) : codex.startThread(opts);
+    const prompt = `${PHASE_PROMPT}\n\n${phiPrompt(keyAllowsPhi(chat))}\n\n${boundedPrompt(cwd, text)}`;
+    const { events } = await thread.runStreamed(prompt, { signal: ac.signal });
+    for await (const ev of events) {
+      if (ev.type === "thread.started") chat.sessionId = ev.thread_id;
+      else if (ev.type === "item.started" || ev.type === "item.updated" || ev.type === "item.completed") {
+        const it = ev.item;
+        if (it.type === "agent_message") {
+          ui.newMessage();
+          ui.text(it.text, false);
+          ui.finalizeText();
+        } else if (it.type === "command_execution")
+          ui.tool({ type: "tool", id: it.id, name: "Bash", input: it.command, output: it.aggregated_output, ok: it.exit_code === undefined ? undefined : it.exit_code === 0 });
+        else if (it.type === "file_change")
+          ui.tool({ type: "tool", id: it.id, name: "Edit", input: it.changes.map((c) => `${c.kind} ${c.path}`).join("\n"), ok: it.status === "completed" });
+        else if (it.type === "error") recordRunError(chat, it.message);
+      } else if (ev.type === "turn.failed") recordRunError(chat, ev.error.message);
+      else if (ev.type === "error") recordRunError(chat, ev.message);
+    }
+    ui.finalizeText();
+    } catch (error) {
+      recordRunError(chat, String((error as Error).message ?? error));
+    }
+    if (ac.signal.aborted || !isContextSizeError(chat.error ?? "") || attempt === 1) break;
+    const handoff = contextHandoff(chat, cwd);
+    chat.error = undefined;
+    chat.sessionKeyId = chat.keyId;
+    ui.newMessage();
+    text = boundedPrompt(cwd, `${handoff}\n\nRequest and runtime instructions for this turn:\n${text}`);
   }
-  ui.finalizeText();
 }
 
 const envWithout = (k: string) => { const { [k]: _drop, ...rest } = process.env; return rest; };
-const keyAllowsPhi = (chat: Chat) => !!store.data.keys.find((k) => k.id === chat.keyId)?.phiAllowed;
+const keyOf = (chat: Chat) => store.data.keys.find((k) => k.id === chat.keyId);
+const keyAllowsPhi = (chat: Chat) => !!keyOf(chat)?.phiAllowed;
 const pretty = (json: string) => {
   try {
     return JSON.stringify(JSON.parse(json), null, 2);
