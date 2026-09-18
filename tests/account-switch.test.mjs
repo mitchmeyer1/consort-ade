@@ -9,10 +9,11 @@ const compiled = ts.transpileModule(readFileSync(new URL('../src/main/agents.ts'
 }).outputText;
 function fixture() {
   const chat = { id: 'chat', worktreeId: 'wt', provider: 'claude', keyId: 'personal', model: 'model', sessionId: 'old-session', sessionKeyId: 'personal', phase: 'waiting', messages: [{ role: 'user', blocks: [{ type: 'text', text: 'Fix the dropdown contrast' }] }] };
-  const keys = [{ id: 'personal', provider: 'claude', phiAllowed: false }, { id: 'work', provider: 'claude', phiAllowed: true, configDir: '/isolated/work' }];
+  const keys = [{ id: 'personal', provider: 'claude', phiAllowed: false }, { id: 'work', provider: 'claude', phiAllowed: true, configDir: '/isolated/work' }, { id: 'codex-login', name: 'Codex CLI login', provider: 'codex', phiAllowed: false }];
   const calls = [];
   const store = { data: { chats: [chat], keys, worktrees: [{ id: 'wt', path: '/nonexistent-test-worktree' }] }, chat: () => chat, save() {}, getSecret: () => '' };
   const mocks = {
+    "./dockerLifecycle": { beginDockerRun: () => "", dockerRunEnvironment: () => ({}), finishDockerRun: async () => {} },
     './store': { store },
     './auth': { loginEnv: key => ({ CLAUDE_CONFIG_DIR: key.configDir ?? '/personal' }) },
     './agentEnvironment': { TESTING_PROMPT: '', agentEnvironment: (_, env) => env },
@@ -42,7 +43,7 @@ function fixture() {
     assert.equal(calls.length, 1);
     return calls[0];
   };
-  return { agents: mod.exports, chat, calls, send };
+  return { agents: mod.exports, chat, calls, keys, send };
 }
 test('same-provider account switch starts a fresh session with history and the selected credentials', async () => {
   const { agents, chat, send } = fixture();
@@ -108,4 +109,53 @@ test('PHI keywords do not switch the selected connector', async () => {
   const call = await send('Check production patient data in snowflake, PHI, DOB and medical records');
   assert.equal(chat.keyId, 'personal');
   assert.equal(call.options.resume, 'old-session');
+});
+
+
+test('Codex pins a thread to its model; Claude does not', () => {
+  const { agents } = fixture();
+  assert.equal(agents.modelPinsSession('codex'), true);
+  assert.equal(agents.modelPinsSession('claude'), false);
+});
+
+test('a Codex model change starts a fresh session and hands the transcript over', async () => {
+  const { agents, chat } = fixture();
+  chat.provider = 'codex';
+  chat.keyId = 'codex-login';
+  chat.model = 'gpt-6-astra';
+  await agents.switchAgent(chat.id, 'codex-login', 'gpt-5.6-sol');
+  assert.equal(chat.model, 'gpt-5.6-sol');
+  assert.equal(chat.sessionId, undefined, 'the old thread cannot be resumed on the new model');
+  const note = chat.messages.find((m) => m.role === 'system' && m.blocks[0].text.includes('gpt-5.6-sol'));
+  assert.ok(note, 'the switch is recorded in the transcript');
+  // the handoff turn ran on Codex: the fixture's Codex mock always reports a quota error
+  assert.match(chat.error, /Account quota exhausted/);
+});
+
+test('a Codex chat with no session yet just changes model', async () => {
+  const { agents, chat } = fixture();
+  chat.provider = 'codex';
+  chat.keyId = 'codex-login';
+  chat.sessionId = undefined;
+  await agents.switchAgent(chat.id, 'codex-login', 'gpt-5.6-sol');
+  assert.equal(chat.model, 'gpt-5.6-sol');
+  assert.equal(chat.error, undefined, 'nothing to hand over, so no turn is spent');
+  assert.equal(chat.messages.filter((m) => m.role === 'system').length, 0);
+});
+
+test('re-picking the model a Codex chat is already on leaves the session alone', async () => {
+  const { agents, chat } = fixture();
+  chat.provider = 'codex';
+  chat.keyId = 'codex-login';
+  await agents.switchAgent(chat.id, 'codex-login', chat.model);
+  assert.equal(chat.sessionId, 'old-session');
+  assert.equal(chat.error, undefined);
+});
+
+test('a session the provider will not resume on this model recovers on the next message', async () => {
+  const { chat, send } = fixture();
+  chat.error = 'This conversation was originally started with model gpt-6-astra; resume it with that model.';
+  const call = await send('Continue');
+  assert.equal(call.options.resume, undefined);
+  assert.match(call.prompt, /Fix the dropdown contrast/);
 });

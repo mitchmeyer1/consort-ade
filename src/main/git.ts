@@ -53,13 +53,13 @@ export async function removeWorktree(repo: string, path: string) {
 
 async function prInfo(path: string): Promise<PrInfo | undefined> {
   try {
-    const { stdout } = await run("gh", ["pr", "view", "--json", "number,state,isDraft,url,title,reviewDecision,statusCheckRollup"], { cwd: path, timeout: 10_000 });
+    const { stdout } = await run("gh", ["pr", "view", "--json", "number,state,isDraft,url,title,author,reviewDecision,statusCheckRollup"], { cwd: path, timeout: 10_000 });
     const j = JSON.parse(stdout);
     const concl: string[] = (j.statusCheckRollup ?? []).map((c: any) => c.conclusion || c.state || c.status);
     const checks = !concl.length ? null
       : concl.some((c) => /FAIL|ERROR|CANCEL|TIMED_OUT/.test(c)) ? "fail"
       : concl.some((c) => /PENDING|QUEUED|IN_PROGRESS|EXPECTED/.test(c)) ? "pending" : "pass";
-    return { number: j.number, state: j.state, draft: j.isDraft, url: j.url, title: j.title, review: j.reviewDecision ?? "", checks };
+    return { number: j.number, state: j.state, draft: j.isDraft, url: j.url, title: j.title, author: j.author?.login ?? "", review: j.reviewDecision ?? "", checks };
   } catch {
     return undefined;
   }

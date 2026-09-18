@@ -8,7 +8,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "start": "electron-vite preview",
-    "package:mac": "pnpm build && electron-rebuild -f -w node-pty && electron-packager . Consort --platform=darwin --arch=arm64 --icon=build/icon.icns --app-bundle-id=com.aligned.consort --out=dist --overwrite --asar=false --prune=true --ignore='^/(src|dist|\\.claude|\\.npmrc|electron\\.vite\\.config\\.ts|tsconfig\\.json)$' && codesign --force --deep --sign - dist/Consort-darwin-arm64/Consort.app && echo 'built dist/Consort-darwin-arm64/Consort.app'",
+    "package:mac": "pnpm build && electron-rebuild -f -w node-pty && electron-packager . Consort --platform=darwin --arch=arm64 --icon=build/icon.icns --app-bundle-id=com.aligned.consort --extend-info=build/Info.plist --out=dist --overwrite --asar=false --prune=true --ignore='^/(src|dist|\\.claude|\\.npmrc|electron\\.vite\\.config\\.ts|tsconfig\\.json)$' && codesign --force --deep --sign - dist/Consort-darwin-arm64/Consort.app && echo 'built dist/Consort-darwin-arm64/Consort.app'",
     "postinstall": "electron-rebuild -f -w node-pty"
   },
   "dependencies": {

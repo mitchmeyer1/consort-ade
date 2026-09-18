@@ -25,6 +25,32 @@ explains. Twenty real findings earn a long document; two earn a short one. Banne
 size: filler, hedging, restating the diff, or a second sentence saying what the first
 already said.
 
+## Model tiers — you orchestrate, agents read
+
+You run on the session's strongest model; the agents you dispatch run one tier down. That
+split is the budget. A review's tokens go overwhelmingly into reading files, grepping for
+peers and tracing callers, and none of that needs your model.
+
+**Your tokens buy judgement, not pages.** Yours go to scope, deciding what to delegate,
+**writing the assignment prompts**, ruling on returned candidates, and the document.
+The agents' tokens buy the reading.
+
+- Dispatch every agent at the delegate tier. The runtime defaults delegated agents to it;
+  pass the model on the call anyway, so a runtime that ignores the default still gets it.
+- Do not walk the diff file by file yourself. You read the PR body, the `--name-only`
+  list, CI, and the repo's instructions — the code gets read by agents.
+- Opening specific cited lines in Phase 3 to settle a candidate is yours to do: named
+  lines, not a file sweep. That is judgement, and it belongs at your tier.
+- Escalate one agent to your tier only after a delegate-tier agent has actually failed on
+  a specific question. Record the escalation and its reason in the summary.
+
+**A delegate-tier agent is only as good as the prompt you wrote it**, so the prompt is the
+work you keep. "Review this file" spends the cheap tier badly and returns guesses you then
+re-check at your own tier — the expensive failure. Every assignment states, in order, what
+to read, what to check, what counts as evidence, and the exact record format to return,
+plus the concrete context listed in Phase 2. Name the risk you already suspect for that
+file so the agent starts where the defects are instead of rediscovering the PR.
+
 ## Keep the user informed throughout the review
 
 The coordinator owns user-facing progress, including while file agents work. Before the
@@ -95,7 +121,14 @@ entrypoint the PR adds or touches, in the repo's own terms. aligned-mono: contro
 (auto-mount at `/api/<namespace>/<filepath>`; name the auth), crons (schedule from
 `infra/src/cron.ts`), workers (`<NAME>_JOB`, and who dispatches it), frontend pages,
 webhooks in, vendor calls out. A Dagster repo: assets, jobs, schedules, sensors, and the
-external systems they read/write. Then trace each by reading the code:
+external systems they read/write.
+
+Enumerate from the diff and the file list yourself — that is cheap and needs your
+judgement. **Tracing is reading, so delegate it:** dispatch one delegate-tier tracer per
+entrypoint (batched within `--fanout`), each returning the hop list, the gate, and the
+real-world effect for its own flow, with a `file:line` per hop. You assemble the map,
+resolve contradictions, and decide the ordering. A tracer that cannot reach the effect
+reports where the trail went cold rather than guessing.
 
 > **Flow N — <name>.** Trigger: who starts it, from where.
 > Hops, each with `file.ts:line` — route → service → DB write / dispatch / external call.
@@ -108,8 +141,9 @@ Every defect's "Example flow" must be an instance of one of these.
 
 ## Phase 2 — one review agent per changed file
 
-Create a dedicated review agent for **each changed file**. Ten changed files means ten
-file agents, not three agents sharing groups of files. The coordinator maps scope,
+Create a dedicated review agent for **each changed file**, every one of them at the
+delegate tier. Ten changed files means ten file agents, not three agents sharing groups of
+files, and not one coordinator reading ten files itself. The coordinator maps scope,
 assigns work, verifies candidates, and writes the report. Use the runtime's agent tool;
 `--fanout N` limits concurrent agents, not total agents or coverage. Queue one-file tasks
 in waves within the runtime limit, releasing finished agents' slots as needed. Do not
@@ -143,7 +177,7 @@ investigation reveals paths the coordinator missed. A large file may get extra a
 specific blocks, but retains its primary file owner. Add targeted cross-file or specialist
 agents when evidence needs further investigation; these supplement the file agents.
 
-Give **every assignment**: repo/local root, PR number, pinned head/base, assigned file and
+Give **every assignment**: the delegate-tier model, repo/local root, PR number, pinned head/base, assigned file and
 exact blocks (or the specific follow-up question), PR body, flow map, relevant repository
 instructions, test-search evidence, CI status, and the **entire `categories.md` brief**.
 Include its text, not only a path or summary. Require COVERED, DEFECT, ITEM, OPEN, and GOOD
@@ -193,17 +227,21 @@ frozen in `template.html`; loading it is where the drift came from.
 1. `cp template.html` to the scratchpad and fill every `{{slot}}`. Repeat the blocks marked
    *repeat*; drop only the blocks marked *optional*. Every `<h2>` stays, in template order,
    even when its body is the `None found.` line.
-2. **Never edit the `<style>` block, the font link, or the class names.** No new classes,
-   no inline styles, no extra sections. If the content does not fit a slot, the content is
-   wrong, not the template.
+2. **Never edit the `<style>` block, the font link, the class names, or the `<i class="ico">`
+   marks in the headings.** The report wears Consort's own palette, type and sprite icons;
+   the icons are inlined in the stylesheet so the file travels on its own. No new classes,
+   no inline styles, no extra sections, no emoji in place of a sprite mark. If the content
+   does not fit a slot, the content is wrong, not the template.
 3. Title is `PR <n> · <Short name>` — two to four plain words; prefix the repo name when it
    isn't aligned-mono (`dagster-snowflake PR 193 · Enrollment pingback`). Favicon is always `📋`.
 4. In Consort, save `.consort/pr-writeup.html` and link it. Use `Artifact` only when that tool is available. Do not post comments to GitHub unless requested.
 
 Section contract (all present, this order): Header · What it does / What ships today /
 Headline · Summary (severity tiles, then category tiles) · How to read this · Flows ·
-The pattern worth naming (*optional*) · Defects · ⛓️ Logic · 👯 Redundant · 💅 Style ·
-🧪 Tests · 📜 Comments · Appendix · Well built · Order of work.
+The pattern worth naming (*optional*) · Defects · Logic · Redundant · Style ·
+Tests · Comments · Appendix · Well built · Order of work. The five category headings carry
+their sprite mark from the template, not the CI reviewer's emoji; the emoji survive only in
+the legend line that maps them.
 
 Each **defect** card: the claim as the heading · `file:line` · **Problem** (1–2 sentences) ·
 **Example flow** (1–2 sentences, real values) · **Fix** (the smallest one) · **Ignore if**
@@ -226,6 +264,8 @@ calls and returned coverage, not the plan. Include:
 - Reviewed PR and head/base SHA; files and changed blocks covered out of total.
 - Actual file-agent count, extra specialist/verification-agent count, total assignments,
   and concurrency/waves used. Distinguish reused agents from new agents and retries.
+- The model each tier ran on, how many assignments ran at the delegate tier, and every
+  escalation to your own tier with the specific question that forced it.
 - One short line per agent: assigned file or question, concerns and cross-file flows checked,
   completion status, and result. List failed, unavailable, or unfinished assignments.
 - Confirmed defects by severity, category items, duplicates/disproved candidates, and open

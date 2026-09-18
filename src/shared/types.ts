@@ -5,15 +5,20 @@ export const phasesFor = (steps?: 3 | 5): readonly Phase[] => steps === 3 ? SIMP
 export type Provider = "claude" | "codex";
 export const MODELS: Record<Provider, string[]> = {
   claude: ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
-  codex: ["gpt-6-astra"], // ponytail: the ChatGPT-login default as of codex 0.154; add others as you use them
+  // fallback only: the live list comes from Codex's own catalog (see main/codexModels.ts)
+  codex: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
 };
+
+/** models offered in the picker: what the provider currently advertises, else the built-in list */
+export const modelOptions = (state: { models?: Partial<Record<Provider, string[]>> }, provider: Provider) =>
+  state.models?.[provider]?.length ? state.models[provider]! : MODELS[provider];
 
 /** configDir: extra CLI logins keep their own credentials there (CLAUDE_CONFIG_DIR / CODEX_HOME); the built-in login uses the CLI default */
 export type ApiKey = { id: string; name: string; provider: Provider; phiAllowed: boolean; auth: "login" | "key"; configDir?: string; defaultModel?: string };
 export type Project = { id: string; name: string; path: string; defaultBase: string; baseSetByUser?: boolean };
 export type QuickAction = { id: string; title: string; command: string; pinned?: boolean };
 export type Worktree = { id: string; projectId: string; name: string; title: string; path: string; branch: string; archived: boolean; root?: boolean; quickActions?: QuickAction[] };
-export type PrInfo = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; draft: boolean; url: string; title: string; review: string; checks: "pass" | "fail" | "pending" | null };
+export type PrInfo = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; draft: boolean; url: string; title: string; author: string; review: string; checks: "pass" | "fail" | "pending" | null };
 export type WorktreeStatus = {
   branch: string; dirty: number; ahead: number; behind: number; merged: boolean; inBase: boolean; base: string;
   last?: { subject: string; author: string; age: string }; files: string; pr?: PrInfo;
@@ -22,7 +27,8 @@ export type WorktreeStatus = {
 export type Block =
   | { type: "text"; text: string }
   | { type: "tool"; id: string; name: string; input: string; output?: string; ok?: boolean };
-export type Message = { id: string; role: "user" | "assistant" | "system"; blocks: Block[]; ts: number };
+/** attachments: staged paths of the files sent with the message, shown as thumbnails/chips under it */
+export type Message = { id: string; role: "user" | "assistant" | "system"; blocks: Block[]; ts: number; attachments?: string[] };
 
 export type Chat = {
   id: string;
@@ -31,6 +37,8 @@ export type Chat = {
   provider: Provider;
   keyId: string;
   model: string;
+  /** model for agents this chat dispatches; unset lets them inherit `model` (see shared/modelTiers.ts) */
+  delegateModel?: string;
   sessionId?: string;
   sessionKeyId?: string; // connector that owns the provider session
   phase: Phase;
@@ -41,6 +49,8 @@ export type Chat = {
   interrupted?: boolean;
   error?: string;
   unreadCompletion?: boolean;
+  /** "remind me": when the reminder comes due (a clock until then, purple after); cleared when you next work in the chat */
+  remindAt?: number;
   permissions?: PermissionRequest[];
   messages: Message[];
   lastChattedAt?: number;
@@ -59,11 +69,13 @@ export type RepoInfo = {
   runs: { name: string; title: string; branch: string; status: string; conclusion: string; createdAt: string; url: string }[];
 };
 export type Job = { id: string; scopeId: string; termId: string; cwd: string; cmd: string; out: string; status: "running" | "exited"; code?: number; startedAt: number; seen?: boolean };
-export type PtyState = { id: string; scopeId: string; termId: string; running: boolean; failed: boolean };
+/** done: a command that took a while finished successfully and nobody has looked yet */
+export type PtyState = { id: string; scopeId: string; termId: string; running: boolean; failed: boolean; done?: boolean };
 export type CommitInfo = { files: string; changed: number; log: { hash: string; subject: string; author: string; age: string }[]; branch: string; ahead: number };
 export type Appearance = { theme: "dark" | "light" | "auto"; background: "opaque" | "frost" | "frost2" };
-export type State = { projects: Project[]; worktrees: Worktree[]; chats: Chat[]; keys: ApiKey[]; defaultKeyId?: string; appearance: Appearance };
+export type State = { projects: Project[]; worktrees: Worktree[]; chats: Chat[]; keys: ApiKey[]; defaultKeyId?: string; appearance: Appearance; models?: Partial<Record<Provider, string[]>> };
 export type PermissionRequest = { id: string; chatId: string; tool: string; input: unknown };
+export type { ConnectorUsage, UsageWindow } from "./usage";
 
 export type Api = {
   getState(): Promise<State>;
@@ -90,13 +102,14 @@ export type Api = {
   autoTitle(id: string): Promise<void>;
   archiveWorktree(id: string, on: boolean): Promise<void>;
   worktreeStatus(id: string): Promise<WorktreeStatus | null>;
-  addChat(worktreeId: string, keyId: string, opts?: { name?: string; model?: string }): Promise<string>;
-  skillPrompt(name: string, worktreeId: string, args?: string): Promise<string>;
+  addChat(worktreeId: string, keyId: string, opts?: { name?: string; model?: string; delegateModel?: string; remember?: boolean }): Promise<string>;
+  skillPrompt(name: string, worktreeId: string, args?: string, delegateModel?: string): Promise<string>;
   listFiles(worktreeId: string): Promise<string[]>;
   readFile(worktreeId: string, rel: string): Promise<string>;
   writeFile(worktreeId: string, rel: string, content: string): Promise<void>;
   renameChat(id: string, name: string): Promise<void>;
   deleteChat(id: string): Promise<void>;
+  chatMenu(id: string): Promise<void>;
   setAutoApprove(id: string, on: boolean): Promise<void>;
   setPhase(id: string, phase: Phase): Promise<void>;
   send(chatId: string, text: string, files?: string[]): Promise<void>;
@@ -126,6 +139,10 @@ export type Api = {
   ptyResize(id: string, cols: number, rows: number): Promise<void>;
   ptyKill(id: string): Promise<void>;
   ptySeen(id: string): Promise<void>;
+  /** clears finished/failed marks for every terminal in a worktree or project */
+  ptySeenScope(scopeId: string): Promise<void>;
+  /** a command-finished notification was clicked: show that worktree or project */
+  onOpenScope(cb: (id: string) => void): () => void;
   ptys(): Promise<PtyState[]>;
   onPtyData(cb: (m: { id: string; data: string }) => void): () => void;
   onPtys(cb: (s: PtyState[]) => void): () => void;
@@ -138,6 +155,8 @@ export type Api = {
   onTheme(cb: (t: "dark" | "light") => void): () => void;
   repoInfo(projectId: string): Promise<RepoInfo>;
   authStatus(keyId: string): Promise<{ loggedIn: boolean; detail: string }>;
+  /** plan usage meters for a connector; cached briefly in main, `force` re-asks the CLI */
+  connectorUsage(keyId: string, force?: boolean): Promise<import("./usage").ConnectorUsage>;
   authLoginCmd(keyId: string): Promise<string>;
   commitInfo(worktreeId: string): Promise<CommitInfo>;
   commit(worktreeId: string, message: string): Promise<string>;

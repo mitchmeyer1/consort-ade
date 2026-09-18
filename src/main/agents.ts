@@ -1,3 +1,4 @@
+import { beginDockerRun, dockerRunEnvironment, finishDockerRun } from "./dockerLifecycle";
 import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
 import { appendFileSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -53,10 +54,23 @@ function stageFiles(cwd: string, files: string[]) {
 }
 
 const running = new Map<string, AbortController>();
-const pending = new Map<string, (allow: boolean) => void>();
+const pending = new Map<string, { chatId: string; finish: (allow: boolean) => void }>();
+// live provider sessions, so a permission-mode change reaches a run already in flight
+const sessions = new Map<string, { setPermissionMode?: (mode: "bypassPermissions" | "acceptEdits") => Promise<void> }>();
 let askPermission: (r: PermissionRequest) => void = () => {};
 export const onPermission = (cb: typeof askPermission) => (askPermission = cb);
-export const answerPermission = (id: string, allow: boolean) => pending.get(id)?.(allow);
+export const answerPermission = (id: string, allow: boolean) => pending.get(id)?.finish(allow);
+
+// auto-approve applies immediately, mid-run: the current session is retuned and
+// anything already waiting on the user is released
+export function setAutoApprove(chatId: string, on: boolean) {
+  const chat = store.chat(chatId);
+  chat.autoApprove = on;
+  store.save();
+  void sessions.get(chatId)?.setPermissionMode?.(on ? "bypassPermissions" : "acceptEdits").catch(() => {});
+  if (!on) return;
+  for (const [, p] of [...pending]) if (p.chatId === chatId) p.finish(true);
+}
 
 export function stop(chatId: string) {
   store.chat(chatId).queuePaused = true;
@@ -120,25 +134,35 @@ function contextHandoff(chat: Chat, cwd: string) {
   return `Continue the same task after a context-size failure. Check current files and completed tool actions before doing work again. Full prior transcript: ${path}; search/read only needed portions, never the whole archive. The following is a truncated handoff, not a complete summary:\n\n${transcriptDigest(chat, 24000)}`;
 }
 
+/** Codex pins a thread to the model that opened it, so resuming one on another model is refused. */
+export const modelPinsSession = (provider: Chat["provider"]) => provider === "codex";
+
 export async function switchAgent(chatId: string, keyId: string, model: string) {
   const chat = store.chat(chatId);
   const key = store.data.keys.find((k) => k.id === keyId);
   if (!key) throw new Error("unknown connector");
   const providerChanged = key.provider !== chat.provider;
   const connectorChanged = keyId !== chat.keyId;
+  const modelChanged = model !== chat.model;
   if (chat.running) await stopAndWait(chatId);
-  const digest = providerChanged ? transcriptDigest(chat) : "";
-  if (connectorChanged || providerChanged) {
+  // A model the provider can't resume onto needs the same treatment as a change of agent: new session, fresh context.
+  const restarts = providerChanged || (modelChanged && modelPinsSession(key.provider));
+  // Nothing to hand over without a live session: the next message already carries the transcript (see runSend).
+  const handover = restarts && !!chat.sessionId && chat.messages.some((m) => m.role !== "system");
+  const digest = handover ? transcriptDigest(chat) : "";
+  if (connectorChanged || restarts) {
     chat.sessionId = undefined;
     chat.sessionKeyId = undefined;
   }
   key.defaultModel = model;
-  chat.keyId = keyId; chat.model = model;
-  if (!providerChanged) { store.save(); return; }
-  chat.provider = key.provider; chat.sessionId = undefined;
-  chat.messages.push({ id: randomUUID(), role: "system", blocks: [{ type: "text", text: `Handed the conversation to ${key.provider} · ${model} (${key.name}).` }], ts: Date.now() });
+  chat.keyId = keyId; chat.model = model; chat.provider = key.provider;
+  if (!handover) { store.save(); return; }
+  chat.messages.push({ id: randomUUID(), role: "system", blocks: [{ type: "text", text: providerChanged
+    ? `Handed the conversation to ${key.provider} · ${model} (${key.name}).`
+    : `Switched to ${model}. ${key.provider === "codex" ? "Codex" : "This provider"} can't resume a session on another model, so this continues in a fresh one with a context handoff.` }], ts: Date.now() });
   store.save();
-  const prompt = `You are taking over an in-progress conversation from another AI agent working in this same repository/worktree. Transcript so far:\n\n${digest}\n\nPick up where it left off: in one or two sentences say what you understand the task and current status to be, then continue the work. If the last step was a question to the user, ask it again briefly and emit [phase:waiting].`;
+  const who = providerChanged ? "another AI agent" : "an earlier model";
+  const prompt = `You are taking over an in-progress conversation from ${who} working in this same repository/worktree. The earlier session can't be resumed, so this is a fresh one. Transcript so far:\n\n${digest}\n\nPick up where it left off: in one or two sentences say what you understand the task and current status to be, then continue the work. If the last step was a question to the user, ask it again briefly and emit [phase:waiting].`;
   await send(chatId, prompt, [], { silent: true });
 }
 
@@ -229,7 +253,10 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
   // A session belongs to the login that created it, not just to the provider.
   // Also recover chats that hit this bug before session ownership was recorded.
   const missingSession = /(?:no (?:conversation|session) found|(?:session|conversation)[^\n]*(?:not found|does not exist)|(?:could(?: not|n't)|cannot|can't|unable to) find[^\n]*(?:session|conversation))/i.test(chat.error ?? "");
-  if ((chat.sessionKeyId && chat.sessionKeyId !== chat.keyId) || missingSession) {
+  // A session the provider refuses to resume on the current model: chats switched before Consort
+  // started opening a new session for that are otherwise stuck failing on every message.
+  const modelMismatch = /(?:conversation|thread|session)[^\n]*(?:started|created)[^\n]*\bmodel\b|\bmodel\b[^\n]*(?:does not|doesn't|did not|didn't) match/i.test(chat.error ?? "");
+  if ((chat.sessionKeyId && chat.sessionKeyId !== chat.keyId) || missingSession || modelMismatch) {
     chat.sessionId = undefined;
     chat.sessionKeyId = undefined;
   }
@@ -238,14 +265,16 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
   }
   const apiKey = store.getSecret(chat.keyId);
   const staged = opts.queuedId ? files : stageFiles(cwd, files);
-  const shown = staged.length ? `${text}\n\n${staged.map((f) => `📎 ${basename(f)}`).join("\n")}` : text;
+  const shown = text; // what the user typed; the files ride along as `attachments` and render as thumbnails
   if (!chat.sessionId && chat.messages.length && !opts.silent) {
     text = `This is a fresh provider session for an existing chat in the same worktree. Use this transcript to retain the task and decisions; check the current files before repeating work.\n\n${transcriptDigest(chat)}\n\nCurrent user message:\n${text}`;
   }
   if (staged.length) text = `${text}\n\nAttached files (read them from disk):\n${staged.map((f) => `- ${f}`).join("\n")}`;
-  if (!opts.silent) chat.messages.push({ id: randomUUID(), role: "user", blocks: [{ type: "text", text: shown }], ts: Date.now() });
+  if (!opts.silent) chat.messages.push({ id: randomUUID(), role: "user", blocks: [{ type: "text", text: shown }], ts: Date.now(), ...(staged.length ? { attachments: staged } : {}) });
   if (opts.queuedId) chat.queuedMessages = chat.queuedMessages?.filter((m) => m.id !== opts.queuedId);
   chat.unreadCompletion = false;
+  // a reminder that has landed is answered by working here; one still counting down keeps its time
+  if (chat.remindAt !== undefined && chat.remindAt <= Date.now()) chat.remindAt = undefined;
   chat.running = true;
   chat.error = undefined;
   chat.interrupted = undefined;
@@ -259,7 +288,7 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
   const ui = new Transcript(chat);
   let browser: Awaited<ReturnType<typeof startAgentBrowser>> | undefined;
   try {
-    text = `${TESTING_PROMPT}\n\n${text}`;
+    text = `${TESTING_PROMPT}\n\n${beginDockerRun(chatId, chat.worktreeId)}\n\n${text}`;
     try {
       browser = await startAgentBrowser(cwd, ac.signal);
       text = `${browser.prompt}\n\n${text}`;
@@ -275,6 +304,9 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
     if (!ac.signal.aborted) recordRunError(chat, String((e as Error).message ?? e));
   } finally {
     await browser?.close().catch(() => {});
+    await finishDockerRun(chatId).catch(() => {
+      chat.messages.push({ id: randomUUID(), role: "system", blocks: [{ type: "text", text: "Docker cleanup could not finish. Consort will retry automatically when Docker is available." }], ts: Date.now() });
+    });
     running.delete(chatId);
     chat.running = false;
     chat.assessingPrompt = false;
@@ -350,6 +382,14 @@ class Transcript {
   }
 }
 
+/**
+ * Pins the tier for every agent this chat dispatches, so a delegation the orchestrator
+ * sends without an explicit model override still lands on the cheaper model rather than
+ * inheriting the orchestrator's. The skill also passes the model per dispatch; this is
+ * the backstop for the dispatch that forgets.
+ */
+const delegateModelEnv = (chat: Chat) => chat.delegateModel ? { CLAUDE_CODE_SUBAGENT_MODEL: chat.delegateModel } : {};
+
 async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, ac: AbortController, ui: Transcript) {
   chat.sessionKeyId = chat.keyId;
   const partialJson = new Map<number, { id: string; name: string; json: string }>();
@@ -363,10 +403,13 @@ async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, 
       includePartialMessages: true,
       settingSources: ["user", "project", "local"],
       systemPrompt: { type: "preset", preset: "claude_code", append: `${PHASE_PROMPT}\n\n${phiPrompt(keyAllowsPhi(chat))}` },
-      env: agentEnvironment(cwd, { ...envWithout("ANTHROPIC_API_KEY"), ...loginEnv(keyOf(chat)), ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}) }),
+      env: agentEnvironment(cwd, { ...envWithout("ANTHROPIC_API_KEY"), ...loginEnv(keyOf(chat)), ...dockerRunEnvironment(chat.id), ...delegateModelEnv(chat), ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}) }),
       permissionMode: chat.autoApprove ? "bypassPermissions" : "acceptEdits",
-      allowDangerouslySkipPermissions: chat.autoApprove,
+      // permits a later switch into bypass; canUseTool still gates every call
+      allowDangerouslySkipPermissions: true,
       canUseTool: async (tool, input) => {
+        // read auto-approve now, not at session start, so toggling it mid-conversation takes effect
+        if (chat.autoApprove) return { behavior: "allow", updatedInput: input };
         // dependency installs never wait on the user (see isInstallCommand); everything else asks
         if (tool === "Bash" && isInstallCommand((input as any)?.command)) return { behavior: "allow", updatedInput: input };
         const id = randomUUID();
@@ -380,7 +423,7 @@ async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, 
             res(allow);
           };
           const abort = () => finish(false);
-          pending.set(id, finish);
+          pending.set(id, { chatId: chat.id, finish });
           if (ac.signal.aborted) { finish(false); return; }
           ac.signal.addEventListener("abort", abort, { once: true });
           chat.permissions = [...(chat.permissions ?? []), request];
@@ -391,6 +434,8 @@ async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, 
       },
     },
   });
+  sessions.set(chat.id, q as Parameters<typeof sessions.set>[1]);
+  try {
   for await (const m of q as AsyncIterable<SDKMessage>) {
     if (m.type === "system" && m.subtype === "init") {
       chat.sessionId = m.session_id;
@@ -421,11 +466,14 @@ async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, 
       ui.finalizeText();
     }
   }
+  } finally {
+    sessions.delete(chat.id);
+  }
 }
 
 async function runCodex(chat: Chat, cwd: string, apiKey: string, text: string, ac: AbortController, ui: Transcript) {
   chat.sessionKeyId = chat.keyId;
-  const codex = new Codex({ ...(apiKey ? { apiKey } : {}), env: agentEnvironment(cwd, { ...envWithout("OPENAI_API_KEY"), ...loginEnv(keyOf(chat)) }) });
+  const codex = new Codex({ ...(apiKey ? { apiKey } : {}), env: agentEnvironment(cwd, { ...envWithout("OPENAI_API_KEY"), ...loginEnv(keyOf(chat)), ...dockerRunEnvironment(chat.id) }) });
   const opts = { ...(chat.model ? { model: chat.model } : {}), workingDirectory: cwd, skipGitRepoCheck: true, sandboxMode: "workspace-write" as const, networkAccessEnabled: true, approvalPolicy: "never" as const };
   for (let attempt = 0; attempt < 2; attempt++) {
     try {

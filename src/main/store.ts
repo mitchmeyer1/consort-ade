@@ -2,6 +2,7 @@ import { app, safeStorage } from "electron";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { defaultConnector } from "../shared/defaultConnector";
+import { codexModels } from "./codexModels";
 import { ensureRootWorktree } from "./rootWorktree";
 import type { State, Chat, Appearance } from "../shared/types";
 
@@ -27,6 +28,9 @@ export class Store {
       c.running = false;
       c.assessingPrompt = false;
       if (c.queuedMessages?.length) c.queuePaused = true;
+      // reminders used to record when they were set; they now record when they come due
+      const legacy = (c as Chat & { remindedAt?: number }).remindedAt;
+      if (legacy && c.remindAt === undefined) { c.remindAt = legacy; delete (c as Chat & { remindedAt?: number }).remindedAt; }
       c.permissions = [];
     }
     for (const k of this.data.keys) { k.phiAllowed ??= false; k.auth ??= this.data.secrets[k.id] ? "key" : "login"; }
@@ -44,7 +48,7 @@ export class Store {
 
   public(): State {
     const { secrets: _s, ...rest } = this.data;
-    return rest;
+    return { ...rest, models: { codex: codexModels(this.data.keys) } };
   }
 
   onChange(cb: (s: State) => void) {

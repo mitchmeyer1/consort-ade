@@ -31,6 +31,7 @@ async function fixture(t) {
   } };
   const store = { data: { chats: [chat], keys: [{ id: 'key', phiAllowed: true }], worktrees: [{ id: 'wt', path: cwd }] }, chat: () => chat, getSecret: () => 'fake', save() {} };
   const mocks = {
+    "./dockerLifecycle": { beginDockerRun: () => "", dockerRunEnvironment: () => ({}), finishDockerRun: async () => {} },
     './store': { store },
     './auth': { loginEnv: () => ({}) },
     './agentBrowser': { startAgentBrowser: async () => ({ prompt: '', close: async () => {} }) },

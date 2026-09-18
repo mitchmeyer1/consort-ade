@@ -1,17 +1,25 @@
+import { startDockerRecovery } from "./dockerLifecycle";
 import { selectedModel } from "../shared/defaultConnector";
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, shell, Notification, Menu } from "electron";
 import { join, basename, resolve, extname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
 import { store } from "./store";
+import { PermissionNotifications } from "./permissionNotifications";
 import * as git from "./git";
 import { ensureRootWorktree, isRootWorktree } from "./rootWorktree";
+import { hooksDirectory, localEnvFiles, prepareWorktree } from "./worktreeFiles";
+import { installCommand } from "./worktreeInstall";
 import * as agents from "./agents";
 import { askOnce, humanize, suggestTitle } from "./namer";
 import { commitFromChat } from "./commitChat";
 import { authLoginCmd, authStatus } from "./auth";
+import { formatDuration } from "./ptyMarkers";
+import { usage } from "./usage";
 import * as ptys from "./ptys";
 import { chatStatus } from "../shared/chatStatus";
+import { REMINDER_CHOICES, reminderDue } from "../shared/reminders";
+import { Reminders } from "./reminders";
 import { MODELS, type Api, type Appearance } from "../shared/types";
 import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -32,14 +40,19 @@ app.setName("ade");
 app.setPath("userData", process.env.ADE_DATA_DIR ?? join(app.getPath("appData"), "ade"));
 
 let win: BrowserWindow;
+let reminders: Reminders | undefined;
 let activeChat: string | null = null;
 const isViewing = (id: string) => activeChat === id && !!win && !win.isDestroyed() && win.isFocused() && win.isVisible() && !win.isMinimized();
 function acknowledgeChat() {
   const chat = store.data.chats.find((c) => c.id === activeChat);
-  if (chat?.unreadCompletion && isViewing(chat.id)) {
-    chat.unreadCompletion = false;
-    store.save();
-  }
+  if (!chat || !isViewing(chat.id)) return;
+  // opening the chat is coming back to it, which is all a due reminder was asking for.
+  // One still counting down stays: it is an appointment, not a mark on an unread chat.
+  const reminderLanded = reminderDue(chat.remindAt, Date.now());
+  if (!chat.unreadCompletion && !reminderLanded) return;
+  chat.unreadCompletion = false;
+  if (reminderLanded) chat.remindAt = undefined;
+  store.save();
 }
 
 
@@ -97,11 +110,41 @@ async function syncWorktrees(projectId: string) {
       suggestTitle(nw.path, nw.branch).then((t) => { if (nw.title === humanize(nw.branch)) { nw.title = t; store.save(); } });
     }
   }
+  // Worktrees made before this, or outside Consort, still need the repo's env files and
+  // its generated hook runner. Scan the repo once, then fill in whatever each one is missing.
+  const [env, hooks] = await Promise.all([
+    localEnvFiles(p.path).catch(() => [] as string[]),
+    hooksDirectory(p.path).catch(() => undefined),
+  ]);
+  if (env.length || hooks) {
+    await Promise.all(
+      live.filter((l) => l.path !== p.path).map((l) => prepareWorktree(p.path, l.path, { env, hooks })),
+    );
+  }
   store.data.worktrees = store.data.worktrees.filter(
     (w) => w.projectId !== projectId || w.root || live.some((l) => l.path === w.path),
   );
   const alive = new Set(store.data.worktrees.map((w) => w.id));
   store.data.chats = store.data.chats.filter((c) => alive.has(c.worktreeId));
+}
+
+/**
+ * Give a new worktree the dependencies the repo already has. Workspace packages are linked
+ * relatively, so a worktree cannot borrow the repo's `node_modules` without resolving into
+ * the repo's own checkout — it needs its own, which a warm store makes cheap.
+ *
+ * Runs in a terminal of its own so the work is visible and interruptible, and starts here
+ * rather than waiting for the drawer to be opened.
+ */
+function startInstall(scopeId: string, repo: string, path: string) {
+  installCommand(repo, path)
+    .then(async (command) => {
+      if (!command) return;
+      const id = await ptys.create(scopeId, "install", path, 120, 30);
+      // Same grace the renderer gives a new shell before typing into it.
+      setTimeout(() => ptys.write(id, `${command}\r`), 700);
+    })
+    .catch((error) => console.error("worktree install failed to start", error));
 }
 
 const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
@@ -211,9 +254,14 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     return root.id;
   },
   addWorktree: async (projectId: string, name: string, branch: string, base: string) => {
-    await git.addWorktree(project(projectId).path, name, branch, base);
+    const repo = project(projectId).path;
+    const path = await git.addWorktree(repo, name, branch, base);
+    // The tree is already on disk; a copy failure must not undo it.
+    await prepareWorktree(repo, path);
     await syncWorktrees(projectId);
     store.save();
+    const created = store.data.worktrees.find((w) => w.path === path);
+    if (created) startInstall(created.id, repo, path);
   },
   removeWorktree: async (id: string) => {
     const w = store.data.worktrees.find((w) => w.id === id)!;
@@ -256,6 +304,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   ptyResize: (id: string, cols: number, rows: number) => ptys.resize(id, cols, rows),
   ptyKill: (id: string) => ptys.kill(id),
   ptySeen: (id: string) => ptys.seen(id),
+  ptySeenScope: (scopeId: string) => ptys.seenScope(scopeId),
   ptys: () => ptys.list(),
   artifactMenu: (id: string, target: string) => new Promise<"open" | null>((done) => {
     const remote = /^https?:\/\//i.test(target);
@@ -292,6 +341,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     return { kind: ext === ".md" ? "markdown" as const : [".html", ".htm"].includes(ext) ? "html" as const : "text" as const, content: readFileSync(path, "utf8") };
   },
   authStatus: (keyId: string) => authStatus(keyId),
+  connectorUsage: (keyId: string, force?: boolean) => { const k = store.data.keys.find((k) => k.id === keyId); if (!k) throw new Error("Connector not found"); return usage.read(k, { force }); },
   commitInfo: (id: string) => git.commitInfo(wt(id).path),
   commit: async (id: string, message: string) => { const r = await git.commit(wt(id).path, message); statusCache.delete(id); return r; },
   suggestCommit: async (id: string) => {
@@ -327,15 +377,18 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     applyAppearance();
     store.save();
   },
-  addChat: (worktreeId: string, keyId: string, opts: { name?: string; model?: string } = {}) => {
+  addChat: (worktreeId: string, keyId: string, opts: { name?: string; model?: string; delegateModel?: string; remember?: boolean } = {}) => {
     const id = randomUUID();
     const key = store.data.keys.find((k) => k.id === keyId);
     if (!key) throw new Error("Connector not found.");
     const provider = key.provider;
     const model = opts.model?.trim() || selectedModel(store.data, key, MODELS[provider][0]);
-    key.defaultModel = model;
+    const delegateModel = opts.delegateModel?.trim();
+    // A model a task pinned for itself is not the user's choice: remembering a review's
+    // orchestrator tier would silently start every later chat on the priciest model.
+    if (opts.remember !== false) key.defaultModel = model;
     store.data.chats.push({
-      id, worktreeId, provider, keyId, model, name: opts.name || "New chat",
+      id, worktreeId, provider, keyId, model, ...(delegateModel ? { delegateModel } : {}), name: opts.name || "New chat",
       phase: "waiting", autoApprove: false, running: false, messages: [],
     });
     store.save();
@@ -345,15 +398,24 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     store.chat(id).name = name;
     store.save();
   },
+  chatMenu: (id: string) => new Promise<void>((done) => {
+    const chat = store.chat(id);
+    // store.save() re-arms the timers through the change listener below
+    const setReminder = (remindAt: number | undefined) => { chat.remindAt = remindAt; store.save(); };
+    const due = chat.remindAt === undefined ? "" : ` (${new Date(chat.remindAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })})`;
+    const menu = Menu.buildFromTemplate([
+      { label: "Remind me", submenu: REMINDER_CHOICES.map((choice) => ({ label: choice.label, click: () => setReminder(choice.due(Date.now())) })) },
+      { label: `Clear reminder${due}`, enabled: chat.remindAt !== undefined, click: () => setReminder(undefined) },
+    ]);
+    menu.once("menu-will-close", () => setImmediate(() => done()));
+    menu.popup({ window: win });
+  }),
   deleteChat: (id: string) => {
     agents.stop(id);
     store.data.chats = store.data.chats.filter((c) => c.id !== id);
     store.save();
   },
-  setAutoApprove: (id: string, on: boolean) => {
-    store.chat(id).autoApprove = on;
-    store.save();
-  },
+  setAutoApprove: (id: string, on: boolean) => agents.setAutoApprove(id, on),
   setPhase: (id: string, phase) => {
     store.chat(id).phase = phase;
     store.chat(id).assessingPrompt = false;
@@ -434,15 +496,17 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     if (key?.configDir && key.configDir.startsWith(join(app.getPath("userData"), "logins"))) rmSync(key.configDir, { recursive: true, force: true });
     store.data.keys = store.data.keys.filter((k) => k.id !== id);
     delete store.data.secrets[id];
+    usage.forget(id);
     store.save();
   },
   answerPermission: (id: string, allow: boolean) => agents.answerPermission(id, allow),
-  skillPrompt: (name: string, worktreeId: string, args?: string) => {
+  skillPrompt: (name: string, worktreeId: string, args?: string, delegateModel?: string) => {
     const dir = join(app.getAppPath(), "skills", name);
     const skill = readFileSync(join(dir, "SKILL.md"), "utf8").replace(/^---[\s\S]*?---\n/, "");
     const brief = name === "pr-writeup" ? `\n\n## Complete review agent brief — include in every delegated assignment\n\n${readFileSync(join(dir, "categories.md"), "utf8")}` : "";
     const progress = name === "pr-writeup" ? "Keep the user informed in chat: explain the review plan before tools, then give a brief plain-language update every 30–45 seconds or five tool calls, whichever comes first. Summarize what you learned and what you are checking next; tool output alone is not an update.\n\n" : "";
-    return `${progress}Run the following skill${args ? ` with argument: ${args}` : " for the current branch"} in ${wt(worktreeId).path}. Its sibling files live in ${dir}.
+    const tier = delegateModel ? `You are the orchestrator, running on this session's strongest model. Dispatch every delegated agent on \`${delegateModel}\` by passing that model on the agent call; the runtime already defaults delegated agents to it. Your tokens go to scope, agent prompts, verification decisions and the final prose — not to reading the diff yourself. Escalate a single agent back to your own model only when a specific verification has already failed at the delegate tier, and say why in the operational summary.\n\n` : "";
+    return `${progress}${tier}Run the following skill${args ? ` with argument: ${args}` : " for the current branch"} in ${wt(worktreeId).path}. Its sibling files live in ${dir}.
 The Artifact tool is not available here: write the finished HTML to .consort/pr-writeup.html in the worktree. Print the operational review summary in the terminal/chat, then end with a clickable Markdown link to the saved HTML using its absolute path.
 
 ${skill}${brief}`;
@@ -469,6 +533,7 @@ ${skill}${brief}`;
 };
 
 app.whenReady().then(() => {
+  startDockerRecovery(join(app.getPath("userData"), "docker-runs"));
   store.load();
   store.save();
   // first-run titles for worktrees imported before titles existed
@@ -477,18 +542,29 @@ app.whenReady().then(() => {
   for (const [name, fn] of Object.entries(handlers)) ipcMain.handle(name, (_e, ...args) => fn!(...args));
   // the window can be gone while jobs/agents are still winding down
   const send = (ch: string, data: unknown) => { if (win && !win.isDestroyed()) win.webContents.send(ch, data); };
+  const openChat = (id: string) => {
+    if (!store.data.chats.some((chat) => chat.id === id) || !win || win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.show(); win.focus(); send("openChat", id);
+  };
+  const permissionNotifications = new PermissionNotifications(() => store.data.chats, agents.answerPermission, openChat);
+  reminders = new Reminders(() => store.data.chats, openChat, () => store.save(), isViewing);
+  reminders.sync();
   const previous = new Map(store.data.chats.map((c) => [c.id, eventKey(c)]));
   function eventKey(c: (typeof store.data.chats)[number]) {
     const status = chatStatus(c);
     return c.permissions?.length ? `permission:${c.permissions.map((p) => p.id).join(",")}`
-      : c.error ? `error:${c.error}` : status ?? "idle";
+      // a reminder is something you set yourself, so it is never worth a notification
+      : c.error ? `error:${c.error}` : (status === "reminder" || status === "scheduled" ? null : status) ?? "idle";
   }
   store.onChange((s) => {
+    permissionNotifications.sync();
+    reminders?.sync();
     for (const c of s.chats) {
       const key = eventKey(c);
       const changed = previous.get(c.id) !== key;
       previous.set(c.id, key);
-      if (!changed || key === "idle" || isViewing(c.id) || !Notification.isSupported()) continue;
+      if (!changed || c.permissions?.length || key === "idle" || isViewing(c.id) || !Notification.isSupported()) continue;
       const status = chatStatus(c);
       const notification = new Notification({
         title: status === "attention" ? "Chat needs your attention" : status === "complete" ? "Chat complete" : "Chat started working",
@@ -510,6 +586,23 @@ app.whenReady().then(() => {
   });
   agents.onPermission((r) => send("permission", r));
   ptys.listen((id, data) => send("pty:data", { id, data }), (s) => send("ptys", s));
+  // a terminal command that ran a while has finished: say so, and let the click land on its worktree
+  ptys.onCommandDone(({ scopeId, command, code, durationMs }) => {
+    if (!Notification.isSupported()) return;
+    const where = store.data.worktrees.find((w) => w.id === scopeId)?.title ?? store.data.projects.find((p) => p.id === scopeId)?.name ?? "terminal";
+    const notification = new Notification({
+      title: code === 0 ? "Command finished" : `Command failed (exit ${code})`,
+      subtitle: where,
+      body: `${command ?? "command"} · ${formatDuration(durationMs)}`,
+    });
+    notification.on("click", () => {
+      if (!win || win.isDestroyed()) return;
+      if (win.isMinimized()) win.restore();
+      win.show(); win.focus(); send("openScope", scopeId);
+    });
+    notification.on("failed", (_event, error) => console.warn("Command notification failed:", error));
+    notification.show();
+  });
   process.on("uncaughtException", (e) => console.error("[main]", e));
   createWindow();
   // drop worktrees whose folders vanished since last run
