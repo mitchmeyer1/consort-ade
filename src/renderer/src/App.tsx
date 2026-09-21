@@ -66,6 +66,10 @@ const PrBadge = ({ st }: { st: WorktreeStatus }) => {
   if (pr.state === "CLOSED") return <span className="badge closed" title={pr.title}>✗ #{pr.number}</span>;
   return <span className="badge pr" title={pr.title}>{pr.draft ? "◐" : "⎇"} #{pr.number}</span>;
 };
+/** whose move an open PR waits on: the crown when it is yours, quiet when it is theirs */
+const TurnBadge = ({ pr }: { pr?: { turn?: "yours" | "theirs" | null; why?: string } }) => !pr?.turn ? null : (
+  <span className={"badge turn " + pr.turn} title={pr.why}>{pr.turn === "yours" ? <><Ico n="crown" /> Your turn</> : "Their turn"}</span>
+);
 /** the issue an `issue/<n>` branch was made for; clicking opens it on GitHub */
 const IssueBadge = ({ issue }: { issue?: WorktreeStatus["issue"] }) => !issue ? null : (
   <span className={"badge issue " + issue.state.toLowerCase()} role="link" title={`Issue #${issue.number}: ${issue.title}${issue.state === "CLOSED" ? " (closed)" : ""}`}
@@ -88,6 +92,7 @@ const Badges = ({ st, pr = true }: { st: WorktreeStatus | null; pr?: boolean }) 
     <span className="badges">
       {pr && <IssueBadge issue={st.issue} />}
       {pr && <PrBadge st={st} />}
+      {pr && st.pr?.state === "OPEN" && <TurnBadge pr={st.pr} />}
       {pr && <CiBadge ci={st.ci} />}
       {st.dirty > 0 && <span className="badge" title="uncommitted changes">±{st.dirty}</span>}
       {st.ahead > 0 && <span className="badge" title="ahead of upstream">↑{st.ahead}</span>}
@@ -242,6 +247,12 @@ export function App() {
 
   };
   const toggle = (t: Tab) => setTab((cur) => (cur === t ? undefined : t));
+  // views without a path to the selection (the review panel's "open chat") ask for it by event
+  useEffect(() => {
+    const openChat = (e: Event) => setSel({ type: "chat", id: (e as CustomEvent<string>).detail });
+    window.addEventListener("consort-open-chat", openChat);
+    return () => window.removeEventListener("consort-open-chat", openChat);
+  }, []);
   const runQuickAction = (wt: Worktree, action: { title: string; command: string }) => {
     const termId = `action-${crypto.randomUUID()}`;
     termTabs.set(wt.id, [...(termTabs.get(wt.id) ?? ["t1"]), termId]);
@@ -587,7 +598,7 @@ function ProjectPage({ project: p, state, openForm, onSelect }: { project: Proje
         <a href="#" onClick={(e) => { e.preventDefault(); ade.openExternal(pr.url); }}>{pr.title}</a>
         <div className="m">{pr.author} · {pr.branch} · {ago(pr.updatedAt)}{pr.draft ? " · draft" : ""}{pr.review ? ` · ${pr.review.toLowerCase().replace("_", " ")}` : ""}{pr.mine ? ` · ${pr.role}` : ""}</div>
       </span>
-      {pr.turn && <span className={"badge turn " + pr.turn} title={pr.why}>{pr.turn === "yours" ? <><Ico n="crown" /> Your turn</> : "Their turn"}</span>}
+      <TurnBadge pr={pr} />
       {localBranches.has(pr.branch) ? <span className="badge">local</span> : <button onClick={() => setForm({ branch: pr.branch })}>open as worktree</button>}
       <button disabled={busyPr === pr.number} onClick={() => review(pr)}>{busyPr === pr.number ? "…" : "Review"}</button>
     </div>
@@ -1524,7 +1535,7 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
         <div className="composer-options">
           <span className="left">
             <button className={"commitbtn" + (commit ? " armed" : "")} title="Stage everything, commit, and push. Type a message or let the AI write one." disabled={code || chat.running || !!commit} onClick={armCommit}><Ico n="wheat" />{commit && !commit.typed ? `commit ${commit.count}` : "commit"}</button>
-            <button className="commitbtn" disabled={!worktree} aria-pressed={code} title={code ? "Return to AI chat" : "Run commands in this worktree"} onClick={() => setMode(code ? "chat" : "code")}><Ico n={code ? "quill" : "terminal"} />{code ? "CHAT" : "CODE"}</button>
+            <button className="commitbtn" disabled={!worktree} aria-pressed={code} title={code ? "Return to AI chat" : "Run commands in this worktree"} onClick={() => setMode(code ? "chat" : "code")}><Ico n={code ? "quill" : "terminal"} />{code ? "CHAT" : "TERMINAL"}</button>
             <button className="commitbtn" disabled={!worktree} aria-pressed={side} title={side ? "Return to AI chat" : "Ask a read-only agent about this job — it won't interrupt the work"} onClick={() => setMode(side ? "chat" : "side")}><Ico n={side ? "quill" : "candle"} />{side ? "CHAT" : "SIDECHAT"}</button>
             {chat.running && <button className="commitbtn stopbtn" title="Stop this chat" onClick={() => ade.stop(chat.id)}><span className="stop-square" aria-hidden="true" />Stop</button>}
             {chatStatus(chat) === "running" && <div className="composer-working" role="status"><span className="working-circle" aria-hidden="true" />Working…</div>}

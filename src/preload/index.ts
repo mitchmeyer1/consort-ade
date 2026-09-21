@@ -12,7 +12,7 @@ const methods = [
   "getState", "openRootWorktree", "rootStatus", "rootBranches", "switchRootBranch", "checkoutAtRoot", "commitAndPushRoot", "commitWorktree", "pushWorktree", "pullWorktree", "setActiveChat", "pickFolder", "addProject", "removeProject", "setProjectBase", "syncWorktrees", "addWorktree",
   "removeWorktree", "worktreeStatus", "addChat", "renameChat", "deleteChat", "chatMenu", "askSide", "clearSide", "setAutoApprove", "setPhase",
   "send", "stop", "addKey", "renameKey", "removeKey", "answerPermission", "runCommand", "addQuickAction", "setQuickActionPinned", "deleteQuickAction", "diff", "skillPrompt", "issuePrompt", "pickFiles", "stageBlob", "setChatKey", "setKeyPhi", "setDefaultKey", "setPhiMode", "switchAgent", "continueChat", "renameWorktree", "archiveWorktree", "autoTitle", "openExternal", "artifactMenu", "previewArtifact", "setAppearance", "effectiveTheme", "repoInfo", "listFiles", "readFile", "writeFile", "authStatus", "authLoginCmd", "connectorUsage", "commitInfo", "commit", "suggestCommit", "commitChat", "ptyCreate", "ptyWrite", "ptyResize", "ptyKill", "ptySeen", "ptySeenScope", "ptys",
-  "readReview", "findReview", "updateReviewFinding", "submitReview", "reviewDrift", "reinvestigateFinding", "watchReview", "unwatchReview",
+  "readReview", "findReview", "updateReviewFinding", "submitReview", "reviewDrift", "reinvestigateFinding", "fixFinding", "watchReview", "unwatchReview",
 ];
 contextBridge.exposeInMainWorld("ade", {
   ...Object.fromEntries(methods.map((m) => [m, invoke(m)])),

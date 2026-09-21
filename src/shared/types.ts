@@ -20,6 +20,7 @@ import type { SideMessage } from "./sideChat";
 import type { FindingStatus, Review, ReviewEvent, ReviewSummary, VerdictReport } from "./review";
 import type { CiInfo } from "./ci";
 import type { IssueInfo, IssueLink } from "./issues";
+import type { PrTurn } from "./prTurn";
 export type { Contributor, SideMessage };
 export type { Finding, FindingStatus, Review, ReviewEvent, ReviewSummary, Submission, Verdict, VerdictReport } from "./review";
 export type { CiCheck, CiInfo, CiState } from "./ci";
@@ -27,7 +28,8 @@ export type { IssueDetail, IssueInfo, IssueLink } from "./issues";
 export type Project = { id: string; name: string; path: string; defaultBase: string; baseSetByUser?: boolean };
 export type QuickAction = { id: string; title: string; command: string; pinned?: boolean };
 export type Worktree = { id: string; projectId: string; name: string; title: string; path: string; branch: string; archived: boolean; root?: boolean; quickActions?: QuickAction[] };
-export type PrInfo = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; draft: boolean; url: string; title: string; author: string; review: string; /** GitHub's check rollup for the PR head, raw, for the CI summary */ checks: unknown[] };
+/** the worktree's own PR; the turn fields follow the same rule as the project page's PR list */
+export type PrInfo = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; draft: boolean; url: string; title: string; author: string; review: string; /** GitHub's check rollup for the PR head, raw, for the CI summary */ checks: unknown[] } & Partial<PrTurn>;
 export type WorktreeStatus = {
   branch: string; dirty: number; ahead: number; behind: number; merged: boolean; inBase: boolean; base: string;
   last?: { subject: string; author: string; age: string }; files: string; pr?: PrInfo;
@@ -96,8 +98,7 @@ export type RootStatus = { branch: string | null; commit: string; dirty: boolean
 export type RepoInfo = {
   repo?: { nameWithOwner: string; description: string; url: string; defaultBranch: string; pushedAt: string; isPrivate: boolean };
   me: string;
-  prs: { number: number; title: string; author: string; branch: string; draft: boolean; review: string; updatedAt: string; url: string;
-    mine: boolean; role: "author" | "reviewer" | null; turn: "yours" | "theirs" | null; why: string }[];
+  prs: ({ number: number; title: string; author: string; branch: string; draft: boolean; review: string; updatedAt: string; url: string } & PrTurn)[];
   runs: { name: string; title: string; branch: string; status: string; conclusion: string; createdAt: string; url: string }[];
   /** open issues, most recently updated first */
   issues: IssueInfo[];
@@ -212,6 +213,8 @@ export type Api = {
   reviewDrift(worktreeId: string, target: string): Promise<{ head: string | null; state: string | null; reviewDecision: string; url: string; drifted: string[] }>;
   /** re-check one finding against the PR's current head with a read-only agent; the verdict is written into the file */
   reinvestigateFinding(worktreeId: string, target: string, findingId: string): Promise<{ review: Review; report: VerdictReport; summary: string; head: string }>;
+  /** hand one finding to the review chat in its worktree (or a new chat) to fix locally; queued if that chat is busy */
+  fixFinding(worktreeId: string, target: string, findingId: string): Promise<{ review: Review; chatId: string; chatName: string; queued: boolean }>;
   watchReview(worktreeId: string, target: string): Promise<void>;
   unwatchReview(worktreeId: string, target: string): Promise<void>;
   /** the absolute path of a review file that changed on disk */

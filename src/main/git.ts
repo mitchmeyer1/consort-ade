@@ -7,6 +7,7 @@ import type { Commit } from "../shared/contributors";
 // the extension matters: tests load this module straight into Node, which resolves relative imports literally
 import { latestPushRuns, summarizeChecks, type CiInfo } from "../shared/ci.ts";
 import { issueNumberOf, type IssueDetail, type IssueInfo, type IssueLink } from "../shared/issues.ts";
+import { TURN_FIELDS, whoseTurn } from "../shared/prTurn.ts";
 
 const run = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) =>
@@ -55,11 +56,18 @@ export async function removeWorktree(repo: string, path: string) {
   await git(repo, "worktree", "remove", "--force", path);
 }
 
+/** the gh login, fetched once per process; it does not change while the app runs */
+let meMemo: Promise<string> | undefined;
+const whoAmI = (cwd: string) => (meMemo ??= run("gh", ["api", "user", "-q", ".login"], { cwd, timeout: 10_000 }).then((r) => r.stdout.trim(), () => { meMemo = undefined; return ""; }));
+
 async function prInfo(path: string): Promise<PrInfo | undefined> {
   try {
-    const { stdout } = await run("gh", ["pr", "view", "--json", "number,state,isDraft,url,title,author,reviewDecision,statusCheckRollup"], { cwd: path, timeout: 10_000 });
+    const [{ stdout }, me] = await Promise.all([
+      run("gh", ["pr", "view", "--json", `number,state,isDraft,url,title,reviewDecision,statusCheckRollup,${TURN_FIELDS}`], { cwd: path, timeout: 10_000 }),
+      whoAmI(path),
+    ]);
     const j = JSON.parse(stdout);
-    return { number: j.number, state: j.state, draft: j.isDraft, url: j.url, title: j.title, author: j.author?.login ?? "", review: j.reviewDecision ?? "", checks: Array.isArray(j.statusCheckRollup) ? j.statusCheckRollup : [] };
+    return { number: j.number, state: j.state, draft: j.isDraft, url: j.url, title: j.title, author: j.author?.login ?? "", review: j.reviewDecision ?? "", checks: Array.isArray(j.statusCheckRollup) ? j.statusCheckRollup : [], ...whoseTurn(j, me) };
   } catch {
     return undefined;
   }
@@ -198,11 +206,11 @@ export const repoName = (cwd: string): Promise<string | undefined> =>
 export async function repoInfo(cwd: string): Promise<RepoInfo> {
   const [repo, prs, runs, issues, me] = await Promise.all([
     gh(cwd, ["repo", "view", "--json", "nameWithOwner,description,url,defaultBranchRef,pushedAt,isPrivate"]),
-    gh(cwd, ["pr", "list", "--limit", "30", "--json", "number,title,author,headRefName,isDraft,reviewDecision,updatedAt,url,reviewRequests,reviews,comments,commits"]),
+    gh(cwd, ["pr", "list", "--limit", "30", "--json", `number,title,headRefName,isDraft,reviewDecision,updatedAt,url,${TURN_FIELDS}`]),
     gh(cwd, ["run", "list", "--limit", "8", "--json", "status,conclusion,name,headBranch,createdAt,url,displayTitle"]),
     // the page shows 15 and expands to the rest; the comment count comes from the list payload without pulling bodies
     gh(cwd, ["issue", "list", "--state", "open", "--limit", "50", "--search", "sort:updated-desc", "--json", "number,title,author,state,url,labels,assignees,createdAt,updatedAt,comments"]),
-    run("gh", ["api", "user", "-q", ".login"], { cwd, timeout: 10_000 }).then((r) => r.stdout.trim(), () => ""),
+    whoAmI(cwd),
   ]);
   return {
     me,
@@ -214,25 +222,6 @@ export async function repoInfo(cwd: string): Promise<RepoInfo> {
     runs: (runs ?? []).map((r: any) => ({ name: r.name, title: r.displayTitle, branch: r.headBranch, status: r.status, conclusion: r.conclusion, createdAt: r.createdAt, url: r.url })),
     issues: (issues ?? []).map(mapIssue),
   };
-}
-
-// ponytail: "turn" = who acted last (review/comment/commit), with a pending review request always yours
-function whoseTurn(p: any, me: string) {
-  const isAuthor = p.author?.login === me;
-  const requested = (p.reviewRequests ?? []).some((r: any) => r.login === me);
-  const acts: { who: string; at: string; what: string }[] = [
-    ...(p.reviews ?? []).map((r: any) => ({ who: r.author?.login, at: r.submittedAt, what: `${(r.state ?? "reviewed").toLowerCase().replace("_", " ")}` })),
-    ...(p.comments ?? []).map((c: any) => ({ who: c.author?.login, at: c.createdAt, what: "commented" })),
-    ...(p.commits ?? []).flatMap((c: any) => (c.authors ?? []).map((a: any) => ({ who: a.login, at: c.committedDate, what: "pushed" }))),
-  ].filter((a) => a.who && a.at && a.who !== "github-actions" && a.who !== "claude").sort((a, b) => a.at.localeCompare(b.at));
-  const iActed = acts.some((a) => a.who === me);
-  const role = isAuthor ? "author" : requested || iActed ? "reviewer" : null;
-  if (!role) return { mine: false, role, turn: null, why: "" };
-  if (requested) return { mine: true, role, turn: "yours" as const, why: "review requested" };
-  const last = acts[acts.length - 1];
-  if (!last) return { mine: true, role, turn: isAuthor ? ("theirs" as const) : ("yours" as const), why: isAuthor ? "waiting on reviewers" : "not reviewed yet" };
-  if (last.who === me) return { mine: true, role, turn: "theirs" as const, why: `you ${last.what} last` };
-  return { mine: true, role, turn: "yours" as const, why: `${last.who} ${last.what}` };
 }
 
 // editor: paths stay inside the worktree

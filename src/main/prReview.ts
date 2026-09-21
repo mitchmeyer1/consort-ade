@@ -10,7 +10,7 @@ import {
   applyVerdict, approvedFindings, commentableLines, draftBodyPrompt, driftBases, driftedFindings, fallbackReviewBody, parseReview, parseVerdict,
   patchesToDiff, recordSubmission, reviewPayload, serializeReview, updateFinding, verdictSummary, verifiedHead,
   type FindingStatus, type Review, type ReviewEvent, type VerdictReport,
-  pickReviewFile, reviewSummary, type ReviewSummary,
+  pickReviewFile, reviewSummary, recordFixRequest, type ReviewSummary,
 } from "../shared/review";
 import { store } from "./store";
 import { defaultConnector } from "../shared/defaultConnector";
@@ -35,6 +35,14 @@ export function repoOf(review: Review) {
 
 export async function readReview(path: string) {
   return { path, review: parseReview(await fs.readFile(path, "utf8")) };
+}
+
+/** note on the finding which chat is fixing it */
+export async function setFixRequest(path: string, findingId: string, chatId: string) {
+  const { review } = await readReview(path);
+  const next = recordFixRequest(review, findingId, chatId, new Date().toISOString());
+  await writeReview(path, next);
+  return next;
 }
 
 /** the review file a branch owns, if any: relative path plus what it amounts to */

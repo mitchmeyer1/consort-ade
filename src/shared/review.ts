@@ -42,7 +42,10 @@ export type Finding = {
   head?: string;
   /** the last re-investigation against a newer PR head */
   investigation?: Investigation;
+  /** set when "Fix locally" handed this finding to a chat in the worktree */
+  fixRequest?: FixRequest;
 };
+export type FixRequest = { chatId: string; at: string };
 
 export const VERDICTS = ["same", "modified", "removed"] as const;
 export type Verdict = (typeof VERDICTS)[number];
@@ -116,6 +119,7 @@ function finding(raw: any, index: number): Finding | undefined {
   const inv = raw.investigation;
   const investigation: Investigation | undefined = inv && VERDICTS.includes(inv.verdict) && typeof inv.head === "string"
     ? { at: str(inv.at), head: inv.head, verdict: inv.verdict, reason: str(inv.reason), ...(str(inv.previousComment) ? { previousComment: inv.previousComment } : {}) } : undefined;
+  const fixRequest: FixRequest | undefined = raw.fixRequest && typeof raw.fixRequest.chatId === "string" ? { chatId: raw.fixRequest.chatId, at: str(raw.fixRequest.at) } : undefined;
   return {
     id: str(raw.id) || `${kind === "defect" ? "D" : "I"}${index + 1}`,
     kind, severity: kind === "defect" ? severity ?? "low" : undefined, category,
@@ -128,6 +132,7 @@ function finding(raw: any, index: number): Finding | undefined {
     posted,
     head: str(raw.head) || undefined,
     investigation,
+    fixRequest,
   };
 }
 
@@ -187,6 +192,25 @@ export function updateFinding(review: Review, id: string, patch: { status?: Find
   if (patch.status === "commented") throw new Error("Post to GitHub to mark a finding as commented.");
   if (patch.status === "dropped") throw new Error("Only a re-investigation drops a finding; use Ignore to pass on it.");
   return { ...review, findings: review.findings.map((f) => f.id !== id ? f : { ...f, ...(patch.status ? { status: patch.status } : {}), ...(patch.comment !== undefined ? { comment: patch.comment } : {}) }) };
+}
+
+/** the message "Fix locally" sends: the finding as the reviewer wrote it, then how to go about the change */
+export function fixPrompt(review: Review, f: Finding) {
+  const where = `${f.file}${f.line ? `:${f.line}` : ""}`;
+  const lines = [`Fix ${f.id} from the PR ${review.pr} review (${review.title}) locally, in this worktree.`, "", `**${f.title}**`, `File: ${where}`];
+  if (f.kind === "defect") {
+    for (const [label, text] of [["Problem", f.problem], ["Example flow", f.exampleFlow], ["Suggested fix", f.fix]] as const) if (text) lines.push(`${label}: ${text}`);
+  } else {
+    for (const [label, text] of Object.entries(f.fields ?? {})) if (text) lines.push(`${label}: ${text}`);
+  }
+  lines.push("", "Make the smallest change that resolves it, in the style of the surrounding code, and run the tests that cover it. Do not commit, and do not edit the review file. Finish with a short paragraph on what changed and where.");
+  return lines.join("\n");
+}
+
+/** remember which chat took the finding, so the card can link back to it */
+export function recordFixRequest(review: Review, id: string, chatId: string, at: string): Review {
+  if (!review.findings.some((f) => f.id === id)) throw new Error(`No finding ${id} in this review.`);
+  return { ...review, findings: review.findings.map((f) => (f.id === id ? { ...f, fixRequest: { chatId, at } } : f)) };
 }
 
 export const approvedFindings = (review: Review) => review.findings.filter((f) => f.status === "approved" && f.comment?.trim());

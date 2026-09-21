@@ -1,5 +1,4 @@
 import { startDockerRecovery } from "./dockerLifecycle";
-import { selectedModel } from "../shared/defaultConnector";
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, shell, Notification, Menu } from "electron";
 import { join, basename, resolve, extname } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -24,7 +23,11 @@ import { issueBriefPrompt } from "../shared/issues";
 import { askSide } from "./sideChat";
 import { Reminders } from "./reminders";
 import { Notifier, type Notice } from "../shared/notices";
-import { findReview, readReview, reinvestigate, reviewDrift, setFinding, submitReview, ReviewWatchers } from "./prReview";
+import { findReview, readReview, reinvestigate, reviewDrift, setFinding, setFixRequest, submitReview, ReviewWatchers } from "./prReview";
+import { fixPrompt, prNumberOf } from "../shared/review";
+import { isReviewChat } from "../shared/reviewProgress";
+import { defaultConnector, selectedModel } from "../shared/defaultConnector";
+import { modelTiers } from "../shared/modelTiers";
 import { MODELS, type Api, type Appearance } from "../shared/types";
 import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -358,6 +361,27 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   submitReview: (id: string, target: string, opts: { event: import("../shared/review").ReviewEvent; body: string; inline: boolean; draft: boolean }) => submitReview(artifactPath(id, target), opts),
   reviewDrift: (id: string, target: string) => reviewDrift(artifactPath(id, target)),
   reinvestigateFinding: (id: string, target: string, findingId: string) => reinvestigate(artifactPath(id, target), findingId),
+  // "Fix locally": the review chat already holds the context, so the finding goes there, queued behind whatever it is doing;
+  // a branch with no review chat gets a fresh one on the default connector
+  fixFinding: async (id: string, target: string, findingId: string) => {
+    const path = artifactPath(id, target);
+    const { review } = await readReview(path);
+    const finding = review.findings.find((f) => f.id === findingId);
+    if (!finding) throw new Error(`No finding ${findingId} in this review.`);
+    const reviewChats = store.data.chats.filter((c) => c.worktreeId === id && isReviewChat(c)).sort((a, b) => (b.lastChattedAt ?? 0) - (a.lastChattedAt ?? 0));
+    let chat = reviewChats.find((c) => prNumberOf(c.name) === review.pr) ?? reviewChats[0];
+    if (!chat) {
+      const key = defaultConnector(store.data);
+      if (!key) throw new Error("Add a connector in Settings first.");
+      const tiers = modelTiers(key.provider, store.public().models?.[key.provider]);
+      const chatId = handlers.addChat!(id, key.id, { name: `Fix ${finding.id} · ${review.title}`, model: tiers.orchestrator, delegateModel: tiers.delegate, remember: false });
+      chat = store.chat(chatId);
+    }
+    const queued = !!chat.running;
+    await agents.send(chat.id, fixPrompt(review, finding));
+    const next = await setFixRequest(path, findingId, chat.id);
+    return { review: next, chatId: chat.id, chatName: chat.name, queued };
+  },
   watchReview: (id: string, target: string) => { reviewWatchers.add(artifactPath(id, target)); },
   unwatchReview: (id: string, target: string) => { reviewWatchers.remove(artifactPath(id, target)); },
   authStatus: (keyId: string) => authStatus(keyId),

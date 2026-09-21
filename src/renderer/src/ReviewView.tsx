@@ -40,7 +40,8 @@ export function ReviewView({ worktree, path }: { worktree: Worktree; path: strin
   const [investigating, setInvestigating] = useState<Set<string>>(() => new Set());
   const [filter, setFilter] = useState<Filter>("all");
   /** the finish panel: open with inline comments (all decided) or as a review-only submission */
-  const [finish, setFinish] = useState<{ inline: boolean } | null>(null);
+  // `at` changes on every click so the panel scrolls back into view even when it is already open
+  const [finish, setFinish] = useState<{ inline: boolean; at: number } | null>(null);
   const [dismissed, setDismissed] = useState(false);
   const announced = useRef<string | undefined>(undefined);
 
@@ -122,12 +123,25 @@ export function ReviewView({ worktree, path }: { worktree: Worktree; path: strin
   const visible = (f: Finding) => filter === "all" || (filter === "drifted" ? drifted.has(f.id) : f.status === filter);
   const moved = !!drift?.head && !!review.head && drift.head !== review.head;
   const decided = allDecided(review);
-  const showFinish = finish ?? (decided && !review.submissions.length && !dismissed ? { inline: true } : null);
+  const showFinish = finish ?? (decided && !review.submissions.length && !dismissed ? { inline: true, at: 0 } : null);
   const decision = drift?.reviewDecision ? DECISION_LABEL[drift.reviewDecision] ?? drift.reviewDecision.toLowerCase().replace("_", " ") : "";
   const open = (url: string) => ade.openExternal(url);
+  const openChat = (chatId: string) => window.dispatchEvent(new CustomEvent("consort-open-chat", { detail: chatId }));
+  // hand the finding to the worktree's chat; the toast is the way back to it
+  const fixLocally = async (f: Finding) => {
+    const id = toasts.start(`Sending ${f.id} to the chat…`);
+    try {
+      const res = await ade.fixFinding(worktree.id, path, f.id);
+      setReview(res.review);
+      toasts.dismiss(id);
+      toasts.notify("success", `${f.id} sent to ${res.chatName}${res.queued ? ", queued behind its current task" : ""}`, "Click to open the chat", { chat: res.chatId });
+    } catch (e) {
+      toasts.fail(id, `Couldn't start a fix for ${f.id}`, (e as Error).message);
+    }
+  };
   const count = (key: Filter) => key === "all" ? review.findings.length : key === "drifted" ? drifted.size : review.findings.filter((f) => f.status === key).length;
   const card = (f: Finding) => <FindingCard key={f.id} f={f} review={review} drifted={drifted.has(f.id)} liveHead={drift?.head ?? null} investigating={investigating.has(f.id)}
-    onDecide={decide} onComment={saveComment} onReinvestigate={reinvestigate} onOpen={open} />;
+    onDecide={decide} onComment={saveComment} onReinvestigate={reinvestigate} onFix={fixLocally} onOpen={open} onOpenChat={openChat} />;
 
   return (
     <div className="rv">
@@ -160,13 +174,13 @@ export function ReviewView({ worktree, path }: { worktree: Worktree; path: strin
         </div>
         <div className="rv-buttons">
           <button disabled={checking} title="Ask GitHub whether the PR has new commits that touch any finding" onClick={() => checkDrift(true)}>{checking ? "Checking…" : "Check for changes"}</button>
-          <button disabled={busy} title="Approve, comment on, or request changes to the PR without posting the queued comments inline" onClick={() => setFinish({ inline: false })}>Submit review</button>
-          <button className={showFinish?.inline ? "on" : "primary"} disabled={!queued || busy} title={queued ? `Send the ${queued} queued comment${queued === 1 ? "" : "s"} as one GitHub review, with a verdict` : "Queue findings with “Comment on PR” first"} onClick={() => setFinish({ inline: true })}>
+          <button disabled={busy} title="Approve, comment on, or request changes to the PR without posting the queued comments inline" onClick={() => setFinish({ inline: false, at: Date.now() })}>Submit review</button>
+          <button className={showFinish?.inline ? "on" : "primary"} disabled={!queued || busy} title={queued ? `Send the ${queued} queued comment${queued === 1 ? "" : "s"} as one GitHub review, with a verdict` : "Queue findings with “Comment on PR” first"} onClick={() => setFinish({ inline: true, at: Date.now() })}>
             {busy ? "Submitting…" : queued ? `Post ${queued} to PR` : "Post to PR"}
           </button>
         </div>
       </div>
-      {showFinish && <FinishPanel review={review} inline={showFinish.inline} decision={decision} busy={busy}
+      {showFinish && <FinishPanel review={review} inline={showFinish.inline} openedAt={showFinish.at} decision={decision} busy={busy}
         onSubmit={submit} onQuick={quickPost} onClose={() => { setFinish(null); setDismissed(true); }} />}
       {review.submissions.length > 0 && <div className="rv-submissions">
         {review.submissions.map((sub, i) => <div key={i} className={`rv-sub ${sub.event.toLowerCase()}`}>
@@ -192,14 +206,22 @@ export function ReviewView({ worktree, path }: { worktree: Worktree; path: strin
 
       {review.flows.length > 0 && <>
         <h2 className="rv-h2"><Ico n="branch" />Flows <span className="k">{review.flows.length}</span></h2>
-        {review.flows.map((flow, i) => <div key={i} className="rv-flow">
-          <span className={"rv-tag" + (flow.mode === "unattended" ? " unattended" : "")}>{flow.mode === "unattended" ? "unattended" : "human-driven"}</span>
-          <span className={"rv-tag" + (flow.reachable ? "" : " gated")}>{flow.reachable ? "reachable today" : `behind ${flow.gate ?? "a gate"}`}</span>
-          <h3>Flow {i + 1} — {flow.name}</h3>
+        {review.flows.map((flow, i) => {
+          // a short gate reads as a tag; a sentence-long one gets its own line under the heading
+          const gateInTag = !flow.reachable && !!flow.gate && flow.gate.length <= 28;
+          return <div key={i} className="rv-flow">
+          <div className="rv-flow-head">
+            <h3>Flow {i + 1} — {flow.name}</h3>
+            <div className="rv-tags">
+              <span className={"rv-tag" + (flow.reachable ? "" : " gated")} title={flow.reachable ? undefined : flow.gate}>{flow.reachable ? "reachable today" : gateInTag ? `behind ${flow.gate}` : "gated"}</span>
+              <span className={"rv-tag" + (flow.mode === "unattended" ? " unattended" : "")}>{flow.mode === "unattended" ? "unattended" : "human-driven"}</span>
+            </div>
+          </div>
+          {!flow.reachable && flow.gate && !gateInTag && <p><strong>Behind:</strong> {flow.gate}</p>}
           {flow.trigger && <p><strong>Trigger:</strong> {flow.trigger}</p>}
           {flow.hops.length > 0 && <p>{flow.hops.map((h, j) => <React.Fragment key={j}>{j > 0 && " → "}{h.text}{h.ref && <> <span className="rv-ref">{h.ref}</span></>}</React.Fragment>)}</p>}
           {flow.endsIn && <p><strong>Ends in:</strong> {flow.endsIn}</p>}
-        </div>)}
+        </div>; })}
       </>}
 
       {review.pattern && <>
@@ -235,11 +257,18 @@ export function ReviewView({ worktree, path }: { worktree: Worktree; path: strin
 }
 
 type FinishProps = {
-  review: Review; inline: boolean; decision: string; busy: boolean;
+  review: Review; inline: boolean; openedAt: number; decision: string; busy: boolean;
   onSubmit: (opts: { event: ReviewEvent; body: string; inline: boolean; draft: boolean }) => void; onQuick: () => void; onClose: () => void;
 };
 /** GitHub's "Finish your review" box: a verdict, a body the model drafts when left blank, and whether the queued comments ride along inline. */
-function FinishPanel({ review, inline: initialInline, decision, busy, onSubmit, onQuick, onClose }: FinishProps) {
+function FinishPanel({ review, inline: initialInline, openedAt, decision, busy, onSubmit, onQuick, onClose }: FinishProps) {
+  // the action bar is sticky, so the click can come from far down the page: bring the panel to the reader and hand it focus
+  const panel = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!openedAt) return;
+    panel.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    panel.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus({ preventScroll: true });
+  }, [openedAt]);
   const [event, setEvent] = useState<ReviewEvent>(() => suggestedEvent(review));
   const [body, setBody] = useState("");
   const [inline, setInline] = useState(initialInline);
@@ -249,7 +278,7 @@ function FinishPanel({ review, inline: initialInline, decision, busy, onSubmit, 
   const decided = allDecided(review);
   const suggestion = suggestedEvent(review);
   return (
-    <div className="rv-finish" role="dialog" aria-label="Finish your review">
+    <div className="rv-finish" role="dialog" aria-label="Finish your review" ref={panel}>
       <div className="rv-finish-head">
         <h3>Finish your review</h3>
         <span className="m">{decided ? `Every finding decided · ${counts.approved} queued · ${counts.commented} posted · ${counts.ignored} ignored${counts.dropped ? ` · ${counts.dropped} dropped` : ""}` : `${counts.pending} finding${counts.pending === 1 ? "" : "s"} still undecided`}{decision ? ` · GitHub: ${decision}` : ""}</span>
@@ -280,9 +309,10 @@ function FinishPanel({ review, inline: initialInline, decision, busy, onSubmit, 
 
 type CardProps = {
   f: Finding; review: Review; drifted: boolean; liveHead: string | null; investigating: boolean;
-  onDecide: (f: Finding, s: FindingStatus) => void; onComment: (f: Finding, c: string) => void; onReinvestigate: (f: Finding) => void; onOpen: (url: string) => void;
+  onDecide: (f: Finding, s: FindingStatus) => void; onComment: (f: Finding, c: string) => void; onReinvestigate: (f: Finding) => void; onFix: (f: Finding) => void;
+  onOpen: (url: string) => void; onOpenChat: (chatId: string) => void;
 };
-function FindingCard({ f, review, drifted, liveHead, investigating, onDecide, onComment, onReinvestigate, onOpen }: CardProps) {
+function FindingCard({ f, review, drifted, liveHead, investigating, onDecide, onComment, onReinvestigate, onFix, onOpen, onOpenChat }: CardProps) {
   const [draft, setDraft] = useState(f.comment ?? "");
   const box = useRef<HTMLTextAreaElement>(null);
   useEffect(() => { setDraft(f.comment ?? ""); }, [f.comment]);
@@ -308,6 +338,7 @@ function FindingCard({ f, review, drifted, liveHead, investigating, onDecide, on
         <span className="rv-ref">{f.file}{f.line ? `:${f.line}` : ""}</span>
         <span className="rv-checked" title={`This finding was last verified against commit ${checkedAt}`}>checked at {short(checkedAt) || "?"}</span>
         {drifted && <span className="rv-drift" title="The PR has changed this file since the finding was checked">file changed on PR since</span>}
+        {f.fixRequest && <a href="#" className="rv-fixing" title="A chat in this worktree was asked to make this change" onClick={(e) => { e.preventDefault(); onOpenChat(f.fixRequest!.chatId); }}>fix requested{f.fixRequest.at ? ` ${when(f.fixRequest.at)}` : ""} · open chat ↗</a>}
       </div>
       {inv && <div className={`rv-inv ${inv.verdict}`}>
         <b>{inv.verdict === "same" ? "Re-checked: still holds" : inv.verdict === "modified" ? (posted ? "Re-checked: changed — posted comment may need a follow-up" : "Re-checked: still holds, comment updated") : posted ? "Re-checked: looks fixed — posted comment is stale" : "Re-checked: no longer holds"}</b>
@@ -334,6 +365,9 @@ function FindingCard({ f, review, drifted, liveHead, investigating, onDecide, on
             {f.status === "ignored" ? "Ignored · undo" : "Ignore"}
           </button>
         </>}
+        {!dropped && <button className={f.fixRequest ? "on" : ""} title={f.fixRequest ? "Ask again: send this finding to the chat in this worktree once more" : "This PR is yours: ask the chat in this worktree to make the change"} onClick={() => onFix(f)}>
+          {f.fixRequest ? "Fix again" : "Fix locally"}
+        </button>}
         <button className={drifted ? "rv-reinvestigate hot" : "rv-reinvestigate"} disabled={!canReinvestigate}
           title={!liveHead ? "GitHub has not answered yet" : liveHead === checkedAt ? "The PR has no commits newer than this finding's check" : "Re-check this finding against the PR's current commit: same comment, a modified one, or removed"}
           onClick={() => onReinvestigate(f)}>
