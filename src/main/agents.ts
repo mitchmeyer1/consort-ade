@@ -10,14 +10,19 @@ import { startAgentBrowser } from "./agentBrowser";
 import { agentEnvironment, isInstallCommand, TESTING_PROMPT } from "./agentEnvironment";
 import { loginEnv } from "./auth";
 import { PHASES, type Chat, type Block, type Phase, type PermissionRequest } from "../shared/types";
+import { advancePlan, finishPlan, parsePlan, PLAN_MARKER, startPlan, STEP_MARKER } from "../shared/planProgress";
 
 // ponytail: phase tracked via text markers so claude + codex share one mechanism
 const PHASE_PROMPT = `For EVERY new prompt, first assess the task and plan your approach before doing work. The ADE starts at waiting during this assessment.
 Choose the progress flow before using tools or answering, and emit [steps:3] or [steps:5] on its own line.
 Use 3 steps ONLY for simple factual or conversational questions requiring no code/file changes, substantial research, or validation: waiting → executing → complete. Plan briefly during the initial assessment, then emit [phase:executing] before answering and [phase:complete] when finished. Never jump straight to complete.
 Use 5 steps for all other tasks: ${PHASES.join(" → ")}. Emit [steps:5], then [phase:planning] and describe the plan before acting. Continue through [phase:executing], [phase:validating], and [phase:complete] in order. Do not skip planning or validation. If a simple task grows in scope, upgrade with [steps:5] and plan before continuing.
-Every phase marker belongs on its own line. Emit [phase:waiting] if you need user input; otherwise finish at complete. Select the flow anew for every prompt, including follow-ups and queued messages, regardless of the previous turn's flow.`;
+Every phase marker belongs on its own line. Emit [phase:waiting] if you need user input; otherwise finish at complete. Select the flow anew for every prompt, including follow-ups and queued messages, regardless of the previous turn's flow.
+
+Also lay out the specific work as a plan the user can watch. Once you know the approach and before your first tool call, emit on its own line [plan: first step | second step | verify step] — 2 to 6 steps, each an imperative phrase of at most six words naming a real unit of this task ("read the store", "add the field", "run the tests"), not the generic phases above. List them in the order you will do them, and emit [step:N] on its own line as you start step N (1-based), counting up, so the user sees where you are. If a step turns out wrong, emit a fresh [plan: …] rather than reworking the old one. Skip the plan entirely for a question you answer without tools. Agents you dispatch are attached to the step that is live when you dispatch them, so no marker is needed for them.
+The last step is always verification, and it must be a check you actually run, named concretely: the repository's test suite or typecheck, the screenshot helper against the running app for anything visual, the CLI or endpoint you changed, a query against the data you migrated. Do the check, read its output, and say what it showed. If a check fails, fix and re-run it rather than reporting the failure as done; if nothing can be run, say plainly what you could not verify instead of claiming it passed. A step you never started is reported to the user as skipped, so do not declare work you will not do.`;
 const PROGRESS_MARKER = /\[(?:steps:(3|5)|phase:(waiting|planning|executing|validating|complete))\]\s*/g;
+
 const PHI_MARKER = /\[phi-required\]\s*/g;
 const phiPrompt = (allowed: boolean) =>
   allowed
@@ -273,6 +278,7 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
   if (!opts.silent) chat.messages.push({ id: randomUUID(), role: "user", blocks: [{ type: "text", text: shown }], ts: Date.now(), ...(staged.length ? { attachments: staged } : {}) });
   if (opts.queuedId) chat.queuedMessages = chat.queuedMessages?.filter((m) => m.id !== opts.queuedId);
   chat.unreadCompletion = false;
+  chat.plan = undefined; // the plan belongs to the task being answered, not the chat
   // a reminder that has landed is answered by working here; one still counting down keeps its time
   if (chat.remindAt !== undefined && chat.remindAt <= Date.now()) chat.remindAt = undefined;
   chat.running = true;
@@ -310,6 +316,7 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
     running.delete(chatId);
     chat.running = false;
     chat.assessingPrompt = false;
+    if (chat.plan && !ac.signal.aborted && !chat.error) chat.plan = finishPlan(chat.plan, Date.now());
     chat.permissions = [];
     if (!ac.signal.aborted && !chat.error && (chat.phase as Phase) !== "waiting") {
       chat.phase = "complete";
@@ -367,7 +374,15 @@ class Transcript {
           if (m[2] === "planning" || m[2] === "validating") this.chat.phaseSteps = 5;
         }
       }
-      b.text = b.text.replace(PROGRESS_MARKER, "").replace(PHI_MARKER, "");
+      // the agent's own plan for this task, and where in it we are
+      for (const m of b.text.matchAll(PLAN_MARKER)) {
+        const steps = parsePlan(m[1] ?? "");
+        if (steps.length) this.chat.plan = startPlan(steps, Date.now());
+      }
+      for (const m of b.text.matchAll(STEP_MARKER)) {
+        if (this.chat.plan) this.chat.plan = advancePlan(this.chat.plan, Number(m[1]), Date.now());
+      }
+      b.text = b.text.replace(PROGRESS_MARKER, "").replace(PLAN_MARKER, "").replace(STEP_MARKER, "").replace(PHI_MARKER, "");
     }
     const m = this.assistant();
     m.blocks = m.blocks.filter((b) => b.type !== "text" || b.text.trim());

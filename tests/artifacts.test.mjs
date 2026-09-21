@@ -60,3 +60,17 @@ test('chat artifacts include remote files and local paths, excluding web pages a
   assert.deepEqual(links.map((l) => l.label), ['PDF', 'Notes']);
   assert.deepEqual(chatArtifacts([]), []);
 });
+
+test('html previews get the chat scrollbar rules injected before </head>', async () => {
+  const { withFrameScrollbars, frameScrollbarStyle } = await import('../src/shared/artifacts.ts');
+  const doc = '<!doctype html><html><head><title>x</title><style>body{background:#000}</style></head><body>hi</body></html>';
+  const out = withFrameScrollbars(doc);
+  assert.ok(out.includes('::-webkit-scrollbar-track{background:transparent}'), 'no track');
+  assert.ok(out.indexOf('data-consort-scrollbars') > out.indexOf('body{background:#000}'), 'injected after the document styles');
+  assert.ok(out.indexOf('data-consort-scrollbars') < out.indexOf('</head>'), 'injected inside head');
+  assert.equal(out.replace(frameScrollbarStyle(), ''), doc, 'nothing else changes');
+
+  assert.ok(withFrameScrollbars('<p>fragment</p>').startsWith('<style data-consort-scrollbars>'), 'a fragment gets the style prepended');
+  assert.ok(frameScrollbarStyle('light').includes('rgba(20,19,17,.22)'), 'light theme uses the dark thumb');
+  assert.ok(frameScrollbarStyle('dark').includes('rgba(243,234,214,.18)'), 'dark theme uses the pale thumb');
+});

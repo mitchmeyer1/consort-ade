@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import ts from 'typescript';
+import * as planProgress from '../src/shared/planProgress.ts';
 const require = createRequire(import.meta.url);
 const compiled = ts.transpileModule(readFileSync(new URL('../src/main/agents.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -19,6 +20,7 @@ function fixture() {
     './agentEnvironment': { TESTING_PROMPT: '', agentEnvironment: (_, env) => env },
     './agentBrowser': { startAgentBrowser: async () => ({ prompt: '', close: async () => {} }) },
     '../shared/types': { PHASES: [] },
+    '../shared/planProgress': planProgress,
     '@openai/codex-sdk': { Codex: class {
       startThread() { return this.resumeThread(); }
       resumeThread() { return { runStreamed: async () => ({ events: (async function* () {

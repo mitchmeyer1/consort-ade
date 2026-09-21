@@ -19,7 +19,10 @@ import { usage } from "./usage";
 import * as ptys from "./ptys";
 import { chatStatus } from "../shared/chatStatus";
 import { REMINDER_CHOICES, reminderDue } from "../shared/reminders";
+import { topContributor } from "../shared/contributors";
+import { askSide } from "./sideChat";
 import { Reminders } from "./reminders";
+import { readReview, reinvestigate, reviewDrift, setFinding, submitReview, ReviewWatchers } from "./prReview";
 import { MODELS, type Api, type Appearance } from "../shared/types";
 import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -41,6 +44,8 @@ app.setPath("userData", process.env.ADE_DATA_DIR ?? join(app.getPath("appData"),
 
 let win: BrowserWindow;
 let reminders: Reminders | undefined;
+// a review file changed on disk (an agent wrote it, or a status was saved): tell the open viewer
+const reviewWatchers = new ReviewWatchers((path) => { if (win && !win.isDestroyed()) win.webContents.send("reviewChanged", path); });
 let activeChat: string | null = null;
 const isViewing = (id: string) => activeChat === id && !!win && !win.isDestroyed() && win.isFocused() && win.isVisible() && !win.isMinimized();
 function acknowledgeChat() {
@@ -294,7 +299,11 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     if (!w) return null;
     const hit = statusCache.get(id);
     if (hit && Date.now() - hit.t < 20_000) return hit.p;
-    const p = git.status(w.path, project(w.projectId).defaultBase).catch(() => null);
+    const base = project(w.projectId).defaultBase;
+    // whose branch this is rides along with the status the sidebar already polls for
+    const p = Promise.all([git.status(w.path, base), git.branchAuthors(w.path, base)])
+      .then(([status, commits]) => ({ ...status, author: topContributor(commits) }))
+      .catch(() => null);
     statusCache.set(id, { t: Date.now(), p });
     return p;
   },
@@ -340,6 +349,13 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     if ([".docx", ".xlsx", ".pptx", ".zip"].includes(ext)) return { kind: "unsupported" as const, content: "Preview unavailable for this file type. Use Show in Finder to open it in its application." };
     return { kind: ext === ".md" ? "markdown" as const : [".html", ".htm"].includes(ext) ? "html" as const : "text" as const, content: readFileSync(path, "utf8") };
   },
+  readReview: (id: string, target: string) => readReview(artifactPath(id, target)),
+  updateReviewFinding: (id: string, target: string, findingId: string, patch: { status?: import("../shared/review").FindingStatus; comment?: string }) => setFinding(artifactPath(id, target), findingId, patch),
+  submitReview: (id: string, target: string, opts: { event: import("../shared/review").ReviewEvent; body: string; inline: boolean; draft: boolean }) => submitReview(artifactPath(id, target), opts),
+  reviewDrift: (id: string, target: string) => reviewDrift(artifactPath(id, target)),
+  reinvestigateFinding: (id: string, target: string, findingId: string) => reinvestigate(artifactPath(id, target), findingId),
+  watchReview: (id: string, target: string) => { reviewWatchers.add(artifactPath(id, target)); },
+  unwatchReview: (id: string, target: string) => { reviewWatchers.remove(artifactPath(id, target)); },
   authStatus: (keyId: string) => authStatus(keyId),
   connectorUsage: (keyId: string, force?: boolean) => { const k = store.data.keys.find((k) => k.id === keyId); if (!k) throw new Error("Connector not found"); return usage.read(k, { force }); },
   commitInfo: (id: string) => git.commitInfo(wt(id).path),
@@ -410,6 +426,11 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     menu.once("menu-will-close", () => setImmediate(() => done()));
     menu.popup({ window: win });
   }),
+  askSide: (id: string, question: string) => askSide(id, question),
+  clearSide: (id: string) => {
+    store.chat(id).sideMessages = [];
+    store.save();
+  },
   deleteChat: (id: string) => {
     agents.stop(id);
     store.data.chats = store.data.chats.filter((c) => c.id !== id);
@@ -503,13 +524,27 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   skillPrompt: (name: string, worktreeId: string, args?: string, delegateModel?: string) => {
     const dir = join(app.getAppPath(), "skills", name);
     const skill = readFileSync(join(dir, "SKILL.md"), "utf8").replace(/^---[\s\S]*?---\n/, "");
-    const brief = name === "pr-writeup" ? `\n\n## Complete review agent brief — include in every delegated assignment\n\n${readFileSync(join(dir, "categories.md"), "utf8")}` : "";
-    const progress = name === "pr-writeup" ? "Keep the user informed in chat: explain the review plan before tools, then give a brief plain-language update every 30–45 seconds or five tool calls, whichever comes first. Summarize what you learned and what you are checking next; tool output alone is not an update.\n\n" : "";
-    const tier = delegateModel ? `You are the orchestrator, running on this session's strongest model. Dispatch every delegated agent on \`${delegateModel}\` by passing that model on the agent call; the runtime already defaults delegated agents to it. Your tokens go to scope, agent prompts, verification decisions and the final prose — not to reading the diff yourself. Escalate a single agent back to your own model only when a specific verification has already failed at the delegate tier, and say why in the operational summary.\n\n` : "";
-    return `${progress}${tier}Run the following skill${args ? ` with argument: ${args}` : " for the current branch"} in ${wt(worktreeId).path}. Its sibling files live in ${dir}.
-The Artifact tool is not available here: write the finished HTML to .consort/pr-writeup.html in the worktree. Print the operational review summary in the terminal/chat, then end with a clickable Markdown link to the saved HTML using its absolute path.
+    const worktreePath = wt(worktreeId).path;
+    let progress = "", rubric = "";
+    if (name === "pr-writeup") {
+      // The agent brief is shared context: it lives once on disk where every review agent
+      // reads it, instead of being pasted into each assignment by the orchestrator.
+      const categories = readFileSync(join(dir, "categories.md"), "utf8");
+      const reviewDir = join(worktreePath, ".consort", "pr-review");
+      mkdirSync(join(reviewDir, "agents"), { recursive: true });
+      writeFileSync(join(reviewDir, "categories.md"), categories);
+      progress = `Keep the user informed in chat at the phase boundaries: the plan before the first tool call, then one short plain-language update when scope is done, when a wave is dispatched, when it returns, when verification is done, and when the report is written. Not a running commentary.
 
-${skill}${brief}`;
+Runtime rules for this review: dispatch review agents with \`run_in_background: false\`, a whole wave in one message, because a turn that ends while agents are still running loses their results. Shared context goes in .consort/pr-review/brief.md once; the agent brief is already saved at .consort/pr-review/categories.md, so assignments point at those files and stay under ~1,500 characters. Each agent writes its report to .consort/pr-review/agents/<slug>.md; on a resume, read that directory first and dispatch only groups with no report.
+
+`;
+      rubric = `\n\n## Review rubric you apply in verification (agents read their own copy from disk — never paste this into an assignment)\n\n${categories}`;
+    }
+    const tier = delegateModel ? `You are the orchestrator, running on this session's strongest model. Dispatch every delegated agent on \`${delegateModel}\` by passing that model on the agent call; the runtime already defaults delegated agents to it. Your tokens go to scope, grouping, short assignments, verification decisions and the final prose — not to reading the diff yourself. Escalate a single agent back to your own model only when a specific verification has already failed at the delegate tier, and say why in the summary.\n\n` : "";
+    return `${progress}${tier}Run the following skill${args ? ` with argument: ${args}` : " for the current branch"} in ${worktreePath}. Its sibling files live in ${dir}.
+The Artifact tool is not available here. The deliverable is the review file: write it to .consort/pr-review/pr-<n>.review.json in the worktree, in the schema the skill gives. Consort renders that file and lets Mitch approve or ignore each finding and post the approved ones to GitHub, so do not post comments yourself. Print the operational review summary in chat, then end with a clickable Markdown link to the saved review file using its absolute path.
+
+${skill}${rubric}`;
   },
   addQuickAction: (worktreeId: string, title: string, command: string) => {
     const worktree = wt(worktreeId);

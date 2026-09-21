@@ -27,6 +27,7 @@ export class Store {
       if (c.running || (!c.error && last && (last.role === "user" || pendingTool))) c.interrupted = true;
       c.running = false;
       c.assessingPrompt = false;
+      c.sideBusy = false;
       if (c.queuedMessages?.length) c.queuePaused = true;
       // reminders used to record when they were set; they now record when they come due
       const legacy = (c as Chat & { remindedAt?: number }).remindedAt;

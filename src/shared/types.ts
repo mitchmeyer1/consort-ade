@@ -15,6 +15,11 @@ export const modelOptions = (state: { models?: Partial<Record<Provider, string[]
 
 /** configDir: extra CLI logins keep their own credentials there (CLAUDE_CONFIG_DIR / CODEX_HOME); the built-in login uses the CLI default */
 export type ApiKey = { id: string; name: string; provider: Provider; phiAllowed: boolean; auth: "login" | "key"; configDir?: string; defaultModel?: string };
+import type { Contributor } from "./contributors";
+import type { SideMessage } from "./sideChat";
+import type { FindingStatus, Review, ReviewEvent, VerdictReport } from "./review";
+export type { Contributor, SideMessage };
+export type { Finding, FindingStatus, Review, ReviewEvent, Submission, Verdict, VerdictReport } from "./review";
 export type Project = { id: string; name: string; path: string; defaultBase: string; baseSetByUser?: boolean };
 export type QuickAction = { id: string; title: string; command: string; pinned?: boolean };
 export type Worktree = { id: string; projectId: string; name: string; title: string; path: string; branch: string; archived: boolean; root?: boolean; quickActions?: QuickAction[] };
@@ -22,11 +27,25 @@ export type PrInfo = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; draf
 export type WorktreeStatus = {
   branch: string; dirty: number; ahead: number; behind: number; merged: boolean; inBase: boolean; base: string;
   last?: { subject: string; author: string; age: string }; files: string; pr?: PrInfo;
+  /** who wrote most of what this branch adds on top of its base */
+  author?: Contributor;
 };
 
 export type Block =
   | { type: "text"; text: string }
   | { type: "tool"; id: string; name: string; input: string; output?: string; ok?: boolean };
+/** one step of the plan the agent declares at the start of a task */
+export type PlanStep = { label: string; startedAt?: number; doneAt?: number; skipped?: boolean };
+export type ChatPlan = { steps: PlanStep[]; current: number; ts: number };
+
+/** a row in the progress panel: a review's phase, or a step of the agent's own plan */
+export type StageState = "done" | "active" | "pending" | "skipped";
+export type Stage = {
+  id: string; label: string; state: StageState; detail?: string;
+  done?: number; total?: number;
+  subtasks?: { label: string; state: StageState }[];
+};
+
 /** attachments: staged paths of the files sent with the message, shown as thumbnails/chips under it */
 export type Message = { id: string; role: "user" | "assistant" | "system"; blocks: Block[]; ts: number; attachments?: string[] };
 
@@ -56,6 +75,11 @@ export type Chat = {
   lastChattedAt?: number;
   queuedMessages?: { id: string; text: string; files: string[] }[];
   queuePaused?: boolean;
+  /** the steps the agent laid out for the current task, and how far along it is */
+  plan?: ChatPlan;
+  /** the read-only side chat you can ask about this chat's job while it runs */
+  sideMessages?: SideMessage[];
+  sideBusy?: boolean;
 };
 
 export type RootBranch = { ref: string; name: string; occupied?: string };
@@ -110,6 +134,8 @@ export type Api = {
   renameChat(id: string, name: string): Promise<void>;
   deleteChat(id: string): Promise<void>;
   chatMenu(id: string): Promise<void>;
+  askSide(id: string, question: string): Promise<void>;
+  clearSide(id: string): Promise<void>;
   setAutoApprove(id: string, on: boolean): Promise<void>;
   setPhase(id: string, phase: Phase): Promise<void>;
   send(chatId: string, text: string, files?: string[]): Promise<void>;
@@ -163,4 +189,17 @@ export type Api = {
   suggestCommit(worktreeId: string): Promise<string>;
   /** commit + push from the composer, narrated into the chat transcript; omit message to let the AI draft one */
   commitChat(chatId: string, message?: string): Promise<string>;
+  /** a `*.review.json` a PR review wrote; `target` is the same link text an artifact carries */
+  readReview(worktreeId: string, target: string): Promise<{ path: string; review: Review }>;
+  updateReviewFinding(worktreeId: string, target: string, findingId: string, patch: { status?: FindingStatus; comment?: string }): Promise<Review>;
+  /** submit one GitHub review: verdict, body (drafted by the model when blank and `draft` is set), and the queued comments inline when `inline` is set */
+  submitReview(worktreeId: string, target: string, opts: { event: ReviewEvent; body: string; inline: boolean; draft: boolean }): Promise<{ review: Review; result: { url: string; event: ReviewEvent; body: string; drafted: boolean; inline: string[]; general: string[]; headMoved: boolean } }>;
+  /** the PR's live head, state and review decision, and the findings whose file changed since they were verified */
+  reviewDrift(worktreeId: string, target: string): Promise<{ head: string | null; state: string | null; reviewDecision: string; url: string; drifted: string[] }>;
+  /** re-check one finding against the PR's current head with a read-only agent; the verdict is written into the file */
+  reinvestigateFinding(worktreeId: string, target: string, findingId: string): Promise<{ review: Review; report: VerdictReport; summary: string; head: string }>;
+  watchReview(worktreeId: string, target: string): Promise<void>;
+  unwatchReview(worktreeId: string, target: string): Promise<void>;
+  /** the absolute path of a review file that changed on disk */
+  onReviewChanged(cb: (path: string) => void): () => void;
 };

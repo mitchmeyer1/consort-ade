@@ -42,3 +42,23 @@ export function chatArtifacts(messages: Message[]) {
   }
   return [...files.values()];
 }
+
+/**
+ * An HTML artifact renders inside a sandboxed iframe, where the app stylesheet never
+ * reaches, so its scrollbar falls back to the platform default: a solid track and no
+ * visible thumb over a dark page. Inject the same rules the chat uses (no track, a
+ * shaded thumb) into the document before it is handed to the frame.
+ */
+export function frameScrollbarStyle(theme: "dark" | "light" = "dark") {
+  const thumb = theme === "light" ? "rgba(20,19,17,.22)" : "rgba(243,234,214,.18)";
+  const hover = theme === "light" ? "rgba(20,19,17,.36)" : "rgba(243,234,214,.32)";
+  return `<style data-consort-scrollbars>::-webkit-scrollbar{width:9px;height:9px;background:transparent}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:${thumb};border-radius:3px;border:2px solid transparent;background-clip:padding-box}::-webkit-scrollbar-thumb:hover{background:${hover};background-clip:padding-box}::-webkit-scrollbar-corner{background:transparent}</style>`;
+}
+
+export function withFrameScrollbars(html: string, theme: "dark" | "light" = "dark") {
+  const style = frameScrollbarStyle(theme);
+  // after the document's own styles so it wins ties; fall back to prepending for fragments
+  const head = /<\/head\s*>/i.exec(html);
+  if (head) return html.slice(0, head.index) + style + html.slice(head.index);
+  return style + html;
+}

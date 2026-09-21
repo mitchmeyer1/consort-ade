@@ -8,7 +8,7 @@ const compiled = ts.transpileModule(readFileSync(new URL('../src/shared/usage.ts
 }).outputText;
 const mod = { exports: {} };
 new Function('require', 'module', 'exports', compiled)(() => ({}), mod, mod.exports);
-const { claudeUsageFrom, codexUsageFrom, formatReset, formatAge, usageTone, windowLabel } = mod.exports;
+const { claudeUsageFrom, codexUsageFrom, connectorAccess, connectorBlock, modelBlock, formatReset, formatAge, usageTone, windowLabel } = mod.exports;
 
 const NOW = Date.parse('2026-09-17T15:00:00Z');
 const H = 3600_000;
@@ -123,6 +123,64 @@ test('snapshot age is coarse and never negative', () => {
   assert.equal(formatAge(NOW - 4 * 60_000, NOW), '4m ago');
   assert.equal(formatAge(NOW - 2 * H, NOW), '2h ago');
   assert.equal(formatAge(NOW - 50 * H, NOW), '2d ago');
+});
+
+test('claude: scoped windows remember their model family; a lock on one shuts only that family', () => {
+  const rows = claudeUsageFrom('k', { rate_limits_available: true, rate_limits: { limits: [
+    { kind: 'session', percent: 10, scope: null },
+    { kind: 'weekly_scoped', percent: 100, scope: { model: { display_name: 'Fable' }, surface: null } },
+    { kind: 'weekly_scoped', percent: 5, scope: { model: null, surface: { display_name: 'Claude Code' } } },
+  ] } }, NOW);
+  assert.deepEqual(rows.windows.map(w => w.model), [undefined, 'Fable', undefined], 'only model scopes count as a family');
+  const fixed = claudeUsageFrom('k', { rate_limits_available: true, rate_limits: {
+    five_hour: { utilization: 20 }, seven_day_opus: { utilization: 88, locked_reason: 'model_paused' },
+  } }, NOW);
+  assert.equal(fixed.blocked, undefined, 'a per-model lock is not a plan-wide block');
+  assert.deepEqual(fixed.windows.map(w => [w.model, w.locked]), [[undefined, undefined], ['Opus', true]]);
+  assert.equal(modelBlock(fixed, 'claude-opus-5'), 'Weekly · Opus limit reached');
+  assert.equal(modelBlock(fixed, 'claude-fable-5-1'), undefined);
+});
+
+const CLAUDE = ['claude-fable-5-1', 'claude-opus-5', 'claude-sonnet-5'];
+const snap = (windows, extra = {}) => ({ keyId: 'k', at: NOW, windows, ...extra });
+
+test('access: no snapshot or nothing metered reads as open', () => {
+  assert.deepEqual(connectorAccess(undefined, CLAUDE), { level: 'ok' });
+  assert.deepEqual(connectorAccess(snap([], { unavailable: 'API key' }), CLAUDE), { level: 'ok' });
+  assert.deepEqual(connectorAccess(snap([{ id: 'w', label: '5-hour', percent: 99 }, { id: 'f', label: 'Weekly · Fable', percent: 99, model: 'Fable' }]), CLAUDE), { level: 'ok' });
+  assert.equal(modelBlock(undefined, 'claude-opus-5'), undefined);
+});
+
+test('access: a provider block or a spent plan-wide window makes the connector and every model red', () => {
+  const blocked = snap([{ id: 'w', label: '5-hour', percent: 40 }], { blocked: 'Out of credits' });
+  assert.deepEqual(connectorAccess(blocked, CLAUDE), { level: 'blocked', reason: 'Out of credits' });
+  assert.equal(connectorBlock(blocked), 'Out of credits');
+  for (const m of CLAUDE) assert.equal(modelBlock(blocked, m), 'Out of credits');
+  const spent = snap([{ id: 'primary', label: '5-hour', percent: 100 }, { id: 'secondary', label: 'Weekly', percent: 30 }]);
+  assert.deepEqual(connectorAccess(spent, ['gpt-6-astra']), { level: 'blocked', reason: '5-hour limit reached' });
+  assert.equal(modelBlock(spent, 'gpt-6-astra'), '5-hour limit reached');
+});
+
+test('access: a spent model family reads orange on the connector and red only on its models', () => {
+  const u = snap([{ id: 's', label: '5-hour', percent: 30 }, { id: 'f', label: 'Weekly · Fable', percent: 100, model: 'Fable' }]);
+  assert.deepEqual(connectorAccess(u, CLAUDE), { level: 'partial', reason: 'Weekly · Fable limit reached' });
+  assert.equal(connectorBlock(u), undefined);
+  assert.equal(modelBlock(u, 'claude-fable-5-1'), 'Weekly · Fable limit reached');
+  assert.equal(modelBlock(u, 'claude-opus-5'), undefined);
+  assert.equal(modelBlock(u, 'claude-sonnet-5'), undefined);
+  assert.equal(modelBlock(snap([{ id: 'o', label: 'Weekly · Opus', percent: 100, model: 'Claude Opus' }]), 'claude-opus-5'), 'Weekly · Opus limit reached', 'multi-word family names still match');
+});
+
+test('access: every offered model spent is as red as a plan-wide block', () => {
+  const u = snap([
+    { id: 'f', label: 'Weekly · Fable', percent: 100, model: 'Fable' },
+    { id: 'o', label: 'Weekly · Opus', percent: 100, model: 'Opus' },
+    { id: 's', label: 'Weekly · Sonnet', percent: 100, model: 'Sonnet' },
+  ]);
+  assert.equal(connectorAccess(u, CLAUDE).level, 'blocked');
+  assert.match(connectorAccess(u, CLAUDE).reason, /^All models at their limit/);
+  assert.equal(connectorAccess(u, [...CLAUDE, 'claude-haiku-4-5-20251001']).level, 'partial', 'an unmetered model keeps the connector usable');
+  assert.equal(connectorAccess(u, []).level, 'partial', 'with no model list the family windows alone cannot prove a full block');
 });
 
 test('tone warns from 80% and reads as spent from 95%', () => {

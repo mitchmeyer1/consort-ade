@@ -6,15 +6,20 @@ import { defaultConnector, selectedModel } from "../../shared/defaultConnector";
 import { modelTiers } from "../../shared/modelTiers";
 import React, { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { lastPrompt } from "../../shared/lastPrompt";
-import { formatAge, formatReset, usageTone, type ConnectorUsage } from "../../shared/usage";
+import { connectorAccess, formatAge, formatReset, modelBlock, usageTone, type ConnectorUsage } from "../../shared/usage";
 import { MODELS, modelOptions, PHASES, phasesFor, type Api, type Block, type Chat, type CommitInfo, type Phase, type PtyState, type PermissionRequest, type Project, type RepoInfo, type RootStatus, type State, type Worktree, type WorktreeStatus } from "../../shared/types";
 import { chatStatus } from "../../shared/chatStatus";
 import { recentChats, recentWorktrees } from "../../shared/conversationOrder";
 import { Lockup, Mark } from "./Logo";
-import { artifactLinkAction, artifactLinks, chatArtifacts } from "../../shared/artifacts";
+import { artifactLinkAction, artifactLinks, chatArtifacts, withFrameScrollbars } from "../../shared/artifacts";
 import { attachmentName, isImageAttachment } from "../../shared/attachments";
 import { reminderLabel } from "../../shared/reminders";
 import { prChatName } from "../../shared/prChat";
+import { reviewProgress } from "../../shared/reviewProgress";
+import { isReviewFile } from "../../shared/review";
+import { ReviewView } from "./ReviewView";
+import { planStages } from "../../shared/planProgress";
+import type { Stage } from "../../shared/types";
 import { marked } from "marked";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -46,6 +51,13 @@ const PrBadge = ({ st }: { st: WorktreeStatus }) => {
   if (pr.state === "CLOSED") return <span className="badge closed" title={pr.title}>✗ #{pr.number}</span>;
   return <span className={"badge pr" + (pr.checks === "fail" ? " bad" : "")} title={`${pr.title} · checks ${pr.checks ?? "none"}`}>{pr.draft ? "◐" : "⎇"} #{pr.number} {c}</span>;
 };
+/** whose branch this is: a GitHub login when the commits carry one, otherwise the git author's name */
+const Contributor = ({ who }: { who?: WorktreeStatus["author"] }) => !who ? null : (
+  <small className="contributor" title={`${who.name}${who.login ? ` (@${who.login})` : ""} — ${who.commits} commit${who.commits === 1 ? "" : "s"} on this branch`}>
+    {who.login ? `@${who.login}` : who.name}
+  </small>
+);
+
 const Badges = ({ st, pr = true }: { st: WorktreeStatus | null; pr?: boolean }) =>
   !st ? null : (
     <span className="badges">
@@ -266,9 +278,10 @@ export function App() {
               <Mark />
               <div className="word">Consort</div>
               <div className="sub">AGENTIC DEVELOPMENT ENVIRONMENT</div>
-              <div className="est">AN AGENTIC WORKSPACE · NEW YORK</div>
+              <div className="est">Arbor Operis et Ramorum Progression ● New York</div>
               <div className="ornament rose" />
             </div>
+            <div className="tagline">Agents to work on your code within feature branch worktrees. Multiple chats per worktree. Multiple worktrees per project.</div>
           </div>
         )}
       </div>
@@ -383,9 +396,12 @@ function WorktreeNode({ wt, state, sel, running, failed, done, onSelect, collaps
       <div className={"row worktree" + (active ? " active" : "") + (wt.archived ? " dim" : "")} onClick={() => { onSelect({ type: "worktree", id: wt.id }); if (done.has(wt.id)) void ade.ptySeenScope(wt.id); }}>
         <span className="slot"><Ico n="thorn" className="wt" /></span>
         <span className="grow">{wt.root ? "Root" : <Editable value={wt.title} onSave={(t) => ade.renameWorktree(wt.id, t)} />}<Dots id={wt.id} running={running} failed={failed} done={done} /></span>
-        {/* branch + badges share one subtitle line, aligned under the title text rather than the icon */}
+        {/* two subtitle lines, aligned under the title text rather than the icon: the branch, then who owns it and where it stands */}
         <span className="meta">
           <small className="branch" title={st?.branch ?? wt.branch}>{st?.branch ?? wt.branch}</small>
+        </span>
+        <span className="meta status">
+          {!wt.root && <Contributor who={st?.author} />}
           {st && (st.dirty > 0 || st.ahead > 0 || st.behind > 0 || st.pr || st.inBase) && <Badges st={st} />}
         </span>
         <span className="tools" onClick={(e) => e.stopPropagation()}>
@@ -1131,6 +1147,7 @@ function AgentPicker({ chat, keys, models }: { chat: Chat; keys: State["keys"]; 
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [usage, setUsage] = useState<Record<string, ConnectorUsage>>({});
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const key = keys.find((k) => k.id === selected);
@@ -1142,6 +1159,14 @@ function AgentPicker({ chat, keys, models }: { chat: Chat; keys: State["keys"]; 
     document.addEventListener("pointerdown", outside);
     return () => document.removeEventListener("pointerdown", outside);
   }, [open]);
+  // plan limits colour the options: main keeps each snapshot for a minute, so opening the picker is cheap
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    for (const k of keys) ade.connectorUsage(k.id).then((u) => { if (live) setUsage((prev) => ({ ...prev, [k.id]: u })); }, () => {});
+    return () => { live = false; };
+  }, [open, keys.map((k) => k.id).join("|")]);
+  const optionClass = (level: "ok" | "partial" | "blocked" | undefined) => "agent-picker-option" + (level && level !== "ok" ? ` ${level}` : "");
   useEffect(() => {
     if (open) root.current?.querySelector<HTMLButtonElement>(".agent-picker-popover button")?.focus();
   }, [open, selected]);
@@ -1161,17 +1186,86 @@ function AgentPicker({ chat, keys, models }: { chat: Chat; keys: State["keys"]; 
       <div className="agent-picker-heading">{key ? <button disabled={busy} onClick={() => setSelected(null)}>← Choose AI</button> : <strong>Choose AI</strong>}<button aria-label="Close AI picker" onClick={close}>×</button></div>
       {key ? <>
         <div className="agent-picker-caption">{providerName(key.provider)} · {key.name}</div>
-        {[...new Set([...(key.provider === chat.provider ? [chat.model] : []), ...modelOptions({ models }, key.provider)])].map((model) => <button className="agent-picker-option" key={model} disabled={busy} onClick={() => chooseModel(model)} aria-pressed={key.id === chat.keyId && model === chat.model}>{model}</button>)}
+        {[...new Set([...(key.provider === chat.provider ? [chat.model] : []), ...modelOptions({ models }, key.provider)])].map((model) => {
+          const block = modelBlock(usage[key.id], model);
+          return <button className={optionClass(block ? "blocked" : "ok")} key={model} disabled={busy} title={block} onClick={() => chooseModel(model)} aria-pressed={key.id === chat.keyId && model === chat.model}>{model}</button>;
+        })}
         <button className="agent-picker-option" disabled={busy} onClick={() => { const model = prompt("Model ID", key.provider === chat.provider ? chat.model : ""); if (model) chooseModel(model); }}>Other model…</button>
       </> : <>
         {(["codex", "claude"] as const).map((provider) => <React.Fragment key={provider}>
           <div className="agent-picker-caption">{providerName(provider)}</div>
-          {keys.filter((k) => k.provider === provider).map((k) => <button className="agent-picker-option" key={k.id} onClick={() => setSelected(k.id)} aria-pressed={k.id === chat.keyId}><span>{k.name}{k.phiAllowed ? " · PHI" : ""}</span><span aria-hidden="true">›</span></button>)}
+          {keys.filter((k) => k.provider === provider).map((k) => {
+            const access = connectorAccess(usage[k.id], modelOptions({ models }, provider));
+            return <button className={optionClass(access.level)} key={k.id} title={access.reason} onClick={() => setSelected(k.id)} aria-pressed={k.id === chat.keyId}><span>{k.name}{k.phiAllowed ? " · PHI" : ""}</span><span aria-hidden="true">›</span></button>;
+          })}
           {!keys.some((k) => k.provider === provider) && <div className="agent-picker-caption">Add a connection in Settings</div>}
         </React.Fragment>)}
       </>}
     </div>}
   </div>;
+}
+
+/* Where the work actually is: a review's known phases, or the steps the agent laid out itself. */
+function ProgressPanel({ title, stages }: { title: string; stages: Stage[] }) {
+  const finished = stages.filter((s) => s.state === "done").length;
+  const mark = (state: Stage["state"]) => state === "done" ? "✓" : state === "active" ? <span className="spin" /> : state === "skipped" ? "–" : "·";
+  return (
+    <div className="review-progress">
+      <div className="rp-card">
+        <div className="rp-head"><Ico n="laurel" />{title}<span className="rp-count">{finished}/{stages.length}</span></div>
+        {stages.map((s) => (
+          <div key={s.id} className={`rp-stage ${s.state}`} title={s.state === "skipped" ? `${s.label} — not run` : undefined}>
+            <span className="rp-mark" aria-hidden="true">{mark(s.state)}</span>
+            <span className="rp-label">
+              {s.label}
+              {s.detail && <small>{s.detail}</small>}
+              {s.total ? <span className="rp-bar" role="img" aria-label={s.detail}><i style={{ width: `${Math.round(100 * Math.min(1, (s.done ?? 0) / s.total))}%` }} /></span> : null}
+              {s.subtasks?.length ? <span className="rp-subs">{s.subtasks.map((t, i) => (
+                <span key={i} className={`rp-sub ${t.state}`} title={t.label}><span className="rp-mark" aria-hidden="true">{mark(t.state)}</span>{t.label}</span>
+              ))}</span> : null}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* A second, read-only agent you can ask about a long job while it runs. */
+function SideChatPane({ chat }: { chat: Chat }) {
+  const [text, setText] = useState("");
+  const bottom = useRef<HTMLDivElement>(null);
+  const messages = chat.sideMessages ?? [];
+  useEffect(() => { bottom.current?.scrollIntoView({ block: "end" }); }, [messages.length, chat.sideBusy]);
+  const ask = () => {
+    const question = text.trim();
+    if (!question || chat.sideBusy) return;
+    setText("");
+    ade.askSide(chat.id, question).catch((e) => alert(e.message));
+  };
+  return (
+    <div className="sidechat card">
+      <div className="sidechat-head">
+        <span><Ico n="candle" />Side chat · read-only</span>
+        <span className="grow" />
+        {messages.length > 0 && <button className="icon" title="Clear these questions" onClick={() => ade.clearSide(chat.id).catch(() => {})}>clear</button>}
+      </div>
+      <div className="sidechat-log">
+        {!messages.length && <div className="m">Ask about this job while it works — “how far along is this?”, “what is it doing now?”, “has anything failed?”. It reads the transcript, the notes and the files the job has written, and can’t change anything or interrupt it.</div>}
+        {messages.map((m) => <div key={m.id} className={`sidechat-msg ${m.role}`}>{m.text}</div>)}
+        {chat.sideBusy && <div className="sidechat-msg assistant busy"><span className="spin" />reading the job…</div>}
+        <div ref={bottom} />
+      </div>
+      <div className="sidechat-input">
+        <textarea rows={1} value={text} placeholder="Ask about this job…" autoFocus disabled={chat.sideBusy}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); ask(); } }} />
+        <button className="icon enter" title="Ask (↩)" disabled={!text.trim() || chat.sideBusy} onClick={ask}>
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19V5" /><path d="M6 11l6-6 6 6" /></svg>
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, onOpenMd }: { chat: Chat; worktree?: Worktree; keys: State["keys"]; models: State["models"]; perms: PermissionRequest[]; ptys: PtyState[]; answer: (id: string, ok: boolean) => void; onOpenMd: (p: string) => void }) {
@@ -1188,6 +1282,15 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, onOpenMd 
   }, [errorDetails]);
   const [codeModes, setCodeModes] = useState<Record<string, boolean>>({});
   const code = !!worktree && !!codeModes[chat.id];
+  // the composer shows one of three things: the message box, the worktree terminal, or the side chat
+  const [sideModes, setSideModes] = useState<Record<string, boolean>>({});
+  const side = !!worktree && !!sideModes[chat.id];
+  const setMode = (mode: "chat" | "code" | "side") => {
+    setCommit(null);
+    setCodeModes((modes) => ({ ...modes, [chat.id]: mode === "code" }));
+    setSideModes((modes) => ({ ...modes, [chat.id]: mode === "side" }));
+    if (mode === "chat") requestAnimationFrame(() => box.current?.focus());
+  };
   const draft = useSyncExternalStore(chatDrafts.subscribe, () => chatDrafts.get(chat.id));
   const files = draft.files;
   const setFiles = (update: (files: string[]) => string[]) => chatDrafts.update(chat.id, { files: update(chatDrafts.get(chat.id).files) });
@@ -1229,11 +1332,15 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, onOpenMd 
   const onDrop = async (e: React.DragEvent) => { e.preventDefault(); setOver(false); addFiles(await filesFromTransfer(e.dataTransfer)); };
   const onPaste = async (e: React.ClipboardEvent) => { if ([...e.clipboardData.items].some((i) => i.kind === "file")) { e.preventDefault(); addFiles(await filesFromTransfer(e.clipboardData)); } };
   const recall = lastPrompt(chat);
+  // a review follows our own skill, so its stages are known; every other chat shows the plan the agent declared
+  const review = reviewProgress(chat);
+  const stages = review ?? planStages(chat);
   return (
     <div className={"chatpane" + (over ? " over" : "")} onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setOver(false); }} onDrop={onDrop} onPaste={onPaste}>
       {over && <div className="dropveil">Drop to attach</div>}
       <PhaseStrip phase={chat.phase} steps={chat.phaseSteps} onSelect={(phase) => ade.setPhase(chat.id, phase)} />
       <div className="messages">
+        {stages && <ProgressPanel title={review ? "Review" : "Plan"} stages={stages} />}
         {recall && <div className="chat-recall"><span title={recall}>{recall}</span></div>}
         <div className="column">
         {chat.messages.filter((m) => m.blocks.length).map((m) =>
@@ -1288,17 +1395,19 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, onOpenMd 
         <div className="composer-options">
           <span className="left">
             <button className={"commitbtn" + (commit ? " armed" : "")} title="Stage everything, commit, and push. Type a message or let the AI write one." disabled={code || chat.running || !!commit} onClick={armCommit}><Ico n="wheat" />{commit && !commit.typed ? `commit ${commit.count}` : "commit"}</button>
-            <button className="commitbtn" disabled={!worktree} aria-pressed={code} title={code ? "Return to AI chat" : "Run commands in this worktree"} onClick={() => { setCommit(null); setCodeModes((modes) => ({ ...modes, [chat.id]: !code })); if (code) requestAnimationFrame(() => box.current?.focus()); }}><Ico n={code ? "quill" : "terminal"} />{code ? "CHAT" : "CODE"}</button>
+            <button className="commitbtn" disabled={!worktree} aria-pressed={code} title={code ? "Return to AI chat" : "Run commands in this worktree"} onClick={() => setMode(code ? "chat" : "code")}><Ico n={code ? "quill" : "terminal"} />{code ? "CHAT" : "CODE"}</button>
+            <button className="commitbtn" disabled={!worktree} aria-pressed={side} title={side ? "Return to AI chat" : "Ask a read-only agent about this job — it won't interrupt the work"} onClick={() => setMode(side ? "chat" : "side")}><Ico n={side ? "quill" : "candle"} />{side ? "CHAT" : "SIDECHAT"}</button>
             {chat.running && <button className="commitbtn stopbtn" title="Stop this chat" onClick={() => ade.stop(chat.id)}><span className="stop-square" aria-hidden="true" />Stop</button>}
             {chatStatus(chat) === "running" && <div className="composer-working" role="status"><span className="working-circle" aria-hidden="true" />Working…</div>}
           </span>
           <label><input type="checkbox" checked={chat.autoApprove} onChange={(e) => ade.setAutoApprove(chat.id, e.target.checked).catch((e) => alert(e.message))} /> Auto-approve</label>
           <label title="Use a PHI-approved key for this chat"><input type="checkbox" checked={!!keys.find((k) => k.id === chat.keyId)?.phiAllowed} onChange={(e) => ade.setPhiMode(chat.id, e.target.checked).catch((e) => alert(e.message))} /> PHI mode</label>
         </div>
+        {side && worktree && <SideChatPane chat={chat} />}
         {code && worktree && <div className="composer-terminal card">
           <XTermPane key={chat.id} scope={{ id: worktree.id, cwd: worktree.path, title: worktree.title }} termId={`composer-${chat.id}`} active failed={false} done={composerDone} />
         </div>}
-        <div style={code ? { display: "none" } : undefined} className={"composer card" + (over ? " over" : "") + (commit ? " committing" : "")}>
+        <div style={code || side ? { display: "none" } : undefined} className={"composer card" + (over ? " over" : "") + (commit ? " committing" : "")}>
           <textarea ref={box} value={text} rows={1} onChange={(e) => { setText(e.target.value); if (commit && !commit.typed && e.target.value) setCommit({ ...commit, typed: true }); }} placeholder={placeholder}
             onInput={(e) => { const t = e.currentTarget; t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 240) + "px"; }}
             onKeyDown={(e) => {
@@ -1594,7 +1703,7 @@ function MarkdownView({ worktree, path, onEdit, onNavigate }: { worktree: Worktr
   useEffect(() => {
     let active = true;
     setPreview(undefined); setErr(undefined);
-    if (path) ade.previewArtifact(worktree.id, path).then((p) => { if (active) setPreview(p); }, (e) => { if (active) setErr(e.message); });
+    if (path && !isReviewFile(path)) ade.previewArtifact(worktree.id, path).then((p) => { if (active) setPreview(p); }, (e) => { if (active) setErr(e.message); });
     return () => { active = false; };
   }, [worktree.id, path, reload]);
   const onClick = (e: React.MouseEvent) => {
@@ -1608,18 +1717,20 @@ function MarkdownView({ worktree, path, onEdit, onNavigate }: { worktree: Worktr
     ade.artifactMenu(worktree.id, target).then((action) => { if (action === "open") onNavigate(target); }).catch((e) => setErr(e.message));
   };
   if (!path) return <div className="card">Open a linked file in a chat to preview it here.</div>;
+  const review = isReviewFile(path);
   return (
     <div className="mdwrap">
       <div className="ebar">
         <span className="grow mono" title={path}>{path}</span>
-        <button className="icon" title="Reload" onClick={() => setReload((n) => n + 1)}>↻</button>
+        {!review && <button className="icon" title="Reload" onClick={() => setReload((n) => n + 1)}>↻</button>}
         <button onClick={() => ade.artifactMenu(worktree.id, path).catch((e) => setErr(e.message))}>Actions</button>
-        {preview && ["text", "markdown", "html"].includes(preview.kind) && <button onClick={() => onEdit(path)}>Edit</button>}
+        {(review || (preview && ["text", "markdown", "html"].includes(preview.kind))) && <button onClick={() => onEdit(path)}>Edit</button>}
       </div>
-      {err ? <div className="error">{err}</div> : !preview ? <div className="m">loading…</div>
+      {review ? <ReviewView worktree={worktree} path={path} />
+        : err ? <div className="error">{err}</div> : !preview ? <div className="m">loading…</div>
         : preview.kind === "markdown" ? <article className="md" onClick={onClick} dangerouslySetInnerHTML={{ __html: marked.parse(preview.content) as string }} />
         : preview.kind === "image" ? <img className="artifact-image" src={preview.content} alt={path} />
-        : preview.kind === "html" ? <iframe className="artifact-frame" title={path} sandbox="" srcDoc={preview.content} />
+        : preview.kind === "html" ? <iframe className="artifact-frame" title={path} sandbox="" srcDoc={withFrameScrollbars(preview.content, document.documentElement.dataset.theme === "light" ? "light" : "dark")} />
         : preview.kind === "url" || preview.kind === "pdf" ? <iframe className="artifact-frame" title={path} sandbox="" src={preview.content} />
         : <pre className="artifact-text">{preview.content}</pre>}
     </div>

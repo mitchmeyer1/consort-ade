@@ -1,9 +1,16 @@
 # Review categories — agent brief
 
-Paste this whole file into every fan-out agent. It mirrors the nine labels the CI reviewer
-(`scripts/ci/pr-review.ts`) uses, so a writeup and a bot review speak the same language.
+Every review agent reads this file from `.consort/pr-review/categories.md` before its
+assignment. It mirrors the nine labels the CI reviewer (`scripts/ci/pr-review.ts`) uses, so a
+writeup and a bot review speak the same language.
 
-Each primary agent owns one changed file and checks every changed block for security, logic, redundancy, performance/reliability, style, tests, and comments. Follow callers, callees, and equivalent functions across the repository; the assigned file does not limit evidence gathering. Follow-up agents may investigate a specific question. Return coverage for each block and concern (or an evidence-based not-applicable reason), unresolved candidates, and findings. Do not run tests; inspect assertions and use current-head CI for execution evidence.
+You own a small group of related files — a source file with its tests, or a few small files in
+one subsystem. Check every changed block in them for security, logic, redundancy,
+performance/reliability, style, tests, and comments. Follow callers, callees, and equivalent
+functions across the repository; the group limits your assignment, not your evidence. If the
+assignment names entrypoints, trace each one to its real-world effect and return a FLOW record.
+Do not run tests; read the assertions and use the CI status in the brief as execution evidence.
+Write your full report to the path the assignment gives you and return the same text.
 
 Every finding has a **severity** (defects) *or* a **category** (everything else), never both
 buckets at once. A category item that has a nameable failure scenario is a defect — give it a
@@ -97,7 +104,7 @@ Shape: `file:line-range | why it's too much | the trimmed version`.
   types match.
 - **Do not reverse a deliberate refactor made in this same PR.**
 - **No verification findings.** "Worth confirming", "harmless but noting", "no action needed" —
-  is not a confirmed finding. Disproved claims need counterevidence in the ledger; unresolved claims return as OPEN instead of disappearing.
+  is not a confirmed finding. If you argued yourself out of it, drop it; if you could not settle it, return it as OPEN with the missing evidence named.
 - **Well-known crypto/auth primitives reject empty input by construction.** No "add an
   `if (!signature)` guard in case the SDK changes".
 - **Absence claims need positive evidence.** "No test", "unused", "duplicates" — you see a diff
@@ -114,12 +121,16 @@ Shape: `file:line-range | why it's too much | the trimmed version`.
 Only lines you actually read at the review SHA. No speculation, no "consider extracting".
 
 ```
+FLOW   | entrypoint | trigger | hop file:line → hop file:line → … | ends in (real-world effect) |
+  reachable today yes/no (gate) | human-driven / unattended
 DEFECT | file:line | severity | origin category or "-" | claim | what the code does |
   failure scenario (inputs → wrong outcome) | smallest fix | ignore-if
 ITEM   | file:line | category | claim | detail per the category's Shape above
 GOOD   | file:line | what is genuinely well built and why it should survive a refactor
-COVERED | assigned block IDs / ranges | concern | callers/callees and evidence inspected
 OPEN   | file:line | candidate claim | evidence so far | missing evidence | next check
+COVERED | file | read fully / hunks read | callees and peers you opened | limits, if any
 ```
 
-Include a GOOD line per file where earned. Zero findings for a file is a normal answer.
+One COVERED line per file you were assigned, nothing finer. A GOOD line per file where earned.
+Zero findings for a file is a normal answer. A flow whose trail goes cold reports where, not a
+guess.

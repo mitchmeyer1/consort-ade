@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promises as fs } from "node:fs";
 import type { CommitInfo, PrInfo, RepoInfo, WorktreeStatus } from "../shared/types";
+import type { Commit } from "../shared/contributors";
 
 const run = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) =>
@@ -63,6 +64,13 @@ async function prInfo(path: string): Promise<PrInfo | undefined> {
   } catch {
     return undefined;
   }
+}
+
+/** who authored the commits this branch adds on top of its base, newest first */
+export async function branchAuthors(path: string, base: string): Promise<Commit[]> {
+  // only the branch's own commits count, so a long-lived base doesn't drown them out
+  const log = await git(path, "log", "-200", "--no-merges", "--format=%an%x00%ae", `${base}..HEAD`).catch(() => "");
+  return log.split("\n").filter(Boolean).map((l) => { const [name, email] = l.split("\0"); return { name: name ?? "", email: email ?? "" }; });
 }
 
 export async function status(path: string, base: string): Promise<WorktreeStatus> {

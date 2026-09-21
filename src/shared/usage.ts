@@ -1,5 +1,11 @@
 /** One metered window of a plan: how much of it is used and when it rolls over. */
-export type UsageWindow = { id: string; label: string; percent: number; resetsAt?: number };
+export type UsageWindow = {
+  id: string; label: string; percent: number; resetsAt?: number;
+  /** the model family this window meters ("Opus", "Fable"…); general windows have none */
+  model?: string;
+  /** the provider has shut this window regardless of its percent */
+  locked?: true;
+};
 
 /** What Settings shows for one connector: the plan's meters, or why there are none. */
 export type ConnectorUsage = {
@@ -59,22 +65,26 @@ export function claudeUsageFrom(keyId: string, raw: ClaudeUsage, at: number): Co
     const percent = pct(row?.percent);
     if (percent === undefined) continue;
     const kind = typeof row.kind === "string" ? row.kind : "window";
-    const scope = row.scope?.model?.display_name ?? row.scope?.surface?.display_name;
+    const modelScope = row.scope?.model?.display_name;
+    const scope = modelScope ?? row.scope?.surface?.display_name;
     const label = kind === "session" ? "5-hour" : kind === "weekly_all" ? "Weekly" : kind.startsWith("weekly") ? (typeof scope === "string" ? `Weekly · ${scope}` : "Weekly") : humanize(kind);
-    windows.push({ id: `${kind}:${typeof scope === "string" ? scope : i}`, label, percent, resetsAt: isoMs(row.resets_at) });
+    windows.push({ id: `${kind}:${typeof scope === "string" ? scope : i}`, label, percent, resetsAt: isoMs(row.resets_at), ...(typeof modelScope === "string" ? { model: modelScope } : {}) });
   }
   if (!windows.length) {
     for (const [field, label] of CLAUDE_FIXED) {
       const w = rl[field] as ClaudeWindow;
       const percent = pct(w?.utilization);
-      if (percent !== undefined) windows.push({ id: field, label, percent, resetsAt: isoMs(w?.resets_at) });
+      const model = field === "seven_day_opus" ? "Opus" : field === "seven_day_sonnet" ? "Sonnet" : undefined;
+      const locked = typeof w?.locked_reason === "string";
+      if (percent !== undefined) windows.push({ id: field, label, percent, resetsAt: isoMs(w?.resets_at), ...(model ? { model } : {}), ...(model && locked ? { locked: true } : {}) });
     }
     for (const m of rl.model_scoped ?? []) {
       const percent = pct(m?.utilization);
-      if (percent !== undefined && typeof m.display_name === "string") windows.push({ id: `model:${m.display_name}`, label: `Weekly · ${m.display_name}`, percent, resetsAt: isoMs(m.resets_at) });
+      if (percent !== undefined && typeof m.display_name === "string") windows.push({ id: `model:${m.display_name}`, label: `Weekly · ${m.display_name}`, percent, resetsAt: isoMs(m.resets_at), model: m.display_name });
     }
   }
-  const locked = CLAUDE_FIXED.map(([f]) => (rl[f] as ClaudeWindow)?.locked_reason).find((r) => typeof r === "string") as string | undefined;
+  // a lock on a plan-wide window stops everything; a lock on a per-model window only shuts that model
+  const locked = (["five_hour", "seven_day"] as const).map((f) => (rl[f] as ClaudeWindow)?.locked_reason).find((r) => typeof r === "string") as string | undefined;
   return { keyId, at, plan, windows, ...(locked ? { blocked: humanize(locked) } : {}) };
 }
 
@@ -129,6 +139,49 @@ export function formatAge(at: number, now: number): string {
   if (s < 3600) return `${Math.round(s / 60)}m ago`;
   if (s < 86400) return `${Math.round(s / 3600)}h ago`;
   return `${Math.round(s / 86400)}d ago`;
+}
+
+/** a window that will refuse work right now */
+const spent = (w: UsageWindow) => w.locked === true || w.percent >= 100;
+
+/** does a scoped window's family name ("Opus", "Claude Sonnet") describe this model id ("claude-opus-5")? */
+const meters = (model: string, family: string) => {
+  const id = model.toLowerCase();
+  return family.toLowerCase().split(/[\s·-]+/).filter((w) => w.length > 2 && w !== "claude" && w !== "weekly").some((w) => id.includes(w));
+};
+
+/** why the whole connector is refusing work, if it is: a provider block or a spent plan-wide window */
+export function connectorBlock(usage: ConnectorUsage | undefined): string | undefined {
+  if (!usage || usage.unavailable) return undefined;
+  if (usage.blocked) return usage.blocked;
+  const w = usage.windows.find((w) => !w.model && spent(w));
+  return w ? `${w.label} limit reached` : undefined;
+}
+
+/** why this model is unavailable on the connector, if it is: the connector's block or its own family's spent window */
+export function modelBlock(usage: ConnectorUsage | undefined, model: string): string | undefined {
+  const whole = connectorBlock(usage);
+  if (whole) return whole;
+  const w = usage?.windows.find((w) => w.model && spent(w) && meters(model, w.model));
+  return w ? `${w.label} limit reached` : undefined;
+}
+
+export type ConnectorAccess = { level: "ok" | "partial" | "blocked"; reason?: string };
+
+/**
+ * How the picker should read a connector: red when nothing can run on it (a provider block, a
+ * spent plan-wide window, or every offered model spent), orange when only some model families
+ * are spent, plain otherwise. No snapshot, or nothing metered, reads as open.
+ */
+export function connectorAccess(usage: ConnectorUsage | undefined, models: string[]): ConnectorAccess {
+  const whole = connectorBlock(usage);
+  if (whole) return { level: "blocked", reason: whole };
+  if (!usage) return { level: "ok" };
+  const scoped = usage.windows.filter((w) => w.model && spent(w));
+  if (!scoped.length) return { level: "ok" };
+  const reason = scoped.map((w) => `${w.label} limit reached`).join(" · ");
+  if (models.length && models.every((m) => modelBlock(usage, m))) return { level: "blocked", reason: `All models at their limit · ${reason}` };
+  return { level: "partial", reason };
 }
 
 /** how loudly a meter should read: past 80% it warns, at 95%+ it is effectively spent */

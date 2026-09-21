@@ -100,5 +100,23 @@ test('the review prompt names the delegate model and keeps the orchestrator off 
   const skill = readFileSync(new URL('../skills/pr-writeup/SKILL.md', import.meta.url), 'utf8');
   assert.ok(/## Model tiers/.test(skill), 'the skill must state the tier split');
   assert.ok(/Do not walk the diff file by file yourself/.test(skill));
-  assert.ok(/delegate one delegate-tier tracer per|dispatch one delegate-tier tracer per/.test(skill), 'flow tracing must be delegated too');
+  assert.ok(/Tracing is reading, so the file agents do it/.test(skill), 'flow tracing must be delegated too, folded into the file agents');
+  assert.ok(/No separate tracer agents/.test(skill), 'no second fleet of agents just to trace flows');
+});
+
+test('the review never leaves agents running in the background and shares context through files', () => {
+  const skill = readFileSync(new URL('../skills/pr-writeup/SKILL.md', import.meta.url), 'utf8');
+  assert.ok(/run_in_background: false/.test(skill), 'a turn that ends with background agents loses their results');
+  assert.ok(/\.consort\/pr-review\/brief\.md/.test(skill), 'shared context is written once to the brief');
+  assert.ok(/\.consort\/pr-review\/agents\/<slug>\.md/.test(skill), 'agent reports persist so a resume does not re-dispatch');
+  assert.ok(!/every 30–45 seconds|five tool calls/.test(skill), 'no running commentary cadence');
+
+  const skillPrompt = declaration.properties.find(p => p.name.getText(source) === 'skillPrompt').getText(source);
+  assert.ok(/run_in_background: false/.test(skillPrompt), 'the runtime rule reaches the orchestrator prompt');
+  assert.ok(/writeFileSync\(join\(reviewDir, "categories\.md"\)/.test(skillPrompt), 'the agent brief is saved to the worktree for agents to read');
+  assert.ok(!/include in every delegated assignment/.test(skillPrompt), 'the brief is no longer pasted per assignment');
+
+  const categories = readFileSync(new URL('../skills/pr-writeup/categories.md', import.meta.url), 'utf8');
+  assert.ok(/^FLOW\s+\|/m.test(categories), 'agents return flow records');
+  assert.ok(/One COVERED line per file/.test(categories), 'coverage is per file, not per block per concern');
 });
