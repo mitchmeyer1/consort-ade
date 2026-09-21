@@ -22,6 +22,7 @@ import { REMINDER_CHOICES, reminderDue } from "../shared/reminders";
 import { topContributor } from "../shared/contributors";
 import { askSide } from "./sideChat";
 import { Reminders } from "./reminders";
+import { Notifier, type Notice } from "../shared/notices";
 import { readReview, reinvestigate, reviewDrift, setFinding, submitReview, ReviewWatchers } from "./prReview";
 import { MODELS, type Api, type Appearance } from "../shared/types";
 import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -47,7 +48,8 @@ let reminders: Reminders | undefined;
 // a review file changed on disk (an agent wrote it, or a status was saved): tell the open viewer
 const reviewWatchers = new ReviewWatchers((path) => { if (win && !win.isDestroyed()) win.webContents.send("reviewChanged", path); });
 let activeChat: string | null = null;
-const isViewing = (id: string) => activeChat === id && !!win && !win.isDestroyed() && win.isFocused() && win.isVisible() && !win.isMinimized();
+const isActive = () => !!win && !win.isDestroyed() && win.isFocused() && win.isVisible() && !win.isMinimized();
+const isViewing = (id: string) => activeChat === id && isActive();
 function acknowledgeChat() {
   const chat = store.data.chats.find((c) => c.id === activeChat);
   if (!chat || !isViewing(chat.id)) return;
@@ -582,8 +584,29 @@ app.whenReady().then(() => {
     if (win.isMinimized()) win.restore();
     win.show(); win.focus(); send("openChat", id);
   };
-  const permissionNotifications = new PermissionNotifications(() => store.data.chats, agents.answerPermission, openChat);
-  reminders = new Reminders(() => store.data.chats, openChat, () => store.save(), isViewing);
+  // while Consort is the active window a system banner would just cover it: toast instead, with the same click target
+  const notifier = new Notifier(isActive, (n) => send("toast", n), (n: Notice) => {
+    if (!Notification.isSupported()) return;
+    const notification = new Notification({ title: n.title, body: n.body ?? "" });
+    notification.on("click", () => { if (n.open?.chat) openChat(n.open.chat); else if (n.open?.scope) openScope(n.open.scope); });
+    notification.on("failed", (_event, error) => console.warn("Notification failed:", error));
+    notification.show();
+  });
+  const openScope = (scopeId: string) => {
+    if (!win || win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.show(); win.focus(); send("openScope", scopeId);
+  };
+  const permissionNotifications = new PermissionNotifications(() => store.data.chats, agents.answerPermission, openChat, (chat, request) => {
+    if (!notifier.inApp()) return false;
+    notifier.show({ title: `Permission needed: ${request.tool}`, body: `${chat.name} · click to review it in chat`, open: { chat: chat.id }, kind: "info" });
+    return true;
+  });
+  reminders = new Reminders(() => store.data.chats, openChat, () => store.save(), isViewing, (chat) => {
+    if (!notifier.inApp()) return false;
+    notifier.show({ title: "Reminder", body: `${chat.name} · you asked to come back to this chat`, open: { chat: chat.id }, kind: "info" });
+    return true;
+  });
   reminders.sync();
   const previous = new Map(store.data.chats.map((c) => [c.id, eventKey(c)]));
   function eventKey(c: (typeof store.data.chats)[number]) {
@@ -599,21 +622,14 @@ app.whenReady().then(() => {
       const key = eventKey(c);
       const changed = previous.get(c.id) !== key;
       previous.set(c.id, key);
-      if (!changed || c.permissions?.length || key === "idle" || isViewing(c.id) || !Notification.isSupported()) continue;
+      if (!changed || c.permissions?.length || key === "idle" || isViewing(c.id)) continue;
       const status = chatStatus(c);
-      const notification = new Notification({
+      notifier.show({
         title: status === "attention" ? "Chat needs your attention" : status === "complete" ? "Chat complete" : "Chat started working",
-        body: c.permissions?.length ? "A chat is waiting for permission." : c.error ? "A chat encountered an error." : status === "attention" ? "A chat is waiting for your response." : status === "complete" ? "Your chat is ready to review." : "Your chat is running.",
+        body: `${c.name} · ${c.error ? "the chat hit an error" : status === "attention" ? "waiting for your response" : status === "complete" ? "ready to review" : "running"}`,
+        open: { chat: c.id },
+        kind: c.error ? "error" : status === "complete" ? "success" : "info",
       });
-      notification.on("click", () => {
-        if (!store.data.chats.some((chat) => chat.id === c.id) || !win || win.isDestroyed()) return;
-        if (win.isMinimized()) win.restore();
-        win.show();
-        win.focus();
-        send("openChat", c.id);
-      });
-      notification.on("failed", (_event, error) => console.warn("Chat notification failed:", error));
-      notification.show();
     }
     for (const id of previous.keys()) if (!s.chats.some((c) => c.id === id)) previous.delete(id);
     send("state", s);
@@ -623,20 +639,13 @@ app.whenReady().then(() => {
   ptys.listen((id, data) => send("pty:data", { id, data }), (s) => send("ptys", s));
   // a terminal command that ran a while has finished: say so, and let the click land on its worktree
   ptys.onCommandDone(({ scopeId, command, code, durationMs }) => {
-    if (!Notification.isSupported()) return;
     const where = store.data.worktrees.find((w) => w.id === scopeId)?.title ?? store.data.projects.find((p) => p.id === scopeId)?.name ?? "terminal";
-    const notification = new Notification({
+    notifier.show({
       title: code === 0 ? "Command finished" : `Command failed (exit ${code})`,
-      subtitle: where,
-      body: `${command ?? "command"} · ${formatDuration(durationMs)}`,
+      body: `${where} · ${command ?? "command"} · ${formatDuration(durationMs)}`,
+      open: { scope: scopeId },
+      kind: code === 0 ? "success" : "error",
     });
-    notification.on("click", () => {
-      if (!win || win.isDestroyed()) return;
-      if (win.isMinimized()) win.restore();
-      win.show(); win.focus(); send("openScope", scopeId);
-    });
-    notification.on("failed", (_event, error) => console.warn("Command notification failed:", error));
-    notification.show();
   });
   process.on("uncaughtException", (e) => console.error("[main]", e));
   createWindow();

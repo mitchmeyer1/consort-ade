@@ -200,7 +200,15 @@ input.edit { padding: 1px 6px; font: inherit; width: 100%; min-width: 0; backgro
 .page h1 span { cursor: text; }
 
 .badge.pr { border-color: var(--cream); color: var(--cream); }
-.badge.pr.bad { border-color: var(--err); color: var(--err); }
+/* CI on the pushed commit: green stays quiet, red speaks up, pending breathes; the glyph is the whole signal */
+.badge.ci { font-family: var(--mono); letter-spacing: .02em; }
+.badge.ci[role="link"] { cursor: pointer; }
+.badge.ci[role="link"]:hover { background: var(--line); }
+.badge.ci.pass { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 55%, transparent); }
+.badge.ci.fail { color: var(--err); border-color: var(--err); }
+.badge.ci.pending { color: var(--dim); animation: ci-breathe 2.4s ease-in-out infinite; }
+@keyframes ci-breathe { 0%, 100% { opacity: .5; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .badge.ci.pending { animation: none; } }
 .badge.merged { background: var(--cream); color: var(--ink); border-color: var(--cream); }
 .badge.closed { color: var(--err); border-color: var(--err); }
 .gitgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
@@ -930,3 +938,6 @@ button.rv-chip:hover { background: var(--card); color: var(--fg); border-color: 
 .rv-sub { font-size: 12.5px; color: var(--dim); padding: 6px 12px; border-left: 2px solid var(--line2); background: var(--card); border-radius: 3px 10px 10px 3px; }
 .rv-sub b { color: var(--fg); }
 .rv-sub.approve { border-left-color: var(--ok); } .rv-sub.request_changes { border-left-color: var(--high); }
+
+.toast.info { cursor: pointer; }
+.toast.info .toast-mark { color: var(--cream); }

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { advancePlan, finishPlan, isVerifyStep, parsePlan, planStages, PLAN_MARKER, startPlan, STEP_MARKER, VERIFY_STEP, withVerifyStep } from '../src/shared/planProgress.ts';
+import { advancePlan, finishPlan, isVerifyStep, parsePlan, planStages, PLAN_MARKER, startPlan, STEP_MARKER } from '../src/shared/planProgress.ts';
 
 const T = 1_000_000;
 const tool = (name, input, ok) => ({ type: 'tool', id: `${name}-${input}`, name, input, ok });
@@ -90,23 +90,21 @@ test('a chat with no plan gets no panel', () => {
 });
 
 
-test('a plan that does not end in a check gets one appended', () => {
-  assert.deepEqual(parsePlan('read the store | add the field'), ['read the store', 'add the field', VERIFY_STEP]);
-  assert.deepEqual(withVerifyStep(['do a thing']), ['do a thing', VERIFY_STEP]);
+test('the plan is the agent\'s own: no check is appended to a plan that does not end in one', () => {
+  assert.deepEqual(parsePlan('read the issue | trace the code path | write the fix plan'), ['read the issue', 'trace the code path', 'write the fix plan']);
+  assert.deepEqual(parsePlan('read the store | add the field | run the tests'), ['read the store', 'add the field', 'run the tests']);
 });
 
-test('a plan that already verifies is left alone', () => {
-  for (const last of ['run the tests', 'verify in the browser', 'screenshot the panel', 'typecheck and build', 'confirm the migration']) {
-    assert.equal(isVerifyStep(last), true, last);
-    assert.deepEqual(withVerifyStep(['change it', last]), ['change it', last]);
-  }
+test('a checking step is still recognisable by its wording', () => {
+  for (const last of ['run the tests', 'verify in the browser', 'screenshot the panel', 'typecheck and build', 'confirm the migration']) assert.equal(isVerifyStep(last), true, last);
+  assert.equal(isVerifyStep('write the fix plan'), false);
 });
 
-test('appending the check never pushes the plan over its limit', () => {
-  const eight = Array.from({ length: 8 }, (_, i) => `step ${i}`);
-  const steps = withVerifyStep(eight);
+test('a plan longer than the limit is clipped, never padded', () => {
+  const nine = Array.from({ length: 9 }, (_, i) => `step ${i}`);
+  const steps = parsePlan(nine.join(' | '));
   assert.equal(steps.length, 8);
-  assert.equal(steps.at(-1), VERIFY_STEP);
+  assert.equal(steps.at(-1), 'step 7');
 });
 
 test('a run that stops before verifying reports the step as skipped, not done', () => {

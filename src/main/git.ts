@@ -4,6 +4,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { promises as fs } from "node:fs";
 import type { CommitInfo, PrInfo, RepoInfo, WorktreeStatus } from "../shared/types";
 import type { Commit } from "../shared/contributors";
+// the extension matters: tests load this module straight into Node, which resolves relative imports literally
+import { summarizeChecks, type CiInfo } from "../shared/ci.ts";
 
 const run = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) =>
@@ -56,14 +58,32 @@ async function prInfo(path: string): Promise<PrInfo | undefined> {
   try {
     const { stdout } = await run("gh", ["pr", "view", "--json", "number,state,isDraft,url,title,author,reviewDecision,statusCheckRollup"], { cwd: path, timeout: 10_000 });
     const j = JSON.parse(stdout);
-    const concl: string[] = (j.statusCheckRollup ?? []).map((c: any) => c.conclusion || c.state || c.status);
-    const checks = !concl.length ? null
-      : concl.some((c) => /FAIL|ERROR|CANCEL|TIMED_OUT/.test(c)) ? "fail"
-      : concl.some((c) => /PENDING|QUEUED|IN_PROGRESS|EXPECTED/.test(c)) ? "pending" : "pass";
-    return { number: j.number, state: j.state, draft: j.isDraft, url: j.url, title: j.title, author: j.author?.login ?? "", review: j.reviewDecision ?? "", checks };
+    return { number: j.number, state: j.state, draft: j.isDraft, url: j.url, title: j.title, author: j.author?.login ?? "", review: j.reviewDecision ?? "", checks: Array.isArray(j.statusCheckRollup) ? j.statusCheckRollup : [] };
   } catch {
     return undefined;
   }
+}
+
+/** several panels poll the same worktree every 15s; one fetch per pushed commit per half-minute is plenty */
+const ciMemo = new Map<string, { at: number; value: Promise<CiInfo | undefined> }>();
+async function commitChecks(path: string, sha: string): Promise<CiInfo | undefined> {
+  const key = `${path}\0${sha}`;
+  const hit = ciMemo.get(key);
+  if (hit && Date.now() - hit.at < 30_000) return hit.value;
+  const value = Promise.all([
+    gh(path, ["api", `repos/{owner}/{repo}/commits/${sha}/check-runs?per_page=100`]),
+    gh(path, ["api", `repos/{owner}/{repo}/commits/${sha}/status`]),
+  ]).then(([runs, status]) => summarizeChecks([...(runs?.check_runs ?? []), ...(status?.statuses ?? [])]));
+  ciMemo.set(key, { at: Date.now(), value });
+  return value;
+}
+
+/** CI for what has been pushed: the PR's rollup when it has one, else the checks on the upstream tip */
+async function ciInfo(path: string, pr: PrInfo | undefined): Promise<CiInfo | undefined> {
+  if (pr && pr.state === "OPEN") return summarizeChecks(pr.checks, `${pr.url}/checks`);
+  if (pr) return undefined;
+  const sha = (await git(path, "rev-parse", "@{upstream}").catch(() => "")).trim();
+  return sha ? commitChecks(path, sha) : undefined;
 }
 
 /** who authored the commits this branch adds on top of its base, newest first */
@@ -82,6 +102,7 @@ export async function status(path: string, base: string): Promise<WorktreeStatus
     prInfo(path),
   ]);
   const [head, baseTip] = heads.trim().split("\n");
+  const ci = await ciInfo(path, pr);
   const lines = out.split("\n");
   const ab = /^# branch\.ab \+(\d+) -(\d+)/m.exec(out);
   const [subject, author, age] = log.trim().split("\0");
@@ -97,6 +118,7 @@ export async function status(path: string, base: string): Promise<WorktreeStatus
     last: subject ? { subject, author, age } : undefined,
     files: lines.filter((l) => /^[12u?]/.test(l)).map((l) => (l.startsWith("?") ? "?? " + l.slice(2) : l.split(" ").slice(1, 2)[0] + " " + l.split(" ").pop())).join("\n"),
     pr,
+    ci,
   };
 }
 

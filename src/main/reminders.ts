@@ -13,6 +13,8 @@ export class Reminders {
     private openChat: (id: string) => void,
     private changed: () => void,
     private viewing: (chatId: string) => boolean = () => false,
+    /** shows the reminder in-app instead and returns true, when Consort is the active window */
+    private inApp: (chat: Chat) => boolean = () => false,
   ) {}
 
   /** arm every pending reminder, and drop timers whose chat moved, cleared, or went away */
@@ -41,7 +43,7 @@ export class Reminders {
     // If it is the chat on screen, that same save clears it again — no notification needed.
     const seen = this.viewing(chat.id);
     this.changed();
-    if (seen || !Notification.isSupported()) return;
+    if (seen || this.inApp(chat) || !Notification.isSupported()) return;
     const notification = new Notification({ title: "Reminder", subtitle: chat.name, body: "You asked to come back to this chat." });
     notification.on("click", () => this.openChat(chat.id));
     notification.on("failed", (_event, error) => console.warn("Reminder notification failed:", error));

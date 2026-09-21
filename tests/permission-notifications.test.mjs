@@ -55,3 +55,22 @@ test('dismissal leaves permission pending; in-chat answers, stops and chat delet
 test('unsupported notifications leave in-app permission handling untouched', () => {
   const f = fixture(false); f.manager.sync(); assert.equal(f.alerts.length, 0); assert.equal(f.chats[0].permissions.length, 2);
 });
+
+test('while Consort is active a pending permission is shown in-app once and no system notification is built', () => {
+  const shown = [];
+  const inApp = [];
+  class Notification extends EventEmitter { constructor(opts) { super(); this.opts = opts; shown.push(this); } static isSupported() { return true; } show() {} close() {} }
+  const mod = { exports: {} };
+  new Function('require', 'exports', 'process', code)(() => ({ Notification }), mod.exports, { platform: 'darwin' });
+  const chats = [{ id: 'c1', name: 'Review', permissions: [{ id: 'p1', chatId: 'c1', tool: 'Bash', input: {} }] }];
+  const manager = new mod.exports.PermissionNotifications(() => chats, () => {}, () => {}, (chat, request) => { inApp.push(`${chat.id}:${request.id}`); return true; });
+  manager.sync();
+  manager.sync();
+  assert.deepEqual(inApp, ['c1:p1'], 'the toast is shown once, not on every sync');
+  assert.equal(shown.length, 0);
+  chats[0].permissions = [];
+  manager.sync();
+  chats[0].permissions = [{ id: 'p2', chatId: 'c1', tool: 'Edit', input: {} }];
+  manager.sync();
+  assert.deepEqual(inApp, ['c1:p1', 'c1:p2']);
+});

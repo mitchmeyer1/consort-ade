@@ -1,5 +1,5 @@
 import { chatDrafts } from "../../shared/chatDrafts";
-import { toasts } from "../../shared/toasts";
+import { toasts, type Toast } from "../../shared/toasts";
 import { canRestore, scrollKey, scrollMemory } from "../../shared/scrollMemory";
 import { PhaseStrip } from "./PhaseStrip";
 import { defaultConnector, selectedModel } from "../../shared/defaultConnector";
@@ -9,6 +9,7 @@ import { lastPrompt } from "../../shared/lastPrompt";
 import { connectorAccess, formatAge, formatReset, modelBlock, usageTone, type ConnectorUsage } from "../../shared/usage";
 import { MODELS, modelOptions, PHASES, phasesFor, type Api, type Block, type Chat, type CommitInfo, type Phase, type PtyState, type PermissionRequest, type Project, type RepoInfo, type RootStatus, type State, type Worktree, type WorktreeStatus } from "../../shared/types";
 import { chatStatus } from "../../shared/chatStatus";
+import { ciLabel, ciTitle, type CiInfo } from "../../shared/ci";
 import { recentChats, recentWorktrees } from "../../shared/conversationOrder";
 import { Lockup, Mark } from "./Logo";
 import { artifactLinkAction, artifactLinks, chatArtifacts, withFrameScrollbars } from "../../shared/artifacts";
@@ -42,15 +43,18 @@ function useStatus(id?: string, revision = 0) {
   }, [id, revision]);
   return st;
 }
-const CHECK = { pass: "●", fail: "✗", pending: "◌" } as const;
 const PrBadge = ({ st }: { st: WorktreeStatus }) => {
   const pr = st.pr;
   if (pr?.state === "MERGED") return <span className="badge merged" title="PR merged"><Ico n="laurel" /> merged</span>;
   if (!pr) return st.inBase ? <span className="badge" title="HEAD is already contained in the base branch">in base</span> : null;
-  const c = pr.checks ? CHECK[pr.checks] : "";
   if (pr.state === "CLOSED") return <span className="badge closed" title={pr.title}>✗ #{pr.number}</span>;
-  return <span className={"badge pr" + (pr.checks === "fail" ? " bad" : "")} title={`${pr.title} · checks ${pr.checks ?? "none"}`}>{pr.draft ? "◐" : "⎇"} #{pr.number} {c}</span>;
+  return <span className="badge pr" title={pr.title}>{pr.draft ? "◐" : "⎇"} #{pr.number}</span>;
 };
+/** CI on the pushed commit; clicking opens the failing run, or the checks page */
+const CiBadge = ({ ci }: { ci?: CiInfo }) => !ci ? null : (
+  <span className={"badge ci " + ci.state} role={ci.url ? "link" : undefined} title={ciTitle(ci)}
+    onClick={ci.url ? (e) => { e.stopPropagation(); ade.openExternal(ci.url!); } : undefined}>{ciLabel(ci)}</span>
+);
 /** whose branch this is: a GitHub login when the commits carry one, otherwise the git author's name */
 const Contributor = ({ who }: { who?: WorktreeStatus["author"] }) => !who ? null : (
   <small className="contributor" title={`${who.name}${who.login ? ` (@${who.login})` : ""} — ${who.commits} commit${who.commits === 1 ? "" : "s"} on this branch`}>
@@ -62,10 +66,11 @@ const Badges = ({ st, pr = true }: { st: WorktreeStatus | null; pr?: boolean }) 
   !st ? null : (
     <span className="badges">
       {pr && <PrBadge st={st} />}
+      {pr && <CiBadge ci={st.ci} />}
       {st.dirty > 0 && <span className="badge" title="uncommitted changes">±{st.dirty}</span>}
       {st.ahead > 0 && <span className="badge" title="ahead of upstream">↑{st.ahead}</span>}
       {st.behind > 0 && <span className="badge" title="behind upstream">↓{st.behind}</span>}
-      {!st.dirty && !st.ahead && !st.behind && !(pr && (st.pr || st.inBase)) && <span className="badge">clean</span>}
+      {!st.dirty && !st.ahead && !st.behind && !(pr && (st.pr || st.inBase || st.ci)) && <span className="badge">clean</span>}
     </span>
   );
 
@@ -115,14 +120,14 @@ const Field = ({ label, optional, info, children }: { label: string; optional?: 
 );
 
 /** Transient progress for slow operations (worktree add/delete), stacked bottom-centre above everything. */
-function Toaster() {
+function Toaster({ onOpen }: { onOpen: (open: NonNullable<Toast["open"]>) => void }) {
   const items = useSyncExternalStore(toasts.subscribe, toasts.snapshot);
   if (!items.length) return null;
   return (
     <div className="toasts" role="status" aria-live="polite">
       {items.map((t) => (
-        <div key={t.id} className={`toast ${t.kind}`} onClick={() => t.kind !== "loading" && toasts.dismiss(t.id)} title={t.kind === "loading" ? undefined : "Dismiss"}>
-          <span className="toast-mark" aria-hidden>{t.kind === "loading" ? <span className="spin" /> : t.kind === "success" ? "✓" : "✕"}</span>
+        <div key={t.id} className={`toast ${t.kind}`} onClick={() => { if (t.kind === "loading") return; if (t.open) onOpen(t.open); toasts.dismiss(t.id); }} title={t.kind === "loading" ? undefined : t.open ? "Open" : "Dismiss"}>
+          <span className="toast-mark" aria-hidden>{t.kind === "loading" ? <span className="spin" /> : t.kind === "success" ? "✓" : t.kind === "error" ? "✕" : "•"}</span>
           <span className="toast-body">
             <span className="toast-text">{t.text}</span>
             {t.detail && <span className="toast-detail">{t.detail}</span>}
@@ -161,7 +166,8 @@ export function App() {
     const c = ade.onPtys(setPtys);
     const d = ade.onPtyData(({ id, data }) => xterms.get(id)?.term.write(data));
     const e = ade.onOpenScope((id) => { setSel({ type: "worktree", id }); void ade.ptySeenScope(id); });
-    return () => { a(); b(); c(); d(); e(); };
+    const f = ade.onToast((n) => toasts.notify(n.kind ?? "info", n.title, n.body, n.open));
+    return () => { a(); b(); c(); d(); e(); f(); };
   }, []);
 
   useEffect(() => {
@@ -242,7 +248,7 @@ export function App() {
 
   return (
     <div className="app" style={{ gridTemplateColumns: `${collapsed ? 0 : leftW}px 1fr auto` }}>
-      <Toaster />
+      <Toaster onOpen={(open) => { if (open.chat) setSel({ type: "chat", id: open.chat }); else if (open.scope) { setSel({ type: "worktree", id: open.scope }); void ade.ptySeenScope(open.scope); } }} />
       {collapsed ? <div /> : <Sidebar state={state} sel={sel} running={running} failed={failed} done={done} onSelect={setSel} onCollapse={() => setCollapsed(true)} />}
       {!collapsed && <div className="resizer left" style={{ left: leftW - 3 }} onMouseDown={drag("left")} />}
       <div className="main">
@@ -402,7 +408,7 @@ function WorktreeNode({ wt, state, sel, running, failed, done, onSelect, collaps
         </span>
         <span className="meta status">
           {!wt.root && <Contributor who={st?.author} />}
-          {st && (st.dirty > 0 || st.ahead > 0 || st.behind > 0 || st.pr || st.inBase) && <Badges st={st} />}
+          {st && (st.dirty > 0 || st.ahead > 0 || st.behind > 0 || st.pr || st.inBase || st.ci) && <Badges st={st} />}
         </span>
         <span className="tools" onClick={(e) => e.stopPropagation()}>
           <button className="icon" title="New chat here" onClick={() => onSelect({ type: "worktree", id: wt.id, form: true })}>＋</button>
@@ -896,7 +902,7 @@ function GitCard({ st }: { st: WorktreeStatus }) {
           {pr ? (
             <>
               <a href="#" onClick={(e) => { e.preventDefault(); ade.openExternal(pr.url); }}>#{pr.number} {pr.title}</a>
-              <div className="m">{pr.draft ? "draft" : pr.state.toLowerCase()}{pr.review ? ` · ${pr.review.toLowerCase().replace("_", " ")}` : ""}{pr.checks ? ` · checks ${pr.checks}` : ""}</div>
+              <div className="m">{pr.draft ? "draft" : pr.state.toLowerCase()}{pr.review ? ` · ${pr.review.toLowerCase().replace("_", " ")}` : ""}{st.ci ? ` · ${ciTitle(st.ci).toLowerCase()}` : ""}</div>
             </>
           ) : <div className="m">no PR</div>}
         </div>
@@ -1332,6 +1338,18 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, onOpenMd 
   const onDrop = async (e: React.DragEvent) => { e.preventDefault(); setOver(false); addFiles(await filesFromTransfer(e.dataTransfer)); };
   const onPaste = async (e: React.ClipboardEvent) => { if ([...e.clipboardData.items].some((i) => i.kind === "file")) { e.preventDefault(); addFiles(await filesFromTransfer(e.clipboardData)); } };
   const recall = lastPrompt(chat);
+  // the recall chip repeats the last prompt; while that bubble is itself on screen the chip would only cover it
+  const messagesEl = useRef<HTMLDivElement>(null);
+  const [recallHidden, setRecallHidden] = useState(true);
+  const lastUserId = [...chat.messages].reverse().find((m) => m.role === "user" && m.blocks.length)?.id;
+  useEffect(() => {
+    const root = messagesEl.current;
+    const bubble = root?.querySelector<HTMLElement>(".msg.user:last-of-type");
+    if (!root || !bubble) { setRecallHidden(true); return; }
+    const io = new IntersectionObserver(([entry]) => setRecallHidden(!!entry?.isIntersecting), { root, threshold: 0 });
+    io.observe(bubble);
+    return () => io.disconnect();
+  }, [chat.id, lastUserId]);
   // a review follows our own skill, so its stages are known; every other chat shows the plan the agent declared
   const review = reviewProgress(chat);
   const stages = review ?? planStages(chat);
@@ -1339,9 +1357,9 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, onOpenMd 
     <div className={"chatpane" + (over ? " over" : "")} onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setOver(false); }} onDrop={onDrop} onPaste={onPaste}>
       {over && <div className="dropveil">Drop to attach</div>}
       <PhaseStrip phase={chat.phase} steps={chat.phaseSteps} onSelect={(phase) => ade.setPhase(chat.id, phase)} />
-      <div className="messages">
+      <div className="messages" ref={messagesEl}>
         {stages && <ProgressPanel title={review ? "Review" : "Plan"} stages={stages} />}
-        {recall && <div className="chat-recall"><span title={recall}>{recall}</span></div>}
+        {recall && !recallHidden && <div className="chat-recall"><span title={recall}>{recall}</span></div>}
         <div className="column">
         {chat.messages.filter((m) => m.blocks.length).map((m) =>
           m.role === "user" ? <UserBubble key={m.id} text={m.blocks.map((b) => (b.type === "text" ? b.text : "")).join("\n")} attachments={m.attachments} worktreeId={worktree?.id} /> :

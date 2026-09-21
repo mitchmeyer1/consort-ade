@@ -18,15 +18,19 @@ export type ApiKey = { id: string; name: string; provider: Provider; phiAllowed:
 import type { Contributor } from "./contributors";
 import type { SideMessage } from "./sideChat";
 import type { FindingStatus, Review, ReviewEvent, VerdictReport } from "./review";
+import type { CiInfo } from "./ci";
 export type { Contributor, SideMessage };
 export type { Finding, FindingStatus, Review, ReviewEvent, Submission, Verdict, VerdictReport } from "./review";
+export type { CiCheck, CiInfo, CiState } from "./ci";
 export type Project = { id: string; name: string; path: string; defaultBase: string; baseSetByUser?: boolean };
 export type QuickAction = { id: string; title: string; command: string; pinned?: boolean };
 export type Worktree = { id: string; projectId: string; name: string; title: string; path: string; branch: string; archived: boolean; root?: boolean; quickActions?: QuickAction[] };
-export type PrInfo = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; draft: boolean; url: string; title: string; author: string; review: string; checks: "pass" | "fail" | "pending" | null };
+export type PrInfo = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; draft: boolean; url: string; title: string; author: string; review: string; /** GitHub's check rollup for the PR head, raw, for the CI summary */ checks: unknown[] };
 export type WorktreeStatus = {
   branch: string; dirty: number; ahead: number; behind: number; merged: boolean; inBase: boolean; base: string;
   last?: { subject: string; author: string; age: string }; files: string; pr?: PrInfo;
+  /** CI for the pushed commit: from the PR when there is one, else the upstream tip; absent when nothing is pushed or no checks ran */
+  ci?: CiInfo;
   /** who wrote most of what this branch adds on top of its base */
   author?: Contributor;
 };
@@ -202,4 +206,6 @@ export type Api = {
   unwatchReview(worktreeId: string, target: string): Promise<void>;
   /** the absolute path of a review file that changed on disk */
   onReviewChanged(cb: (path: string) => void): () => void;
+  /** a notice main would have sent to the system, delivered in-app because Consort is the active window */
+  onToast(cb: (n: import("./notices").Notice) => void): () => void;
 };

@@ -24,5 +24,6 @@ contextBridge.exposeInMainWorld("ade", {
   onPtys: on("ptys"),
   onTheme: on("theme"),
   onReviewChanged: on("reviewChanged"),
+  onToast: on("toast"),
   pathsFor: (files: File[]) => files.map((f) => webUtils.getPathForFile(f)),
 });

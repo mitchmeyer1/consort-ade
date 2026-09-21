@@ -15,23 +15,20 @@ const SHOWN_SUBTASKS = 4;
 
 /** a last step that actually proves the work: tests, a browser check, running the thing */
 const VERIFIES = /\b(verif|test|check|confirm|validat|screenshot|prove|qa|lint|typecheck|type-check|run the|exercise|smoke)/i;
-export const VERIFY_STEP = "Verify the result";
 
 export const isVerifyStep = (label: string) => VERIFIES.test(label);
-
-/** every plan ends by checking its own work, whether or not the agent remembered to say so */
-export function withVerifyStep(steps: string[]) {
-  const last = steps[steps.length - 1];
-  return last && isVerifyStep(last) ? steps : [...steps.slice(0, MAX_STEPS - 1), VERIFY_STEP];
-}
 
 const tidy = (label: string) =>
   label.trim().replace(/\s+/g, " ").replace(/^[-–—*\d.)\s]+/, "").slice(0, MAX_LABEL).trim();
 
-/** "[plan: read the code | change it | test it]" → the steps, ignoring blanks and overlong lists */
+/**
+ * "[plan: read the code | change it | test it]" → the steps, ignoring blanks and overlong lists.
+ * The plan is the agent's own: a change ends in a check it runs, an investigation or a plan
+ * for someone else does not, and nothing is appended here on its behalf.
+ */
 export function parsePlan(raw: string): string[] {
   const steps = raw.split(/[|;]/).map(tidy).filter(Boolean);
-  return steps.length >= 2 ? withVerifyStep(steps.slice(0, MAX_STEPS)) : [];
+  return steps.length >= 2 ? steps.slice(0, MAX_STEPS) : [];
 }
 
 /** apply a `[plan:…]`: a new plan replaces the old one, since it belongs to the new task */
@@ -52,7 +49,7 @@ export function advancePlan(plan: ChatPlan, step: number, now: number): ChatPlan
 
 /**
  * The run ended. Steps it actually reached are done; steps it never started are marked
- * skipped rather than quietly ticked — a plan that ends without its verification step
+ * skipped rather than quietly ticked — a plan that promised a check and stopped short
  * should say so instead of claiming the work was checked.
  */
 export const finishPlan = (plan: ChatPlan, now: number): ChatPlan =>

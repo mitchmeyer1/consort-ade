@@ -1,13 +1,15 @@
 import { Notification } from "electron";
-import type { Chat } from "../shared/types";
+import type { Chat, PermissionRequest } from "../shared/types";
 
 // A notification belongs to one request, never to whichever prompt is newest in a chat.
 export class PermissionNotifications {
-  private active = new Map<string, Notification>();
+  private active = new Map<string, { close(): void }>();
   constructor(
     private chats: () => Chat[],
     private answer: (id: string, allow: boolean) => void,
     private openChat: (id: string) => void,
+    /** shows the request in-app instead and returns true, when Consort is the active window */
+    private inApp: (chat: Chat, request: PermissionRequest) => boolean = () => false,
   ) {}
 
   sync() {
@@ -16,9 +18,11 @@ export class PermissionNotifications {
     for (const [id, notification] of this.active) {
       if (!pending.has(id)) { this.active.delete(id); notification.close(); }
     }
-    if (!Notification.isSupported()) return;
     for (const chat of chats) for (const request of chat.permissions ?? []) {
       if (this.active.has(request.id)) continue;
+      // the permission box is already on screen in the chat; a toast points at it and needs no Allow/Block of its own
+      if (this.inApp(chat, request)) { this.active.set(request.id, { close() {} }); continue; }
+      if (!Notification.isSupported()) continue;
       const notification = new Notification({
         title: `Permission needed: ${request.tool}`,
         subtitle: chat.name,
