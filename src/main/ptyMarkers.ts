@@ -42,10 +42,18 @@ export const MIN_NOTIFY_MS = 1500;
 /**
  * What a finished command means for the sidebar. Ctrl-C (130) is the user's own doing, so it is
  * neither a failure nor news. Quick commands leave no trace: the user was clearly watching.
+ *
+ * A worktree's own setup run is the exception on both counts. Nobody was watching — we started
+ * it — so it reports however quickly it finishes, matching the toast that announced it. And a
+ * clean one leaves no amber "come and look" dot, because there is nothing in an install to look
+ * at. A `durationMs` of undefined still means no command actually ran: the shell's first prompt
+ * fires an exit marker of its own, and that is not news in either mode.
  */
-export function commandOutcome(code: number, durationMs: number | undefined): { failed: boolean; done: boolean; notify: boolean } {
+export function commandOutcome(code: number, durationMs: number | undefined, setup = false): { failed: boolean; done: boolean; notify: boolean } {
   const failed = code > 0 && code !== 130;
-  const long = durationMs !== undefined && durationMs >= MIN_NOTIFY_MS;
+  const ran = durationMs !== undefined;
+  if (setup) return { failed, done: false, notify: ran && code !== 130 };
+  const long = ran && durationMs >= MIN_NOTIFY_MS;
   return { failed, done: long && !failed && code !== 130, notify: long && code !== 130 };
 }
 

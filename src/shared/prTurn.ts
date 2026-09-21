@@ -1,9 +1,8 @@
 /** Whose move a pull request is waiting on, the same rule for the project page list and the worktree's own PR. */
 export type PrTurn = { mine: boolean; role: "author" | "reviewer" | null; turn: "yours" | "theirs" | null; why: string };
 
-/** the fields of a `gh pr list/view --json` payload the rule reads */
-export const TURN_FIELDS = "author,reviewRequests,reviews,comments,commits";
-
+// the payload shape is whatever `mapPr` in ghQuery.ts produces, which is the shape gh's
+// `--json author,reviewRequests,reviews,comments,commits` used to hand back
 // ponytail: "turn" = who acted last (review/comment/commit), with a pending review request always yours
 export function whoseTurn(p: any, me: string): PrTurn {
   const isAuthor = p.author?.login === me;

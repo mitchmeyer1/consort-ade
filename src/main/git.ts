@@ -7,7 +7,10 @@ import type { Commit } from "../shared/contributors";
 // the extension matters: tests load this module straight into Node, which resolves relative imports literally
 import { latestPushRuns, summarizeChecks, type CiInfo } from "../shared/ci.ts";
 import { issueNumberOf, type IssueDetail, type IssueInfo, type IssueLink } from "../shared/issues.ts";
-import { TURN_FIELDS, whoseTurn } from "../shared/prTurn.ts";
+import { whoseTurn } from "../shared/prTurn.ts";
+import { ghBudget } from "../shared/ghLimit.ts";
+import { ISSUE_PAGE, PR_PAGE, issueListQuery, mapIssueNode, mapPr, pickPr, prByBranchQuery, prListQuery } from "../shared/ghQuery.ts";
+import { prCreateArgs, prUrlIn, type PrDraft, type PrSummaryInput } from "../shared/createPr.ts";
 
 const run = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) =>
@@ -60,15 +63,37 @@ export async function removeWorktree(repo: string, path: string) {
 let meMemo: Promise<string> | undefined;
 const whoAmI = (cwd: string) => (meMemo ??= run("gh", ["api", "user", "-q", ".login"], { cwd, timeout: 10_000 }).then((r) => r.stdout.trim(), () => { meMemo = undefined; return ""; }));
 
+/**
+ * The PR for a worktree, asked for by branch. The sidebar polls every worktree on a timer, so
+ * it is memoized per path for a minute. Critically, a failed fetch (a GitHub rate limit, a
+ * network blip) serves the last good value rather than undefined: the chip must not vanish just
+ * because one poll was throttled. `null` is a real answer — this branch has no PR — and is
+ * cached like any other.
+ */
+const prMemo = new Map<string, { at: number; value: PrInfo | null }>();
 async function prInfo(path: string): Promise<PrInfo | undefined> {
+  const hit = prMemo.get(path);
+  if (hit && Date.now() - hit.at < 60_000) return hit.value ?? undefined;
+  // over the GraphQL budget: asking again only keeps it pinned, and the cached PR is still true
+  if (ghBudget.blocked()) return hit?.value ?? undefined;
   try {
-    const [{ stdout }, me] = await Promise.all([
-      run("gh", ["pr", "view", "--json", `number,state,isDraft,url,title,reviewDecision,statusCheckRollup,${TURN_FIELDS}`], { cwd: path, timeout: 10_000 }),
-      whoAmI(path),
-    ]);
-    const j = JSON.parse(stdout);
-    return { number: j.number, state: j.state, draft: j.isDraft, url: j.url, title: j.title, author: j.author?.login ?? "", review: j.reviewDecision ?? "", checks: Array.isArray(j.statusCheckRollup) ? j.statusCheckRollup : [], ...whoseTurn(j, me) };
-  } catch {
+    const [ref, branch, me] = await Promise.all([repoRef(path), headBranch(path), whoAmI(path)]);
+    // no GitHub remote, or nothing to match a PR against: not an answer, so nothing is cached
+    if (!ref?.owner || !ref.name || !branch) return hit?.value ?? undefined;
+    const data = await graphql<any>(path, prByBranchQuery, { owner: ref.owner, name: ref.name, branch });
+    ghBudget.ok();
+    const node = pickPr(nodes(data?.repository?.pullRequests));
+    // GitHub answered and this branch has no PR: a definite no, cached like any other
+    if (!node) { prMemo.set(path, { at: Date.now(), value: null }); return undefined; }
+    const j = mapPr(node);
+    const info: PrInfo = { number: j.number, state: j.state, draft: j.isDraft, url: j.url, title: j.title, author: j.author?.login ?? "", review: j.reviewDecision ?? "", checks: j.statusCheckRollup, ...whoseTurn(j, me) };
+    prMemo.set(path, { at: Date.now(), value: info });
+    return info;
+  } catch (error) {
+    ghBudget.note(error);
+    // a rate limit or an offline laptop leaves the last good value in place, refreshed to now
+    // so a throttled API is not hammered
+    if (hit) { prMemo.set(path, { at: Date.now(), value: hit.value }); return hit.value ?? undefined; }
     return undefined;
   }
 }
@@ -107,6 +132,13 @@ async function ciInfo(path: string, branch: string, pr: PrInfo | undefined): Pro
   return branchChecks(path, branch);
 }
 
+/** Forget cached PR and CI for a worktree so the next status is fresh; call after a push or pull. */
+export function forgetRemoteStatus(path: string) {
+  prMemo.delete(path);
+  for (const key of ciMemo.keys()) if (key.startsWith(`${path}\0`)) ciMemo.delete(key);
+  forgetRepoInfo(path);
+}
+
 /** who authored the commits this branch adds on top of its base, newest first */
 export async function branchAuthors(path: string, base: string): Promise<Commit[]> {
   // only the branch's own commits count, so a long-lived base doesn't drown them out
@@ -143,20 +175,17 @@ export async function status(path: string, base: string): Promise<WorktreeStatus
     pr,
     ci,
     issue,
+    // over the GraphQL budget: `pr` and `issue` above are the last good ones, and may be absent entirely
+    limitedUntil: ghBudget.resetsAt() || undefined,
   };
 }
 
-/** the issue an `issue/<n>` branch points at, for the sidebar chip; memoized like CI since several panels poll */
-const issueMemo = new Map<string, { at: number; value: Promise<IssueLink | undefined> }>();
-function issueLink(path: string, n: number): Promise<IssueLink | undefined> {
-  const key = `${path}\0${n}`;
-  const hit = issueMemo.get(key);
-  if (hit && Date.now() - hit.at < 60_000) return hit.value;
-  const value = gh(path, ["issue", "view", `${n}`, "--json", "number,title,state,url"])
-    .then((j) => (j ? { number: j.number, title: j.title, state: j.state, url: j.url } : undefined));
-  issueMemo.set(key, { at: Date.now(), value });
-  return value;
-}
+/** the issue an `issue/<n>` branch points at, for the sidebar chip; `gh issue view` is GraphQL like the PR query, so it shares the budget */
+const issueLink = (path: string, n: number): Promise<IssueLink | undefined> =>
+  cached(`${path}\0issue${n}`, 60_000, async () => {
+    const j = await ghRaw(path, ["issue", "view", `${n}`, "--json", "number,title,state,url"]);
+    return { number: j.number, title: j.title, state: j.state, url: j.url } as IssueLink;
+  });
 
 const mapIssue = (i: any): IssueInfo => ({
   number: i.number, title: i.title, author: i.author?.login ?? "", state: i.state, url: i.url,
@@ -196,20 +225,98 @@ export function runCommand(cwd: string, cmd: string) {
   });
 }
 
-const gh = (cwd: string, args: string[]) =>
-  run("gh", [...args], { cwd, timeout: 15_000 }).then((r) => JSON.parse(r.stdout), () => null);
+const ghRaw = async (cwd: string, args: string[]) =>
+  JSON.parse((await run("gh", [...args], { cwd, timeout: 15_000 })).stdout);
+const gh = (cwd: string, args: string[]) => ghRaw(cwd, args).catch(() => null);
+
+/**
+ * One GraphQL query, with the budget it reports folded back into the shared gate. `gh` exits
+ * non-zero on a GraphQL error and prints the payload, but a query can also come back 200 with
+ * an `errors` array, so both are raised the same way for `isRateLimit` to read.
+ */
+async function graphql<T>(cwd: string, query: string, vars: Record<string, string | number>): Promise<T> {
+  const args = ["api", "graphql", "-f", `query=${query}`];
+  for (const [k, v] of Object.entries(vars)) args.push(typeof v === "number" ? "-F" : "-f", `${k}=${v}`);
+  const { stdout } = await run("gh", args, { cwd, timeout: 15_000, maxBuffer: 1 << 24 });
+  const body = JSON.parse(stdout);
+  ghBudget.saw(body?.data?.rateLimit);
+  if (body?.errors?.length) throw new Error(body.errors.map((e: any) => e?.message ?? "").join("; "));
+  return body?.data as T;
+}
+
+const nodes = (c: any): any[] => (Array.isArray(c?.nodes) ? c.nodes.filter(Boolean) : []);
+
+/** owner and name for the GraphQL queries, which cannot use gh's `{owner}/{repo}` placeholders */
+const repoRef = (cwd: string) =>
+  cached(`${cwd}\0ref`, 300_000, async () => {
+    const j = await ghRaw(cwd, ["repo", "view", "--json", "owner,name"]);
+    return { owner: String(j?.owner?.login ?? ""), name: String(j?.name ?? "") };
+  });
+
+/**
+ * The remote branch name a PR for this worktree would carry, or "" when detached. Usually the
+ * local branch name, but a branch pushed under another name (`git push -u origin mitch/x`) is
+ * known to GitHub by the remote one, which is what `gh pr view` used to resolve for us.
+ */
+const headBranch = async (cwd: string): Promise<string> => {
+  const push = await git(cwd, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{push}").then((s) => s.trim(), () => "");
+  if (push) {
+    const remotes = await git(cwd, "remote").then((s) => s.split("\n").map((r) => r.trim()).filter(Boolean), () => []);
+    const remote = remotes.find((r) => push.startsWith(`${r}/`));
+    if (remote) return push.slice(remote.length + 1);
+  }
+  const local = await git(cwd, "rev-parse", "--abbrev-ref", "HEAD").then((s) => s.trim(), () => "");
+  return local && local !== "HEAD" ? local : "";
+};
+
+/**
+ * A gh call kept behind a per-key cache that serves the last good answer when the new one
+ * cannot be had. The project page polls every ten seconds and the sidebar every fifteen, and
+ * the PR and issue lists carry nested reviews, comments and commits, so each poll used to be a
+ * fresh heavy GraphQL query. Inside the window we reuse; over the budget, or on any failure, we
+ * hand back what we already have rather than an empty list that would blank the page.
+ */
+const ghMemo = new Map<string, { at: number; value: unknown }>();
+async function cached<T>(key: string, ttl: number, fetch: () => Promise<T>): Promise<T | undefined> {
+  const hit = ghMemo.get(key);
+  if (hit && Date.now() - hit.at < ttl) return hit.value as T;
+  if (ghBudget.blocked()) return hit?.value as T | undefined;
+  try {
+    const value = await fetch();
+    ghBudget.ok();
+    ghMemo.set(key, { at: Date.now(), value });
+    return value;
+  } catch (error) {
+    ghBudget.note(error);
+    // refreshed to now so a throttled API is not hammered, but the value itself is the last good one
+    if (hit) { ghMemo.set(key, { at: Date.now(), value: hit.value }); return hit.value as T; }
+    return undefined;
+  }
+}
 
 /** owner/name of the GitHub repo, or undefined when gh cannot say */
 export const repoName = (cwd: string): Promise<string | undefined> =>
   gh(cwd, ["repo", "view", "--json", "nameWithOwner"]).then((j) => j?.nameWithOwner || undefined);
 
 export async function repoInfo(cwd: string): Promise<RepoInfo> {
+  // the PR and issue lists are the two heaviest GraphQL queries the app makes; the repo blurb
+  // barely changes and the run list is REST, so each gets the window that suits it
   const [repo, prs, runs, issues, me] = await Promise.all([
-    gh(cwd, ["repo", "view", "--json", "nameWithOwner,description,url,defaultBranchRef,pushedAt,isPrivate"]),
-    gh(cwd, ["pr", "list", "--limit", "30", "--json", `number,title,headRefName,isDraft,reviewDecision,updatedAt,url,${TURN_FIELDS}`]),
-    gh(cwd, ["run", "list", "--limit", "8", "--json", "status,conclusion,name,headBranch,createdAt,url,displayTitle"]),
+    cached(`${cwd}\0repo`, 300_000, () => ghRaw(cwd, ["repo", "view", "--json", "nameWithOwner,description,url,defaultBranchRef,pushedAt,isPrivate"])),
+    cached(`${cwd}\0prs`, 60_000, async () => {
+      const ref = await repoRef(cwd);
+      if (!ref?.owner || !ref.name) throw new Error("no GitHub repo here");
+      const data = await graphql<any>(cwd, prListQuery, { owner: ref.owner, name: ref.name, first: PR_PAGE });
+      return nodes(data?.repository?.pullRequests).map(mapPr);
+    }),
+    cached(`${cwd}\0runs`, 30_000, () => ghRaw(cwd, ["run", "list", "--limit", "8", "--json", "status,conclusion,name,headBranch,createdAt,url,displayTitle"])),
     // the page shows 15 and expands to the rest; the comment count comes from the list payload without pulling bodies
-    gh(cwd, ["issue", "list", "--state", "open", "--limit", "50", "--search", "sort:updated-desc", "--json", "number,title,author,state,url,labels,assignees,createdAt,updatedAt,comments"]),
+    cached(`${cwd}\0issues`, 60_000, async () => {
+      const ref = await repoRef(cwd);
+      if (!ref?.owner || !ref.name) throw new Error("no GitHub repo here");
+      const data = await graphql<any>(cwd, issueListQuery, { owner: ref.owner, name: ref.name, first: ISSUE_PAGE });
+      return nodes(data?.repository?.issues).map(mapIssueNode);
+    }),
     whoAmI(cwd),
   ]);
   return {
@@ -221,7 +328,14 @@ export async function repoInfo(cwd: string): Promise<RepoInfo> {
     })),
     runs: (runs ?? []).map((r: any) => ({ name: r.name, title: r.displayTitle, branch: r.headBranch, status: r.status, conclusion: r.conclusion, createdAt: r.createdAt, url: r.url })),
     issues: (issues ?? []).map(mapIssue),
+    /** set while we are over the GraphQL budget: the lists above are the last good ones, not fresh */
+    limitedUntil: ghBudget.resetsAt() || undefined,
   };
+}
+
+/** Drop the cached project lists so the next `repoInfo` is fresh; call after a push or pull. */
+export function forgetRepoInfo(cwd: string) {
+  for (const key of ghMemo.keys()) if (key.startsWith(`${cwd}\0`)) ghMemo.delete(key);
 }
 
 // editor: paths stay inside the worktree
@@ -284,6 +398,22 @@ export async function commit(cwd: string, message: string) {
 export async function diffForSummary(cwd: string) {
   const { files, patch } = await diff(cwd); // tracked + untracked as patches
   return `Changed files:\n${files}\n${patch}`.slice(0, 14_000);
+}
+
+/**
+ * What a PR describes: the branch's own commits and its diff against the base, from the merge
+ * base so a base that moved on does not show up as this branch's work. Uncommitted changes are
+ * left out; they will not be in the PR. Trimmed like the commit summary so one call stays cheap.
+ */
+export async function branchDiffForSummary(cwd: string, branch: string, base: string): Promise<PrSummaryInput> {
+  // two dots for the log (only commits reachable from HEAD), three for the diff (from the merge base)
+  const range = `${base}...HEAD`;
+  const [commits, stat, patch] = await Promise.all([
+    git(cwd, "log", "--no-merges", "--format=- %s", `${base}..HEAD`),
+    git(cwd, "diff", "--stat=100", range),
+    git(cwd, "diff", "--no-color", "-U2", range),
+  ]);
+  return { branch, base, commits, stat, patch: patch.slice(0, 14_000) };
 }
 
 export async function rootStatus(path: string) {
@@ -390,6 +520,40 @@ export async function pushWorktree(path: string, expectedBranch: string) {
       cwd: path, maxBuffer: 1 << 24, timeout: 120_000, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
     });
     return (stdout + stderr).trim();
+  });
+}
+
+/**
+ * Open a PR for the worktree's branch. The push comes first, under the same lock, so the head
+ * GitHub sees is the head the user sees; `gh pr create` would otherwise stop to ask where to
+ * push, which no one is there to answer. The head is named explicitly so a worktree cut from
+ * the base (whose upstream is the base) cannot be mistaken for it.
+ */
+export async function createPr(path: string, expectedBranch: string, base: string, draft: PrDraft) {
+  const args = prCreateArgs({ ...draft, base, head: expectedBranch });
+  return worktreeOperation(path, expectedBranch, async (branch) => {
+    const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1" };
+    try {
+      await run("git", ["push", "--set-upstream", "origin", `refs/heads/${branch}:refs/heads/${branch}`], { cwd: path, maxBuffer: 1 << 24, timeout: 120_000, env });
+    } catch (error) {
+      throw new Error(`Push failed, so no PR was opened. ${String((error as any)?.stderr || (error as Error).message).trim()}`);
+    }
+    let out: string;
+    try {
+      const { stdout, stderr } = await run("gh", args, { cwd: path, maxBuffer: 1 << 24, timeout: 60_000, env });
+      out = stdout + "\n" + stderr;
+    } catch (error) {
+      const text = String((error as any)?.stderr || (error as Error).message).trim();
+      // gh says this when the head already has a PR: point at it instead of failing blind
+      const existing = prUrlIn(text);
+      throw new Error(existing ? `A pull request already exists for ${branch}: ${existing}` : `gh pr create failed. ${text}`);
+    } finally {
+      // the "no PR" answer was cached for a minute; the next status poll must ask again
+      forgetRemoteStatus(path);
+    }
+    const url = prUrlIn(out);
+    if (!url) throw new Error(`gh pr create finished but printed no PR URL. ${out.trim()}`);
+    return { url, number: Number(/\/pull\/(\d+)/.exec(url)?.[1]) || undefined };
   });
 }
 

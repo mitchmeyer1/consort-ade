@@ -12,7 +12,8 @@ export const CATEGORY_LABELS: Record<Category, string> = { logic: "Logic", redun
 export const SEVERITY_LABELS: Record<Severity, string> = { critical: "Critical", high: "High", medium: "Medium", low: "Low" };
 
 /** pending: not decided · approved: queued for the next post · commented: on GitHub · ignored: Mitch passed · dropped: a re-investigation found it no longer holds */
-export const FINDING_STATUSES = ["pending", "approved", "commented", "ignored", "dropped"] as const;
+/** fixing: handed to a chat in the worktree by "Fix locally"; a decision like ignore, undone by hand */
+export const FINDING_STATUSES = ["pending", "approved", "commented", "ignored", "dropped", "fixing"] as const;
 export type FindingStatus = (typeof FINDING_STATUSES)[number];
 
 export type Finding = {
@@ -191,11 +192,12 @@ export function updateFinding(review: Review, id: string, patch: { status?: Find
   if (target.status === "commented" && patch.status && patch.status !== "commented") throw new Error("That comment is already on GitHub.");
   if (patch.status === "commented") throw new Error("Post to GitHub to mark a finding as commented.");
   if (patch.status === "dropped") throw new Error("Only a re-investigation drops a finding; use Ignore to pass on it.");
+  if (patch.status === "fixing") throw new Error("Use Fix locally to hand a finding to the chat.");
   return { ...review, findings: review.findings.map((f) => f.id !== id ? f : { ...f, ...(patch.status ? { status: patch.status } : {}), ...(patch.comment !== undefined ? { comment: patch.comment } : {}) }) };
 }
 
-/** the message "Fix locally" sends: the finding as the reviewer wrote it, then how to go about the change */
-export function fixPrompt(review: Review, f: Finding) {
+/** the message "Fix locally" sends: the finding as the reviewer wrote it, the user's own direction when they added any, then how to go about the change */
+export function fixPrompt(review: Review, f: Finding, note?: string) {
   const where = `${f.file}${f.line ? `:${f.line}` : ""}`;
   const lines = [`Fix ${f.id} from the PR ${review.pr} review (${review.title}) locally, in this worktree.`, "", `**${f.title}**`, `File: ${where}`];
   if (f.kind === "defect") {
@@ -203,14 +205,21 @@ export function fixPrompt(review: Review, f: Finding) {
   } else {
     for (const [label, text] of Object.entries(f.fields ?? {})) if (text) lines.push(`${label}: ${text}`);
   }
+  // the user's direction outranks the reviewer's suggestion when the two disagree
+  if (note?.trim()) lines.push("", "Direction from Mitch, which takes precedence over the suggested fix where they differ:", note.trim());
   lines.push("", "Make the smallest change that resolves it, in the style of the surrounding code, and run the tests that cover it. Do not commit, and do not edit the review file. Finish with a short paragraph on what changed and where.");
   return lines.join("\n");
 }
 
-/** remember which chat took the finding, so the card can link back to it */
+/**
+ * Remember which chat took the finding, so the card can link back to it. Handing it off is a
+ * decision: an undecided or ignored finding becomes "fixing"; one already queued or posted keeps
+ * that standing, since the comment still belongs on the PR.
+ */
 export function recordFixRequest(review: Review, id: string, chatId: string, at: string): Review {
   if (!review.findings.some((f) => f.id === id)) throw new Error(`No finding ${id} in this review.`);
-  return { ...review, findings: review.findings.map((f) => (f.id === id ? { ...f, fixRequest: { chatId, at } } : f)) };
+  const decide = (status: FindingStatus): FindingStatus => (status === "pending" || status === "ignored" ? "fixing" : status);
+  return { ...review, findings: review.findings.map((f) => (f.id === id ? { ...f, status: decide(f.status), fixRequest: { chatId, at } } : f)) };
 }
 
 export const approvedFindings = (review: Review) => review.findings.filter((f) => f.status === "approved" && f.comment?.trim());
@@ -228,7 +237,7 @@ export function reviewCounts(review: Review) {
   return {
     defects: by((f) => f.kind === "defect"), items: by((f) => f.kind === "item"),
     pending: by((f) => f.status === "pending"), approved: by((f) => f.status === "approved"),
-    commented: by((f) => f.status === "commented"), ignored: by((f) => f.status === "ignored"), dropped: by((f) => f.status === "dropped"),
+    commented: by((f) => f.status === "commented"), ignored: by((f) => f.status === "ignored"), dropped: by((f) => f.status === "dropped"), fixing: by((f) => f.status === "fixing"),
     severity: Object.fromEntries(SEVERITIES.map((s) => [s, by((f) => f.kind === "defect" && f.severity === s)])) as Record<Severity, number>,
     category: Object.fromEntries(CATEGORIES.map((c) => [c, by((f) => f.kind === "item" && f.category === c)])) as Record<Category, number>,
   };
@@ -420,12 +429,12 @@ export function verdictSummary(f: Finding, report: VerdictReport) {
 }
 
 /** what a finished review amounts to, for the chat footer and the top bar */
-export type ReviewSummary = { pr: number; title: string; url: string; reviewedAt: string; total: number; pending: number; queued: number; commented: number; ignored: number; submitted: number };
+export type ReviewSummary = { pr: number; title: string; url: string; reviewedAt: string; total: number; pending: number; queued: number; commented: number; ignored: number; fixing: number; submitted: number };
 export function reviewSummary(review: Review): ReviewSummary {
   const count = (status: FindingStatus) => review.findings.filter((f) => f.status === status).length;
   return {
     pr: review.pr, title: review.title, url: review.url, reviewedAt: review.reviewedAt,
-    total: review.findings.length, pending: count("pending"), queued: count("approved"), commented: count("commented"), ignored: count("ignored") + count("dropped"),
+    total: review.findings.length, pending: count("pending"), queued: count("approved"), commented: count("commented"), ignored: count("ignored") + count("dropped"), fixing: count("fixing"),
     submitted: review.submissions?.length ?? 0,
   };
 }

@@ -4,10 +4,11 @@ import { join } from "node:path";
 import type { IPty } from "node-pty";
 import type { PtyState } from "../shared/types";
 import { commandOutcome, stripMarkers } from "./ptyMarkers";
+import { isSetupTerm } from "../shared/worktreeSetup";
 
 // real shells via node-pty; zsh hooks report command start/exit so the sidebar dots keep working
 type Session = { id: string; scopeId: string; termId: string; pty: IPty; running: boolean; failed: boolean; done: boolean; buf: string; startedAt?: number; command?: string };
-export type CommandDone = { id: string; scopeId: string; termId: string; command?: string; code: number; durationMs: number };
+export type CommandDone = { id: string; scopeId: string; termId: string; command?: string; code: number; durationMs: number; setup: boolean };
 const sessions = new Map<string, Session>();
 let onData: (id: string, data: string) => void = () => {};
 let onState: (s: PtyState[]) => void = () => {};
@@ -48,11 +49,11 @@ export async function create(scopeId: string, termId: string, cwd: string, cols:
     for (const ev of events) {
       if (ev.type === "start") { s.running = true; s.done = false; s.startedAt = Date.now(); s.command = ev.command; continue; }
       const durationMs = s.startedAt === undefined ? undefined : Date.now() - s.startedAt;
-      const outcome = commandOutcome(ev.code, durationMs);
+      const outcome = commandOutcome(ev.code, durationMs, isSetupTerm(s.termId));
       s.running = false;
       if (outcome.failed) s.failed = true;
       if (outcome.done) s.done = true;
-      if (outcome.notify) onDone({ id, scopeId, termId, command: s.command, code: ev.code, durationMs: durationMs! });
+      if (outcome.notify) onDone({ id, scopeId, termId, command: s.command, code: ev.code, durationMs: durationMs!, setup: isSetupTerm(s.termId) });
       s.startedAt = undefined;
     }
     if (out) onData(id, out);

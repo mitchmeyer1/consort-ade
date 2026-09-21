@@ -6,9 +6,10 @@ const finding = (id, status) => ({ id, kind: 'defect', title: id, status });
 const review = (findings, submissions = []) => ({ version: 1, repo: 'o/r', pr: 449, url: 'https://x/pull/449', title: 'Env badge', head: 'abc', base: 'main', reviewedAt: '2026-09-21T15:00:00Z', flows: [], findings, appendix: [], wellBuilt: [], orderOfWork: [], submissions });
 
 test('the summary counts findings by where they stand', () => {
-  const s = reviewSummary(review([finding('D1', 'pending'), finding('D2', 'approved'), finding('L1', 'commented'), finding('S1', 'ignored'), finding('S2', 'dropped')], [{ at: 't', event: 'COMMENT', url: 'u', body: '', inline: [] }]));
+  const s = reviewSummary(review([finding('D1', 'pending'), finding('D2', 'approved'), finding('L1', 'commented'), finding('S1', 'ignored'), finding('S2', 'dropped'), finding('T1', 'fixing')], [{ at: 't', event: 'COMMENT', url: 'u', body: '', inline: [] }]));
   assert.equal(s.pr, 449);
-  assert.equal(s.total, 5);
+  assert.equal(s.total, 6);
+  assert.equal(s.fixing, 1);
   assert.equal(s.pending, 1);
   assert.equal(s.queued, 1);
   assert.equal(s.commented, 1);

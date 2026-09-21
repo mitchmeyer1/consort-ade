@@ -14,10 +14,10 @@ const Ico = ({ n }: { n: string }) => <i className={`ico ico-${n}`} aria-hidden 
 const CATEGORY_ICONS: Record<Category, string> = { logic: "celtic", redundant: "grapes", style: "fleur", tests: "chalice", comments: "quill" };
 const SEV: Record<Severity, string> = { critical: "crit", high: "high", medium: "med", low: "low" };
 const short = (sha?: string | null) => (sha ?? "").slice(0, 7);
-const STATUS_LABEL: Record<FindingStatus, string> = { pending: "undecided", approved: "queued", commented: "posted", ignored: "ignored", dropped: "dropped" };
+const STATUS_LABEL: Record<FindingStatus, string> = { pending: "undecided", approved: "queued", commented: "posted", ignored: "ignored", dropped: "dropped", fixing: "fixing locally" };
 const FILTERS: { key: Filter; label: string }[] = [
   { key: "all", label: "all" }, { key: "pending", label: "undecided" }, { key: "approved", label: "queued" },
-  { key: "commented", label: "posted" }, { key: "ignored", label: "ignored" }, { key: "dropped", label: "dropped" }, { key: "drifted", label: "changed on PR" },
+  { key: "commented", label: "posted" }, { key: "ignored", label: "ignored" }, { key: "fixing", label: "fixing locally" }, { key: "dropped", label: "dropped" }, { key: "drifted", label: "changed on PR" },
 ];
 const when = (iso: string) => { const d = new Date(iso); return isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); };
 
@@ -38,6 +38,8 @@ export function ReviewView({ worktree, path }: { worktree: Worktree; path: strin
   const [checking, setChecking] = useState(false);
   const [drift, setDrift] = useState<Drift>();
   const [investigating, setInvestigating] = useState<Set<string>>(() => new Set());
+  /** the finding "Fix locally" was clicked on, while its dialog is open */
+  const [fixing, setFixing] = useState<Finding>();
   const [filter, setFilter] = useState<Filter>("all");
   /** the finish panel: open with inline comments (all decided) or as a review-only submission */
   // `at` changes on every click so the panel scrolls back into view even when it is already open
@@ -127,11 +129,12 @@ export function ReviewView({ worktree, path }: { worktree: Worktree; path: strin
   const decision = drift?.reviewDecision ? DECISION_LABEL[drift.reviewDecision] ?? drift.reviewDecision.toLowerCase().replace("_", " ") : "";
   const open = (url: string) => ade.openExternal(url);
   const openChat = (chatId: string) => window.dispatchEvent(new CustomEvent("consort-open-chat", { detail: chatId }));
-  // hand the finding to the worktree's chat; the toast is the way back to it
-  const fixLocally = async (f: Finding) => {
+  // hand the finding to the worktree's chat with whatever the user added; the toast is the way back to it
+  const fixLocally = async (f: Finding, note: string) => {
+    setFixing(undefined);
     const id = toasts.start(`Sending ${f.id} to the chat…`);
     try {
-      const res = await ade.fixFinding(worktree.id, path, f.id);
+      const res = await ade.fixFinding(worktree.id, path, f.id, note);
       setReview(res.review);
       toasts.dismiss(id);
       toasts.notify("success", `${f.id} sent to ${res.chatName}${res.queued ? ", queued behind its current task" : ""}`, "Click to open the chat", { chat: res.chatId });
@@ -141,10 +144,11 @@ export function ReviewView({ worktree, path }: { worktree: Worktree; path: strin
   };
   const count = (key: Filter) => key === "all" ? review.findings.length : key === "drifted" ? drifted.size : review.findings.filter((f) => f.status === key).length;
   const card = (f: Finding) => <FindingCard key={f.id} f={f} review={review} drifted={drifted.has(f.id)} liveHead={drift?.head ?? null} investigating={investigating.has(f.id)}
-    onDecide={decide} onComment={saveComment} onReinvestigate={reinvestigate} onFix={fixLocally} onOpen={open} onOpenChat={openChat} />;
+    onDecide={decide} onComment={saveComment} onReinvestigate={reinvestigate} onFix={setFixing} onOpen={open} onOpenChat={openChat} />;
 
   return (
     <div className="rv">
+      {fixing && <FixDialog f={fixing} onCancel={() => setFixing(undefined)} onStart={(note) => fixLocally(fixing, note)} />}
       <div className="rv-eyebrow"><Ico n="star" />Reviewer's writeup</div>
       <h1 className="rv-title">{review.title}</h1>
       <p className="rv-subtitle">
@@ -281,7 +285,7 @@ function FinishPanel({ review, inline: initialInline, openedAt, decision, busy, 
     <div className="rv-finish" role="dialog" aria-label="Finish your review" ref={panel}>
       <div className="rv-finish-head">
         <h3>Finish your review</h3>
-        <span className="m">{decided ? `Every finding decided · ${counts.approved} queued · ${counts.commented} posted · ${counts.ignored} ignored${counts.dropped ? ` · ${counts.dropped} dropped` : ""}` : `${counts.pending} finding${counts.pending === 1 ? "" : "s"} still undecided`}{decision ? ` · GitHub: ${decision}` : ""}</span>
+        <span className="m">{decided ? `Every finding decided · ${counts.approved} queued · ${counts.commented} posted · ${counts.ignored} ignored${counts.fixing ? ` · ${counts.fixing} fixing locally` : ""}${counts.dropped ? ` · ${counts.dropped} dropped` : ""}` : `${counts.pending} finding${counts.pending === 1 ? "" : "s"} still undecided`}{decision ? ` · GitHub: ${decision}` : ""}</span>
         <button className="icon" title="Close" onClick={onClose}>×</button>
       </div>
       <textarea className="rv-finish-body" value={body} rows={4} spellCheck={false} placeholder="Leave blank and AI will fill out" onChange={(e) => setBody(e.target.value)} />
@@ -301,6 +305,39 @@ function FinishPanel({ review, inline: initialInline, openedAt, decision, busy, 
           <button className="primary" disabled={busy} onClick={() => onSubmit({ event, body, inline: inline && queued.length > 0, draft: true })}>
             {busy ? "Submitting…" : `Submit review · ${EVENT_LABELS[event]}`}
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The pause before "Fix locally" sends: the finding goes as the reviewer wrote it, and this is where the
+ * user adds their own direction (a constraint, a different approach, a file to leave alone) to the prompt.
+ */
+function FixDialog({ f, onCancel, onStart }: { f: Finding; onCancel: () => void; onStart: (note: string) => void }) {
+  const [note, setNote] = useState("");
+  const where = `${f.file}${f.line ? `:${f.line}` : ""}`;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onCancel(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+  return (
+    <div className="overlay" onMouseDown={onCancel}>
+      <div className="dialog rv-fix" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="dtitle"><span>Fix {f.id} locally</span><button onClick={onCancel} title="Cancel">✕</button></div>
+        <p className="rv-fix-what"><b>{f.title}</b><br /><code>{where}</code></p>
+        <p className="m">The finding goes to the chat in this worktree as the reviewer wrote it, with the fix it suggested. Add anything you want the fix to follow instead or as well.</p>
+        <div className="field">
+          <label>Your direction<small>(optional)</small></label>
+          <textarea autoFocus value={note} onChange={(e) => setNote(e.target.value)} rows={5}
+            placeholder="e.g. Use the member portal's throttle rather than a worker; leave the response shape alone; add a test for the cooldown path."
+            onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); onStart(note); } }} />
+        </div>
+        <div className="dfoot">
+          <button onClick={onCancel}>Cancel</button>
+          <button className="primary" onClick={() => onStart(note)} title="⌘↩">{f.fixRequest ? "Fix again" : "Start fixing"}</button>
         </div>
       </div>
     </div>
@@ -361,9 +398,11 @@ function FindingCard({ f, review, drifted, liveHead, investigating, onDecide, on
             onClick={() => onDecide(f, f.status === "approved" ? "pending" : "approved")}>
             {f.status === "approved" ? "✓ Queued for PR" : "Comment on PR"}
           </button>
-          <button className={f.status === "ignored" ? "on" : ""} onClick={() => onDecide(f, f.status === "ignored" ? "pending" : "ignored")}>
-            {f.status === "ignored" ? "Ignored · undo" : "Ignore"}
-          </button>
+          {f.status === "fixing"
+            ? <button className="on" title="Back to undecided; the chat keeps working on it either way" onClick={() => onDecide(f, "pending")}>Fixing locally · undo</button>
+            : <button className={f.status === "ignored" ? "on" : ""} onClick={() => onDecide(f, f.status === "ignored" ? "pending" : "ignored")}>
+                {f.status === "ignored" ? "Ignored · undo" : "Ignore"}
+              </button>}
         </>}
         {!dropped && <button className={f.fixRequest ? "on" : ""} title={f.fixRequest ? "Ask again: send this finding to the chat in this worktree once more" : "This PR is yours: ask the chat in this worktree to make the change"} onClick={() => onFix(f)}>
           {f.fixRequest ? "Fix again" : "Fix locally"}

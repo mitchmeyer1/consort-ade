@@ -11,6 +11,7 @@ import { hooksDirectory, localEnvFiles, prepareWorktree } from "./worktreeFiles"
 import { installCommand } from "./worktreeInstall";
 import * as agents from "./agents";
 import { askOnce, humanize, suggestTitle } from "./namer";
+import { parsePrSuggestion, prSuggestionPrompt } from "../shared/createPr";
 import { commitFromChat } from "./commitChat";
 import { authLoginCmd, authStatus } from "./auth";
 import { formatDuration } from "./ptyMarkers";
@@ -23,12 +24,13 @@ import { issueBriefPrompt } from "../shared/issues";
 import { askSide } from "./sideChat";
 import { Reminders } from "./reminders";
 import { Notifier, type Notice } from "../shared/notices";
+import { SETUP_TERM, setupDoneNotice, setupStartNotice } from "../shared/worktreeSetup";
 import { findReview, readReview, reinvestigate, reviewDrift, setFinding, setFixRequest, submitReview, ReviewWatchers } from "./prReview";
-import { fixPrompt, prNumberOf } from "../shared/review";
-import { isReviewChat } from "../shared/reviewProgress";
+import { fixPrompt } from "../shared/review";
+import { pickReviewChat } from "../shared/reviewRunner";
 import { defaultConnector, selectedModel } from "../shared/defaultConnector";
 import { modelTiers } from "../shared/modelTiers";
-import { MODELS, type Api, type Appearance } from "../shared/types";
+import { MODELS, type Api, type Appearance, type PrDraft } from "../shared/types";
 import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { homedir } from "node:os";
@@ -147,13 +149,17 @@ async function syncWorktrees(projectId: string) {
  * Runs in a terminal of its own so the work is visible and interruptible, and starts here
  * rather than waiting for the drawer to be opened.
  */
+let notify: (n: Notice) => void = () => {};
+
 function startInstall(scopeId: string, repo: string, path: string) {
   installCommand(repo, path)
     .then(async (command) => {
       if (!command) return;
-      const id = await ptys.create(scopeId, "install", path, 120, 30);
+      const id = await ptys.create(scopeId, SETUP_TERM, path, 120, 30);
       // Same grace the renderer gives a new shell before typing into it.
       setTimeout(() => ptys.write(id, `${command}\r`), 700);
+      // nobody asked for this run, so it announces itself; its finish is announced from onCommandDone
+      notify(setupStartNotice(store.data.worktrees.find((w) => w.id === scopeId)?.title ?? "the new worktree", command, scopeId));
     })
     .catch((error) => console.error("worktree install failed to start", error));
 }
@@ -209,21 +215,28 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     if (!w) throw new Error("Worktree no longer exists.");
     if (store.data.chats.some((c) => c.worktreeId === id && c.running)) throw new Error("Wait for this worktree's chats to finish before pulling.");
     try { return await git.pullWorktree(w.path, branch); }
-    finally { statusCache.delete(id); repoCache.delete(w.projectId); store.save(); }
+    finally { statusCache.delete(id); git.forgetRemoteStatus(w.path); repoCache.delete(w.projectId); git.forgetRepoInfo(project(w.projectId).path); store.save(); }
   },
   pushWorktree: async (id: string, branch: string) => {
     const w = wt(id);
     if (!w) throw new Error("Worktree no longer exists.");
     if (store.data.chats.some((c) => c.worktreeId === id && c.running)) throw new Error("Wait for this worktree's chats to finish before pushing.");
     try { return await git.pushWorktree(w.path, branch); }
-    finally { statusCache.delete(id); }
+    finally { statusCache.delete(id); git.forgetRemoteStatus(w.path); }
+  },
+  createPr: async (id: string, branch: string, draft: PrDraft) => {
+    const w = wt(id);
+    if (!w) throw new Error("Worktree no longer exists.");
+    if (store.data.chats.some((c) => c.worktreeId === id && c.running)) throw new Error("Wait for this worktree's chats to finish before opening a PR.");
+    try { return await git.createPr(w.path, branch, project(w.projectId).defaultBase, draft); }
+    finally { statusCache.delete(id); git.forgetRemoteStatus(w.path); repoCache.delete(w.projectId); git.forgetRepoInfo(project(w.projectId).path); }
   },
   commitAndPushRoot: async (id: string, branch: string, message: string) => {
     const w = wt(id);
     if (!w || !isRootWorktree(w, project(w.projectId))) throw new Error("Root worktree no longer exists.");
     if (store.data.chats.some((c) => c.worktreeId === id && c.running)) throw new Error("Wait for root chats to finish before committing and pushing.");
     try { return await git.commitAndPushRoot(w.path, branch, message); }
-    finally { statusCache.delete(id); repoCache.delete(w.projectId); }
+    finally { statusCache.delete(id); repoCache.delete(w.projectId); git.forgetRepoInfo(project(w.projectId).path); }
   },
   setActiveChat: (id: string | null) => {
     activeChat = id;
@@ -358,18 +371,18 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   readReview: (id: string, target: string) => readReview(artifactPath(id, target)),
   findReview: (id: string, pr?: number) => findReview(wt(id).path, pr),
   updateReviewFinding: (id: string, target: string, findingId: string, patch: { status?: import("../shared/review").FindingStatus; comment?: string }) => setFinding(artifactPath(id, target), findingId, patch),
-  submitReview: (id: string, target: string, opts: { event: import("../shared/review").ReviewEvent; body: string; inline: boolean; draft: boolean }) => submitReview(artifactPath(id, target), opts),
+  submitReview: (id: string, target: string, opts: { event: import("../shared/review").ReviewEvent; body: string; inline: boolean; draft: boolean }) => submitReview(artifactPath(id, target), opts, id),
   reviewDrift: (id: string, target: string) => reviewDrift(artifactPath(id, target)),
-  reinvestigateFinding: (id: string, target: string, findingId: string) => reinvestigate(artifactPath(id, target), findingId),
+  // the worktree id lets the side job run on the review chat's connector and model rather than the Settings default
+  reinvestigateFinding: (id: string, target: string, findingId: string) => reinvestigate(artifactPath(id, target), findingId, id),
   // "Fix locally": the review chat already holds the context, so the finding goes there, queued behind whatever it is doing;
   // a branch with no review chat gets a fresh one on the default connector
-  fixFinding: async (id: string, target: string, findingId: string) => {
+  fixFinding: async (id: string, target: string, findingId: string, note?: string) => {
     const path = artifactPath(id, target);
     const { review } = await readReview(path);
     const finding = review.findings.find((f) => f.id === findingId);
     if (!finding) throw new Error(`No finding ${findingId} in this review.`);
-    const reviewChats = store.data.chats.filter((c) => c.worktreeId === id && isReviewChat(c)).sort((a, b) => (b.lastChattedAt ?? 0) - (a.lastChattedAt ?? 0));
-    let chat = reviewChats.find((c) => prNumberOf(c.name) === review.pr) ?? reviewChats[0];
+    let chat = pickReviewChat(store.data.chats, id, review.pr);
     if (!chat) {
       const key = defaultConnector(store.data);
       if (!key) throw new Error("Add a connector in Settings first.");
@@ -378,7 +391,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
       chat = store.chat(chatId);
     }
     const queued = !!chat.running;
-    await agents.send(chat.id, fixPrompt(review, finding));
+    await agents.send(chat.id, fixPrompt(review, finding, note));
     const next = await setFixRequest(path, findingId, chat.id);
     return { review: next, chatId: chat.id, chatName: chat.name, queued };
   },
@@ -392,6 +405,13 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     const diff = await git.diffForSummary(wt(id).path);
     if (!diff.trim()) return "";
     return askOnce(wt(id).path, `Write a git commit message for this diff.\nFormat: a short imperative subject line (max 60 chars), a blank line, then 1 to 5 bullets, each ONE sentence, each starting with "- ". No other text.\n\n${diff}`);
+  },
+  suggestPr: async (id: string, branch: string) => {
+    const w = wt(id);
+    if (!w) throw new Error("Worktree no longer exists.");
+    const input = await git.branchDiffForSummary(w.path, branch, project(w.projectId).defaultBase);
+    if (!input.commits.trim() && !input.patch.trim()) return { title: "", body: "" };
+    return parsePrSuggestion(await askOnce(w.path, prSuggestionPrompt(input)));
   },
   commitChat: async (chatId: string, message?: string) => {
     const chat = store.data.chats.find((c) => c.id === chatId);
@@ -623,6 +643,7 @@ app.whenReady().then(() => {
     notification.on("failed", (_event, error) => console.warn("Notification failed:", error));
     notification.show();
   });
+  notify = (n) => notifier.show(n);
   const openScope = (scopeId: string) => {
     if (!win || win.isDestroyed()) return;
     if (win.isMinimized()) win.restore();
@@ -669,9 +690,9 @@ app.whenReady().then(() => {
   agents.onPermission((r) => send("permission", r));
   ptys.listen((id, data) => send("pty:data", { id, data }), (s) => send("ptys", s));
   // a terminal command that ran a while has finished: say so, and let the click land on its worktree
-  ptys.onCommandDone(({ scopeId, command, code, durationMs }) => {
+  ptys.onCommandDone(({ scopeId, command, code, durationMs, setup }) => {
     const where = store.data.worktrees.find((w) => w.id === scopeId)?.title ?? store.data.projects.find((p) => p.id === scopeId)?.name ?? "terminal";
-    notifier.show({
+    notifier.show(setup ? setupDoneNotice(where, code, formatDuration(durationMs), scopeId) : {
       title: code === 0 ? "Command finished" : `Command failed (exit ${code})`,
       body: `${where} · ${command ?? "command"} · ${formatDuration(durationMs)}`,
       open: { scope: scopeId },

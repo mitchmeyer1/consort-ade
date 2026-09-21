@@ -21,10 +21,13 @@ import type { FindingStatus, Review, ReviewEvent, ReviewSummary, VerdictReport }
 import type { CiInfo } from "./ci";
 import type { IssueInfo, IssueLink } from "./issues";
 import type { PrTurn } from "./prTurn";
+import type { PrDraft } from "./createPr";
 export type { Contributor, SideMessage };
 export type { Finding, FindingStatus, Review, ReviewEvent, ReviewSummary, Submission, Verdict, VerdictReport } from "./review";
 export type { CiCheck, CiInfo, CiState } from "./ci";
 export type { IssueDetail, IssueInfo, IssueLink } from "./issues";
+export type { PrDraft } from "./createPr";
+export type PrDraftText = { title: string; body: string };
 export type Project = { id: string; name: string; path: string; defaultBase: string; baseSetByUser?: boolean };
 export type QuickAction = { id: string; title: string; command: string; pinned?: boolean };
 export type Worktree = { id: string; projectId: string; name: string; title: string; path: string; branch: string; archived: boolean; root?: boolean; quickActions?: QuickAction[] };
@@ -39,6 +42,12 @@ export type WorktreeStatus = {
   issue?: IssueLink;
   /** who wrote most of what this branch adds on top of its base */
   author?: Contributor;
+  /**
+   * When GitHub's GraphQL budget is spent, the PR, turn and issue chips have no source — only CI,
+   * which is REST, survives. This is when we will ask again, so the sidebar can say so rather than
+   * quietly dropping the chips.
+   */
+  limitedUntil?: number;
 };
 
 export type Block =
@@ -102,6 +111,8 @@ export type RepoInfo = {
   runs: { name: string; title: string; branch: string; status: string; conclusion: string; createdAt: string; url: string }[];
   /** open issues, most recently updated first */
   issues: IssueInfo[];
+  /** set while GitHub's GraphQL budget is spent: the lists above are the last good ones, not fresh */
+  limitedUntil?: number;
 };
 export type Job = { id: string; scopeId: string; termId: string; cwd: string; cmd: string; out: string; status: "running" | "exited"; code?: number; startedAt: number; seen?: boolean };
 /** done: a command that took a while finished successfully and nobody has looked yet */
@@ -121,6 +132,8 @@ export type Api = {
   commitWorktree(worktreeId: string, expectedBranch: string, message: string): Promise<string>;
   pullWorktree(worktreeId: string, expectedBranch: string): Promise<string>;
   pushWorktree(worktreeId: string, expectedBranch: string): Promise<string>;
+  /** push the branch, then open a PR against the project base; resolves to the new PR's URL */
+  createPr(worktreeId: string, expectedBranch: string, draft: PrDraft): Promise<{ url: string; number?: number }>;
   checkoutAtRoot(worktreeId: string, commitMessage?: string): Promise<RootStatus>;
   setActiveChat(id: string | null): Promise<void>;
   onOpenChat(cb: (id: string) => void): () => void;
@@ -200,6 +213,8 @@ export type Api = {
   commitInfo(worktreeId: string): Promise<CommitInfo>;
   commit(worktreeId: string, message: string): Promise<string>;
   suggestCommit(worktreeId: string): Promise<string>;
+  /** an AI-drafted PR title and bullet body from the branch's commits and diff against the base; empty when there is nothing to describe */
+  suggestPr(worktreeId: string, branch: string): Promise<PrDraftText>;
   /** commit + push from the composer, narrated into the chat transcript; omit message to let the AI draft one */
   commitChat(chatId: string, message?: string): Promise<string>;
   /** a `*.review.json` a PR review wrote; `target` is the same link text an artifact carries */
@@ -213,8 +228,8 @@ export type Api = {
   reviewDrift(worktreeId: string, target: string): Promise<{ head: string | null; state: string | null; reviewDecision: string; url: string; drifted: string[] }>;
   /** re-check one finding against the PR's current head with a read-only agent; the verdict is written into the file */
   reinvestigateFinding(worktreeId: string, target: string, findingId: string): Promise<{ review: Review; report: VerdictReport; summary: string; head: string }>;
-  /** hand one finding to the review chat in its worktree (or a new chat) to fix locally; queued if that chat is busy */
-  fixFinding(worktreeId: string, target: string, findingId: string): Promise<{ review: Review; chatId: string; chatName: string; queued: boolean }>;
+  /** hand one finding to the review chat in its worktree (or a new chat) to fix locally, with the user's own direction appended; queued if that chat is busy */
+  fixFinding(worktreeId: string, target: string, findingId: string, note?: string): Promise<{ review: Review; chatId: string; chatName: string; queued: boolean }>;
   watchReview(worktreeId: string, target: string): Promise<void>;
   unwatchReview(worktreeId: string, target: string): Promise<void>;
   /** the absolute path of a review file that changed on disk */

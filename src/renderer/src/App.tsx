@@ -16,6 +16,7 @@ import { artifactLinkAction, artifactLinks, chatArtifacts, withFrameScrollbars }
 import { attachmentName, isImageAttachment } from "../../shared/attachments";
 import { reminderLabel } from "../../shared/reminders";
 import { prChatName } from "../../shared/prChat";
+import { canCreatePr, prBaseBranch, prBlockedBy, suggestedPrTitle } from "../../shared/createPr";
 import { ISSUE_ROWS, issueBranch, issueChatName, issueFolder, type IssueInfo } from "../../shared/issues";
 import { isReviewChat, reviewProgress } from "../../shared/reviewProgress";
 import { prNumberOf, type ReviewSummary } from "../../shared/review";
@@ -59,16 +60,26 @@ function useReviewFile(worktreeId?: string, pr?: number, ...deps: unknown[]) {
   }, [worktreeId, pr, ...deps]);
   return found;
 }
+/**
+ * The PR this branch has, in whatever state. Clicking any of them opens the PR on GitHub — the
+ * chip is the handiest pointer to it, in the sidebar tree and on the worktree page alike. The
+ * click is stopped here so it does not also select the row the chip sits in. "in base" is the
+ * one case with no PR and so nothing to open.
+ */
 const PrBadge = ({ st }: { st: WorktreeStatus }) => {
   const pr = st.pr;
-  if (pr?.state === "MERGED") return <span className="badge merged" title="PR merged"><Ico n="laurel" /> merged</span>;
   if (!pr) return st.inBase ? <span className="badge" title="HEAD is already contained in the base branch">in base</span> : null;
-  if (pr.state === "CLOSED") return <span className="badge closed" title={pr.title}>✗ #{pr.number}</span>;
-  return <span className="badge pr" title={pr.title}>{pr.draft ? "◐" : "⎇"} #{pr.number}</span>;
+  const open = pr.url ? { role: "link", onClick: (e: React.MouseEvent) => { e.stopPropagation(); ade.openExternal(pr.url); } } : {};
+  const hint = pr.url ? ` — click to open on GitHub` : "";
+  if (pr.state === "MERGED") return <span className="badge merged" title={`${pr.title || "PR merged"} (merged)${hint}`} {...open}><Ico n="laurel" /> merged</span>;
+  if (pr.state === "CLOSED") return <span className="badge closed" title={`${pr.title} (closed)${hint}`} {...open}>✗ #{pr.number}</span>;
+  return <span className="badge pr" title={`${pr.title}${pr.draft ? " (draft)" : ""}${hint}`} {...open}>{pr.draft ? "◐" : "⎇"} #{pr.number}</span>;
 };
-/** whose move an open PR waits on: the crown when it is yours, quiet when it is theirs */
-const TurnBadge = ({ pr }: { pr?: { turn?: "yours" | "theirs" | null; why?: string } }) => !pr?.turn ? null : (
-  <span className={"badge turn " + pr.turn} title={pr.why}>{pr.turn === "yours" ? <><Ico n="crown" /> Your turn</> : "Their turn"}</span>
+/** whose move an open PR waits on: the crown when it is yours, quiet when it is theirs; it speaks for the same PR, so it opens it too */
+const TurnBadge = ({ pr }: { pr?: { turn?: "yours" | "theirs" | null; why?: string; url?: string } }) => !pr?.turn ? null : (
+  <span className={"badge turn " + pr.turn} title={`${pr.why ?? ""}${pr.url ? " — click to open on GitHub" : ""}`}
+    role={pr.url ? "link" : undefined}
+    onClick={pr.url ? (e) => { e.stopPropagation(); ade.openExternal(pr.url!); } : undefined}>{pr.turn === "yours" ? <><Ico n="crown" /> Your turn</> : "Their turn"}</span>
 );
 /** the issue an `issue/<n>` branch was made for; clicking opens it on GitHub */
 const IssueBadge = ({ issue }: { issue?: WorktreeStatus["issue"] }) => !issue ? null : (
@@ -87,21 +98,31 @@ const Contributor = ({ who }: { who?: WorktreeStatus["author"] }) => !who ? null
   </small>
 );
 
-const Badges = ({ st, pr = true }: { st: WorktreeStatus | null; pr?: boolean }) =>
+/**
+ * Why the PR chips are missing. GitHub's GraphQL budget is shared by the whole account, and the
+ * PR, turn and issue chips all come from it while CI comes from REST — so when the budget runs
+ * out they disappear together and CI carries on alone. Better to say so than to look broken.
+ */
+const LimitBadge = ({ until }: { until?: number }) => !until ? null : (
+  <span className="badge limited" title={`GitHub's API budget for this account is spent, so the PR and issue chips have no data to show. CI still works because it uses a separate budget. Trying again at ${new Date(until).toLocaleTimeString()}.`}>gh limited</span>
+);
+
+export const Badges = ({ st, pr = true }: { st: WorktreeStatus | null; pr?: boolean }) =>
   !st ? null : (
     <span className="badges">
       {pr && <IssueBadge issue={st.issue} />}
       {pr && <PrBadge st={st} />}
       {pr && st.pr?.state === "OPEN" && <TurnBadge pr={st.pr} />}
       {pr && <CiBadge ci={st.ci} />}
+      {pr && !st.pr && !st.issue && <LimitBadge until={st.limitedUntil} />}
       {st.dirty > 0 && <span className="badge" title="uncommitted changes">±{st.dirty}</span>}
       {st.ahead > 0 && <span className="badge" title="ahead of upstream">↑{st.ahead}</span>}
       {st.behind > 0 && <span className="badge" title="behind upstream">↓{st.behind}</span>}
-      {!st.dirty && !st.ahead && !st.behind && !(pr && (st.pr || st.inBase || st.ci || st.issue)) && <span className="badge">clean</span>}
+      {!st.dirty && !st.ahead && !st.behind && !(pr && (st.pr || st.inBase || st.ci || st.issue || st.limitedUntil)) && <span className="badge">clean</span>}
     </span>
   );
 
-const Dots = ({ id, running, failed, done }: { id: string; running: Set<string>; failed: Set<string>; done: Set<string> }) => (
+export const Dots = ({ id, running, failed, done }: { id: string; running: Set<string>; failed: Set<string>; done: Set<string> }) => (
   <>{running.has(id) && <span className="live" title="a process is running here" />}{failed.has(id) && <span className="live dead" title="a process failed — open its terminal" />}{done.has(id) && !running.has(id) && !failed.has(id) && <span className="live done" title="a command finished here — click to clear" />}</>
 );
 const PanelIcon = () => (
@@ -147,7 +168,7 @@ const Field = ({ label, optional, info, children }: { label: string; optional?: 
 );
 
 /** Transient progress for slow operations (worktree add/delete), stacked bottom-centre above everything. */
-function Toaster({ onOpen }: { onOpen: (open: NonNullable<Toast["open"]>) => void }) {
+export function Toaster({ onOpen }: { onOpen: (open: NonNullable<Toast["open"]>) => void }) {
   const items = useSyncExternalStore(toasts.subscribe, toasts.snapshot);
   if (!items.length) return null;
   return (
@@ -299,7 +320,8 @@ export function App() {
             {worktree?.quickActions?.filter((action) => action.pinned).map((action) => (
               <button key={action.id} className="pinned-action" title={`Run ${action.title} in ${worktree.path}`} onClick={() => runQuickAction(worktree, action)}><Ico n="star" />{action.title}</button>
             ))}
-            {worktree && <button className={tab === "terminal" ? "on" : ""} onClick={() => toggle("terminal")}><Ico n="terminal" /><span>Terminal</span></button>}
+            {/* the same dots the sidebar shows, so a process running in this worktree is visible from the page it is running for */}
+            {worktree && <button className={tab === "terminal" ? "on" : ""} onClick={() => toggle("terminal")}><Ico n="terminal" /><span>Terminal</span><Dots id={worktree.id} running={running} failed={failed} done={done} /></button>}
             {worktree && <button className={tab === "diff" ? "on" : ""} onClick={() => toggle("diff")}><Ico n="branch" /><span>Diff</span></button>}
             {worktree && <button className={tab === "editor" ? "on" : ""} onClick={() => toggle("editor")}><Ico n="pencil" /><span>Editor</span></button>}
             {worktree && <button className={tab === "commit" ? "on" : ""} onClick={() => toggle("commit")}><Ico n="wheat" /><span>Commit</span></button>}
@@ -830,7 +852,38 @@ function WorktreePage({ wt, state, openForm, onSelect, onRunAction }: { wt: Work
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [gitError, setGitError] = useState("");
-  const [gitResult, setGitResult] = useState("");
+  const [gitResult, setGitResult] = useState<React.ReactNode>("");
+  // the Create PR dialog; null while closed. Opened with a title from the last commit.
+  const [prDraft, setPrDraft] = useState<{ title: string; body: string; draft: boolean } | null>(null);
+  // the Generate button's state: drafting, or a short note when it came back empty or failed
+  const [prGen, setPrGen] = useState<{ busy: boolean; note?: string }>({ busy: false });
+  // seconds since Generate was pressed: a 30-second wait needs a clock, not a frozen word
+  const [prGenSeconds, setPrGenSeconds] = useState(0);
+  useEffect(() => {
+    if (!prGen.busy) { setPrGenSeconds(0); return; }
+    const t = setInterval(() => setPrGenSeconds((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [prGen.busy]);
+  const generatePr = async () => {
+    if (!st || prGen.busy) return;
+    setPrGen({ busy: true });
+    try {
+      const { title, body } = await ade.suggestPr(wt.id, st.branch);
+      if (!title && !body) { setPrGen({ busy: false, note: `Nothing to summarize: no commits on ${st.branch} beyond ${prBaseBranch(st.base)}.` }); return; }
+      setPrDraft((d) => d && { ...d, title: title || d.title, body: body || d.body });
+      setPrGen({ busy: false });
+    } catch (e) { setPrGen({ busy: false, note: (e as Error).message.split("\n")[0] }); }
+  };
+  const createPr = async () => {
+    if (!st || !prDraft || busy) return;
+    setBusy(true); setGitError(""); setGitResult("");
+    try {
+      const { url, number } = await ade.createPr(wt.id, st.branch, prDraft);
+      setPrDraft(null);
+      setGitResult(<>Opened <a href="#" onClick={(e) => { e.preventDefault(); ade.openExternal(url); }}>{number ? `PR #${number}` : "the PR"}</a> for {st.branch}{prDraft.draft ? " as a draft" : ""}.</>);
+    } catch (e) { setGitError((e as Error).message); }
+    finally { setBusy(false); setRevision((n) => n + 1); }
+  };
   const runGit = async (action: "commit" | "push" | "pull") => {
     if (!st || busy) return;
     setBusy(true); setGitError(""); setGitResult("");
@@ -874,6 +927,11 @@ function WorktreePage({ wt, state, openForm, onSelect, onRunAction }: { wt: Work
       <div className="actions">
         <button className="primary" onClick={() => !needKey() && setForm((f) => !f)}><Ico n="quill" /> New chat</button>
         <button onClick={prWriteup}><Ico n="scroll" /> PR write-up</button>
+        {canCreatePr(st) && (
+          <button className="create-pr" disabled={busy || !!prBlockedBy(st) || chats.some((c) => c.running)}
+            title={prBlockedBy(st) ?? `Push ${st.branch} and open a pull request against ${prBaseBranch(st.base)}`}
+            onClick={() => { setGitError(""); setPrGen({ busy: false }); setPrDraft({ title: suggestedPrTitle(st), body: "", draft: false }); }}><Ico n="grapes" /> Create PR</button>
+        )}
       </div>
       {st && <GitCard st={st} />}
       <div className="actions">
@@ -882,7 +940,7 @@ function WorktreePage({ wt, state, openForm, onSelect, onRunAction }: { wt: Work
         <button disabled={busy || !st || chats.some((c) => c.running)} onClick={() => runGit("push")}>{busy ? "Working…" : `Push to origin/${st?.branch ?? wt.branch}`}</button>
       </div>
       {chats.some((c) => c.running) && <div className="m">Commit, pull, and push are available when this worktree's chats finish.</div>}
-      {!committing && gitError && <div className="error">{gitError}</div>}
+      {!committing && !prDraft && gitError && <div className="error">{gitError}</div>}
       {gitResult && <div role="status">{gitResult}</div>}
       {committing && <Dialog title={`Commit to ${st?.branch ?? wt.branch}`} onClose={() => { if (!busy) setCommitting(false); }} footer={<>
         <button disabled={busy} onClick={() => setCommitting(false)}>Cancel</button>
@@ -892,6 +950,31 @@ function WorktreePage({ wt, state, openForm, onSelect, onRunAction }: { wt: Work
         <pre className="files">{st?.files}</pre>
         <Field label="Commit message"><input autoFocus value={message} disabled={busy} onChange={(e) => setMessage(e.target.value)} /></Field>
         {gitError && <div className="error">{gitError}</div>}
+      </Dialog>}
+      {prDraft && st && <Dialog title={`Create PR: ${st.branch} → ${prBaseBranch(st.base)}`} onClose={() => { if (!busy) setPrDraft(null); }} footer={<>
+        <button disabled={busy} onClick={() => setPrDraft(null)}>Cancel</button>
+        <button className="primary" disabled={busy || !prDraft.title.trim() || chats.some((c) => c.running)} onClick={createPr}>{busy ? "Creating…" : prDraft.draft ? "Create draft PR" : "Create PR"}</button>
+      </>}>
+        <p>Push {st.branch} to origin{st.ahead ? ` (${st.ahead} unpushed commit${st.ahead === 1 ? "" : "s"})` : ""}, then open a pull request against {prBaseBranch(st.base)}.{st.dirty ? ` ${st.dirty} uncommitted change${st.dirty === 1 ? " stays" : "s stay"} local.` : ""}</p>
+        <div className={"pr-fields" + (prGen.busy ? " thinking" : "")} aria-busy={prGen.busy}>
+          <div className="field">
+            <label>Title<button className="icon generate" disabled={busy || prGen.busy} title={`Draft a title and bullet points from the commits on ${st.branch}`} onClick={generatePr}><Ico n="star" />Generate</button></label>
+            <input autoFocus value={prDraft.title} disabled={busy || prGen.busy} onChange={(e) => setPrDraft({ ...prDraft, title: e.target.value })} onKeyDown={(e) => { if (e.key === "Enter") void createPr(); }} />
+          </div>
+          <Field label="Description" optional><textarea rows={6} value={prDraft.body} disabled={busy || prGen.busy} placeholder="What changed and why" onChange={(e) => setPrDraft({ ...prDraft, body: e.target.value })} /></Field>
+          {prGen.busy && (
+            <div className="pr-thinking" role="status" aria-live="polite">
+              <span className="pr-thinking-orb" aria-hidden><span /><span /><span /></span>
+              <div className="pr-thinking-text">
+                <strong>Drafting the title and description…</strong>
+                <span>Reading the commits and diff on {st.branch}. This usually takes 15 to 30 seconds.{prGenSeconds >= 3 ? ` ${prGenSeconds}s` : ""}</span>
+              </div>
+            </div>
+          )}
+        </div>
+        {prGen.note && <div className="m" role="status">{prGen.note}</div>}
+        <div className="field"><label className="check"><input type="checkbox" checked={prDraft.draft} disabled={busy} onChange={(e) => setPrDraft({ ...prDraft, draft: e.target.checked })} /> Open as a draft</label></div>
+        {gitError && <div className="error" role="alert">{gitError}</div>}
       </Dialog>}
       {form && <NewChatForm wt={wt} state={state} onClose={() => setForm(false)} onDone={(id) => { setForm(false); onSelect({ type: "chat", id }); }} />}
       <h2>Chats</h2>
@@ -1304,6 +1387,7 @@ function ReviewFooter({ chat, review, onOpen }: { chat: Chat; review: ReviewFile
     if (s.pending) parts.push(`${s.pending} to decide`);
     if (s.queued) parts.push(`${s.queued} queued`);
     if (s.commented) parts.push(`${s.commented} on the PR`);
+    if (s.fixing) parts.push(`${s.fixing} fixing locally`);
     if (s.submitted) parts.push(`${s.submitted} review${s.submitted === 1 ? "" : "s"} submitted`);
     return (
       <div className="review-ready">

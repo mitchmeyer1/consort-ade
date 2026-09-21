@@ -13,8 +13,7 @@ import {
   pickReviewFile, reviewSummary, recordFixRequest, type ReviewSummary,
 } from "../shared/review";
 import { store } from "./store";
-import { defaultConnector } from "../shared/defaultConnector";
-import { modelTiers } from "../shared/modelTiers";
+import { reviewRunner } from "../shared/reviewRunner";
 import { askReadOnly } from "./sideChat";
 
 const gh = (args: string[], cwd: string, input?: string) => new Promise<string>((resolve, reject) => {
@@ -112,7 +111,11 @@ export const investigating = (path: string, id: string) => inFlight.has(`${path}
  * now, the diff since the finding was verified, and the finding itself. The verdict is written
  * back into the review file.
  */
-export async function reinvestigate(path: string, id: string): Promise<{ review: Review; report: VerdictReport; summary: string; head: string }> {
+/** the connector and model a side job runs on: the review chat's, so it is the one the user chose and is paying for */
+const runnerFor = (worktreeId: string | undefined, pr: number) =>
+  reviewRunner({ ...store.data, models: store.public().models }, worktreeId ?? "", pr);
+
+export async function reinvestigate(path: string, id: string, worktreeId?: string): Promise<{ review: Review; report: VerdictReport; summary: string; head: string }> {
   const flightKey = `${path}#${id}`;
   if (inFlight.has(flightKey)) throw new Error(`${id} is already being re-investigated.`);
   inFlight.add(flightKey);
@@ -124,8 +127,8 @@ export async function reinvestigate(path: string, id: string): Promise<{ review:
     const repo = repoOf(review);
     const live = await liveHead(review, cwd);
     if (!live.head) throw new Error("Could not read the PR's current head from GitHub.");
-    const key = defaultConnector(store.data);
-    if (!key) throw new Error("Add a connector in Settings to run a re-investigation.");
+    const runner = runnerFor(worktreeId, review.pr);
+    if (!runner) throw new Error("Add a connector in Settings to run a re-investigation.");
     const base = verifiedHead(review, finding);
     const [content, compare] = await Promise.all([
       gh(["api", `repos/${repo}/contents/${finding.file}?ref=${live.head}`, "--jq", ".content"], cwd)
@@ -155,8 +158,7 @@ export async function reinvestigate(path: string, id: string): Promise<{ review:
       ``,
       `Decide same / modified / removed and end with the JSON object.`,
     ].join("\n");
-    const model = modelTiers(key.provider, store.public().models?.[key.provider]).delegate;
-    const text = await askReadOnly(cwd, prompt, key, { model, system: REINVESTIGATE_SYSTEM, maxTurns: 16 });
+    const text = await askReadOnly(cwd, prompt, runner.key, { model: runner.model, system: REINVESTIGATE_SYSTEM, maxTurns: 16 });
     const report = parseVerdict(text);
     const next = applyVerdict((await readReview(path)).review, id, report, live.head, new Date().toISOString());
     await writeReview(path, next);
@@ -176,7 +178,7 @@ const DRAFT_SYSTEM = "You write the top-level body of a pull-request review in t
  * blank), and — when asked — every queued comment inline, pinned to the commit the review read.
  * Lines the diff at that commit does not show fall into the body, so a comment is never lost.
  */
-export async function submitReview(path: string, opts: SubmitOptions): Promise<{ review: Review; result: SubmitResult }> {
+export async function submitReview(path: string, opts: SubmitOptions, worktreeId?: string): Promise<{ review: Review; result: SubmitResult }> {
   const { review } = await readReview(path);
   const findings = opts.inline ? approvedFindings(review) : [];
   if (opts.inline && !findings.length && !opts.body.trim() && !opts.draft && opts.event === "COMMENT") throw new Error("Nothing is approved. Use “Comment on PR” on the findings you want to post.");
@@ -190,10 +192,9 @@ export async function submitReview(path: string, opts: SubmitOptions): Promise<{
   const commentable = commentableLines(patchesToDiff(compare.files ?? []));
   let body = opts.body.trim(), drafted = false;
   if (!body && opts.draft) {
-    const key = defaultConnector(store.data);
-    if (key) {
-      const model = modelTiers(key.provider, store.public().models?.[key.provider]).delegate;
-      body = await askReadOnly(cwd, draftBodyPrompt(review, opts.event, findings), key, { model, system: DRAFT_SYSTEM, maxTurns: 2 }).then((t) => t.trim(), () => "");
+    const runner = runnerFor(worktreeId, review.pr);
+    if (runner) {
+      body = await askReadOnly(cwd, draftBodyPrompt(review, opts.event, findings), runner.key, { model: runner.model, system: DRAFT_SYSTEM, maxTurns: 2 }).then((t) => t.trim(), () => "");
       drafted = !!body;
     }
     if (!body) body = fallbackReviewBody(review, opts.event, findings);
