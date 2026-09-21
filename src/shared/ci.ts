@@ -51,6 +51,16 @@ export function summarizeChecks(raws: unknown[], fallbackUrl?: string): CiInfo |
   };
 }
 
+/**
+ * Of a branch's workflow runs, newest first as GitHub lists them, the ones for its latest push:
+ * every workflow that ran on the newest head commit. Older pushes and re-runs of them fall away.
+ */
+export function latestPushRuns<T extends { head_sha?: string; run_started_at?: string; created_at?: string }>(runs: T[]): T[] {
+  const stamp = (r: T) => Date.parse(r.run_started_at ?? r.created_at ?? "") || 0;
+  const newest = runs.reduce<T | undefined>((best, r) => (!best || stamp(r) > stamp(best) ? r : best), undefined);
+  return newest?.head_sha ? runs.filter((r) => r.head_sha === newest.head_sha) : [];
+}
+
 /** the badge text: a glyph, "CI", and a count only when something is wrong */
 export function ciLabel(ci: CiInfo) {
   if (ci.state === "fail") return `✗ CI ${ci.failed}`;

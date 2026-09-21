@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkState, ciLabel, ciTitle, normalizeCheck, summarizeChecks } from '../src/shared/ci.ts';
+import { checkState, ciLabel, ciTitle, latestPushRuns, normalizeCheck, summarizeChecks } from '../src/shared/ci.ts';
 
 test('check runs and commit statuses both fold into pass, fail, or pending', () => {
   assert.equal(checkState({ status: 'completed', conclusion: 'success' }), 'pass');
@@ -77,4 +77,27 @@ test('a re-run replaces the earlier attempt with the same name', () => {
 test('no checks means no CI to report', () => {
   assert.equal(summarizeChecks([]), undefined);
   assert.equal(summarizeChecks([{}, null]), undefined);
+});
+
+test("a branch's latest push is every workflow on its newest commit, and nothing older", () => {
+  const runs = [
+    { name: 'CI', head_sha: 'new', created_at: '2026-09-21T16:00:00Z', conclusion: 'success' },
+    { name: 'Lint', head_sha: 'new', created_at: '2026-09-21T15:59:00Z', conclusion: 'success' },
+    { name: 'CI', head_sha: 'old', created_at: '2026-09-21T14:00:00Z', conclusion: 'failure' },
+    { name: 'CI', head_sha: 'older', created_at: '2026-09-21T13:00:00Z', conclusion: 'failure' },
+  ];
+  const latest = latestPushRuns(runs);
+  assert.deepEqual(latest.map((r) => r.name), ['CI', 'Lint']);
+  assert.equal(summarizeChecks(latest).state, 'pass');
+  assert.deepEqual(latestPushRuns([]), []);
+});
+
+test('a re-run started later than the original counts as the same push', () => {
+  const runs = [
+    { name: 'CI', head_sha: 'new', created_at: '2026-09-21T16:00:00Z', run_started_at: '2026-09-21T16:30:00Z', conclusion: 'success' },
+    { name: 'CI', head_sha: 'new', created_at: '2026-09-21T16:00:00Z', run_started_at: '2026-09-21T16:00:00Z', conclusion: 'failure' },
+  ];
+  assert.equal(latestPushRuns(runs).length, 2);
+  // the two attempts share a name; the one listed last wins, as GitHub shows the latest attempt
+  assert.equal(summarizeChecks(latestPushRuns(runs).reverse()).state, 'pass');
 });

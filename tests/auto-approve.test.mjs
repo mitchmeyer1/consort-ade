@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import ts from 'typescript';
 import * as planProgress from '../src/shared/planProgress.ts';
+import * as skillSections from '../src/shared/skillSections.ts';
 const require = createRequire(import.meta.url);
 const compiled = ts.transpileModule(readFileSync(new URL('../src/main/agents.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -27,6 +28,7 @@ function fixture(autoApprove = false) {
     './agentBrowser': { startAgentBrowser: async () => ({ prompt: '', close: async () => {} }) },
     '../shared/types': { PHASES: [] },
     '../shared/planProgress': planProgress,
+    '../shared/skillSections': skillSections,
     '@openai/codex-sdk': { Codex: class {} },
     '@anthropic-ai/claude-agent-sdk': { query: args => {
       calls.push(args);

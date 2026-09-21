@@ -394,3 +394,24 @@ export function verdictSummary(f: Finding, report: VerdictReport) {
   if (report.verdict === "modified") return posted ? `${f.id} changed on the PR — the posted comment may need a follow-up` : `${f.id} still holds — comment updated`;
   return posted ? `${f.id} looks fixed on the PR — the posted comment is now stale` : `${f.id} no longer holds — dropped`;
 }
+
+/** what a finished review amounts to, for the chat footer and the top bar */
+export type ReviewSummary = { pr: number; title: string; url: string; reviewedAt: string; total: number; pending: number; queued: number; commented: number; ignored: number; submitted: number };
+export function reviewSummary(review: Review): ReviewSummary {
+  const count = (status: FindingStatus) => review.findings.filter((f) => f.status === status).length;
+  return {
+    pr: review.pr, title: review.title, url: review.url, reviewedAt: review.reviewedAt,
+    total: review.findings.length, pending: count("pending"), queued: count("approved"), commented: count("commented"), ignored: count("ignored") + count("dropped"),
+    submitted: review.submissions?.length ?? 0,
+  };
+}
+
+/** the review file a chat or branch owns: the PR's own file when we know the number, else the newest */
+export function pickReviewFile(files: { name: string; mtime: number }[], pr?: number) {
+  const reviews = files.filter((f) => isReviewFile(f.name));
+  if (pr !== undefined) { const own = reviews.find((f) => f.name === `pr-${pr}.review.json`); if (own) return own.name; }
+  return reviews.sort((a, b) => b.mtime - a.mtime)[0]?.name;
+}
+
+/** the PR number a review chat is named for, as prChatName writes it */
+export const prNumberOf = (name: string) => { const m = /PR #(\d+)/.exec(name); return m ? Number(m[1]) : undefined; };

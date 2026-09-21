@@ -7,6 +7,7 @@ import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import ts from 'typescript';
 import * as planProgress from '../src/shared/planProgress.ts';
+import * as skillSections from '../src/shared/skillSections.ts';
 
 const require = createRequire(import.meta.url);
 const compiled = ts.transpileModule(await readFile(new URL('../src/main/agents.ts', import.meta.url), 'utf8'), {
@@ -39,6 +40,7 @@ async function fixture(t) {
     './agentEnvironment': { TESTING_PROMPT: '', agentEnvironment: (_, env) => env },
     '../shared/types': { PHASES: ['waiting', 'planning', 'executing', 'validating', 'complete'] },
     '../shared/planProgress': planProgress,
+    '../shared/skillSections': skillSections,
     '@anthropic-ai/claude-agent-sdk': {},
     '@openai/codex-sdk': { Codex: class { startThread() { return thread; } resumeThread() { return thread; } } },
   };

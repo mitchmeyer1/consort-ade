@@ -11,6 +11,7 @@ import { agentEnvironment, isInstallCommand, TESTING_PROMPT } from "./agentEnvir
 import { loginEnv } from "./auth";
 import { PHASES, type Chat, type Block, type Phase, type PermissionRequest } from "../shared/types";
 import { advancePlan, finishPlan, parsePlan, PLAN_MARKER, startPlan, STEP_MARKER } from "../shared/planProgress";
+import { firstPrompt, reviewDeliverable } from "../shared/skillSections";
 
 // ponytail: phase tracked via text markers so claude + codex share one mechanism
 const PHASE_PROMPT = `For EVERY new prompt, first assess the task and plan your approach before doing work. The ADE starts at waiting during this assessment.
@@ -183,10 +184,20 @@ export async function continueChat(chatId: string) {
     new Promise<string>((res) => execFile("find", [".consort", "-type", "f", "-newermt", "-2 days"], { cwd }, (_e, out) => res(out || ""))),
   ]);
   const why = chat.error ? `Your previous run failed with: ${chat.error}` : "The app was closed while you were mid-task, so your previous run was cut off.";
+  // a resumed review has lost the skill text from its context: the digest keeps only the head of the first prompt,
+  // and the file schema lives at the tail. Re-attach that tail, or the run drifts to a Markdown page nobody can act on.
+  const first = firstPrompt(chat);
+  const pr = /PR #(\d+)/.exec(chat.name)?.[1] ?? /\bPR\s+#?(\d+)/.exec(first)?.[1];
+  const sections = /pr-writeup/i.test(first) ? reviewDeliverable(first) : "";
+  const deliverable = sections ? `This chat is a PR review run under the pr-writeup skill. Its deliverable is \`.consort/pr-review/pr-${pr ?? "<n>"}.review.json\` in the schema below, not a Markdown or HTML page: Consort renders the file and every Comment-on-PR / Ignore decision happens there. Reuse the brief and agent reports already under .consort/pr-review rather than re-reviewing, then write the file and end with the link.
+
+${sections}
+
+` : "";
   const prompt = `${why}
 Pick up exactly where you left off and finish the task. Do not start over; check the current state first.
 
-` +
+${deliverable}` +
     `Working tree now (git status --short):
 ${status.trim() || "(clean)"}
 

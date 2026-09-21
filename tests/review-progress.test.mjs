@@ -109,3 +109,31 @@ test('the review file counts as the report, just as the HTML document did', () =
     assert.equal(stages.publish.state, 'done', file);
   }
 });
+
+test('a review that stopped without writing the file marks the rest as not run, never live', () => {
+  const stopped = review([
+    assistant(tool('Bash', 'gh pr view 449 --json', '{}', true), tool('Write', '.consort/pr-review/brief.md', undefined, true)),
+    assistant(tool('Agent', 'review the env badge group', 'report', true)),
+    assistant(tool('Bash', "cat > .consort/pr-review/review.md <<'EOF'", '', true)),
+  ], false);
+  stopped.phase = 'complete';
+  const stages = byId(reviewProgress(stopped));
+  assert.equal(stages.scope.state, 'done');
+  assert.equal(stages.agents.state, 'done');
+  assert.equal(stages.verify.state, 'skipped');
+  assert.equal(stages.writeup.state, 'skipped');
+  assert.equal(stages.publish.state, 'skipped');
+  assert.ok(!Object.values(stages).some((s) => s.state === 'active'));
+});
+
+test('a review paused on a question keeps its live stage', () => {
+  const paused = review([assistant(tool('Bash', 'gh pr view 449 --json', '{}', true))], false);
+  paused.phase = 'waiting';
+  assert.equal(byId(reviewProgress(paused)).scope.state, 'active');
+});
+
+test('a review that has not started yet is all pending, not skipped', () => {
+  const queued = review([], false);
+  queued.phase = 'complete';
+  assert.ok(Object.values(byId(reviewProgress(queued))).every((s) => s.state === 'pending'));
+});

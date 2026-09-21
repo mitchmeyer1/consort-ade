@@ -17,11 +17,13 @@ export const modelOptions = (state: { models?: Partial<Record<Provider, string[]
 export type ApiKey = { id: string; name: string; provider: Provider; phiAllowed: boolean; auth: "login" | "key"; configDir?: string; defaultModel?: string };
 import type { Contributor } from "./contributors";
 import type { SideMessage } from "./sideChat";
-import type { FindingStatus, Review, ReviewEvent, VerdictReport } from "./review";
+import type { FindingStatus, Review, ReviewEvent, ReviewSummary, VerdictReport } from "./review";
 import type { CiInfo } from "./ci";
+import type { IssueInfo, IssueLink } from "./issues";
 export type { Contributor, SideMessage };
-export type { Finding, FindingStatus, Review, ReviewEvent, Submission, Verdict, VerdictReport } from "./review";
+export type { Finding, FindingStatus, Review, ReviewEvent, ReviewSummary, Submission, Verdict, VerdictReport } from "./review";
 export type { CiCheck, CiInfo, CiState } from "./ci";
+export type { IssueDetail, IssueInfo, IssueLink } from "./issues";
 export type Project = { id: string; name: string; path: string; defaultBase: string; baseSetByUser?: boolean };
 export type QuickAction = { id: string; title: string; command: string; pinned?: boolean };
 export type Worktree = { id: string; projectId: string; name: string; title: string; path: string; branch: string; archived: boolean; root?: boolean; quickActions?: QuickAction[] };
@@ -31,6 +33,8 @@ export type WorktreeStatus = {
   last?: { subject: string; author: string; age: string }; files: string; pr?: PrInfo;
   /** CI for the pushed commit: from the PR when there is one, else the upstream tip; absent when nothing is pushed or no checks ran */
   ci?: CiInfo;
+  /** the GitHub issue this branch was made for (an `issue/<n>` branch); the link the sidebar chip shows */
+  issue?: IssueLink;
   /** who wrote most of what this branch adds on top of its base */
   author?: Contributor;
 };
@@ -95,6 +99,8 @@ export type RepoInfo = {
   prs: { number: number; title: string; author: string; branch: string; draft: boolean; review: string; updatedAt: string; url: string;
     mine: boolean; role: "author" | "reviewer" | null; turn: "yours" | "theirs" | null; why: string }[];
   runs: { name: string; title: string; branch: string; status: string; conclusion: string; createdAt: string; url: string }[];
+  /** open issues, most recently updated first */
+  issues: IssueInfo[];
 };
 export type Job = { id: string; scopeId: string; termId: string; cwd: string; cmd: string; out: string; status: "running" | "exited"; code?: number; startedAt: number; seen?: boolean };
 /** done: a command that took a while finished successfully and nobody has looked yet */
@@ -132,6 +138,8 @@ export type Api = {
   worktreeStatus(id: string): Promise<WorktreeStatus | null>;
   addChat(worktreeId: string, keyId: string, opts?: { name?: string; model?: string; delegateModel?: string; remember?: boolean }): Promise<string>;
   skillPrompt(name: string, worktreeId: string, args?: string, delegateModel?: string): Promise<string>;
+  /** the opening message of an issue chat: the issue, its discussion, and the ask for a summary and plan (no code) */
+  issuePrompt(worktreeId: string, number: number): Promise<string>;
   listFiles(worktreeId: string): Promise<string[]>;
   readFile(worktreeId: string, rel: string): Promise<string>;
   writeFile(worktreeId: string, rel: string, content: string): Promise<void>;
@@ -195,6 +203,8 @@ export type Api = {
   commitChat(chatId: string, message?: string): Promise<string>;
   /** a `*.review.json` a PR review wrote; `target` is the same link text an artifact carries */
   readReview(worktreeId: string, target: string): Promise<{ path: string; review: Review }>;
+  /** the review file this branch owns (the PR's own when `pr` is known, else the newest), relative to the worktree, or null when none was written */
+  findReview(worktreeId: string, pr?: number): Promise<{ path: string; summary: ReviewSummary } | null>;
   updateReviewFinding(worktreeId: string, target: string, findingId: string, patch: { status?: FindingStatus; comment?: string }): Promise<Review>;
   /** submit one GitHub review: verdict, body (drafted by the model when blank and `draft` is set), and the queued comments inline when `inline` is set */
   submitReview(worktreeId: string, target: string, opts: { event: ReviewEvent; body: string; inline: boolean; draft: boolean }): Promise<{ review: Review; result: { url: string; event: ReviewEvent; body: string; drafted: boolean; inline: string[]; general: string[]; headMoved: boolean } }>;

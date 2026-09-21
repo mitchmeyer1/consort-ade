@@ -20,10 +20,11 @@ import * as ptys from "./ptys";
 import { chatStatus } from "../shared/chatStatus";
 import { REMINDER_CHOICES, reminderDue } from "../shared/reminders";
 import { topContributor } from "../shared/contributors";
+import { issueBriefPrompt } from "../shared/issues";
 import { askSide } from "./sideChat";
 import { Reminders } from "./reminders";
 import { Notifier, type Notice } from "../shared/notices";
-import { readReview, reinvestigate, reviewDrift, setFinding, submitReview, ReviewWatchers } from "./prReview";
+import { findReview, readReview, reinvestigate, reviewDrift, setFinding, submitReview, ReviewWatchers } from "./prReview";
 import { MODELS, type Api, type Appearance } from "../shared/types";
 import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -352,6 +353,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     return { kind: ext === ".md" ? "markdown" as const : [".html", ".htm"].includes(ext) ? "html" as const : "text" as const, content: readFileSync(path, "utf8") };
   },
   readReview: (id: string, target: string) => readReview(artifactPath(id, target)),
+  findReview: (id: string, pr?: number) => findReview(wt(id).path, pr),
   updateReviewFinding: (id: string, target: string, findingId: string, patch: { status?: import("../shared/review").FindingStatus; comment?: string }) => setFinding(artifactPath(id, target), findingId, patch),
   submitReview: (id: string, target: string, opts: { event: import("../shared/review").ReviewEvent; body: string; inline: boolean; draft: boolean }) => submitReview(artifactPath(id, target), opts),
   reviewDrift: (id: string, target: string) => reviewDrift(artifactPath(id, target)),
@@ -523,6 +525,11 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     store.save();
   },
   answerPermission: (id: string, allow: boolean) => agents.answerPermission(id, allow),
+  issuePrompt: async (worktreeId: string, number: number) => {
+    const w = wt(worktreeId);
+    const [issue, repo] = await Promise.all([git.issueDetail(w.path, number), git.repoName(w.path)]);
+    return issueBriefPrompt(issue, { repo: repo ?? project(w.projectId).name, worktreePath: w.path, branch: w.branch });
+  },
   skillPrompt: (name: string, worktreeId: string, args?: string, delegateModel?: string) => {
     const dir = join(app.getAppPath(), "skills", name);
     const skill = readFileSync(join(dir, "SKILL.md"), "utf8").replace(/^---[\s\S]*?---\n/, "");

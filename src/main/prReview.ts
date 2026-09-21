@@ -5,11 +5,12 @@
  */
 import { execFile } from "node:child_process";
 import { promises as fs, watch, type FSWatcher } from "node:fs";
-import { basename, dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   applyVerdict, approvedFindings, commentableLines, draftBodyPrompt, driftBases, driftedFindings, fallbackReviewBody, parseReview, parseVerdict,
   patchesToDiff, recordSubmission, reviewPayload, serializeReview, updateFinding, verdictSummary, verifiedHead,
   type FindingStatus, type Review, type ReviewEvent, type VerdictReport,
+  pickReviewFile, reviewSummary, type ReviewSummary,
 } from "../shared/review";
 import { store } from "./store";
 import { defaultConnector } from "../shared/defaultConnector";
@@ -34,6 +35,21 @@ export function repoOf(review: Review) {
 
 export async function readReview(path: string) {
   return { path, review: parseReview(await fs.readFile(path, "utf8")) };
+}
+
+/** the review file a branch owns, if any: relative path plus what it amounts to */
+export async function findReview(worktreePath: string, pr?: number): Promise<{ path: string; summary: ReviewSummary } | null> {
+  const dir = join(worktreePath, ".consort", "pr-review");
+  const names = await fs.readdir(dir).catch(() => [] as string[]);
+  const files = await Promise.all(names.map(async (name) => ({ name, mtime: (await fs.stat(join(dir, name)).catch(() => null))?.mtimeMs ?? 0 })));
+  const name = pickReviewFile(files, pr);
+  if (!name) return null;
+  try {
+    const review = parseReview(await fs.readFile(join(dir, name), "utf8"));
+    return { path: join(".consort", "pr-review", name), summary: reviewSummary(review) };
+  } catch {
+    return null;
+  }
 }
 
 async function writeReview(path: string, review: Review) {

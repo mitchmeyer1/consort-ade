@@ -16,7 +16,10 @@ import { artifactLinkAction, artifactLinks, chatArtifacts, withFrameScrollbars }
 import { attachmentName, isImageAttachment } from "../../shared/attachments";
 import { reminderLabel } from "../../shared/reminders";
 import { prChatName } from "../../shared/prChat";
-import { reviewProgress } from "../../shared/reviewProgress";
+import { ISSUE_ROWS, issueBranch, issueChatName, issueFolder, type IssueInfo } from "../../shared/issues";
+import { isReviewChat, reviewProgress } from "../../shared/reviewProgress";
+import { prNumberOf, type ReviewSummary } from "../../shared/review";
+import { firstPrompt, reviewDeliverable } from "../../shared/skillSections";
 import { isReviewFile } from "../../shared/review";
 import { ReviewView } from "./ReviewView";
 import { planStages } from "../../shared/planProgress";
@@ -29,7 +32,7 @@ import "@xterm/xterm/css/xterm.css";
 
 const ade = (window as any).ade as Api;
 const EMPTY: State = { projects: [], worktrees: [], chats: [], keys: [], appearance: { theme: "dark", background: "opaque" } };
-type Tab = "terminal" | "diff" | "editor" | "markdown" | "commit" | "artifacts" | "settings";
+type Tab = "terminal" | "diff" | "editor" | "markdown" | "commit" | "artifacts" | "review" | "settings";
 type Sel = { type: "chat"; id: string } | { type: "worktree"; id: string; form?: boolean } | { type: "project"; id: string; form?: boolean };
 
 function useStatus(id?: string, revision = 0) {
@@ -43,6 +46,19 @@ function useStatus(id?: string, revision = 0) {
   }, [id, revision]);
   return st;
 }
+type ReviewFile = { path: string; summary: ReviewSummary };
+/** the finished review a branch owns; re-checked as the chat that writes it makes progress */
+function useReviewFile(worktreeId?: string, pr?: number, ...deps: unknown[]) {
+  const [found, setFound] = useState<ReviewFile | null>(null);
+  useEffect(() => {
+    if (!worktreeId) { setFound(null); return; }
+    let live = true;
+    ade.findReview(worktreeId, pr).then((r) => { if (live) setFound(r); }, () => { if (live) setFound(null); });
+    return () => { live = false; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [worktreeId, pr, ...deps]);
+  return found;
+}
 const PrBadge = ({ st }: { st: WorktreeStatus }) => {
   const pr = st.pr;
   if (pr?.state === "MERGED") return <span className="badge merged" title="PR merged"><Ico n="laurel" /> merged</span>;
@@ -50,6 +66,11 @@ const PrBadge = ({ st }: { st: WorktreeStatus }) => {
   if (pr.state === "CLOSED") return <span className="badge closed" title={pr.title}>✗ #{pr.number}</span>;
   return <span className="badge pr" title={pr.title}>{pr.draft ? "◐" : "⎇"} #{pr.number}</span>;
 };
+/** the issue an `issue/<n>` branch was made for; clicking opens it on GitHub */
+const IssueBadge = ({ issue }: { issue?: WorktreeStatus["issue"] }) => !issue ? null : (
+  <span className={"badge issue " + issue.state.toLowerCase()} role="link" title={`Issue #${issue.number}: ${issue.title}${issue.state === "CLOSED" ? " (closed)" : ""}`}
+    onClick={(e) => { e.stopPropagation(); ade.openExternal(issue.url); }}><Ico n="candle" /> #{issue.number}</span>
+);
 /** CI on the pushed commit; clicking opens the failing run, or the checks page */
 const CiBadge = ({ ci }: { ci?: CiInfo }) => !ci ? null : (
   <span className={"badge ci " + ci.state} role={ci.url ? "link" : undefined} title={ciTitle(ci)}
@@ -65,12 +86,13 @@ const Contributor = ({ who }: { who?: WorktreeStatus["author"] }) => !who ? null
 const Badges = ({ st, pr = true }: { st: WorktreeStatus | null; pr?: boolean }) =>
   !st ? null : (
     <span className="badges">
+      {pr && <IssueBadge issue={st.issue} />}
       {pr && <PrBadge st={st} />}
       {pr && <CiBadge ci={st.ci} />}
       {st.dirty > 0 && <span className="badge" title="uncommitted changes">±{st.dirty}</span>}
       {st.ahead > 0 && <span className="badge" title="ahead of upstream">↑{st.ahead}</span>}
       {st.behind > 0 && <span className="badge" title="behind upstream">↓{st.behind}</span>}
-      {!st.dirty && !st.ahead && !st.behind && !(pr && (st.pr || st.inBase || st.ci)) && <span className="badge">clean</span>}
+      {!st.dirty && !st.ahead && !st.behind && !(pr && (st.pr || st.inBase || st.ci || st.issue)) && <span className="badge">clean</span>}
     </span>
   );
 
@@ -209,6 +231,8 @@ export function App() {
   useEffect(() => { for (const x of xterms.values()) x.term.options.theme = xtermTheme(); }, [theme]);
   const chat = sel?.type === "chat" ? state.chats.find((c) => c.id === sel.id) : undefined;
   const worktree = state.worktrees.find((w) => w.id === (chat ? chat.worktreeId : sel?.type === "worktree" ? sel.id : undefined));
+  // the branch's finished review, if one exists: it earns a top-bar tab and a card at the foot of the review chat
+  const reviewFile = useReviewFile(worktree?.id, chat ? prNumberOf(chat.name) : undefined, chat?.running, chat?.messages.length);
   const project = sel?.type === "project" ? state.projects.find((p) => p.id === sel.id) : undefined;
   const wtProject = worktree && state.projects.find((p) => p.id === worktree.projectId);
   const crumb = worktree && wtProject ? `${wtProject.name}/${worktree.branch}` : project ? project.name : "Consort ADE";
@@ -268,12 +292,13 @@ export function App() {
             {worktree && <button className={tab === "diff" ? "on" : ""} onClick={() => toggle("diff")}><Ico n="branch" /><span>Diff</span></button>}
             {worktree && <button className={tab === "editor" ? "on" : ""} onClick={() => toggle("editor")}><Ico n="pencil" /><span>Editor</span></button>}
             {worktree && <button className={tab === "commit" ? "on" : ""} onClick={() => toggle("commit")}><Ico n="wheat" /><span>Commit</span></button>}
+            {worktree && reviewFile && <button className={tab === "review" ? "on" : ""} title={`PR #${reviewFile.summary.pr} · ${reviewFile.summary.title}`} onClick={() => toggle("review")}><Ico n="laurel" /><span>Review</span></button>}
             {chat && <button className={tab === "artifacts" ? "on" : ""} aria-pressed={tab === "artifacts"} onClick={() => toggle("artifacts")}><Ico n="scroll" /><span>Artifacts</span></button>}
             <button className={tab === "settings" ? "on" : ""} onClick={() => toggle("settings")}><Ico n="gear" /><span>Settings</span></button>
           </div>
         </div>
         {chat ? (
-          <ChatPane key={chat.id} chat={chat} worktree={worktree} keys={state.keys} models={state.models} perms={perms.filter((p) => p.chatId === chat.id)} ptys={ptys} answer={answer} onOpenMd={(target) => { if (worktree) ade.artifactMenu(worktree.id, target).then((action) => { if (action === "open") openMd(target); }).catch((e) => alert(e.message)); }} />
+          <ChatPane key={chat.id} chat={chat} worktree={worktree} keys={state.keys} models={state.models} perms={perms.filter((p) => p.chatId === chat.id)} ptys={ptys} answer={answer} reviewFile={reviewFile} onOpenReview={() => setTab("review")} onOpenMd={(target) => { if (worktree) ade.artifactMenu(worktree.id, target).then((action) => { if (action === "open") openMd(target); }).catch((e) => alert(e.message)); }} />
         ) : worktree ? (
           <WorktreePage key={worktree.id} wt={worktree} state={state} openForm={sel?.type === "worktree" && !!sel.form} onRunAction={runQuickAction} onSelect={setSel} />
         ) : project ? (
@@ -294,7 +319,7 @@ export function App() {
       {tab && (!["terminal", "editor", "diff"].includes(tab) || worktree) && <>
         <div className="resizer right" style={{ right: rightW - 3 }} onMouseDown={drag("right")} />
         <Drawer key={viewKey} tab={tab} memoryKey={viewKey} state={state} chat={chat} worktree={worktree} scope={worktree ? { id: worktree.id, cwd: worktree.path, title: worktree.title } : project ? { id: project.id, cwd: project.path, title: project.name } : undefined}
-          ptys={ptys} width={rightW} file={file} onEdit={openEditor} onView={openMd} onSignIn={signIn} onClose={() => setTab(undefined)} />
+          ptys={ptys} width={rightW} file={file} reviewPath={reviewFile?.path} onEdit={openEditor} onView={openMd} onSignIn={signIn} onClose={() => setTab(undefined)} />
       </>}
     </div>
   );
@@ -408,7 +433,7 @@ function WorktreeNode({ wt, state, sel, running, failed, done, onSelect, collaps
         </span>
         <span className="meta status">
           {!wt.root && <Contributor who={st?.author} />}
-          {st && (st.dirty > 0 || st.ahead > 0 || st.behind > 0 || st.pr || st.inBase || st.ci) && <Badges st={st} />}
+          {st && (st.dirty > 0 || st.ahead > 0 || st.behind > 0 || st.pr || st.inBase || st.ci || st.issue) && <Badges st={st} />}
         </span>
         <span className="tools" onClick={(e) => e.stopPropagation()}>
           <button className="icon" title="New chat here" onClick={() => onSelect({ type: "worktree", id: wt.id, form: true })}>＋</button>
@@ -514,6 +539,47 @@ function ProjectPage({ project: p, state, openForm, onSelect }: { project: Proje
       ade.send(id, await ade.skillPrompt("pr-writeup", wt.id, `${pr.number}`, tiers.delegate)).catch((e) => alert(e.message));
     } catch (e: any) { alert(e.message); } finally { setBusyPr(undefined); }
   };
+  const [busyIssue, setBusyIssue] = useState<number>();
+  const [allIssues, setAllIssues] = useState(false);
+  // Branch and solve = ensure a worktree on issue/<n>, then open a chat that pitches a plan (no code yet)
+  const solve = async (issue: IssueInfo) => {
+    const key = defaultConnector(state);
+    if (!key) return alert("Add a connector first (Settings)");
+    setBusyIssue(issue.number);
+    try {
+      const branch = issueBranch(issue.number);
+      let wt = state.worktrees.find((w) => w.projectId === p.id && w.branch === branch);
+      if (!wt) {
+        const id = toasts.start(`Creating worktree ${branch}…`);
+        try { await ade.addWorktree(p.id, issueFolder(issue.number), branch, p.defaultBase); }
+        catch (e: any) { toasts.fail(id, `Couldn't create worktree for ${branch}`, String(e.message ?? e).split("\n")[0]); return; }
+        toasts.succeed(id, `Worktree ${branch} ready`);
+        wt = (await ade.getState()).worktrees.find((w) => w.projectId === p.id && w.branch === branch);
+      }
+      if (!wt) throw new Error("worktree not found after create");
+      const prompt = await ade.issuePrompt(wt.id, issue.number);
+      const id = await ade.addChat(wt.id, key.id, { name: issueChatName(issue), remember: false });
+      onSelect({ type: "chat", id });
+      ade.send(id, prompt).catch((e) => alert(e.message));
+    } catch (e: any) { alert(e.message); } finally { setBusyIssue(undefined); }
+  };
+  const IssueRow = ({ issue }: { issue: IssueInfo }) => {
+    const linked = state.worktrees.find((w) => w.projectId === p.id && w.branch === issueBranch(issue.number));
+    return (
+      <div className="lrow">
+        <span className="num">#{issue.number}</span>
+        <span className="grow">
+          <a href="#" onClick={(e) => { e.preventDefault(); ade.openExternal(issue.url); }}>{issue.title}</a>
+          <div className="m">
+            {issue.author} · {ago(issue.updatedAt)}{issue.comments ? ` · ${issue.comments} comment${issue.comments === 1 ? "" : "s"}` : ""}{issue.assignees.length ? ` · ${issue.assignees.map((a) => `@${a}`).join(" ")}` : ""}
+            {issue.labels.map((l) => <span key={l} className="badge label">{l}</span>)}
+          </div>
+        </span>
+        {linked && <span className="badge issue open" role="link" title={`Open worktree ${linked.title}`} onClick={() => onSelect({ type: "worktree", id: linked.id })}><Ico n="candle" /> {linked.branch}</span>}
+        <button disabled={busyIssue === issue.number} title={linked ? `Start a new planning chat in ${linked.branch}` : `Create a worktree on ${issueBranch(issue.number)} and plan the fix`} onClick={() => solve(issue)}>{busyIssue === issue.number ? "…" : linked ? "Solve" : "Branch and solve"}</button>
+      </div>
+    );
+  };
   const PrRow = ({ pr }: { pr: RepoInfo["prs"][number] }) => (
     <div className="lrow">
       <span className="num">#{pr.number}</span>
@@ -574,6 +640,13 @@ function ProjectPage({ project: p, state, openForm, onSelect }: { project: Proje
       <h2>Other open PRs {info && <span className="m">({others.length})</span>}</h2>
       {!info ? null : !others.length ? <div className="m">none</div> : (
         <div className="card list">{others.map((pr) => <PrRow key={pr.number} pr={pr} />)}</div>
+      )}
+
+      <h2>Open issues {info && <span className="m">({info.issues.length}{info.issues.length >= 50 ? "+" : ""})</span>}
+        {info && info.issues.length > ISSUE_ROWS && <button className="icon" onClick={() => setAllIssues((x) => !x)}>{allIssues ? `show ${ISSUE_ROWS}` : `show all ${info.issues.length}`}</button>}
+      </h2>
+      {!info ? <div className="m">loading…</div> : !info.issues.length ? <div className="m">none open</div> : (
+        <div className="card list">{(allIssues ? info.issues : info.issues.slice(0, ISSUE_ROWS)).map((issue) => <IssueRow key={issue.number} issue={issue} />)}</div>
       )}
 
       <h2>Recent CI runs</h2>
@@ -1211,6 +1284,43 @@ function AgentPicker({ chat, keys, models }: { chat: Chat; keys: State["keys"]; 
   </div>;
 }
 
+/* The foot of a review chat: the finished file, or the fact that none was saved and a way to get it. */
+function ReviewFooter({ chat, review, onOpen }: { chat: Chat; review: ReviewFile | null; onOpen: () => void }) {
+  const pr = prNumberOf(chat.name);
+  if (review) {
+    const s = review.summary;
+    const parts = [`${s.total} finding${s.total === 1 ? "" : "s"}`];
+    if (s.pending) parts.push(`${s.pending} to decide`);
+    if (s.queued) parts.push(`${s.queued} queued`);
+    if (s.commented) parts.push(`${s.commented} on the PR`);
+    if (s.submitted) parts.push(`${s.submitted} review${s.submitted === 1 ? "" : "s"} submitted`);
+    return (
+      <div className="review-ready">
+        <Ico n="laurel" className="big" />
+        <div className="grow"><b>Review ready · PR #{s.pr}</b><small>{parts.join(" · ")}</small></div>
+        <button className="primary" onClick={onOpen}>Open review</button>
+      </div>
+    );
+  }
+  // the run is over and left no file: the transcript may hold a verdict, but nothing Consort can act on
+  const ran = chat.messages.some((m) => m.blocks.some((b) => b.type === "tool"));
+  if (chat.running || chat.phase === "waiting" || chat.interrupted || chat.error || !ran) return null;
+  const file = `.consort/pr-review/pr-${pr ?? "<number>"}.review.json`;
+  // the run lost the skill's tail when it was resumed; send the schema and link rule back with the request
+  const ask = () => {
+    const sections = reviewDeliverable(firstPrompt(chat));
+    const text = `The review file was not saved. Write \`${file}\` now from the findings you already verified in this chat and the brief and agent reports under .consort/pr-review (do not re-review), then end with the link \`[PR ${pr ?? "<number>"} review](<absolute path to the file>)\`.${sections ? `\n\nThe skill's rules for the file and the link, again:\n\n${sections}` : ""}`;
+    ade.send(chat.id, text).catch((e) => alert(e.message));
+  };
+  return (
+    <div className="review-ready missing">
+      <Ico n="laurel" className="big" />
+      <div className="grow"><b>No review file was saved</b><small>A review ends in a file Consort can act on. This run stopped before writing one.</small></div>
+      <button onClick={ask}>Write the review file</button>
+    </div>
+  );
+}
+
 /* Where the work actually is: a review's known phases, or the steps the agent laid out itself. */
 function ProgressPanel({ title, stages }: { title: string; stages: Stage[] }) {
   const finished = stages.filter((s) => s.state === "done").length;
@@ -1274,7 +1384,7 @@ function SideChatPane({ chat }: { chat: Chat }) {
   );
 }
 
-function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, onOpenMd }: { chat: Chat; worktree?: Worktree; keys: State["keys"]; models: State["models"]; perms: PermissionRequest[]; ptys: PtyState[]; answer: (id: string, ok: boolean) => void; onOpenMd: (p: string) => void }) {
+function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFile, onOpenReview, onOpenMd }: { chat: Chat; worktree?: Worktree; keys: State["keys"]; models: State["models"]; perms: PermissionRequest[]; ptys: PtyState[]; answer: (id: string, ok: boolean) => void; reviewFile: ReviewFile | null; onOpenReview: () => void; onOpenMd: (p: string) => void }) {
   // the chat's own terminal is on screen whenever the chat is, so a finished command there is seen at once
   const composerDone = !!worktree && !!ptys.find((p) => p.id === `${worktree.id}:composer-${chat.id}`)?.done;
   const [errorDetails, setErrorDetails] = useState<string>();
@@ -1375,6 +1485,7 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, onOpenMd 
             <button className="primary" onClick={() => answer(p.id, true)}>Allow</button> <button onClick={() => answer(p.id, false)}>Deny</button>
           </div>
         ))}
+        {isReviewChat(chat) && <ReviewFooter chat={chat} review={reviewFile} onOpen={onOpenReview} />}
         <div ref={bottom} />
         </div>
       </div>
@@ -1487,14 +1598,14 @@ function useScrollMemory(key: string, ref: React.RefObject<HTMLElement | null>, 
 /* ---------- drawer ---------- */
 
 type Scope = { id: string; cwd: string; title: string };
-function Drawer({ tab, state, chat, worktree, scope, ptys, width, file, memoryKey, onEdit, onView, onSignIn, onClose }: { tab: Tab; state: State; chat?: Chat; worktree?: Worktree; scope?: Scope; ptys: PtyState[]; width: number; file?: string; memoryKey: string; onEdit: (p: string) => void; onView: (p: string) => void; onSignIn: (keyId: string) => void; onClose: () => void }) {
+function Drawer({ tab, state, chat, worktree, scope, ptys, width, file, reviewPath, memoryKey, onEdit, onView, onSignIn, onClose }: { tab: Tab; state: State; chat?: Chat; worktree?: Worktree; scope?: Scope; ptys: PtyState[]; width: number; file?: string; reviewPath?: string; memoryKey: string; onEdit: (p: string) => void; onView: (p: string) => void; onSignIn: (keyId: string) => void; onClose: () => void }) {
   // the body is the scroller for previews, diffs and settings; its place is kept per view + tab + file
   const body = useRef<HTMLDivElement>(null);
   useScrollMemory(scrollKey(memoryKey, tab, file), body, [tab, file]);
   return (
     <div className="drawer" style={{ width }}>
       <div className="dhead">
-        <span><Ico n={{ terminal: "terminal", diff: "branch", editor: "pencil", markdown: "scroll", commit: "wheat", artifacts: "scroll", settings: "gear" }[tab]} className="big" /> {tab[0].toUpperCase() + tab.slice(1)}{scope && tab !== "settings" ? ` · ${scope.title}` : ""}</span>
+        <span><Ico n={{ terminal: "terminal", diff: "branch", editor: "pencil", markdown: "scroll", commit: "wheat", artifacts: "scroll", review: "laurel", settings: "gear" }[tab]} className="big" /> {tab[0].toUpperCase() + tab.slice(1)}{scope && tab !== "settings" ? ` · ${scope.title}` : ""}</span>
         <button className="icon" onClick={onClose}>×</button>
       </div>
       <div className="dbody" ref={body}>
@@ -1505,6 +1616,7 @@ function Drawer({ tab, state, chat, worktree, scope, ptys, width, file, memoryKe
           : tab === "editor" ? <Editor key={worktree.id + (file ?? "")} worktree={worktree} initial={file} memoryKey={memoryKey} onView={onView} />
           : tab === "markdown" ? <MarkdownView key={worktree.id + (file ?? "")} worktree={worktree} path={file} onEdit={onEdit} onNavigate={onView} />
           : tab === "commit" ? <CommitPane key={worktree.id} worktree={worktree} />
+          : tab === "review" ? (reviewPath ? <MarkdownView key={worktree.id + reviewPath} worktree={worktree} path={reviewPath} onEdit={onEdit} onNavigate={onView} /> : <div className="card">No review file for this branch yet.</div>)
           : <Diff key={worktree.id} worktree={worktree} />}
       </div>
     </div>

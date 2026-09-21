@@ -71,5 +71,8 @@ export function reviewProgress(chat: Pick<Chat, "messages" | "running" | "phase"
 
   // only one stage can be the live one: the earliest unfinished stage that has started
   const active = stages.findIndex((s) => s.state === "active");
-  return stages.map((s, i) => (s.state === "active" && i !== active ? { ...s, state: "pending" } : s));
+  const settledStages = stages.map((s, i) => (s.state === "active" && i !== active ? { ...s, state: "pending" as StageState } : s));
+  // the run is over (not paused on a question): whatever it never reached is marked not run, never left spinning
+  const over = !chat.running && chat.phase !== "waiting" && all.length > 0;
+  return over ? settledStages.map((s) => (s.state === "done" ? s : { ...s, state: "skipped" as StageState })) : settledStages;
 }

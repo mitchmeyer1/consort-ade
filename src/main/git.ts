@@ -5,7 +5,8 @@ import { promises as fs } from "node:fs";
 import type { CommitInfo, PrInfo, RepoInfo, WorktreeStatus } from "../shared/types";
 import type { Commit } from "../shared/contributors";
 // the extension matters: tests load this module straight into Node, which resolves relative imports literally
-import { summarizeChecks, type CiInfo } from "../shared/ci.ts";
+import { latestPushRuns, summarizeChecks, type CiInfo } from "../shared/ci.ts";
+import { issueNumberOf, type IssueDetail, type IssueInfo, type IssueLink } from "../shared/issues.ts";
 
 const run = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) =>
@@ -64,26 +65,38 @@ async function prInfo(path: string): Promise<PrInfo | undefined> {
   }
 }
 
-/** several panels poll the same worktree every 15s; one fetch per pushed commit per half-minute is plenty */
+/** several panels poll the same worktree every 15s; one fetch per branch per half-minute is plenty */
 const ciMemo = new Map<string, { at: number; value: Promise<CiInfo | undefined> }>();
-async function commitChecks(path: string, sha: string): Promise<CiInfo | undefined> {
-  const key = `${path}\0${sha}`;
+/**
+ * CI for a branch with no PR, asked by branch name so it is really this branch's: the local
+ * tracking ref can lag when pushes came from another checkout, and a commit shared with the base
+ * carries the base's own check runs, which would pin the base's red CI on a green branch.
+ */
+async function branchChecks(path: string, branch: string): Promise<CiInfo | undefined> {
+  const key = `${path}\0${branch}`;
   const hit = ciMemo.get(key);
   if (hit && Date.now() - hit.at < 30_000) return hit.value;
-  const value = Promise.all([
-    gh(path, ["api", `repos/{owner}/{repo}/commits/${sha}/check-runs?per_page=100`]),
-    gh(path, ["api", `repos/{owner}/{repo}/commits/${sha}/status`]),
-  ]).then(([runs, status]) => summarizeChecks([...(runs?.check_runs ?? []), ...(status?.statuses ?? [])]));
+  const value = (async () => {
+    const runs = await gh(path, ["api", `repos/{owner}/{repo}/actions/runs?branch=${encodeURIComponent(branch)}&per_page=40`]);
+    const latest = latestPushRuns<{ head_sha?: string; created_at?: string }>(runs?.workflow_runs ?? []);
+    // commit statuses (non-Actions CI) hang off the commit itself; the newest run tells us which commit that is
+    const sha = latest[0]?.head_sha;
+    const status = sha ? await gh(path, ["api", `repos/{owner}/{repo}/commits/${sha}/status`]) : null;
+    return summarizeChecks([...latest, ...(status?.statuses ?? [])]);
+  })();
   ciMemo.set(key, { at: Date.now(), value });
   return value;
 }
 
-/** CI for what has been pushed: the PR's rollup when it has one, else the checks on the upstream tip */
-async function ciInfo(path: string, pr: PrInfo | undefined): Promise<CiInfo | undefined> {
+/**
+ * CI for what has been pushed: the PR's rollup when it has one, else the branch's latest push by
+ * name. The local upstream is no guide: a worktree cut from the base tracks the base, and its
+ * tracking refs lag when pushes came from elsewhere. A branch never pushed simply has no runs.
+ */
+async function ciInfo(path: string, branch: string, pr: PrInfo | undefined): Promise<CiInfo | undefined> {
   if (pr && pr.state === "OPEN") return summarizeChecks(pr.checks, `${pr.url}/checks`);
-  if (pr) return undefined;
-  const sha = (await git(path, "rev-parse", "@{upstream}").catch(() => "")).trim();
-  return sha ? commitChecks(path, sha) : undefined;
+  if (pr || !branch || branch === "(detached)" || branch === "?") return undefined;
+  return branchChecks(path, branch);
 }
 
 /** who authored the commits this branch adds on top of its base, newest first */
@@ -102,12 +115,14 @@ export async function status(path: string, base: string): Promise<WorktreeStatus
     prInfo(path),
   ]);
   const [head, baseTip] = heads.trim().split("\n");
-  const ci = await ciInfo(path, pr);
   const lines = out.split("\n");
+  const branchName = lines.find((l) => l.startsWith("# branch.head "))?.slice(14) ?? "?";
+  const issueNumber = issueNumberOf(branchName);
+  const [ci, issue] = await Promise.all([ciInfo(path, branchName, pr), issueNumber ? issueLink(path, issueNumber) : undefined]);
   const ab = /^# branch\.ab \+(\d+) -(\d+)/m.exec(out);
   const [subject, author, age] = log.trim().split("\0");
   return {
-    branch: lines.find((l) => l.startsWith("# branch.head "))?.slice(14) ?? "?",
+    branch: branchName,
     dirty: lines.filter((l) => /^[12u?]/.test(l)).length,
     ahead: ab ? +ab[1] : 0,
     behind: ab ? +ab[2] : 0,
@@ -119,6 +134,36 @@ export async function status(path: string, base: string): Promise<WorktreeStatus
     files: lines.filter((l) => /^[12u?]/.test(l)).map((l) => (l.startsWith("?") ? "?? " + l.slice(2) : l.split(" ").slice(1, 2)[0] + " " + l.split(" ").pop())).join("\n"),
     pr,
     ci,
+    issue,
+  };
+}
+
+/** the issue an `issue/<n>` branch points at, for the sidebar chip; memoized like CI since several panels poll */
+const issueMemo = new Map<string, { at: number; value: Promise<IssueLink | undefined> }>();
+function issueLink(path: string, n: number): Promise<IssueLink | undefined> {
+  const key = `${path}\0${n}`;
+  const hit = issueMemo.get(key);
+  if (hit && Date.now() - hit.at < 60_000) return hit.value;
+  const value = gh(path, ["issue", "view", `${n}`, "--json", "number,title,state,url"])
+    .then((j) => (j ? { number: j.number, title: j.title, state: j.state, url: j.url } : undefined));
+  issueMemo.set(key, { at: Date.now(), value });
+  return value;
+}
+
+const mapIssue = (i: any): IssueInfo => ({
+  number: i.number, title: i.title, author: i.author?.login ?? "", state: i.state, url: i.url,
+  labels: (i.labels ?? []).map((l: any) => l.name).filter(Boolean), assignees: (i.assignees ?? []).map((a: any) => a.login).filter(Boolean),
+  comments: Array.isArray(i.comments) ? i.comments.length : typeof i.comments === "number" ? i.comments : (i.comments?.totalCount ?? 0),
+  createdAt: i.createdAt, updatedAt: i.updatedAt,
+});
+
+/** one issue with its body and thread, for the chat that opens it */
+export async function issueDetail(cwd: string, n: number): Promise<IssueDetail> {
+  const j = await gh(cwd, ["issue", "view", `${n}`, "--json", "number,title,author,state,url,labels,assignees,createdAt,updatedAt,body,comments"]);
+  if (!j) throw new Error(`Couldn't load issue #${n} from GitHub. Is gh signed in?`);
+  return {
+    ...mapIssue(j), body: j.body ?? "",
+    discussion: (j.comments ?? []).map((c: any) => ({ author: c.author?.login ?? "", at: c.createdAt ?? "", body: c.body ?? "" })),
   };
 }
 
@@ -146,11 +191,17 @@ export function runCommand(cwd: string, cmd: string) {
 const gh = (cwd: string, args: string[]) =>
   run("gh", [...args], { cwd, timeout: 15_000 }).then((r) => JSON.parse(r.stdout), () => null);
 
+/** owner/name of the GitHub repo, or undefined when gh cannot say */
+export const repoName = (cwd: string): Promise<string | undefined> =>
+  gh(cwd, ["repo", "view", "--json", "nameWithOwner"]).then((j) => j?.nameWithOwner || undefined);
+
 export async function repoInfo(cwd: string): Promise<RepoInfo> {
-  const [repo, prs, runs, me] = await Promise.all([
+  const [repo, prs, runs, issues, me] = await Promise.all([
     gh(cwd, ["repo", "view", "--json", "nameWithOwner,description,url,defaultBranchRef,pushedAt,isPrivate"]),
     gh(cwd, ["pr", "list", "--limit", "30", "--json", "number,title,author,headRefName,isDraft,reviewDecision,updatedAt,url,reviewRequests,reviews,comments,commits"]),
     gh(cwd, ["run", "list", "--limit", "8", "--json", "status,conclusion,name,headBranch,createdAt,url,displayTitle"]),
+    // the page shows 15 and expands to the rest; the comment count comes from the list payload without pulling bodies
+    gh(cwd, ["issue", "list", "--state", "open", "--limit", "50", "--search", "sort:updated-desc", "--json", "number,title,author,state,url,labels,assignees,createdAt,updatedAt,comments"]),
     run("gh", ["api", "user", "-q", ".login"], { cwd, timeout: 10_000 }).then((r) => r.stdout.trim(), () => ""),
   ]);
   return {
@@ -161,6 +212,7 @@ export async function repoInfo(cwd: string): Promise<RepoInfo> {
       review: p.reviewDecision ?? "", updatedAt: p.updatedAt, url: p.url, ...whoseTurn(p, me),
     })),
     runs: (runs ?? []).map((r: any) => ({ name: r.name, title: r.displayTitle, branch: r.headBranch, status: r.status, conclusion: r.conclusion, createdAt: r.createdAt, url: r.url })),
+    issues: (issues ?? []).map(mapIssue),
   };
 }
 

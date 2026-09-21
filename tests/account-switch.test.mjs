@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import ts from 'typescript';
 import * as planProgress from '../src/shared/planProgress.ts';
+import * as skillSections from '../src/shared/skillSections.ts';
 const require = createRequire(import.meta.url);
 const compiled = ts.transpileModule(readFileSync(new URL('../src/main/agents.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -21,6 +22,7 @@ function fixture() {
     './agentBrowser': { startAgentBrowser: async () => ({ prompt: '', close: async () => {} }) },
     '../shared/types': { PHASES: [] },
     '../shared/planProgress': planProgress,
+    '../shared/skillSections': skillSections,
     '@openai/codex-sdk': { Codex: class {
       startThread() { return this.resumeThread(); }
       resumeThread() { return { runStreamed: async () => ({ events: (async function* () {
@@ -160,4 +162,27 @@ test('a session the provider will not resume on this model recovers on the next 
   const call = await send('Continue');
   assert.equal(call.options.resume, undefined);
   assert.match(call.prompt, /Fix the dropdown contrast/);
+});
+
+test('a resumed review gets the skill\'s file schema and link rule back, since the digest drops them', async () => {
+  const { agents, chat, calls } = fixture();
+  chat.name = 'PR #449 wnstck';
+  chat.interrupted = true;
+  chat.messages = [{ role: 'user', blocks: [{ type: 'text', text: `Run the pr-writeup skill for PR 449.\n\n## Phase 0 — scope\nlook\n\n## Phase 5 — the review file\nSave it to pr-<n>.review.json with keys a, b, c.\n\n## Phase 6 — summary and link\nEnd with the link.\n\n## Voice\nplain\n` }] }];
+  await agents.continueChat(chat.id);
+  for (let i = 0; i < 100 && (chat.running || !calls.length); i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, 1);
+  const prompt = calls[0].prompt;
+  assert.match(prompt, /deliverable is `\.consort\/pr-review\/pr-449\.review\.json`/);
+  assert.match(prompt, /## Phase 5 — the review file\nSave it to pr-<n>\.review\.json with keys a, b, c\./);
+  assert.match(prompt, /## Phase 6 — summary and link/);
+});
+
+test('an ordinary interrupted chat resumes without any review talk', async () => {
+  const { agents, chat, calls } = fixture();
+  chat.interrupted = true;
+  await agents.continueChat(chat.id);
+  for (let i = 0; i < 100 && (chat.running || !calls.length); i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, 1);
+  assert.doesNotMatch(calls[0].prompt, /pr-writeup|review\.json/);
 });
