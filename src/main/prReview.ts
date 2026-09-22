@@ -123,6 +123,7 @@ export async function reinvestigate(path: string, id: string, worktreeId?: strin
     const { review } = await readReview(path);
     const finding = review.findings.find((f) => f.id === id);
     if (!finding) throw new Error(`No finding ${id} in this review.`);
+    if (!finding.file) throw new Error("A general PR comment has no file to re-investigate.");
     const cwd = dirname(path);
     const repo = repoOf(review);
     const live = await liveHead(review, cwd);

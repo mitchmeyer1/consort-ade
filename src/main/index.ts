@@ -10,6 +10,8 @@ import { ensureRootWorktree, isRootWorktree } from "./rootWorktree";
 import { hooksDirectory, localEnvFiles, prepareWorktree } from "./worktreeFiles";
 import { installCommand } from "./worktreeInstall";
 import * as agents from "./agents";
+import { browserLaunch, type BrowserInfo } from "./openArtifact";
+import { isScratch, scratchWorktree } from "../shared/scratch";
 import { askOnce, humanize, suggestTitle } from "./namer";
 import { parsePrSuggestion, prSuggestionPrompt } from "../shared/createPr";
 import { commitFromChat } from "./commitChat";
@@ -95,6 +97,9 @@ function createWindow() {
   if (process.env.ELECTRON_RENDERER_URL) win.loadURL(process.env.ELECTRON_RENDERER_URL);
   else win.loadFile(join(import.meta.dirname, "../renderer/index.html"));
 }
+
+/** where repoless chats keep their folders: inside the app's data directory, out of the user's way */
+const scratchRoot = () => join(app.getPath("userData"), "chats");
 
 function artifactPath(id: string, target: string) {
   let path = target.replace(/:\d+(?::\d+)?$/, "").split("#")[0];
@@ -315,7 +320,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   // ponytail: 20s cache so sidebar + page + cards polling don't hammer gh
   worktreeStatus: (id: string) => {
     const w = store.data.worktrees.find((w) => w.id === id);
-    if (!w) return null;
+    if (!w || isScratch(w)) return null;
     const hit = statusCache.get(id);
     if (hit && Date.now() - hit.t < 20_000) return hit.p;
     const base = project(w.projectId).defaultBase;
@@ -342,17 +347,20 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     const menu = Menu.buildFromTemplate([
       { label: "Open", click: () => done("open") },
       { label: "Show in Finder", enabled: !!path, click: () => { if (path) { try { statSync(path); shell.showItemInFolder(path); } catch (e) { report(e); } } } },
-      { label: "Open in Browser", click: () => {
+      // the default app for the file's own type: Word for .docx, Preview for .pdf, Numbers for .xlsx…
+      { label: "Open in Default App", enabled: !!path, click: async () => {
+        try { statSync(path!); const err = await shell.openPath(path!); if (err) report(err); } catch (e) { report(e); }
+      } },
+      { label: "Open in Browser", click: async () => {
         if (remote) { shell.openExternal(target).catch(report); return; }
         try {
           statSync(path!);
-          // Ask Launch Services for the default HTTPS browser, even for local files.
-          const browser = shell.openExternal;
-          if (process.platform === "darwin") execFile("/usr/bin/osascript", ["-e", 'POSIX path of (path to default application for URL "https://example.com")'], (err, stdout) => {
-            if (err) return report(err);
-            execFile("/usr/bin/open", ["-a", stdout.trim(), path!], (e) => { if (e) report(e); });
-          });
-          else browser(pathToFileURL(path!).href).catch(report);
+          // the https:// handler is the browser, whatever the file's own type would open in
+          let browser: BrowserInfo;
+          try { browser = await app.getApplicationInfoForProtocol("https://example.com"); } catch {}
+          const launch = browserLaunch(process.platform, browser, path!);
+          if (launch) execFile(launch.cmd, launch.args, (e) => { if (e) report(e); });
+          else await shell.openExternal(pathToFileURL(path!).href);
         } catch (e) { report(e); }
       } },
     ]);
@@ -458,8 +466,21 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     store.save();
     return id;
   },
+  // The folder is the worktree; it is made up front so a first prompt with attachments has
+  // somewhere to stage them. Deleting the chat removes both (see deleteChat).
+  addScratchChat: (keyId: string, opts: { name?: string; model?: string } = {}) => {
+    const id = randomUUID();
+    const path = join(scratchRoot(), id);
+    mkdirSync(path, { recursive: true });
+    store.data.worktrees.push(scratchWorktree(id, path, opts.name?.trim() || "Chat"));
+    return handlers.addChat!(id, keyId, { name: opts.name, model: opts.model });
+  },
   renameChat: (id: string, name: string) => {
-    store.chat(id).name = name;
+    const chat = store.chat(id);
+    chat.name = name;
+    // a repoless chat's worktree is only its folder; its title follows the chat
+    const w = store.data.worktrees.find((w) => w.id === chat.worktreeId);
+    if (w && isScratch(w)) w.title = name;
     store.save();
   },
   chatMenu: (id: string) => new Promise<void>((done) => {
@@ -481,7 +502,14 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   },
   deleteChat: (id: string) => {
     agents.stop(id);
+    const chat = store.data.chats.find((c) => c.id === id);
     store.data.chats = store.data.chats.filter((c) => c.id !== id);
+    // a repoless chat owns its folder: the last chat on a scratch worktree takes the folder with it
+    const w = chat && store.data.worktrees.find((w) => w.id === chat.worktreeId);
+    if (w && isScratch(w) && !store.data.chats.some((c) => c.worktreeId === w.id)) {
+      store.data.worktrees = store.data.worktrees.filter((x) => x.id !== w.id);
+      if (w.path.startsWith(scratchRoot())) rmSync(w.path, { recursive: true, force: true });
+    }
     store.save();
   },
   setAutoApprove: (id: string, on: boolean) => agents.setAutoApprove(id, on),

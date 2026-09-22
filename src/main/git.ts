@@ -140,10 +140,21 @@ export function forgetRemoteStatus(path: string) {
 }
 
 /** who authored the commits this branch adds on top of its base, newest first */
+/**
+ * The branch's own commits: those on HEAD that no other remote branch has. Measuring from the
+ * project's base ref instead would credit the branch with everything between that ref and
+ * the branch's real fork point — with GitHub's default branch pointing at an old feature
+ * branch, that was all of development's history and its most prolific author. The base is
+ * only the fallback for a repo with no remote branches to compare against.
+ */
 export async function branchAuthors(path: string, base: string): Promise<Commit[]> {
-  // only the branch's own commits count, so a long-lived base doesn't drown them out
-  const log = await git(path, "log", "-200", "--no-merges", "--format=%an%x00%ae", `${base}..HEAD`).catch(() => "");
-  return log.split("\n").filter(Boolean).map((l) => { const [name, email] = l.split("\0"); return { name: name ?? "", email: email ?? "" }; });
+  const parse = (log: string) => log.split("\n").filter(Boolean).map((l) => { const [name, email] = l.split("\0"); return { name: name ?? "", email: email ?? "" }; });
+  const head = (await git(path, "rev-parse", "--abbrev-ref", "HEAD").catch(() => "")).trim();
+  const remotes = (await git(path, "for-each-ref", "--format=%(refname:short)", "refs/remotes").catch(() => "")).split("\n").filter(Boolean);
+  // every remote branch but the branch's own upload and the symbolic HEAD
+  const others = remotes.filter((r) => { const [, ...rest] = r.split("/"); const name = rest.join("/"); return name !== "HEAD" && name !== head; });
+  if (!others.length) return parse(await git(path, "log", "-200", "--no-merges", "--format=%an%x00%ae", `${base}..HEAD`).catch(() => ""));
+  return parse(await git(path, "log", "-200", "--no-merges", "--format=%an%x00%ae", "HEAD", "--not", ...others).catch(() => ""));
 }
 
 export async function status(path: string, base: string): Promise<WorktreeStatus> {

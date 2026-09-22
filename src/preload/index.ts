@@ -10,7 +10,7 @@ const on = (channel: string) => (cb: (x: any) => void) => {
 const methods = [
   "resumeQueue", "removeQueuedMessage",
   "getState", "openRootWorktree", "rootStatus", "rootBranches", "switchRootBranch", "checkoutAtRoot", "commitAndPushRoot", "commitWorktree", "pushWorktree", "pullWorktree", "createPr", "setActiveChat", "pickFolder", "addProject", "removeProject", "setProjectBase", "syncWorktrees", "addWorktree",
-  "removeWorktree", "worktreeStatus", "addChat", "renameChat", "deleteChat", "chatMenu", "askSide", "clearSide", "setAutoApprove", "setPhase",
+  "removeWorktree", "worktreeStatus", "addChat", "addScratchChat", "renameChat", "deleteChat", "chatMenu", "askSide", "clearSide", "setAutoApprove", "setPhase",
   "send", "stop", "addKey", "renameKey", "removeKey", "answerPermission", "runCommand", "addQuickAction", "setQuickActionPinned", "deleteQuickAction", "diff", "skillPrompt", "issuePrompt", "pickFiles", "stageBlob", "setChatKey", "setKeyPhi", "setDefaultKey", "setPhiMode", "switchAgent", "continueChat", "renameWorktree", "archiveWorktree", "autoTitle", "openExternal", "artifactMenu", "previewArtifact", "setAppearance", "effectiveTheme", "repoInfo", "listFiles", "readFile", "writeFile", "authStatus", "authLoginCmd", "connectorUsage", "commitInfo", "commit", "suggestCommit", "suggestPr", "commitChat", "ptyCreate", "ptyWrite", "ptyResize", "ptyKill", "ptySeen", "ptySeenScope", "ptys",
   "readReview", "findReview", "updateReviewFinding", "submitReview", "reviewDrift", "reinvestigateFinding", "fixFinding", "watchReview", "unwatchReview",
 ];

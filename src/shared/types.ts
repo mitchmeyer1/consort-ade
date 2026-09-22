@@ -30,7 +30,11 @@ export type { PrDraft } from "./createPr";
 export type PrDraftText = { title: string; body: string };
 export type Project = { id: string; name: string; path: string; defaultBase: string; baseSetByUser?: boolean };
 export type QuickAction = { id: string; title: string; command: string; pinned?: boolean };
-export type Worktree = { id: string; projectId: string; name: string; title: string; path: string; branch: string; archived: boolean; root?: boolean; quickActions?: QuickAction[] };
+export type Worktree = {
+  id: string; projectId: string; name: string; title: string; path: string; branch: string; archived: boolean; root?: boolean; quickActions?: QuickAction[];
+  /** a repoless chat's folder in the app's hidden data directory: no project, no git (see shared/scratch.ts) */
+  scratch?: true;
+};
 /** the worktree's own PR; the turn fields follow the same rule as the project page's PR list */
 export type PrInfo = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; draft: boolean; url: string; title: string; author: string; review: string; /** GitHub's check rollup for the PR head, raw, for the CI summary */ checks: unknown[] } & Partial<PrTurn>;
 export type WorktreeStatus = {
@@ -151,6 +155,8 @@ export type Api = {
   archiveWorktree(id: string, on: boolean): Promise<void>;
   worktreeStatus(id: string): Promise<WorktreeStatus | null>;
   addChat(worktreeId: string, keyId: string, opts?: { name?: string; model?: string; delegateModel?: string; remember?: boolean }): Promise<string>;
+  /** a chat with no repo: makes a hidden scratch folder for it and returns the chat id */
+  addScratchChat(keyId: string, opts?: { name?: string; model?: string }): Promise<string>;
   skillPrompt(name: string, worktreeId: string, args?: string, delegateModel?: string): Promise<string>;
   /** the opening message of an issue chat: the issue, its discussion, and the ask for a summary and plan (no code) */
   issuePrompt(worktreeId: string, number: number): Promise<string>;

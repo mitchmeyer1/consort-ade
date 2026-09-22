@@ -266,7 +266,12 @@ that exact line.
     { "id": "T1", "kind": "item", "category": "tests",
       "title": "what has no test or is wrong", "file": "tests/standard/x.test.ts", "line": 3,
       "fields": { "Costs": "…", "Suite": "standard — tests/standard/x.test.ts", "Test": "the one assertion" },
-      "comment": "optional; only when the item is worth a PR comment",
+      "comment": "tests/standard/x.test.ts:3 — ready-to-post comment",
+      "status": "pending" },
+    { "id": "L1", "kind": "item", "category": "logic",
+      "title": "a PR-level concern with no honest line to pin",
+      "fields": { "Gap": "…", "Fix": "…" },
+      "comment": "Ready-to-post general PR comment with no invented file or line",
       "status": "pending" }
   ],
   "testsExisting": "one sentence on the PR's test files and what they prove",
@@ -285,10 +290,15 @@ Rules for the file:
   `Fix` · Redundant: `Overlap`, `Do` (name the existing definition's `file:line` in Overlap) ·
   Style: `House way` (with the peer `file:line`), `Fix` · Tests: `Costs`, `Suite`, `Test` ·
   Comments: `Trimmed` (the replacement comment, newlines allowed).
-- **comment** on every defect: ONE sentence, plain, direct, opening with the exact `file:line`.
-  Model: `sigma-md.service.ts:214 — Nothing tests retry429MaxWaitMs — add a test that a
-  retry-after: 600 with a small cap resolves fast, so a unit slip here doesn't hang the
-  mapping save.` Items get one only when the item deserves a PR comment.
+- **comment** on every retained finding: ONE sentence, plain, direct, ready to post. For a
+  code-specific finding, open with the exact `file:line`. Model:
+  `sigma-md.service.ts:214 — Nothing tests retry429MaxWaitMs — add a test that a retry-after:
+  600 with a small cap resolves fast, so a unit slip here doesn't hang the mapping save.` Do
+  not leave a blank field for Mitch to write.
+- **file** and **line** are required when a finding belongs to a changed line, and they must be
+  verified at the review SHA. When there is genuinely no applicable code location, omit both and
+  write the comment as a general PR comment; Consort will put it in the review body instead of
+  inventing a location.
 - **status** is always `"pending"` when you write the file. Mitch sets the rest; if you are
   re-running a review whose file already exists, read it first and carry forward every
   finding's `status`, `comment` edits, `posted`, `head` and `investigation` records where the
@@ -357,8 +367,8 @@ diff. If the plain paragraph and the code paragraph say the same thing, cut the 
 - Cutting weak findings beats padding the count. If the honest answer is 12, ship 12.
   If it is 0, report 0 with coverage and CI evidence.
 - Frozen-behind-a-flag write paths are reviewed as live code.
-- The schema is law. A key the viewer does not know is never shown; a missing `file:line`
-  is a comment that cannot be posted.
+- The schema is law. A key the viewer does not know is never shown. Omit `file` and `line` only
+  for a genuine general PR comment; otherwise a verified `file:line` is required.
 - Last pass: read the list as the author. Anything that earns "no shit" / "that's a
   follow-up" / "that's just how it works" should have died in Phase 3. Kill it now.
 - Same pass, for voice: any claim you can't follow without opening the file isn't finished.

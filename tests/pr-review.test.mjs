@@ -24,7 +24,7 @@ test('review files are recognised by suffix, ignoring line anchors', () => {
   assert.equal(isReviewFile('package.json'), false);
 });
 
-test('parsing fills defaults and keeps every finding with a title and file', () => {
+test('parsing fills defaults and keeps every finding with a title', () => {
   const review = parseReview(JSON.stringify(sample()));
   assert.equal(review.version, 1);
   assert.equal(review.pr, 402);
@@ -39,10 +39,11 @@ test('parsing rejects what cannot be shown and drops malformed findings', () => 
   assert.throws(() => parseReview('not json'), /Not valid JSON/);
   assert.throws(() => parseReview('{"findings":[]}'), /pr/);
   assert.throws(() => parseReview('{"pr":1}'), /findings/);
-  const review = parseReview(JSON.stringify({ pr: 1, findings: [{ title: 'no file' }, { file: 'a.ts', title: 'ok', severity: 'high' }, 'junk'] }));
-  assert.equal(review.findings.length, 1);
-  assert.equal(review.findings[0].kind, 'defect');
-  assert.equal(review.findings[0].id, 'D2');
+  const review = parseReview(JSON.stringify({ pr: 1, findings: [{ title: 'general comment', comment: 'This belongs on the PR.' }, { file: 'a.ts', title: 'ok', severity: 'high' }, 'junk'] }));
+  assert.equal(review.findings.length, 2);
+  assert.equal(review.findings[0].file, undefined, 'a deliberately general comment needs no invented file');
+  assert.equal(review.findings[1].kind, 'defect');
+  assert.equal(review.findings[1].id, 'D2');
 });
 
 test('a finding marked commented without a posted record is only approved', () => {
@@ -131,6 +132,15 @@ test('one review payload carries inline comments and lists the rest in its body'
   assert.match(result.payload.body, /\*\*packages\/core\/src\/prompts\.ts:12\*\* — Budget looks low\./);
   assert.match(result.payload.body, /\*\*tests\/standard\/match\.test\.ts:3\*\* — Add a rematch test\./);
   assert.equal(reviewPayload(review, [], commentable), null);
+});
+
+test('a finding with no applicable source line becomes a plain general PR comment', () => {
+  const general = parseReview(JSON.stringify({ pr: 1, findings: [{ id: 'L1', kind: 'item', category: 'logic', title: 'Document the rollout limit', comment: 'Please document the rollout limitation before merging.', status: 'approved' }] }));
+  const result = reviewPayload(general, approvedFindings(general), new Map());
+  assert.deepEqual(result.inline, []);
+  assert.deepEqual(result.general.map((f) => f.id), ['L1']);
+  assert.equal(result.payload.body, 'Please document the rollout limitation before merging.');
+  assert.deepEqual(result.payload.comments, []);
 });
 
 test('serialising round-trips through parsing', () => {

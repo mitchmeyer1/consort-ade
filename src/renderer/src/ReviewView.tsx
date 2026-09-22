@@ -317,7 +317,7 @@ function FinishPanel({ review, inline: initialInline, openedAt, decision, busy, 
  */
 function FixDialog({ f, onCancel, onStart }: { f: Finding; onCancel: () => void; onStart: (note: string) => void }) {
   const [note, setNote] = useState("");
-  const where = `${f.file}${f.line ? `:${f.line}` : ""}`;
+  const where = f.file ? `${f.file}${f.line ? `:${f.line}` : ""}` : "General PR comment";
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onCancel(); };
     window.addEventListener("keydown", onKey);
@@ -361,7 +361,7 @@ function FindingCard({ f, review, drifted, liveHead, investigating, onDecide, on
   const fields = f.kind === "defect" ? defectFields.filter((x): x is [string, string] => !!x[1]) : Object.entries(f.fields ?? {});
   const checkedAt = verifiedHead(review, f);
   const inv = f.investigation;
-  const canReinvestigate = !!liveHead && liveHead !== checkedAt && !investigating;
+  const canReinvestigate = !!f.file && !!liveHead && liveHead !== checkedAt && !investigating;
   return (
     <div className={`rv-finding ${tone} ${f.status}${drifted ? " drifted" : ""}`}>
       <div className="head">
@@ -372,9 +372,9 @@ function FindingCard({ f, review, drifted, liveHead, investigating, onDecide, on
         <span className={`rv-status ${f.status}`}>{posted && f.posted ? <a href={f.posted.url} onClick={(e) => { e.preventDefault(); onOpen(f.posted!.url); }}>posted ↗</a> : STATUS_LABEL[f.status]}</span>
       </div>
       <div className="rv-refline">
-        <span className="rv-ref">{f.file}{f.line ? `:${f.line}` : ""}</span>
+        <span className="rv-ref">{f.file ? `${f.file}${f.line ? `:${f.line}` : ""}` : "General PR comment"}</span>
         <span className="rv-checked" title={`This finding was last verified against commit ${checkedAt}`}>checked at {short(checkedAt) || "?"}</span>
-        {drifted && <span className="rv-drift" title="The PR has changed this file since the finding was checked">file changed on PR since</span>}
+        {f.file && drifted && <span className="rv-drift" title="The PR has changed this file since the finding was checked">file changed on PR since</span>}
         {f.fixRequest && <a href="#" className="rv-fixing" title="A chat in this worktree was asked to make this change" onClick={(e) => { e.preventDefault(); onOpenChat(f.fixRequest!.chatId); }}>fix requested{f.fixRequest.at ? ` ${when(f.fixRequest.at)}` : ""} · open chat ↗</a>}
       </div>
       {inv && <div className={`rv-inv ${inv.verdict}`}>
@@ -387,14 +387,14 @@ function FindingCard({ f, review, drifted, liveHead, investigating, onDecide, on
         <dt>PR comment</dt>
         <dd>
           <textarea ref={box} className="rv-comment" value={draft} readOnly={posted || dropped} spellCheck={false} rows={1}
-            placeholder={f.kind === "defect" ? "The one-sentence comment to post…" : "Write a comment here to make this postable…"}
+            placeholder="Prepared PR comment appears here"
             onChange={(e) => setDraft(e.target.value)}
             onBlur={() => { if (!posted && !dropped && draft !== (f.comment ?? "")) onComment(f, draft); }} />
         </dd>
       </dl>
       <div className="rv-buttons">
         {!posted && !dropped && <>
-          <button className={f.status === "approved" ? "primary" : ""} disabled={!draft.trim()} title={draft.trim() ? "Queue this comment for the next post" : "Write a comment first"}
+          <button className={f.status === "approved" ? "primary" : ""} disabled={!draft.trim()} title={draft.trim() ? "Queue this prepared comment for the next post" : "This legacy finding has no prepared comment"}
             onClick={() => onDecide(f, f.status === "approved" ? "pending" : "approved")}>
             {f.status === "approved" ? "✓ Queued for PR" : "Comment on PR"}
           </button>
@@ -408,7 +408,7 @@ function FindingCard({ f, review, drifted, liveHead, investigating, onDecide, on
           {f.fixRequest ? "Fix again" : "Fix locally"}
         </button>}
         <button className={drifted ? "rv-reinvestigate hot" : "rv-reinvestigate"} disabled={!canReinvestigate}
-          title={!liveHead ? "GitHub has not answered yet" : liveHead === checkedAt ? "The PR has no commits newer than this finding's check" : "Re-check this finding against the PR's current commit: same comment, a modified one, or removed"}
+          title={!f.file ? "General PR comments have no source file to re-check" : !liveHead ? "GitHub has not answered yet" : liveHead === checkedAt ? "The PR has no commits newer than this finding's check" : "Re-check this finding against the PR's current commit: same comment, a modified one, or removed"}
           onClick={() => onReinvestigate(f)}>
           {investigating ? "Re-investigating…" : "Re-investigate"}
         </button>

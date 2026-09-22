@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import ts from 'typescript';
 import * as planProgress from '../src/shared/planProgress.ts';
 import * as skillSections from '../src/shared/skillSections.ts';
+import * as followups from '../src/shared/followups.ts';
 const require = createRequire(import.meta.url);
 const compiled = ts.transpileModule(readFileSync(new URL('../src/main/agents.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -23,6 +24,7 @@ function fixture() {
     '../shared/types': { PHASES: [] },
     '../shared/planProgress': planProgress,
     '../shared/skillSections': skillSections,
+    '../shared/followups': followups,
     '@openai/codex-sdk': { Codex: class {
       startThread() { return this.resumeThread(); }
       resumeThread() { return { runStreamed: async () => ({ events: (async function* () {

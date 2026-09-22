@@ -12,6 +12,7 @@ import { loginEnv } from "./auth";
 import { PHASES, type Chat, type Block, type Phase, type PermissionRequest } from "../shared/types";
 import { advancePlan, finishPlan, parsePlan, PLAN_MARKER, startPlan, STEP_MARKER } from "../shared/planProgress";
 import { firstPrompt, reviewDeliverable } from "../shared/skillSections";
+import { FOLLOWUP_PROMPT } from "../shared/followups";
 
 // ponytail: phase tracked via text markers so claude + codex share one mechanism
 const PHASE_PROMPT = `For EVERY new prompt, first assess the task and plan your approach before doing work. The ADE starts at waiting during this assessment.
@@ -21,7 +22,9 @@ Use 5 steps for all other tasks: ${PHASES.join(" → ")}. Emit [steps:5], then [
 Every phase marker belongs on its own line. Emit [phase:waiting] if you need user input; otherwise finish at complete. Select the flow anew for every prompt, including follow-ups and queued messages, regardless of the previous turn's flow.
 
 Also lay out the specific work as a plan the user can watch. Once you know the approach and before your first tool call, emit on its own line [plan: first step | second step | verify step] — 2 to 6 steps, each an imperative phrase of at most six words naming a real unit of this task ("read the store", "add the field", "run the tests"), not the generic phases above. List them in the order you will do them, and emit [step:N] on its own line as you start step N (1-based), counting up, so the user sees where you are. If a step turns out wrong, emit a fresh [plan: …] rather than reworking the old one. Skip the plan entirely for a question you answer without tools. Agents you dispatch are attached to the step that is live when you dispatch them, so no marker is needed for them.
-When the task changes code, data or configuration, or produces something that can be run, the last step is a check you actually run, named concretely: the repository's test suite or typecheck, the screenshot helper against the running app for anything visual, the CLI or endpoint you changed, a query against the data you migrated. Do the check, read its output, and say what it showed. If a check fails, fix and re-run it rather than reporting the failure as done; if nothing can be run, say plainly what you could not verify instead of claiming it passed. An investigation, an explanation, a plan for someone else to carry out, or a question answered from reading has no verification step — do not add one for form's sake. A step you never started is reported to the user as skipped, so do not declare work you will not do.`;
+When the task changes code, data or configuration, or produces something that can be run, the last step is a check you actually run, named concretely: the repository's test suite or typecheck, the screenshot helper against the running app for anything visual, the CLI or endpoint you changed, a query against the data you migrated. Do the check, read its output, and say what it showed. If a check fails, fix and re-run it rather than reporting the failure as done; if nothing can be run, say plainly what you could not verify instead of claiming it passed. An investigation, an explanation, a plan for someone else to carry out, or a question answered from reading has no verification step — do not add one for form's sake. A step you never started is reported to the user as skipped, so do not declare work you will not do.
+
+${FOLLOWUP_PROMPT}`;
 const PROGRESS_MARKER = /\[(?:steps:(3|5)|phase:(waiting|planning|executing|validating|complete))\]\s*/g;
 
 const PHI_MARKER = /\[phi-required\]\s*/g;

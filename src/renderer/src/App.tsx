@@ -12,7 +12,9 @@ import { chatStatus } from "../../shared/chatStatus";
 import { ciLabel, ciTitle, type CiInfo } from "../../shared/ci";
 import { recentChats, recentWorktrees } from "../../shared/conversationOrder";
 import { Lockup, Mark } from "./Logo";
-import { artifactLinkAction, artifactLinks, chatArtifacts, withFrameScrollbars } from "../../shared/artifacts";
+import { artifactLinkAction, artifactLinks, artifactWhen, chatArtifacts, localImageTarget, withFrameScrollbars } from "../../shared/artifacts";
+import { parseFollowups, type Followup } from "../../shared/followups";
+import { isScratch, scratchChats } from "../../shared/scratch";
 import { attachmentName, isImageAttachment } from "../../shared/attachments";
 import { reminderLabel } from "../../shared/reminders";
 import { prChatName } from "../../shared/prChat";
@@ -261,7 +263,8 @@ export function App() {
   const reviewFile = useReviewFile(worktree?.id, chat ? prNumberOf(chat.name) : undefined, chat?.running, chat?.messages.length);
   const project = sel?.type === "project" ? state.projects.find((p) => p.id === sel.id) : undefined;
   const wtProject = worktree && state.projects.find((p) => p.id === worktree.projectId);
-  const crumb = worktree && wtProject ? `${wtProject.name}/${worktree.branch}` : project ? project.name : "Consort ADE";
+  const scratch = isScratch(worktree);
+  const crumb = worktree && wtProject ? `${wtProject.name}/${worktree.branch}` : scratch ? "Chats" : project ? project.name : "Consort ADE";
   useEffect(() => { document.title = chat ? `${crumb} · ${chat.name}` : crumb; }, [crumb, chat?.name]);
   const answer = (id: string, allow: boolean) => {
     ade.answerPermission(id, allow);
@@ -322,9 +325,9 @@ export function App() {
             ))}
             {/* the same dots the sidebar shows, so a process running in this worktree is visible from the page it is running for */}
             {worktree && <button className={tab === "terminal" ? "on" : ""} onClick={() => toggle("terminal")}><Ico n="terminal" /><span>Terminal</span><Dots id={worktree.id} running={running} failed={failed} done={done} /></button>}
-            {worktree && <button className={tab === "diff" ? "on" : ""} onClick={() => toggle("diff")}><Ico n="branch" /><span>Diff</span></button>}
+            {worktree && !scratch && <button className={tab === "diff" ? "on" : ""} onClick={() => toggle("diff")}><Ico n="branch" /><span>Diff</span></button>}
             {worktree && <button className={tab === "editor" ? "on" : ""} onClick={() => toggle("editor")}><Ico n="pencil" /><span>Editor</span></button>}
-            {worktree && <button className={tab === "commit" ? "on" : ""} onClick={() => toggle("commit")}><Ico n="wheat" /><span>Commit</span></button>}
+            {worktree && !scratch && <button className={tab === "commit" ? "on" : ""} onClick={() => toggle("commit")}><Ico n="wheat" /><span>Commit</span></button>}
             {worktree && reviewFile && <button className={tab === "review" ? "on" : ""} title={`PR #${reviewFile.summary.pr} · ${reviewFile.summary.title}`} onClick={() => toggle("review")}><Ico n="laurel" /><span>Review</span></button>}
             {chat && <button className={tab === "artifacts" ? "on" : ""} aria-pressed={tab === "artifacts"} onClick={() => toggle("artifacts")}><Ico n="scroll" /><span>Artifacts</span></button>}
             <button className={tab === "settings" ? "on" : ""} onClick={() => toggle("settings")}><Ico n="gear" /><span>Settings</span></button>
@@ -367,6 +370,10 @@ function Sidebar({ state, sel, running, failed, done, onSelect, onCollapse }: { 
     const p = await ade.pickFolder();
     if (p) ade.addProject(p).catch((e) => alert(e.message));
   };
+  // repoless chats: not on any code, each working out of a hidden folder of its own
+  const [newChat, setNewChat] = useState(false);
+  const chats = recentChats(scratchChats(state));
+  const needKey = () => { if (!state.keys.length) { alert("Add a connector in Settings first."); return true; } return false; };
   return (
     <div className="sidebar">
       <div className="brandrow"><Lockup /></div>
@@ -377,6 +384,31 @@ function Sidebar({ state, sel, running, failed, done, onSelect, onCollapse }: { 
       {state.projects.map((p) => (
         <ProjectNode key={p.id} project={p} state={state} sel={sel} running={running} failed={failed} done={done} onSelect={onSelect} collapsed={collapsed} toggle={toggle} />
       ))}
+      <div className="sect chats">
+        <span>Chats</span>
+        <button className="icon" title="New chat (no repo)" onClick={() => !needKey() && setNewChat(true)}>＋</button>
+      </div>
+      <div className="scratch-chats">
+        {chats.length ? <div className="chatlist">{chats.map((c) => <ChatRow key={c.id} c={c} sel={sel} onSelect={onSelect} />)}</div>
+          : <div className="row hint" onClick={() => !needKey() && setNewChat(true)}><small>Chat or work without a repo.</small></div>}
+      </div>
+      {newChat && <NewChatForm scratch state={state} onClose={() => setNewChat(false)} onDone={(id) => { setNewChat(false); onSelect({ type: "chat", id }); }} />}
+    </div>
+  );
+}
+
+// one chat in the sidebar: under a worktree, or on its own in the CHATS section
+function ChatRow({ c, sel, onSelect }: { c: Chat; sel?: Sel; onSelect: (s: Sel) => void }) {
+  const status = chatStatus(c);
+  const dotLabel = (status === "reminder" || status === "scheduled") ? reminderLabel(c.remindAt!, Date.now()) : status;
+  return (
+    <div className={"row chat" + (sel?.type === "chat" && c.id === sel.id ? " active" : "") + (status ? ` st-${status}` : "")} onClick={() => onSelect({ type: "chat", id: c.id })} onContextMenu={(e) => { e.preventDefault(); void ade.chatMenu(c.id); }}>
+      <span className="slot chat-symbol"><Ico n="celtic" />{status && <span role="img" aria-label={dotLabel!} title={dotLabel!} className={`chat-dot ${status}`}>{status === "scheduled" && <ClockGlyph />}</span>}</span>
+      <span className="grow"><Editable value={c.name} onSave={(n) => ade.renameChat(c.id, n)} /></span>
+      <MiniBar phase={c.phase} steps={c.phaseSteps} />
+      <span className="tools" onClick={(e) => e.stopPropagation()}>
+        <button className="icon" onClick={() => confirm("Delete chat?") && ade.deleteChat(c.id)}>×</button>
+      </span>
     </div>
   );
 }
@@ -475,20 +507,7 @@ function WorktreeNode({ wt, state, sel, running, failed, done, onSelect, collaps
           <button className="icon" title={collapsed[wt.id] ? "Expand" : "Collapse"} onClick={() => toggle(wt.id)}>{collapsed[wt.id] ? "▸" : "▾"}</button>
         </span>
       </div>
-      {!collapsed[wt.id] && chats.length > 0 && <div className="chatlist">{chats.map((c) => {
-        const status = chatStatus(c);
-        const dotLabel = (status === "reminder" || status === "scheduled") ? reminderLabel(c.remindAt!, Date.now()) : status;
-        return (
-          <div key={c.id} className={"row chat" + (sel?.type === "chat" && c.id === sel.id ? " active" : "") + (status ? ` st-${status}` : "")} onClick={() => onSelect({ type: "chat", id: c.id })} onContextMenu={(e) => { e.preventDefault(); void ade.chatMenu(c.id); }}>
-            <span className="slot chat-symbol"><Ico n="celtic" />{status && <span role="img" aria-label={dotLabel!} title={dotLabel!} className={`chat-dot ${status}`}>{status === "scheduled" && <ClockGlyph />}</span>}</span>
-            <span className="grow"><Editable value={c.name} onSave={(n) => ade.renameChat(c.id, n)} /></span>
-            <MiniBar phase={c.phase} steps={c.phaseSteps} />
-            <span className="tools" onClick={(e) => e.stopPropagation()}>
-              <button className="icon" onClick={() => confirm("Delete chat?") && ade.deleteChat(c.id)}>×</button>
-            </span>
-          </div>
-        );
-      })}</div>}
+      {!collapsed[wt.id] && chats.length > 0 && <div className="chatlist">{chats.map((c) => <ChatRow key={c.id} c={c} sel={sel} onSelect={onSelect} />)}</div>}
     </div>
   );
 }
@@ -1093,8 +1112,8 @@ function SiblingCard({ wt, state, onSelect }: { wt: Worktree; state: State; onSe
   );
 }
 
-function NewChatForm({ wt, state, onClose, onDone }: { wt: Worktree; state: State; onClose: () => void; onDone: (id: string) => void }) {
-  const [name, setName] = useState(wt.title);
+function NewChatForm({ wt, scratch, state, onClose, onDone }: { wt?: Worktree; scratch?: boolean; state: State; onClose: () => void; onDone: (id: string) => void }) {
+  const [name, setName] = useState(wt?.title ?? "");
   const [keyId, setKeyId] = useState(defaultConnector(state)?.id ?? "");
   const provider = state.keys.find((k) => k.id === keyId)?.provider ?? "claude";
   const preferredModel = () => { const key = state.keys.find((k) => k.id === keyId); return key ? selectedModel(state, key, MODELS[provider][0]) : MODELS[provider][0]; };
@@ -1107,16 +1126,19 @@ function NewChatForm({ wt, state, onClose, onDone }: { wt: Worktree; state: Stat
   const options = modelOptions(state, provider);
   useEffect(() => { const next = preferredModel(); setModel(next); setCustom(!modelOptions(state, provider).includes(next)); }, [keyId]);
   const start = async () => {
-    const id = await ade.addChat(wt.id, keyId, { name, model });
+    let id: string;
+    try { id = wt ? await ade.addChat(wt.id, keyId, { name, model }) : await ade.addScratchChat(keyId, { name, model }); }
+    catch (e) { alert((e as Error).message); return; }
     if (prompt.trim() || files.length) ade.send(id, prompt.trim() || "See attached files.", files).catch((e) => alert(e.message));
     onDone(id);
   };
   return (
-    <Dialog title="Create a chat" onClose={onClose} footer={<>
+    <Dialog title={scratch ? "Create a chat · no repo" : "Create a chat"} onClose={onClose} footer={<>
       <button onClick={onClose}>Cancel</button>
       <button className="primary" disabled={!keyId || !name || !model} onClick={start}>Create</button>
     </>}>
-      <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} autoFocus /></Field>
+      <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} autoFocus placeholder={scratch ? "What is this about?" : undefined} /></Field>
+      {scratch && <p className="m">Not on any code. The chat gets a private folder to work out of if it needs one; every connector and model is available.</p>}
       <div className="two">
         <Field label="Key" info="PHI-approved keys are marked">
           <select value={keyId} onChange={(e) => setKeyId(e.target.value)}>
@@ -1144,7 +1166,7 @@ function NewChatForm({ wt, state, onClose, onDone }: { wt: Worktree; state: Stat
             <button className="icon attach" title="Attach files" onClick={async () => addFiles(await ade.pickFiles())}>
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.5l-8.6 8.6a5 5 0 0 1-7-7l9.2-9.2a3.3 3.3 0 0 1 4.7 4.7L10 18.9a1.6 1.6 0 0 1-2.3-2.3l8.5-8.5" /></svg>
             </button>
-            <Attachments worktreeId={wt.id} paths={files} onRemove={(f) => setFiles((x) => x.filter((y) => y !== f))} />
+            <Attachments worktreeId={wt?.id} paths={files} onRemove={(f) => setFiles((x) => x.filter((y) => y !== f))} />
             {!files.length && <span className="m">no attachments</span>}
           </div>
         </div>
@@ -1167,14 +1189,75 @@ function MdLinks({ text, onOpen }: { text: string; onOpen: (p: string) => void }
   return <>{parts}</>;
 }
 
-// Assistant prose: Markdown, with bare file paths turned into artifact links.
-function Prose({ text, onOpen }: { text: string; onOpen: (p: string) => void }) {
-  return <ProseMd text={text} onOpen={onOpen} />;
+// Local images in rendered Markdown: the <img> the browser cannot load becomes an artifact
+// anchor carrying the source path and alt text; useArtifactImages fills it with the file.
+function linkImages(root: ParentNode) {
+  for (const img of [...root.querySelectorAll("img")]) {
+    const target = localImageTarget(img.getAttribute("src"));
+    if (!target) continue;
+    const a = document.createElement("a");
+    a.href = "#"; a.className = "mdlink mdimg"; a.dataset.artifact = target;
+    const alt = img.getAttribute("alt") || target.split("/").pop() || target;
+    a.dataset.alt = alt; a.title = alt; a.textContent = alt;
+    img.replaceWith(a);
+  }
 }
-function ProseMd({ text, onOpen }: { text: string; onOpen: (p: string) => void }) {
+
+// Once the HTML is in the document, load each image anchor's file. One that cannot be read
+// keeps its text label, which still opens the artifact like any other link.
+function useArtifactImages(ref: React.RefObject<HTMLElement | null>, worktreeId: string | undefined, resolve: (target: string) => string, html: string) {
+  useEffect(() => {
+    const root = ref.current;
+    if (!root || !worktreeId) return;
+    let live = true;
+    for (const a of root.querySelectorAll<HTMLAnchorElement>("a.mdimg[data-artifact]")) {
+      if (a.querySelector("img")) continue;
+      attachmentPreview(worktreeId, resolve(a.dataset.artifact!)).then((src) => {
+        if (!live) return;
+        const img = document.createElement("img");
+        img.src = src; img.alt = a.dataset.alt ?? "";
+        a.replaceChildren(img); a.classList.add("loaded");
+      }, () => {});
+    }
+    return () => { live = false; };
+  }, [ref, worktreeId, html]);
+}
+
+// One assistant turn: its prose and tool rows, then the follow-ups it suggested as chips.
+// Clicking a chip sends that prompt to this chat (queued if the agent is still working).
+function AssistantMessage({ blocks, onOpen, worktreeId, live, onFollowup }: { blocks: Block[]; onOpen: (p: string) => void; worktreeId?: string; live: boolean; onFollowup: (prompt: string) => void }) {
+  const parsed = React.useMemo(() => {
+    const followups: Followup[] = [];
+    const rows = blocks.map((b) => {
+      if (b.type !== "text") return b;
+      const p = parseFollowups(b.text);
+      followups.push(...p.followups);
+      return { ...b, text: p.text };
+    });
+    return { rows, followups };
+  }, [blocks]);
+  return (
+    <div className="msg assistant">
+      {parsed.rows.map((b, k) => b.type === "text" ? (b.text.trim() ? <Prose key={k} text={b.text} onOpen={onOpen} worktreeId={worktreeId} /> : null) : <ToolRow key={b.id} b={b} onOpen={onOpen} live={live} />)}
+      {parsed.followups.length > 0 && (
+        <div className="followups" role="group" aria-label="Suggested follow-ups">
+          {parsed.followups.map((f) => <button key={f.prompt} className="followup" title={f.prompt} onClick={() => onFollowup(f.prompt)}>{f.label}</button>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Assistant prose: Markdown, with bare file paths turned into artifact links.
+function Prose({ text, onOpen, worktreeId }: { text: string; onOpen: (p: string) => void; worktreeId?: string }) {
+  return <ProseMd text={text} onOpen={onOpen} worktreeId={worktreeId} />;
+}
+function ProseMd({ text, onOpen, worktreeId }: { text: string; onOpen: (p: string) => void; worktreeId?: string }) {
+  const el = useRef<HTMLDivElement>(null);
   const html = React.useMemo(() => {
     const tpl = document.createElement("template");
     tpl.innerHTML = marked.parse(text) as string;
+    linkImages(tpl.content);
     const walker = document.createTreeWalker(tpl.content, NodeFilter.SHOW_TEXT);
     const nodes: Text[] = [];
     for (let n = walker.nextNode(); n; n = walker.nextNode()) if (!(n.parentElement?.closest("a, code, pre"))) nodes.push(n as Text);
@@ -1186,6 +1269,7 @@ function ProseMd({ text, onOpen }: { text: string; onOpen: (p: string) => void }
     }
     return tpl.innerHTML;
   }, [text]);
+  useArtifactImages(el, worktreeId, (t) => t, html);
   const onClick = (e: React.MouseEvent) => {
     const a = (e.target as HTMLElement).closest("a"); if (!a) return;
     const target = a.dataset.artifact ?? a.getAttribute("href") ?? "";
@@ -1195,7 +1279,7 @@ function ProseMd({ text, onOpen }: { text: string; onOpen: (p: string) => void }
     if (action === "artifact") onOpen(target);
     else if (action === "external") ade.openExternal(target);
   };
-  return <div className="md prose" onClick={onClick} onContextMenu={onClick} dangerouslySetInnerHTML={{ __html: html }} />;
+  return <div ref={el} className="md prose" onClick={onClick} onContextMenu={onClick} dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
 // files from a drop or paste: real paths when Finder gives them, otherwise read the bytes and stage them
@@ -1509,7 +1593,16 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
   const [over, setOver] = useState(false);
   const bottom = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => { bottom.current?.scrollIntoView({ block: "end" }); }, [chat.messages, perms.length]);
+  // Scrolling follows new content only while you are at the bottom. Once you scroll up to read,
+  // the view stays put and a pulse at the foot of the pane says more has arrived; clicking it,
+  // or sending a message of your own, goes back to following.
+  const messagesEl = useRef<HTMLDivElement>(null);
+  const pinned = useRef(true);
+  const [unseen, setUnseen] = useState(false);
+  const nearBottom = (el: HTMLElement) => el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+  const onMessagesScroll = () => { const el = messagesEl.current; if (!el) return; pinned.current = nearBottom(el); if (pinned.current) setUnseen(false); };
+  const jump = () => { pinned.current = true; setUnseen(false); bottom.current?.scrollIntoView({ block: "end" }); };
+  useEffect(() => { if (pinned.current) bottom.current?.scrollIntoView({ block: "end" }); else setUnseen(true); }, [chat.messages, perms.length]);
   // Commit shortcut: the composer becomes a commit-message box with a 5s fuse. Typing defuses it; silence lets the AI write the message.
   const [commit, setCommit] = useState<{ count: number; typed: boolean } | null>(null);
   const text = commit ? commitText : draft.text;
@@ -1535,6 +1628,7 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
     if (commit) { if (text.trim() || !commit.typed) fireCommit(text.trim() || undefined); return; }
     if (!text.trim() && !files.length) return;
     chatDrafts.submit(chat.id, (draft) => ade.send(chat.id, draft.text.trim() || "See attached files.", draft.files)).catch((e) => alert(e.message));
+    jump();
   };
   const placeholder = commit
     ? commit.typed ? "commit message · ↩ to commit and push · esc to cancel" : `start typing commit or ai will decide ${commit.count}…`
@@ -1544,7 +1638,6 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
   const onPaste = async (e: React.ClipboardEvent) => { if ([...e.clipboardData.items].some((i) => i.kind === "file")) { e.preventDefault(); addFiles(await filesFromTransfer(e.clipboardData)); } };
   const recall = lastPrompt(chat);
   // the recall chip repeats the last prompt; while that bubble is itself on screen the chip would only cover it
-  const messagesEl = useRef<HTMLDivElement>(null);
   const [recallHidden, setRecallHidden] = useState(true);
   const lastUserId = [...chat.messages].reverse().find((m) => m.role === "user" && m.blocks.length)?.id;
   useEffect(() => {
@@ -1562,16 +1655,15 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
     <div className={"chatpane" + (over ? " over" : "")} onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setOver(false); }} onDrop={onDrop} onPaste={onPaste}>
       {over && <div className="dropveil">Drop to attach</div>}
       <PhaseStrip phase={chat.phase} steps={chat.phaseSteps} onSelect={(phase) => ade.setPhase(chat.id, phase)} />
-      <div className="messages" ref={messagesEl}>
+      <div className="messages" ref={messagesEl} onScroll={onMessagesScroll}>
         {stages && <ProgressPanel title={review ? "Review" : "Plan"} stages={stages} />}
         {recall && !recallHidden && <div className="chat-recall"><span title={recall}>{recall}</span></div>}
         <div className="column">
         {chat.messages.filter((m) => m.blocks.length).map((m) =>
           m.role === "user" ? <UserBubble key={m.id} text={m.blocks.map((b) => (b.type === "text" ? b.text : "")).join("\n")} attachments={m.attachments} worktreeId={worktree?.id} /> :
           m.role === "system" ? <div key={m.id} className="msg system">{m.blocks.map((b) => (b.type === "text" ? b.text : "")).join(" ")}</div> : (
-          <div key={m.id} className="msg assistant">
-            {m.blocks.map((b, k) => b.type === "text" ? <Prose key={k} text={b.text} onOpen={onOpenMd} /> : <ToolRow key={b.id} b={b} onOpen={onOpenMd} live={chat.running} />)}
-          </div>
+          <AssistantMessage key={m.id} blocks={m.blocks} onOpen={onOpenMd} worktreeId={worktree?.id} live={chat.running}
+            onFollowup={(prompt) => ade.send(chat.id, prompt).catch((e) => alert(e.message))} />
         ))}
         {perms.map((p) => (
           <div key={p.id} className="perm">
@@ -1584,6 +1676,8 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
         <div ref={bottom} />
         </div>
       </div>
+      {/* the seam between messages and composer: a pulse here means more arrived below where you are reading */}
+      <button type="button" className={"new-below" + (unseen ? " on" : "")} aria-hidden={!unseen} tabIndex={unseen ? 0 : -1} title="New messages below — click to scroll down" onClick={jump} />
       {!chat.running && (chat.interrupted || chat.error) && (
         <div className="resume">
           {chat.error ? <button className="resume-error" title="View full error details" onClick={() => { setErrorDetails(chat.error); setCopyStatus(""); }}>
@@ -1618,7 +1712,7 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
         </div>}
         <div className="composer-options">
           <span className="left">
-            <button className={"commitbtn" + (commit ? " armed" : "")} title="Stage everything, commit, and push. Type a message or let the AI write one." disabled={code || chat.running || !!commit} onClick={armCommit}><Ico n="wheat" />{commit && !commit.typed ? `commit ${commit.count}` : "commit"}</button>
+            {!isScratch(worktree) && <button className={"commitbtn" + (commit ? " armed" : "")} title="Stage everything, commit, and push. Type a message or let the AI write one." disabled={code || chat.running || !!commit} onClick={armCommit}><Ico n="wheat" />{commit && !commit.typed ? `commit ${commit.count}` : "commit"}</button>}
             <button className="commitbtn" disabled={!worktree} aria-pressed={code} title={code ? "Return to AI chat" : "Run commands in this worktree"} onClick={() => setMode(code ? "chat" : "code")}><Ico n={code ? "quill" : "terminal"} />{code ? "CHAT" : "TERMINAL"}</button>
             <button className="commitbtn" disabled={!worktree} aria-pressed={side} title={side ? "Return to AI chat" : "Ask a read-only agent about this job — it won't interrupt the work"} onClick={() => setMode(side ? "chat" : "side")}><Ico n={side ? "quill" : "candle"} />{side ? "CHAT" : "SIDECHAT"}</button>
             {chat.running && <button className="commitbtn stopbtn" title="Stop this chat" onClick={() => ade.stop(chat.id)}><span className="stop-square" aria-hidden="true" />Stop</button>}
@@ -1730,9 +1824,17 @@ function ArtifactsView({ chat, onOpen }: { chat: Chat; onOpen: (path: string) =>
     <div className="m">{artifacts.length} linked file{artifacts.length === 1 ? "" : "s"} · {chat.name}</div>
     {error && <div className="error" role="alert">{error}</div>}
     {!artifacts.length ? <div className="card">No artifacts yet. Files linked in assistant responses will appear here.</div>
-      : <ul>{artifacts.map(({ label, target }) => <li key={target}>
+      : <ul>{artifacts.map(({ label, target, linkedAt, updatedAt }) => <li key={target}>
         <button className="artifact-entry" title={target} onClick={() => open(target)} onContextMenu={(e) => { e.preventDefault(); open(target); }}>
-          <Ico n="scroll" /><span><strong>{label}</strong>{label !== target && <small>{target}</small>}</span><span aria-hidden="true">›</span>
+          <Ico n="scroll" />
+          <strong>{label}</strong>
+          {/* one date, the latest, as a file browser shows "modified"; the tooltip has the history */}
+          <time className="artifact-when" dateTime={new Date(updatedAt).toISOString()}
+            title={updatedAt > linkedAt ? `Linked ${new Date(linkedAt).toLocaleString()} · updated ${new Date(updatedAt).toLocaleString()}` : `Linked ${new Date(linkedAt).toLocaleString()}`}>
+            {artifactWhen(updatedAt, Date.now())}
+          </time>
+          {label !== target && <small className="artifact-path"><span>{target}</span></small>}
+          <span className="artifact-chev" aria-hidden="true">›</span>
         </button>
       </li>)}</ul>}
   </div>;
@@ -1931,14 +2033,24 @@ function MarkdownView({ worktree, path, onEdit, onNavigate }: { worktree: Worktr
     if (path && !isReviewFile(path)) ade.previewArtifact(worktree.id, path).then((p) => { if (active) setPreview(p); }, (e) => { if (active) setErr(e.message); });
     return () => { active = false; };
   }, [worktree.id, path, reload]);
+  const dir = path?.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
+  const resolve = (href: string) => /^(?:[a-z]+:|\/|~\/)/i.test(href) ? href : dir + href;
+  const html = React.useMemo(() => {
+    if (preview?.kind !== "markdown") return "";
+    const tpl = document.createElement("template");
+    tpl.innerHTML = marked.parse(preview.content) as string;
+    linkImages(tpl.content);
+    return tpl.innerHTML;
+  }, [preview]);
+  const article = useRef<HTMLElement>(null);
+  useArtifactImages(article, worktree.id, resolve, html);
   const onClick = (e: React.MouseEvent) => {
     const a = (e.target as HTMLElement).closest("a");
     if (!a) return;
     e.preventDefault();
-    const href = a.getAttribute("href") ?? "";
+    const href = a.dataset.artifact ?? a.getAttribute("href") ?? "";
     if (href.startsWith("#")) return;
-    const dir = path!.includes("/") ? path!.slice(0, path!.lastIndexOf("/") + 1) : "";
-    const target = /^(?:[a-z]+:|\/|~\/)/i.test(href) ? href : dir + href;
+    const target = resolve(href);
     ade.artifactMenu(worktree.id, target).then((action) => { if (action === "open") onNavigate(target); }).catch((e) => setErr(e.message));
   };
   if (!path) return <div className="card">Open a linked file in a chat to preview it here.</div>;
@@ -1953,7 +2065,7 @@ function MarkdownView({ worktree, path, onEdit, onNavigate }: { worktree: Worktr
       </div>
       {review ? <ReviewView worktree={worktree} path={path} />
         : err ? <div className="error">{err}</div> : !preview ? <div className="m">loading…</div>
-        : preview.kind === "markdown" ? <article className="md" onClick={onClick} dangerouslySetInnerHTML={{ __html: marked.parse(preview.content) as string }} />
+        : preview.kind === "markdown" ? <article ref={article} className="md" onClick={onClick} dangerouslySetInnerHTML={{ __html: html }} />
         : preview.kind === "image" ? <img className="artifact-image" src={preview.content} alt={path} />
         : preview.kind === "html" ? <iframe className="artifact-frame" title={path} sandbox="" srcDoc={withFrameScrollbars(preview.content, document.documentElement.dataset.theme === "light" ? "light" : "dark")} />
         : preview.kind === "url" || preview.kind === "pdf" ? <iframe className="artifact-frame" title={path} sandbox="" src={preview.content} />

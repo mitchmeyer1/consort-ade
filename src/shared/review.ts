@@ -24,8 +24,8 @@ export type Finding = {
   category?: Category;
   /** the heading: consequence for a defect, the claim for an item */
   title: string;
-  /** repo-relative path and line at the review head; a second ref (redundant items) goes in `fields` */
-  file: string;
+  /** repo-relative path and line at the review head; absent only for a deliberately general PR comment */
+  file?: string;
   line?: number;
   /** defect fields, plain first, refs second */
   problem?: string;
@@ -34,7 +34,7 @@ export type Finding = {
   ignoreIf?: string;
   /** category-card fields in the order the card shows them (Gap/Fix, Overlap/Do, House way/Fix, Costs/Suite/Test, Trimmed) */
   fields?: Record<string, string>;
-  /** the ready-to-post GitHub comment in Mitch's voice; defects always, items when one is worth posting */
+  /** the ready-to-post GitHub comment in Mitch's voice; every retained finding has one */
   comment?: string;
   status: FindingStatus;
   /** set when the comment landed on GitHub */
@@ -111,7 +111,7 @@ function finding(raw: any, index: number): Finding | undefined {
   const kind: Finding["kind"] = raw.kind === "item" || (raw.kind !== "defect" && !severity) ? "item" : "defect";
   const title = str(raw.title ?? raw.claim);
   const file = str(raw.file ?? raw.path);
-  if (!title || !file) return undefined;
+  if (!title) return undefined;
   const fields = raw.fields && typeof raw.fields === "object"
     ? Object.fromEntries(Object.entries(raw.fields).filter(([, v]) => typeof v === "string") as [string, string][])
     : undefined;
@@ -124,7 +124,7 @@ function finding(raw: any, index: number): Finding | undefined {
   return {
     id: str(raw.id) || `${kind === "defect" ? "D" : "I"}${index + 1}`,
     kind, severity: kind === "defect" ? severity ?? "low" : undefined, category,
-    title, file, line: num(raw.line),
+    title, file: file || undefined, line: file ? num(raw.line) : undefined,
     problem: str(raw.problem) || undefined, exampleFlow: str(raw.exampleFlow ?? raw.example) || undefined,
     fix: str(raw.fix) || undefined, ignoreIf: str(raw.ignoreIf) || undefined,
     fields: fields && Object.keys(fields).length ? fields : undefined,
@@ -198,7 +198,7 @@ export function updateFinding(review: Review, id: string, patch: { status?: Find
 
 /** the message "Fix locally" sends: the finding as the reviewer wrote it, the user's own direction when they added any, then how to go about the change */
 export function fixPrompt(review: Review, f: Finding, note?: string) {
-  const where = `${f.file}${f.line ? `:${f.line}` : ""}`;
+  const where = f.file ? `${f.file}${f.line ? `:${f.line}` : ""}` : "General PR comment";
   const lines = [`Fix ${f.id} from the PR ${review.pr} review (${review.title}) locally, in this worktree.`, "", `**${f.title}**`, `File: ${where}`];
   if (f.kind === "defect") {
     for (const [label, text] of [["Problem", f.problem], ["Example flow", f.exampleFlow], ["Suggested fix", f.fix]] as const) if (text) lines.push(`${label}: ${text}`);
@@ -286,17 +286,18 @@ export function reviewPayload(review: Review, findings: Finding[], commentable: 
   const inline: Finding[] = [], general: Finding[] = [];
   for (const f of findings) {
     if (!f.comment?.trim()) continue;
-    (f.line && commentable.get(f.file)?.has(f.line) ? inline : general).push(f);
+    (f.file && f.line && commentable.get(f.file)?.has(f.line) ? inline : general).push(f);
   }
   const event = opts.event ?? "COMMENT";
   const lead = (opts.body ?? "").trim();
   if (!inline.length && !general.length && !lead && event === "COMMENT") return null;
-  const listed = general.map((f) => `**${f.file}${f.line ? `:${f.line}` : ""}** — ${f.comment!.trim()}`).join("\n\n");
+  const listed = general.map((f) => f.file ? `**${f.file}${f.line ? `:${f.line}` : ""}** — ${f.comment!.trim()}` : f.comment!.trim()).join("\n\n");
   const body = [lead, listed].filter(Boolean).join("\n\n");
   return {
     payload: {
       commit_id: review.head, event, body,
-      comments: inline.map((f) => ({ path: f.file, line: f.line!, side: "RIGHT", body: f.comment!.trim() })),
+      // Only findings with a file and line enter `inline` above; retain that invariant here.
+      comments: inline.map((f) => ({ path: f.file!, line: f.line!, side: "RIGHT", body: f.comment!.trim() })),
     },
     inline, general,
   };
@@ -330,7 +331,7 @@ export function fallbackReviewBody(review: Review, event: ReviewEvent, included:
 /** what the model gets when the body is left blank */
 export function draftBodyPrompt(review: Review, event: ReviewEvent, included: Finding[]): string {
   const earlier = review.findings.filter((f) => f.status === "commented" && !included.includes(f));
-  const line = (f: Finding) => `- ${f.id} · ${f.kind === "defect" ? f.severity : f.category} · ${f.file}${f.line ? `:${f.line}` : ""} — ${f.title}${f.comment ? `\n  comment: ${f.comment}` : ""}`;
+  const line = (f: Finding) => `- ${f.id} · ${f.kind === "defect" ? f.severity : f.category} · ${f.file ? `${f.file}${f.line ? `:${f.line}` : ""}` : "general PR comment"} — ${f.title}${f.comment ? `\n  comment: ${f.comment}` : ""}`;
   return [
     `Write the top-level body of a GitHub pull-request review for PR #${review.pr} "${review.title}"${review.repo ? ` in ${review.repo}` : ""}. The verdict is ${EVENT_LABELS[event]}.`,
     `Voice: the reviewer's own, first person, plain and direct, two to five sentences, no headings, no bullet lists, no emoji, no sign-off, no restating each inline comment. Say what the PR does well in one clause, what the comments add up to, and what the verdict means for the author. Do not invent findings.`,
@@ -372,7 +373,7 @@ export function driftedFindings(review: Review, liveHead: string, changedBy: Map
   for (const f of review.findings) {
     const base = verifiedHead(review, f);
     if (!base || base === liveHead) continue;
-    if (changedBy.get(base)?.has(f.file)) out.add(f.id);
+    if (f.file && changedBy.get(base)?.has(f.file)) out.add(f.id);
   }
   return out;
 }
