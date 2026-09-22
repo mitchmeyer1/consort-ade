@@ -28,10 +28,14 @@ export type { CiCheck, CiInfo, CiState } from "./ci";
 export type { IssueDetail, IssueInfo, IssueLink } from "./issues";
 export type { PrDraft } from "./createPr";
 export type PrDraftText = { title: string; body: string };
-export type Project = { id: string; name: string; path: string; defaultBase: string; baseSetByUser?: boolean };
 export type QuickAction = { id: string; title: string; command: string; pinned?: boolean };
+export type Project = {
+  id: string; name: string; path: string; defaultBase: string; baseSetByUser?: boolean;
+  /** BUILD, START SERVER…: shown on every worktree of the project, run in the one you are in (see shared/quickActions.ts) */
+  quickActions?: QuickAction[];
+};
 export type Worktree = {
-  id: string; projectId: string; name: string; title: string; path: string; branch: string; archived: boolean; root?: boolean; quickActions?: QuickAction[];
+  id: string; projectId: string; name: string; title: string; path: string; branch: string; archived: boolean; root?: boolean;
   /** a repoless chat's folder in the app's hidden data directory: no project, no git (see shared/scratch.ts) */
   scratch?: true;
 };
@@ -123,7 +127,11 @@ export type Job = { id: string; scopeId: string; termId: string; cwd: string; cm
 export type PtyState = { id: string; scopeId: string; termId: string; running: boolean; failed: boolean; done?: boolean };
 export type CommitInfo = { files: string; changed: number; log: { hash: string; subject: string; author: string; age: string }[]; branch: string; ahead: number };
 export type Appearance = { theme: "dark" | "light" | "auto"; background: "opaque" | "frost" | "frost2" };
-export type State = { projects: Project[]; worktrees: Worktree[]; chats: Chat[]; keys: ApiKey[]; defaultKeyId?: string; appearance: Appearance; models?: Partial<Record<Provider, string[]>> };
+export type State = {
+  projects: Project[]; worktrees: Worktree[]; chats: Chat[]; keys: ApiKey[]; defaultKeyId?: string; appearance: Appearance; models?: Partial<Record<Provider, string[]>>;
+  /** standing instructions appended to every chat's prompt (see shared/instructions.ts) */
+  instructions?: import("./instructions").Instruction[];
+};
 export type PermissionRequest = { id: string; chatId: string; tool: string; input: unknown };
 export type { ConnectorUsage, UsageWindow } from "./usage";
 
@@ -188,9 +196,9 @@ export type Api = {
   removeKey(id: string): Promise<void>;
   onPermission(cb: (r: PermissionRequest) => void): () => void;
   answerPermission(id: string, allow: boolean): Promise<void>;
-  addQuickAction(worktreeId: string, title: string, command: string): Promise<void>;
-  setQuickActionPinned(worktreeId: string, actionId: string, pinned: boolean): Promise<void>;
-  deleteQuickAction(worktreeId: string, actionId: string): Promise<void>;
+  addQuickAction(projectId: string, title: string, command: string): Promise<void>;
+  setQuickActionPinned(projectId: string, actionId: string, pinned: boolean): Promise<void>;
+  deleteQuickAction(projectId: string, actionId: string): Promise<void>;
   runCommand(worktreeId: string, cmd: string): Promise<{ out: string; code: number }>;
   ptyCreate(scopeId: string, termId: string, cwd: string, cols: number, rows: number): Promise<string>;
   ptyWrite(id: string, data: string): Promise<void>;
@@ -209,6 +217,7 @@ export type Api = {
   previewArtifact(worktreeId: string, target: string): Promise<{ kind: "url" | "image" | "pdf" | "markdown" | "html" | "text" | "unsupported"; content: string }>;
   openExternal(url: string): Promise<void>;
   setAppearance(a: Partial<Appearance>): Promise<void>;
+  setInstructions(items: import("./instructions").Instruction[]): Promise<void>;
   effectiveTheme(): Promise<"dark" | "light">;
   onTheme(cb: (t: "dark" | "light") => void): () => void;
   repoInfo(projectId: string): Promise<RepoInfo>;

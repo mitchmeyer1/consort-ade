@@ -13,6 +13,7 @@ import { PHASES, type Chat, type Block, type Phase, type PermissionRequest } fro
 import { advancePlan, finishPlan, parsePlan, PLAN_MARKER, startPlan, STEP_MARKER } from "../shared/planProgress";
 import { firstPrompt, reviewDeliverable } from "../shared/skillSections";
 import { FOLLOWUP_PROMPT } from "../shared/followups";
+import { withInstructions } from "../shared/instructions";
 
 // ponytail: phase tracked via text markers so claude + codex share one mechanism
 const PHASE_PROMPT = `For EVERY new prompt, first assess the task and plan your approach before doing work. The ADE starts at waiting during this assessment.
@@ -431,7 +432,7 @@ async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, 
       abortController: ac,
       includePartialMessages: true,
       settingSources: ["user", "project", "local"],
-      systemPrompt: { type: "preset", preset: "claude_code", append: `${PHASE_PROMPT}\n\n${phiPrompt(keyAllowsPhi(chat))}` },
+      systemPrompt: { type: "preset", preset: "claude_code", append: withInstructions(`${PHASE_PROMPT}\n\n${phiPrompt(keyAllowsPhi(chat))}`, store.data.instructions) },
       env: agentEnvironment(cwd, { ...envWithout("ANTHROPIC_API_KEY"), ...loginEnv(keyOf(chat)), ...dockerRunEnvironment(chat.id), ...delegateModelEnv(chat), ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}) }),
       permissionMode: chat.autoApprove ? "bypassPermissions" : "acceptEdits",
       // permits a later switch into bypass; canUseTool still gates every call
@@ -507,7 +508,7 @@ async function runCodex(chat: Chat, cwd: string, apiKey: string, text: string, a
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
     const thread = chat.sessionId ? codex.resumeThread(chat.sessionId, opts) : codex.startThread(opts);
-    const prompt = `${PHASE_PROMPT}\n\n${phiPrompt(keyAllowsPhi(chat))}\n\n${boundedPrompt(cwd, text)}`;
+    const prompt = `${withInstructions(`${PHASE_PROMPT}\n\n${phiPrompt(keyAllowsPhi(chat))}`, store.data.instructions)}\n\n${boundedPrompt(cwd, text)}`;
     const { events } = await thread.runStreamed(prompt, { signal: ac.signal });
     for await (const ev of events) {
       if (ev.type === "thread.started") chat.sessionId = ev.thread_id;

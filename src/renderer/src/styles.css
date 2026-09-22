@@ -122,6 +122,14 @@ details.tool pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--lin
 .drawer .dbody { flex: 1; overflow: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; }
 .card h4 { margin: 0 0 8px; font-size: 10px; letter-spacing: .28em; text-transform: uppercase; color: var(--dim); font-weight: 600; }
+/* standing instructions: one line each, a checkbox to pause it, × to drop it */
+.instr { display: flex; align-items: flex-start; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); font-size: 14px; line-height: 1.4; cursor: pointer; }
+.instr input { margin-top: 3px; }
+.instr .grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.instr.off .grow { color: var(--dim); text-decoration: line-through; text-decoration-color: var(--line2); }
+.instr .icon { color: var(--dim); } .instr .icon:hover { color: var(--fg); }
+.instr-add { display: flex; gap: 8px; margin-top: 10px; }
+.instr-add input { flex: 1; padding: 9px 12px; border-radius: 3px; background: var(--bg); font-size: 14px; }
 .krow { display: flex; gap: 8px; align-items: center; padding: 4px 0; }
 .krow .grow { flex: 1; min-width: 0; }
 .term { font: 11.5px/1.5 var(--mono); }
@@ -617,7 +625,9 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 .sidechat-input textarea { flex: 1; border: none; background: none; resize: none; padding: 4px 2px; max-height: 120px; }
 .sidechat-input textarea:focus { border: none; }
 .composer-terminal .xtpane { border: none; padding: 0; min-width: 0; }
-.composer.card textarea { border: none; background: none; padding: 4px 4px; min-height: 28px; max-height: 240px; font-size: 14.5px; line-height: 1.5; resize: none; }
+/* flex: none matters: in this column flexbox the inherited flex: 1 collapsed the basis to zero and the height the
+   resize code sets was ignored, so the box never grew. Ten lines is the ceiling; past that it scrolls. */
+.composer.card textarea { flex: none; border: none; background: none; padding: 4px 4px; min-height: calc(1.5em + 8px); max-height: calc(1.5em * 10 + 8px); overflow-y: hidden; font-size: 14.5px; line-height: 1.5; resize: none; }
 .composer.card textarea:focus { border: none; }
 .composer .cbar { display: flex; align-items: center; gap: 8px; }
 .composer .cbar .grow { flex: 1; }
@@ -642,7 +652,7 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 
 .topbar select.modelpick { max-width: 190px; font-family: var(--mono); font-size: 11px; }
 
-/* light mode: angel on a dark oval */
+/* light mode: the mark on a dark oval */
 
 
 
@@ -651,7 +661,7 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 
 /* mark sits in a mandorla (almond halo): fixed 5:7, pointed top and bottom; dark in light mode, invisible in dark */
 .markwrap { display: inline-grid; place-items: center; aspect-ratio: 4 / 5; flex-shrink: 0; }
-.markwrap .mark { display: block; width: 56%; height: 66%; }
+.markwrap .mark { display: block; width: 74%; height: 62%; }
 .brand .markwrap { width: 60px; }
 .empty .markwrap { width: 300px; margin: 0 auto 8px; }
 :root[data-theme="light"] .markwrap { background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 125'><path fill='%23141311' d='M50 0 C 104 26, 104 99, 50 125 C -4 99, -4 26, 50 0 Z'/></svg>") center / 100% 100% no-repeat; }
@@ -700,7 +710,7 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 /* new content arrived while you were scrolled up: a thin blue line glowing along the seam under the scroll area */
 .new-below { position: relative; flex: none; height: 0; width: 100%; padding: 0; margin: 0; border: none; border-radius: 0 !important; background: none; pointer-events: none; opacity: 0; transition: opacity .25s; z-index: 2; overflow: visible; }
 .new-below::before { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 14px; }
-.new-below::after { content: ""; position: absolute; left: 6%; right: 6%; bottom: 0; height: 2px; border-radius: 2px; background: linear-gradient(90deg, transparent, #5b9dff 20%, #8fbcff 50%, #5b9dff 80%, transparent); box-shadow: 0 0 10px 2px rgba(91,157,255,.55), 0 -6px 18px rgba(91,157,255,.25); }
+.new-below::after { content: ""; position: absolute; left: 44%; right: 44%; bottom: 0; height: 2px; border-radius: 2px; background: linear-gradient(90deg, transparent, #5b9dff 20%, #8fbcff 50%, #5b9dff 80%, transparent); box-shadow: 0 0 6px 1px rgba(91,157,255,.55), 0 -2px 7px rgba(91,157,255,.25); }
 .new-below.on { opacity: 1; pointer-events: auto; cursor: pointer; animation: new-below-pulse 1.5s ease-in-out infinite; }
 .new-below.on:hover { animation-play-state: paused; opacity: 1; }
 @keyframes new-below-pulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }

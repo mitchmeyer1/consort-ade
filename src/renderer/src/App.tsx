@@ -4,7 +4,7 @@ import { canRestore, scrollKey, scrollMemory } from "../../shared/scrollMemory";
 import { PhaseStrip } from "./PhaseStrip";
 import { defaultConnector, selectedModel } from "../../shared/defaultConnector";
 import { modelTiers } from "../../shared/modelTiers";
-import React, { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { lastPrompt } from "../../shared/lastPrompt";
 import { connectorAccess, formatAge, formatReset, modelBlock, usageTone, type ConnectorUsage } from "../../shared/usage";
 import { MODELS, modelOptions, PHASES, phasesFor, type Api, type Block, type Chat, type CommitInfo, type Phase, type PtyState, type PermissionRequest, type Project, type RepoInfo, type RootStatus, type State, type Worktree, type WorktreeStatus } from "../../shared/types";
@@ -15,6 +15,7 @@ import { Lockup, Mark } from "./Logo";
 import { artifactLinkAction, artifactLinks, artifactWhen, chatArtifacts, localImageTarget, withFrameScrollbars } from "../../shared/artifacts";
 import { parseFollowups, type Followup } from "../../shared/followups";
 import { isScratch, scratchChats } from "../../shared/scratch";
+import { BREVITY, type Instruction } from "../../shared/instructions";
 import { attachmentName, isImageAttachment } from "../../shared/attachments";
 import { reminderLabel } from "../../shared/reminders";
 import { prChatName } from "../../shared/prChat";
@@ -320,7 +321,7 @@ export function App() {
             </div>
           ) : <span className="title">{crumb}</span>}
           <div className="tabs">
-            {worktree?.quickActions?.filter((action) => action.pinned).map((action) => (
+            {worktree && wtProject?.quickActions?.filter((action) => action.pinned).map((action) => (
               <button key={action.id} className="pinned-action" title={`Run ${action.title} in ${worktree.path}`} onClick={() => runQuickAction(worktree, action)}><Ico n="star" />{action.title}</button>
             ))}
             {/* the same dots the sidebar shows, so a process running in this worktree is visible from the page it is running for */}
@@ -865,6 +866,7 @@ const lastText = (c: Chat) => {
 };
 
 function WorktreePage({ wt, state, openForm, onSelect, onRunAction }: { wt: Worktree; state: State; openForm: boolean; onSelect: (s: Sel) => void; onRunAction: (wt: Worktree, action: { title: string; command: string }) => void }) {
+  const project = state.projects.find((p) => p.id === wt.projectId);
   const [revision, setRevision] = useState(0);
   const st = useStatus(wt.id, revision);
   const [committing, setCommitting] = useState(false);
@@ -941,7 +943,7 @@ function WorktreePage({ wt, state, openForm, onSelect, onRunAction }: { wt: Work
           <div className="path">{wt.path}</div>
         </div>
         </div>
-        <QuickActions key={wt.id} wt={wt} onRun={(action) => onRunAction(wt, action)} />
+        {project && <QuickActions key={wt.id} project={project} wt={wt} onRun={(action) => onRunAction(wt, action)} />}
       </div>
       <div className="actions">
         <button className="primary" onClick={() => !needKey() && setForm((f) => !f)}><Ico n="quill" /> New chat</button>
@@ -1018,7 +1020,8 @@ function WorktreePage({ wt, state, openForm, onSelect, onRunAction }: { wt: Work
   );
 }
 
-function QuickActions({ wt, onRun }: { wt: Worktree; onRun: (action: { title: string; command: string }) => void }) {
+// the project's actions, run in this worktree
+function QuickActions({ project, wt, onRun }: { project: Project; wt: Worktree; onRun: (action: { title: string; command: string }) => void }) {
   const [adding, setAdding] = useState(false);
   const [title, setTitle] = useState("");
   const [command, setCommand] = useState("");
@@ -1028,21 +1031,21 @@ function QuickActions({ wt, onRun }: { wt: Worktree; onRun: (action: { title: st
   const save = async () => {
     if (busy || !title.trim() || !command.trim()) return;
     setBusy(true); setError("");
-    try { await ade.addQuickAction(wt.id, title, command); setAdding(false); setTitle(""); setCommand(""); }
+    try { await ade.addQuickAction(project.id, title, command); setAdding(false); setTitle(""); setCommand(""); }
     catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
   };
   const remove = async () => {
     if (!deleting || busy) return;
     setBusy(true); setError("");
-    try { await ade.deleteQuickAction(wt.id, deleting.id); setDeleting(null); }
+    try { await ade.deleteQuickAction(project.id, deleting.id); setDeleting(null); }
     catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
   };
   return <section className="quick-actions" aria-label="Quick actions">
     <h4>Quick actions</h4>
     <div className="quick-action-tiles">
-      {(wt.quickActions ?? []).map(action => <div className="quick-action-tile" key={action.id}>
+      {(project.quickActions ?? []).map(action => <div className="quick-action-tile" key={action.id}>
         <button className="quick-action-run" title={`Run ${action.title} in ${wt.path}`} onClick={() => onRun(action)}>
           <Ico n="terminal" /><span>{action.title}</span>
         </button>
@@ -1051,7 +1054,7 @@ function QuickActions({ wt, onRun }: { wt: Worktree; onRun: (action: { title: st
           <div className="quick-action-menu-items">
             <button onClick={(e) => {
               e.currentTarget.closest("details")?.removeAttribute("open");
-              ade.setQuickActionPinned(wt.id, action.id, !action.pinned).catch((e) => alert(e.message));
+              ade.setQuickActionPinned(project.id, action.id, !action.pinned).catch((e) => alert(e.message));
             }}>{action.pinned ? "Unpin from header" : "Pin to header"}</button>
             <button onClick={(e) => { e.currentTarget.closest("details")?.removeAttribute("open"); setError(""); setDeleting(action); }}>Delete action…</button>
           </div>
@@ -1065,13 +1068,13 @@ function QuickActions({ wt, onRun }: { wt: Worktree; onRun: (action: { title: st
     </>}>
       <Field label="Title"><input aria-label="Action title" autoFocus value={title} onChange={e => setTitle(e.target.value)} placeholder="BUILD" disabled={busy} /></Field>
       <Field label="Bash command"><textarea aria-label="Bash command" className="quick-action-code" rows={6} spellCheck={false} value={command} onChange={e => setCommand(e.target.value)} placeholder="pnpm package:mac" disabled={busy} /></Field>
-      <div className="m">Saved only for {wt.root ? "Root" : wt.title}. Runs in {wt.path}.</div>
+      <div className="m">Saved for every worktree in {project.name}. Runs in the worktree you press it from — here, {wt.path}.</div>
       {error && <div className="error" role="alert">{error}</div>}
     </Dialog>}
     {deleting && <Dialog title="Delete quick action" onClose={() => { if (!busy) setDeleting(null); }} footer={<>
       <button disabled={busy} onClick={() => setDeleting(null)}>Cancel</button>
       <button disabled={busy} onClick={remove}>{busy ? "Deleting…" : "Delete action"}</button>
-    </>}><p>Delete “{deleting.title}” from this workspace? Running terminals will stay open.</p>{error && <div className="error" role="alert">{error}</div>}</Dialog>}
+    </>}><p>Delete “{deleting.title}” from {project.name}? It disappears from every worktree. Running terminals will stay open.</p>{error && <div className="error" role="alert">{error}</div>}</Dialog>}
   </section>;
 }
 
@@ -1598,19 +1601,51 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
   // or sending a message of your own, goes back to following.
   const messagesEl = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
+  const seenContent = useRef<string | null>(null);
   const [unseen, setUnseen] = useState(false);
   const nearBottom = (el: HTMLElement) => el.scrollHeight - el.scrollTop - el.clientHeight < 48;
   const onMessagesScroll = () => { const el = messagesEl.current; if (!el) return; pinned.current = nearBottom(el); if (pinned.current) setUnseen(false); };
   const jump = () => { pinned.current = true; setUnseen(false); bottom.current?.scrollIntoView({ block: "end" }); };
-  useEffect(() => { if (pinned.current) bottom.current?.scrollIntoView({ block: "end" }); else setUnseen(true); }, [chat.messages, perms.length]);
+  // A pane starts clean for the chat it is showing.  In particular, an update to another chat
+  // must never leave its "new below" indicator on the newly selected one.
+  const visibleContent = `${chat.id}:${chat.messages.map((m) => `${m.id}:${m.blocks.map((b) => b.type === "text" ? b.text.length : b.type).join(",")}`).join("|")}:${perms.map((p) => p.id).join(",")}`;
+  useEffect(() => { pinned.current = true; seenContent.current = null; setUnseen(false); }, [chat.id]);
+  useEffect(() => {
+    if (seenContent.current === null) {
+      seenContent.current = visibleContent;
+      bottom.current?.scrollIntoView({ block: "end" });
+      return;
+    }
+    if (seenContent.current === visibleContent) return;
+    seenContent.current = visibleContent;
+    if (pinned.current) bottom.current?.scrollIntoView({ block: "end" }); else setUnseen(true);
+  }, [visibleContent]);
   // Commit shortcut: the composer becomes a commit-message box with a 5s fuse. Typing defuses it; silence lets the AI write the message.
   const [commit, setCommit] = useState<{ count: number; typed: boolean } | null>(null);
   const text = commit ? commitText : draft.text;
   const setText = (value: string) => { if (commit) setCommitText(value); else chatDrafts.update(chat.id, { text: value }); };
-  useEffect(() => {
-    const input = box.current;
-    if (input) { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 240) + "px"; }
+  // The box grows with what you type, up to ten lines (or a third of a short window), then scrolls.
+  // This sets the actual height; the CSS max-height is the fallback for the same ceiling.
+  const resizeComposer = (input: HTMLTextAreaElement | null) => {
+    if (!input) return;
+    const cs = getComputedStyle(input);
+    const line = parseFloat(cs.lineHeight) || 22;
+    const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+    const max = Math.min(Math.round(line * 10 + pad), Math.max(line * 3 + pad, Math.floor(window.innerHeight / 3)));
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, max)}px`;
+    input.style.overflowY = input.scrollHeight > max ? "auto" : "hidden";
+  };
+  // This must be a layout effect: a normal effect can measure the one-line DOM just before
+  // React commits the controlled value that wrapped onto line two.
+  useLayoutEffect(() => {
+    resizeComposer(box.current);
   }, [text]);
+  useEffect(() => {
+    const onResize = () => resizeComposer(box.current);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
   const armCommit = () => { if (chat.running || commit) return; setCommitText(""); setCommit({ count: 5, typed: false }); requestAnimationFrame(() => box.current?.focus()); };
   const fireCommit = (message?: string) => {
     setCommit(null); setCommitText("");
@@ -1726,8 +1761,13 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
           <XTermPane key={chat.id} scope={{ id: worktree.id, cwd: worktree.path, title: worktree.title }} termId={`composer-${chat.id}`} active failed={false} done={composerDone} />
         </div>}
         <div style={code || side ? { display: "none" } : undefined} className={"composer card" + (over ? " over" : "") + (commit ? " committing" : "")}>
-          <textarea ref={box} value={text} rows={1} onChange={(e) => { setText(e.target.value); if (commit && !commit.typed && e.target.value) setCommit({ ...commit, typed: true }); }} placeholder={placeholder}
-            onInput={(e) => { const t = e.currentTarget; t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 240) + "px"; }}
+          <textarea ref={box} value={text} rows={1} onChange={(e) => {
+            const input = e.currentTarget;
+            setText(input.value);
+            if (commit && !commit.typed && input.value) setCommit({ ...commit, typed: true });
+            // The native input event fires before the controlled value has been committed.
+            requestAnimationFrame(() => resizeComposer(input));
+          }} placeholder={placeholder}
             onKeyDown={(e) => {
               if (e.key === "Escape" && commit) { e.preventDefault(); setCommit(null); setCommitText(""); return; }
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); }
@@ -2210,6 +2250,34 @@ function Meters({ usage, signedOut, now }: { usage?: ConnectorUsage; signedOut: 
   );
 }
 
+/* standing instructions for every chat: add a line, switch it off without losing it, remove it */
+function InstructionsCard({ items }: { items: Instruction[] }) {
+  const [draft, setDraft] = useState("");
+  const save = (next: Instruction[]) => ade.setInstructions(next).catch((e) => alert(e.message));
+  const add = (text: string) => { const t = text.trim(); if (!t) return; save([...items, { id: crypto.randomUUID(), text: t, enabled: true }]); setDraft(""); };
+  const hasBrevity = items.some((i) => i.text === BREVITY);
+  return (
+    <div className="card instructions">
+      <h4><Ico n="quill" />Every chat
+        {!hasBrevity && <span className="h4-actions"><button className="icon" title="Add the brevity instruction" onClick={() => add(BREVITY)}>＋ brevity</button></span>}
+      </h4>
+      <div className="conn-note">Standing instructions appended to every chat's prompt, on every connector and model. They apply from the next message.</div>
+      {items.map((i) => (
+        <label key={i.id} className={"instr" + (i.enabled ? "" : " off")}>
+          <input type="checkbox" checked={i.enabled} onChange={(e) => save(items.map((x) => x.id === i.id ? { ...x, enabled: e.target.checked } : x))} />
+          <span className="grow">{i.text}</span>
+          <button className="icon" title="Remove" aria-label={`Remove instruction: ${i.text}`} onClick={(e) => { e.preventDefault(); save(items.filter((x) => x.id !== i.id)); }}>×</button>
+        </label>
+      ))}
+      <div className="instr-add">
+        <input value={draft} placeholder={items.length ? "Add another instruction…" : "e.g. Respond with brevity."} onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); add(draft); } }} />
+        <button disabled={!draft.trim()} onClick={() => add(draft)}>Add</button>
+      </div>
+    </div>
+  );
+}
+
 function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string) => void }) {
   const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
   const [savingName, setSavingName] = useState(false);
@@ -2266,6 +2334,7 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
         ))}
         {!state.keys.length && <div className="conn-note">No connectors yet.</div>}
       </div>
+      <InstructionsCard items={state.instructions ?? []} />
       <div className="card">
         <h4><Ico n="butterfly" />Appearance</h4>
         <div className="krow">

@@ -449,6 +449,11 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     applyAppearance();
     store.save();
   },
+  // standing instructions reach a chat on its next turn; running turns keep the prompt they started with
+  setInstructions: (items: import("../shared/instructions").Instruction[]) => {
+    store.data.instructions = items.map((i) => ({ id: i.id, text: i.text.trim(), enabled: !!i.enabled })).filter((i) => i.text);
+    store.save();
+  },
   addChat: (worktreeId: string, keyId: string, opts: { name?: string; model?: string; delegateModel?: string; remember?: boolean } = {}) => {
     const id = randomUUID();
     const key = store.data.keys.find((k) => k.id === keyId);
@@ -627,21 +632,24 @@ The Artifact tool is not available here. The deliverable is the review file: wri
 
 ${skill}${rubric}`;
   },
-  addQuickAction: (worktreeId: string, title: string, command: string) => {
-    const worktree = wt(worktreeId);
+  // quick actions are the project's: one BUILD for every worktree, run wherever you press it
+  addQuickAction: (projectId: string, title: string, command: string) => {
+    const p = project(projectId);
+    if (!p) throw new Error("Project not found.");
     if (!title.trim() || !command.trim()) throw new Error("Enter a title and Bash command.");
-    (worktree.quickActions ??= []).push({ id: randomUUID(), title: title.trim(), command });
+    (p.quickActions ??= []).push({ id: randomUUID(), title: title.trim(), command });
     store.save();
   },
-  setQuickActionPinned: (worktreeId: string, actionId: string, pinned: boolean) => {
-    const action = wt(worktreeId).quickActions?.find((action) => action.id === actionId);
+  setQuickActionPinned: (projectId: string, actionId: string, pinned: boolean) => {
+    const action = project(projectId)?.quickActions?.find((action) => action.id === actionId);
     if (!action) throw new Error("Quick action not found.");
     action.pinned = pinned;
     store.save();
   },
-  deleteQuickAction: (worktreeId: string, actionId: string) => {
-    const worktree = wt(worktreeId);
-    worktree.quickActions = (worktree.quickActions ?? []).filter((action) => action.id !== actionId);
+  deleteQuickAction: (projectId: string, actionId: string) => {
+    const p = project(projectId);
+    if (!p) throw new Error("Project not found.");
+    p.quickActions = (p.quickActions ?? []).filter((action) => action.id !== actionId);
     store.save();
   },
   runCommand: (worktreeId: string, cmd: string) => git.runCommand(wt(worktreeId).path, cmd),

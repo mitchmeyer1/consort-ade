@@ -6,6 +6,7 @@ import ts from 'typescript';
 import * as planProgress from '../src/shared/planProgress.ts';
 import * as skillSections from '../src/shared/skillSections.ts';
 import * as followups from '../src/shared/followups.ts';
+import * as instructions from '../src/shared/instructions.ts';
 const require = createRequire(import.meta.url);
 const compiled = ts.transpileModule(readFileSync(new URL('../src/main/agents.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -31,6 +32,7 @@ function fixture(autoApprove = false) {
     '../shared/planProgress': planProgress,
     '../shared/skillSections': skillSections,
     '../shared/followups': followups,
+    '../shared/instructions': instructions,
     '@openai/codex-sdk': { Codex: class {} },
     '@anthropic-ai/claude-agent-sdk': { query: args => {
       calls.push(args);

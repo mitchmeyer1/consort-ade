@@ -1,10 +1,11 @@
 import React from "react";
-// Violin glyph, cream on black, run through a turbulence warp for the melty look
-// PNG is white-on-black; a luminance mask turns it into currentColor on transparent, so it follows the theme
-import mask from "./assets/angel-mask.png"; // pre-thresholded alpha mask (magick: threshold 50%, alpha copy, trim)
+// The muses: three figures in a ring, cream on black. The angel with the violin stays in assets as the
+// previous mark (angel.png / angel-mask.png) should we want it back.
+// PNG source is white-on-black; a thresholded alpha mask paints it in currentColor so it follows the theme
+import mask from "./assets/muses-mask.png"; // magick: gray, threshold 50%, trim, resize 800, alpha copy
 
 const MASK = { WebkitMaskImage: `url(${mask})`, maskImage: `url(${mask})` } as React.CSSProperties;
-// the wrapper becomes a dark oval in light mode so the angel stays cream-on-black
+// the wrapper becomes a dark oval in light mode so the mark stays cream-on-black
 export const Mark = ({ className }: { className?: string }) => (
   <span className={"markwrap " + (className ?? "")}><span className="mark" style={MASK} aria-label="Consort" /></span>
 );

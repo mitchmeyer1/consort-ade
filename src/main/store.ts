@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { defaultConnector } from "../shared/defaultConnector";
 import { codexModels } from "./codexModels";
 import { ensureRootWorktree } from "./rootWorktree";
+import { migrateQuickActions } from "../shared/quickActions";
 import type { State, Chat, Appearance } from "../shared/types";
 
 type Persisted = State & { secrets: Record<string, string> };
@@ -45,6 +46,8 @@ export class Store {
       ensureRootWorktree(this.data.worktrees, p, existing?.branch ?? "(unknown)");
     }
     for (const w of this.data.worktrees) { w.title ??= w.name; w.archived ??= false; }
+    // quick actions used to live on each worktree; they belong to the project
+    migrateQuickActions(this.data.projects, this.data.worktrees);
   }
 
   public(): State {
