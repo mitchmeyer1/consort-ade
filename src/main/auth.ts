@@ -2,6 +2,7 @@ import { app } from "electron";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { promisify } from "node:util";
 import { store } from "./store";
 import type { ApiKey } from "../shared/types";
@@ -17,6 +18,8 @@ export const codexBin = () => nm("@openai/codex-darwin-arm64/vendor/aarch64-appl
 export const CONFIG_ENV = { claude: "CLAUDE_CONFIG_DIR", codex: "CODEX_HOME" } as const;
 export const loginEnv = (key: ApiKey | undefined): Record<string, string> =>
   key?.auth === "login" && key.configDir ? { [CONFIG_ENV[key.provider]]: key.configDir } : {};
+/** The directory Codex reads for globally available skills for this connector. */
+export const codexHome = (key: ApiKey) => key.configDir ?? process.env.CODEX_HOME ?? join(homedir(), ".codex");
 const keyById = (id: string) => { const k = store.data.keys.find((k) => k.id === id); if (!k) throw new Error("Connector not found"); return k; };
 
 const shq = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;

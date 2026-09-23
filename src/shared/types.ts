@@ -33,6 +33,16 @@ export type { IssueDetail, IssueInfo, IssueLink } from "./issues";
 export type { PrDraft } from "./createPr";
 export type PrDraftText = { title: string; body: string };
 export type QuickAction = { id: string; title: string; command: string; pinned?: boolean };
+/** An extension installed into the native configuration directory of one connector. */
+export type InstalledExtension = {
+  id: string;
+  connectorId: string;
+  provider: Provider;
+  kind: "plugin" | "skill";
+  name: string;
+  source?: string;
+  installedAt: number;
+};
 /** one repo of a workspace: which project it came from and the folder it sits in under the workspace path */
 export type WorkspaceRepo = { projectId: string; dir: string };
 export type Project = {
@@ -146,6 +156,8 @@ export type CommitInfo = { files: string; changed: number; log: { hash: string; 
 export type Appearance = { theme: "dark" | "light" | "auto"; background: "opaque" | "frost" | "frost2" };
 export type State = {
   projects: Project[]; worktrees: Worktree[]; chats: Chat[]; keys: ApiKey[]; defaultKeyId?: string; appearance: Appearance; models?: Partial<Record<Provider, string[]>>;
+  /** Extensions Consort installed through Settings; their provider config remains the source of truth. */
+  extensions?: InstalledExtension[];
   /** standing instructions appended to every chat's prompt (see shared/instructions.ts) */
   instructions?: import("./instructions").Instruction[];
   /** the last model list each provider reported, with when; `models` above is derived from it */
@@ -244,6 +256,10 @@ export type Api = {
   openExternal(url: string): Promise<void>;
   setAppearance(a: Partial<Appearance>): Promise<void>;
   setInstructions(items: import("./instructions").Instruction[]): Promise<void>;
+  /** Install through Claude Code's own marketplace and plugin commands. */
+  installClaudePlugin(keyId: string, marketplace: string, plugin: string): Promise<InstalledExtension>;
+  /** Copy a standard SKILL.md directory into this connector's CODEX_HOME/skills directory. */
+  installCodexSkill(keyId: string, source: string): Promise<InstalledExtension>;
   /** re-ask every connector which models it offers; the picker updates when they answer */
   refreshModels(): Promise<void>;
   effectiveTheme(): Promise<"dark" | "light">;
@@ -267,6 +283,8 @@ export type Api = {
   updateReviewFinding(worktreeId: string, target: string, findingId: string, patch: { status?: FindingStatus; comment?: string }): Promise<Review>;
   /** submit one GitHub review: verdict, body (drafted by the model when blank and `draft` is set), and the queued comments inline when `inline` is set */
   submitReview(worktreeId: string, target: string, opts: { event: ReviewEvent; body: string; inline: boolean; draft: boolean }): Promise<{ review: Review; result: { url: string; event: ReviewEvent; body: string; drafted: boolean; inline: string[]; general: string[]; headMoved: boolean } }>;
+  /** "Comment all": queue every undecided finding with a comment and post the whole queue as one comments-only review */
+  commentAllFindings(worktreeId: string, target: string): Promise<{ review: Review; result: { url: string; event: ReviewEvent; body: string; drafted: boolean; inline: string[]; general: string[]; headMoved: boolean } }>;
   /** the PR's live head, state and review decision, and the findings whose file changed since they were verified */
   reviewDrift(worktreeId: string, target: string): Promise<{ head: string | null; state: string | null; reviewDecision: string; url: string; drifted: string[] }>;
   /** re-check one finding against the PR's current head with a read-only agent; the verdict is written into the file */

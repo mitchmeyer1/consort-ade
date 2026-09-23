@@ -16,11 +16,11 @@ import { isWorkspace, repoDirs, reposForPr, slugify, workspaceSources } from "..
 import * as ws from "./workspaces";
 import { probeClaudeModels } from "./claudeModels";
 import { forgetCodexModels } from "./codexModels";
-import type { Project, RepoResult, RepoStatus, WorkspaceStatus, Worktree } from "../shared/types";
+import type { InstalledExtension, Project, RepoResult, RepoStatus, WorkspaceStatus, Worktree } from "../shared/types";
 import { askOnce, humanize, suggestTitle } from "./namer";
 import { parsePrSuggestion, prSuggestionPrompt } from "../shared/createPr";
 import { commitFromChat } from "./commitChat";
-import { authLoginCmd, authStatus } from "./auth";
+import { authLoginCmd, authStatus, claudeBin, codexHome, loginEnv } from "./auth";
 import { formatDuration } from "./ptyMarkers";
 import { usage } from "./usage";
 import * as ptys from "./ptys";
@@ -32,13 +32,13 @@ import { askSide } from "./sideChat";
 import { Reminders } from "./reminders";
 import { Notifier, type Notice } from "../shared/notices";
 import { SETUP_TERM, setupDoneNotice, setupStartNotice } from "../shared/worktreeSetup";
-import { findReview, readReview, reinvestigate, reviewDrift, setFinding, setFixRequest, submitReview, ReviewWatchers } from "./prReview";
+import { commentAll, findReview, readReview, reinvestigate, reviewDrift, setFinding, setFixRequest, submitReview, ReviewWatchers } from "./prReview";
 import { fixPrompt } from "../shared/review";
 import { pickReviewChat } from "../shared/reviewRunner";
 import { defaultConnector, selectedModel } from "../shared/defaultConnector";
 import { modelTiers } from "../shared/modelTiers";
 import { MODELS, type Api, type Appearance, type PrDraft } from "../shared/types";
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { homedir } from "node:os";
 
@@ -127,6 +127,14 @@ const project = (id: string) => store.data.projects.find((p) => p.id === id)!;
 const libraryDir = (...parts: string[]) => join(app.getPath("userData"), ...parts);
 const worktreesRoot = (p: Project) => libraryDir("worktrees", basename(p.path));
 const workspacesRoot = () => libraryDir("workspaces");
+
+function nativeCommand(file: string, args: string[], env: NodeJS.ProcessEnv) {
+  return new Promise<void>((done, fail) => execFile(file, args, { env, timeout: 60_000, maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
+    if (!error) return done();
+    const detail = String(stderr || stdout || error.message).trim().split("\n").slice(-3).join(" ");
+    fail(new Error(detail || `Command failed: ${file} ${args.join(" ")}`));
+  }));
+}
 
 /** the repos of a workspace as git targets; a source project that was removed is skipped */
 const targetsOf = (p: Project): ws.RepoTarget[] =>
@@ -475,6 +483,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   findReview: (id: string, pr?: number) => findReview(wt(id).path, pr),
   updateReviewFinding: (id: string, target: string, findingId: string, patch: { status?: import("../shared/review").FindingStatus; comment?: string }) => setFinding(artifactPath(id, target), findingId, patch),
   submitReview: (id: string, target: string, opts: { event: import("../shared/review").ReviewEvent; body: string; inline: boolean; draft: boolean }) => submitReview(artifactPath(id, target), opts, id),
+  commentAllFindings: (id: string, target: string) => commentAll(artifactPath(id, target), id),
   reviewDrift: (id: string, target: string) => reviewDrift(artifactPath(id, target)),
   // the worktree id lets the side job run on the review chat's connector and model rather than the Settings default
   reinvestigateFinding: (id: string, target: string, findingId: string) => reinvestigate(artifactPath(id, target), findingId, id),
@@ -569,6 +578,38 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   setInstructions: (items: import("../shared/instructions").Instruction[]) => {
     store.data.instructions = items.map((i) => ({ id: i.id, text: i.text.trim(), enabled: !!i.enabled })).filter((i) => i.text);
     store.save();
+  },
+  installClaudePlugin: async (keyId: string, marketplace: string, plugin: string): Promise<InstalledExtension> => {
+    const key = store.data.keys.find((k) => k.id === keyId);
+    if (!key || key.provider !== "claude") throw new Error("Choose a Claude connector.");
+    if (key.auth !== "login") throw new Error("Claude plugins need a Claude Code terminal-login connector.");
+    const name = plugin.trim();
+    if (!name) throw new Error("Enter a plugin name.");
+    const env = { ...process.env, ...loginEnv(key) };
+    const source = marketplace.trim();
+    if (source) await nativeCommand(claudeBin(), ["plugin", "marketplace", "add", source], env);
+    await nativeCommand(claudeBin(), ["plugin", "install", name], env);
+    const installed: InstalledExtension = { id: randomUUID(), connectorId: key.id, provider: "claude", kind: "plugin", name, ...(source ? { source } : {}), installedAt: Date.now() };
+    (store.data.extensions ??= []).push(installed);
+    store.save();
+    return installed;
+  },
+  installCodexSkill: (keyId: string, source: string): InstalledExtension => {
+    const key = store.data.keys.find((k) => k.id === keyId);
+    if (!key || key.provider !== "codex") throw new Error("Choose a Codex connector.");
+    const root = resolve(source);
+    if (!existsSync(root) || !statSync(root).isDirectory()) throw new Error("Choose a skill folder.");
+    if (!existsSync(join(root, "SKILL.md"))) throw new Error("That folder must contain SKILL.md.");
+    const name = basename(root).replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+    if (!name) throw new Error("Choose a folder with a valid name.");
+    const destination = join(codexHome(key), "skills", name);
+    if (existsSync(destination)) throw new Error(`A Codex skill named “${name}” is already installed for this connector.`);
+    mkdirSync(join(codexHome(key), "skills"), { recursive: true });
+    cpSync(root, destination, { recursive: true, force: false, errorOnExist: true });
+    const installed: InstalledExtension = { id: randomUUID(), connectorId: key.id, provider: "codex", kind: "skill", name, source: root, installedAt: Date.now() };
+    (store.data.extensions ??= []).push(installed);
+    store.save();
+    return installed;
   },
   addChat: (worktreeId: string, keyId: string, opts: { name?: string; model?: string; delegateModel?: string; remember?: boolean } = {}) => {
     const id = randomUUID();

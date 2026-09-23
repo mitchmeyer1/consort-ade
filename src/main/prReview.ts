@@ -8,7 +8,7 @@ import { promises as fs, watch, type FSWatcher } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import {
   applyVerdict, approvedFindings, commentableLines, draftBodyPrompt, driftBases, driftedFindings, fallbackReviewBody, parseReview, parseVerdict,
-  patchesToDiff, recordSubmission, reviewPayload, serializeReview, updateFinding, verdictSummary, verifiedHead,
+  patchesToDiff, queueAll, recordSubmission, reviewPayload, serializeReview, updateFinding, verdictSummary, verifiedHead,
   type FindingStatus, type Review, type ReviewEvent, type VerdictReport,
   pickReviewFile, reviewSummary, recordFixRequest, type ReviewSummary,
 } from "../shared/review";
@@ -210,6 +210,19 @@ export async function submitReview(path: string, opts: SubmitOptions, worktreeId
   });
   await writeReview(path, next);
   return { review: next, result: { url, event: opts.event, body, drafted, inline: built.inline.map((f) => f.id), general: built.general.map((f) => f.id), headMoved: !!live?.head && live.head !== review.head } };
+}
+
+/**
+ * "Comment all": queue every undecided finding that has a comment, then post the whole queue as
+ * one comments-only review with no verdict. The queue is written first, so a failed post leaves
+ * the findings queued rather than undecided and a retry from "Post to PR" picks them up.
+ */
+export async function commentAll(path: string, worktreeId?: string): Promise<{ review: Review; result: SubmitResult }> {
+  const { review } = await readReview(path);
+  const queued = queueAll(review);
+  if (!approvedFindings(queued).length) throw new Error("Nothing to comment: every finding with a prepared comment is already posted, ignored, or being fixed.");
+  if (queued !== review) await writeReview(path, queued);
+  return submitReview(path, { event: "COMMENT", body: "", inline: true, draft: false }, worktreeId);
 }
 
 /** Watch a review file (through its directory, so atomic saves are seen) and call back on change. */

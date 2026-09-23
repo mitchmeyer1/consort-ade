@@ -224,6 +224,18 @@ export function recordFixRequest(review: Review, id: string, chatId: string, at:
 
 export const approvedFindings = (review: Review) => review.findings.filter((f) => f.status === "approved" && f.comment?.trim());
 
+/** the undecided findings "Comment all" would queue: those with a prepared comment to post */
+export const queueableFindings = (review: Review) => review.findings.filter((f) => f.status === "pending" && f.comment?.trim());
+
+/**
+ * "Comment all": trust the review and queue every undecided finding that has a comment. Ignored,
+ * fixing, posted and dropped findings are decisions already made and stay as they are.
+ */
+export function queueAll(review: Review): Review {
+  const ids = new Set(queueableFindings(review).map((f) => f.id));
+  return ids.size ? { ...review, findings: review.findings.map((f) => (ids.has(f.id) ? { ...f, status: "approved" as FindingStatus } : f)) } : review;
+}
+
 /** Defects by severity, then items by category, in the order the document shows them. */
 export function groupFindings(findings: Finding[]) {
   const defects = SEVERITIES.map((severity) => ({ key: severity, label: SEVERITY_LABELS[severity], findings: findings.filter((f) => f.kind === "defect" && f.severity === severity) }));

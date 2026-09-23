@@ -9,6 +9,7 @@ import { lastPrompt } from "../../shared/lastPrompt";
 import { connectorAccess, formatAge, formatReset, modelBlock, usageTone, type ConnectorUsage } from "../../shared/usage";
 import { MODELS, modelOptions, PHASES, phasesFor, type Api, type Block, type Chat, type CommitInfo, type Phase, type PtyState, type PermissionRequest, type Project, type RepoInfo, type RootStatus, type State, type Worktree, type WorktreeStatus } from "../../shared/types";
 import { chatStatus } from "../../shared/chatStatus";
+import { CHAT_MARKS, hasRollup, rollupLabel, rollupStatus } from "../../shared/statusRollup";
 import { ciLabel, ciTitle, type CiInfo } from "../../shared/ci";
 import { recentChats, recentWorktrees } from "../../shared/conversationOrder";
 import { Lockup, Mark } from "./Logo";
@@ -26,6 +27,7 @@ import { ISSUE_ROWS, issueBranch, issueChatName, issueFolder, type IssueInfo } f
 import { isReviewChat, reviewProgress } from "../../shared/reviewProgress";
 import { prNumberOf, type ReviewSummary } from "../../shared/review";
 import { firstPrompt, reviewDeliverable } from "../../shared/skillSections";
+import { quickActionParameters, resolveQuickAction } from "../../shared/quickActions";
 import { isReviewFile } from "../../shared/review";
 import { ReviewView } from "./ReviewView";
 import { planStages } from "../../shared/planProgress";
@@ -141,6 +143,30 @@ export const Badges = ({ st, pr = true }: { st: WorktreeStatus | null; pr?: bool
 export const Dots = ({ id, running, failed, done }: { id: string; running: Set<string>; failed: Set<string>; done: Set<string> }) => (
   <>{running.has(id) && <span className="live" title="a process is running here" />}{failed.has(id) && <span className="live dead" title="a process failed — open its terminal" />}{done.has(id) && !running.has(id) && !failed.has(id) && <span className="live done" title="a command finished here — click to clear" />}</>
 );
+/*
+ * A collapsed project still has to say what's going on underneath: the process dots of its hidden
+ * worktrees and one dot per chat mark, with a count when several chats share it. Loudest first.
+ */
+function Rollup({ chats, scopeIds, running, failed, done }: { chats: Chat[]; scopeIds: string[]; running: Set<string>; failed: Set<string>; done: Set<string> }) {
+  const r = rollupStatus(chats, scopeIds, { running, failed, done });
+  if (!hasRollup(r)) return null;
+  return (
+    <span className="rollup" aria-label="status of hidden worktrees and chats">
+      {r.running && <span className="live" title="a process is running in a worktree here" />}
+      {r.failed && <span className="live dead" title="a process failed in a worktree here — expand to find it" />}
+      {r.done && <span className="live done" title="a command finished in a worktree here" />}
+      {CHAT_MARKS.filter((m) => r.chats[m]).map((m) => {
+        const n = r.chats[m]!, label = rollupLabel(m, n);
+        return (
+          <span key={m} className={`rmark ${m}`} role="img" aria-label={label} title={label}>
+            <span className={`chat-dot ${m}`}>{m === "scheduled" && <ClockGlyph />}</span>
+            {n > 1 && <small>{n}</small>}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
 const PanelIcon = () => (
   <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
     <rect x="3" y="4.5" width="18" height="15" rx="3" /><path d="M9.5 4.5v15" />
@@ -204,6 +230,7 @@ export function Toaster({ onOpen }: { onOpen: (open: NonNullable<Toast["open"]>)
 
 export function App() {
   const [state, setState] = useState<State>(EMPTY);
+  const [actionArgs, setActionArgs] = useState<{ wt: Worktree; action: { title: string; command: string }; names: string[]; values: Record<string, string> }>();
   const [sel, setSel] = useState<Sel>();
   const [connectedAgentIds, setConnectedAgentIds] = useState<Set<string>>(new Set());
   // Panel state belongs to the selected view, not the underlying terminal scope.
@@ -307,7 +334,7 @@ export function App() {
     window.addEventListener("consort-open-chat", openChat);
     return () => window.removeEventListener("consort-open-chat", openChat);
   }, []);
-  const runQuickAction = (wt: Worktree, action: { title: string; command: string }) => {
+  const startQuickAction = (wt: Worktree, action: { title: string; command: string }) => {
     const termId = `action-${crypto.randomUUID()}`;
     termTabs.set(wt.id, [...(termTabs.get(wt.id) ?? ["t1"]), termId]);
     termLabels.set(`${wt.id}:${termId}`, action.title);
@@ -316,6 +343,16 @@ export function App() {
     pendingCmd.set(`${wt.id}:${termId}`, "bash -lc '" + action.command.replace(/'/g, "'\"'\"'") + "'");
     setTab("terminal");
     window.dispatchEvent(new CustomEvent("consort-terminal-added", { detail: { scopeId: wt.id, termId } }));
+  };
+  const runQuickAction = (wt: Worktree, action: { title: string; command: string }) => {
+    const names = quickActionParameters(action.command);
+    if (!names.length) return startQuickAction(wt, action);
+    setActionArgs({ wt, action, names, values: Object.fromEntries(names.map((name) => [name, ""])) });
+  };
+  const submitQuickAction = () => {
+    if (!actionArgs) return;
+    startQuickAction(actionArgs.wt, { ...actionArgs.action, command: resolveQuickAction(actionArgs.action.command, actionArgs.values) });
+    setActionArgs(undefined);
   };
   const signIn = async (keyId: string) => {
     let sc = worktree ? { id: worktree.id, cwd: worktree.path } : null;
@@ -405,6 +442,15 @@ export function App() {
         <Drawer key={viewKey} tab={tab} memoryKey={viewKey} state={state} chat={chat} worktree={worktree} scope={worktree ? { id: worktree.id, cwd: worktree.path, title: worktree.title } : project ? { id: project.id, cwd: project.path, title: project.name } : undefined}
           ptys={ptys} width={rightW} file={file} reviewPath={reviewFile?.path} onEdit={openEditor} onView={openMd} onSignIn={signIn} onClose={() => setTab(undefined)} />
       </>}
+      {actionArgs && <Dialog title={actionArgs.action.title} onClose={() => setActionArgs(undefined)} footer={<>
+        <button onClick={() => setActionArgs(undefined)}>Cancel</button>
+        <button className="primary" onClick={submitQuickAction}>Run action</button>
+      </>}>
+        <div className="m">Runs in {actionArgs.wt.path}.</div>
+        {actionArgs.names.map((name, index) => <Field key={name} label={name}>
+          <input autoFocus={index === 0} value={actionArgs.values[name]} placeholder={`Enter ${name}`} onChange={(e) => setActionArgs((current) => current ? { ...current, values: { ...current.values, [name]: e.target.value } } : current)} onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); submitQuickAction(); } }} />
+        </Field>)}
+      </Dialog>}
     </div>
   );
 }
@@ -567,14 +613,15 @@ function WorkspaceNode({ project: p, state, sel, running, failed, done, onSelect
     <div className="projnode workspace">
       <div className={"row project" + (active ? " active" : "") + (collapsed[p.id] ? " closed" : "")} onClick={() => onSelect({ type: "project", id: p.id })}>
         <span className="slot caret" title={collapsed[p.id] ? "Expand" : "Collapse"} onClick={(e) => { e.stopPropagation(); toggle(p.id); }}><Ico n="thorn" className="proj" /><span className="chev">{collapsed[p.id] ? "▸" : "▾"}</span></span>
-        <span className="grow" title={p.path}>{p.name}<span className="badge ws">workspace</span>{wt && <Dots id={wt.id} running={running} failed={failed} done={done} />}</span>
+        <span className="grow" title={p.path}>{p.name}{wt && <Dots id={wt.id} running={running} failed={failed} done={done} />}{collapsed[p.id] && <Rollup chats={chats} scopeIds={[]} running={running} failed={failed} done={done} />}</span>
         <span className="tools" onClick={(e) => e.stopPropagation()}>
           {wt && <button className="icon" title="New chat here" onClick={() => onSelect({ type: "worktree", id: wt.id, form: true })}>＋</button>}
           <button className="icon" title="Remove workspace" onClick={remove}>×</button>
         </span>
       </div>
       {!collapsed[p.id] && wt && <div className="wtlist"><div>
-        <div className={"row worktree" + (active ? " active" : "")} onClick={() => { onSelect({ type: "worktree", id: wt.id }); if (done.has(wt.id)) void ade.ptySeenScope(wt.id); }}>
+        {/* only the top line highlights when selected: the branch and repo lines beneath are its detail, not a second target */}
+        <div className="row worktree" onClick={() => { onSelect({ type: "worktree", id: wt.id }); if (done.has(wt.id)) void ade.ptySeenScope(wt.id); }}>
           <span className="slot"><Ico n="branch" className="wt" /></span>
           <span className="grow"><small className="branch" title={p.branch}>{p.branch}</small></span>
           {/* one line per repo: its name, then the same chips a worktree row shows */}
@@ -599,12 +646,15 @@ function ProjectNode({ project: p, state, sel, running, failed, done, onSelect, 
   const all = state.worktrees.filter((w) => w.projectId === p.id);
   const wts = recentWorktrees(all.filter((w) => w.root || showArchived || !w.archived), state.chats);
   const archivedN = all.filter((w) => w.archived).length;
+  // what the closed caret hides: the listed worktrees' process dots and their chats' marks
+  const wtIds = wts.map((w) => w.id);
+  const hiddenChats = collapsed[p.id] ? state.chats.filter((c) => wtIds.includes(c.worktreeId!)) : [];
   return (
     <div className="projnode">
       <div className={"row project" + (sel?.type === "project" && sel.id === p.id ? " active" : "") + (collapsed[p.id] ? " closed" : "")} onClick={() => onSelect({ type: "project", id: p.id })}>
         {/* the caret lives in the icon slot: icon at rest, caret on hover or while collapsed */}
         <span className="slot caret" title={collapsed[p.id] ? "Expand" : "Collapse"} onClick={(e) => { e.stopPropagation(); toggle(p.id); }}><Ico n="arch" className="proj" /><span className="chev">{collapsed[p.id] ? "▸" : "▾"}</span></span>
-        <span className="grow" title={p.path}>{p.name}<Dots id={p.id} running={running} failed={failed} done={done} /></span>
+        <span className="grow" title={p.path}>{p.name}<Dots id={p.id} running={running} failed={failed} done={done} />{collapsed[p.id] && <Rollup chats={hiddenChats} scopeIds={wtIds} running={running} failed={failed} done={done} />}</span>
         <span className="tools" onClick={(e) => e.stopPropagation()}>
           <button className="icon" title="New worktree" onClick={() => onSelect({ type: "project", id: p.id, form: true })}>＋</button>
           <button className="icon" title="Re-scan worktrees" onClick={() => ade.syncWorktrees(p.id)}>↻</button>
@@ -1420,6 +1470,7 @@ function QuickActions({ project, wt, manage = false, onRun }: { project: Project
     </>}>
       <Field label="Title"><input aria-label="Action title" autoFocus value={title} onChange={e => setTitle(e.target.value)} placeholder="BUILD" disabled={busy} /></Field>
       <Field label="Bash command"><textarea aria-label="Bash command" className="quick-action-code" rows={6} spellCheck={false} value={command} onChange={e => setCommand(e.target.value)} placeholder="pnpm package:mac" disabled={busy} /></Field>
+      <div className="m">Use {"{{name}}"} for a value requested before the command runs, for example: git checkout {"{{branch}}"}.</div>
       <div className="m">Saved for every worktree in {project.name}. {wt ? `Runs here in ${wt.path}.` : "It will run from the worktree you choose."}</div>
       {error && <div className="error" role="alert">{error}</div>}
     </Dialog>}
@@ -2609,8 +2660,7 @@ function InstructionsCard({ items }: { items: Instruction[] }) {
   const save = (next: Instruction[]) => ade.setInstructions(next).catch((e) => alert(e.message));
   const add = (text: string) => { const t = text.trim(); if (!t) return; save([...items, { id: crypto.randomUUID(), text: t, enabled: true }]); setDraft(""); };
   return (
-    <div className="card instructions">
-      <h4><Ico n="quill" />Every chat</h4>
+    <div className="instructions">
       <div className="conn-note">Standing instructions appended to every chat's prompt, on every connector and model. They apply from the next message.</div>
       {items.map((i) => (
         <div key={i.id} className={"instr" + (i.enabled ? "" : " off") + (open === i.id ? " open" : "")}>
@@ -2626,6 +2676,63 @@ function InstructionsCard({ items }: { items: Instruction[] }) {
       </div>
     </div>
   );
+}
+
+function SettingsSection({ icon, title, children, actions, initialOpen = true }: { icon: string; title: string; children: React.ReactNode; actions?: React.ReactNode; initialOpen?: boolean }) {
+  const [open, setOpen] = useState(initialOpen);
+  return <section className={`card settings-section ${open ? "open" : ""}`}>
+    <div className="settings-section-head">
+      <button className="settings-section-toggle" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        <span><Ico n={icon} />{title}</span><span className="settings-chevron">{open ? "▾" : "▸"}</span>
+      </button>
+      {actions && <span className="h4-actions">{actions}</span>}
+    </div>
+    {open && <div className="settings-section-body">{children}</div>}
+  </section>;
+}
+
+function ExtensionsCard({ state }: { state: State }) {
+  const [kind, setKind] = useState<"claude" | "codex">("claude");
+  const claude = state.keys.filter((k) => k.provider === "claude" && k.auth === "login");
+  const codex = state.keys.filter((k) => k.provider === "codex");
+  const [keyId, setKeyId] = useState("");
+  const [marketplace, setMarketplace] = useState("");
+  const [plugin, setPlugin] = useState("");
+  const [skillPath, setSkillPath] = useState("");
+  const [busy, setBusy] = useState(false);
+  const keys = kind === "claude" ? claude : codex;
+  const selected = keys.some((k) => k.id === keyId) ? keyId : keys[0]?.id ?? "";
+  const install = async () => {
+    if (!selected || busy) return;
+    setBusy(true);
+    try {
+      if (kind === "claude") await ade.installClaudePlugin(selected, marketplace, plugin);
+      else await ade.installCodexSkill(selected, skillPath);
+      setMarketplace(""); setPlugin(""); setSkillPath("");
+    } catch (e) { alert((e as Error).message); }
+    finally { setBusy(false); }
+  };
+  const chooseSkill = async () => { const path = await ade.pickFolder(); if (path) setSkillPath(path); };
+  const installed = (state.extensions ?? []).slice().sort((a, b) => b.installedAt - a.installedAt);
+  return <div className="extensions">
+    <div className="conn-note">Use each provider's native extension format. New chats load extensions installed for their selected connector.</div>
+    <div className="seg extension-kind">
+      <button className={kind === "claude" ? "on" : ""} onClick={() => setKind("claude")}>Claude plugin</button>
+      <button className={kind === "codex" ? "on" : ""} onClick={() => setKind("codex")}>Codex skill</button>
+    </div>
+    {!keys.length ? <div className="conn-note">Add a {kind === "claude" ? "Claude Code terminal-login" : "Codex"} connector first.</div> : <>
+      <Field label="Connector"><select value={selected} onChange={(e) => setKeyId(e.target.value)}>{keys.map((k) => <option key={k.id} value={k.id}>{k.name}</option>)}</select></Field>
+      {kind === "claude" ? <>
+        <Field label="Marketplace" optional><input value={marketplace} placeholder="aligned-marketplace/claude-plugins" onChange={(e) => setMarketplace(e.target.value)} /></Field>
+        <Field label="Plugin"><input value={plugin} placeholder="dan-hex-practices" onChange={(e) => setPlugin(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void install(); }} /></Field>
+        <div className="extension-actions"><button className="primary" disabled={busy || !plugin.trim()} onClick={install}>{busy ? "Installing…" : "Install plugin"}</button></div>
+      </> : <>
+        <Field label="Skill folder" info="Choose the folder containing SKILL.md."><div className="path-pick"><input readOnly value={skillPath} placeholder="No folder selected" /><button onClick={chooseSkill}>Choose…</button></div></Field>
+        <div className="extension-actions"><button className="primary" disabled={busy || !skillPath} onClick={install}>{busy ? "Installing…" : "Install skill"}</button></div>
+      </>}
+    </>}
+    {!!installed.length && <div className="extension-list">{installed.map((x) => <div className="extension-row" key={x.id}><span><Ico n={x.kind === "plugin" ? "star" : "quill"} />{x.name}</span><small>{state.keys.find((k) => k.id === x.connectorId)?.name ?? "Removed connector"} · {x.kind}</small></div>)}</div>}
+  </div>;
 }
 
 function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string) => void }) {
@@ -2671,22 +2778,19 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
   };
   return (
     <>
-      <div className="card connectors">
-        <h4><Ico n="fleur" />AI connectors
-          <span className="h4-actions">
+      <SettingsSection icon="fleur" title="AI connectors" actions={<>
             <button className="icon" title="Refresh sign-in state, usage and the model lists" aria-label="Refresh all connectors" onClick={() => { refreshStatus(); refreshUsage(true); ade.refreshModels().catch(() => {}); }}>↻</button>
             <button className="icon" title="Add a connector (API key or another CLI login)" onClick={() => setAdding(true)}>＋</button>
-          </span>
-        </h4>
+          </>}>
         {state.keys.map((k) => (
           <Connector key={k.id} k={k} isDefault={defaultConnector(state)?.id === k.id} status={status[k.id]} usage={usage[k.id]} now={now}
             onSignIn={() => onSignIn(k.id)} onRename={() => setRenaming({ id: k.id, name: k.name })} onRefresh={() => { refreshStatus(); refreshUsage(true, k.id); }} />
         ))}
         {!state.keys.length && <div className="conn-note">No connectors yet.</div>}
-      </div>
-      <InstructionsCard items={state.instructions ?? []} />
-      <div className="card">
-        <h4><Ico n="butterfly" />Appearance</h4>
+      </SettingsSection>
+      <SettingsSection icon="quill" title="Chat rules"><InstructionsCard items={state.instructions ?? []} /></SettingsSection>
+      <SettingsSection icon="star" title="Plugins + skills" initialOpen={false}><ExtensionsCard state={state} /></SettingsSection>
+      <SettingsSection icon="butterfly" title="Appearance">
         <div className="krow">
           <span className="grow">Mode</span>
           <div className="seg">
@@ -2699,7 +2803,7 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
             {([["opaque", "opaque"], ["frost", "frosted"], ["frost2", "frosted+"]] as const).map(([v, l]) => <button key={v} className={state.appearance.background === v ? "on" : ""} onClick={() => ade.setAppearance({ background: v })}>{l}</button>)}
           </div>
         </div>
-      </div>
+      </SettingsSection>
       {renaming && (
         <Dialog title="Rename connector" onClose={() => { if (!savingName) setRenaming(null); }} footer={<>
           <button disabled={savingName} onClick={() => setRenaming(null)}>Cancel</button>

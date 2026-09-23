@@ -6,7 +6,7 @@
  */
 import React, { useEffect, useRef, useState } from "react";
 import type { Api, Finding, FindingStatus, Review, Worktree } from "../../shared/types";
-import { CATEGORIES, CATEGORY_LABELS, EVENT_LABELS, REVIEW_EVENTS, SEVERITIES, SEVERITY_LABELS, allDecided, approvedFindings, groupFindings, reviewCounts, suggestedEvent, verifiedHead, type Category, type ReviewEvent, type Severity } from "../../shared/review";
+import { CATEGORIES, CATEGORY_LABELS, EVENT_LABELS, REVIEW_EVENTS, SEVERITIES, SEVERITY_LABELS, allDecided, approvedFindings, groupFindings, queueableFindings, reviewCounts, suggestedEvent, verifiedHead, type Category, type ReviewEvent, type Severity } from "../../shared/review";
 import { toasts } from "../../shared/toasts";
 
 const ade = (window as any).ade as Api;
@@ -45,6 +45,8 @@ export function ReviewView({ worktree, path }: { worktree: Worktree; path: strin
   // `at` changes on every click so the panel scrolls back into view even when it is already open
   const [finish, setFinish] = useState<{ inline: boolean; at: number } | null>(null);
   const [dismissed, setDismissed] = useState(false);
+  /** the "Comment all" confirmation is open */
+  const [confirmingAll, setConfirmingAll] = useState(false);
   const announced = useRef<string | undefined>(undefined);
 
   const load = () => ade.readReview(worktree.id, path).then(({ path: p, review }) => { setAbs(p); setReview(review); setErr(undefined); }, (e) => setErr(e.message));
@@ -115,11 +117,32 @@ export function ReviewView({ worktree, path }: { worktree: Worktree; path: strin
     finally { setBusy(false); }
   };
   const quickPost = () => submit({ event: "COMMENT", body: "", inline: true, draft: false });
+  // "Comment all": the dialog was the confirmation, so no second prompt here
+  const commentAll = async () => {
+    if (!review) return;
+    setConfirmingAll(false);
+    setBusy(true);
+    const id = toasts.start(`Posting every comment to PR #${review.pr}…`);
+    try {
+      const { review: next, result } = await ade.commentAllFindings(worktree.id, path);
+      setReview(next); setFinish(null);
+      const n = result.inline.length + result.general.length;
+      const parts = [`${n} comment${n === 1 ? "" : "s"} posted on PR #${review.pr}`];
+      if (result.general.length) parts.push(`${result.general.length} listed in the body, not on a diff line`);
+      if (result.headMoved) parts.push("the PR has newer commits, so GitHub may mark some outdated");
+      toasts.succeed(id, parts.join(" · "));
+      void checkDrift(false);
+    } catch (e) {
+      toasts.fail(id, `Couldn't post the comments on PR #${review.pr}`, (e as Error).message);
+      load();
+    } finally { setBusy(false); }
+  };
 
   if (err) return <div className="error">{err}</div>;
   if (!review) return <div className="m">loading…</div>;
   const counts = reviewCounts(review);
   const queued = counts.approved;
+  const queueable = queueableFindings(review).length;
   const groups = groupFindings(review.findings);
   const drifted = new Set(drift?.drifted ?? []);
   const visible = (f: Finding) => filter === "all" || (filter === "drifted" ? drifted.has(f.id) : f.status === filter);
@@ -149,6 +172,7 @@ export function ReviewView({ worktree, path }: { worktree: Worktree; path: strin
   return (
     <div className="rv">
       {fixing && <FixDialog f={fixing} onCancel={() => setFixing(undefined)} onStart={(note) => fixLocally(fixing, note)} />}
+      {confirmingAll && <CommentAllDialog review={review} onCancel={() => setConfirmingAll(false)} onConfirm={commentAll} />}
       <div className="rv-eyebrow"><Ico n="star" />Reviewer's writeup</div>
       <h1 className="rv-title">{review.title}</h1>
       <p className="rv-subtitle">
@@ -178,6 +202,7 @@ export function ReviewView({ worktree, path }: { worktree: Worktree; path: strin
         </div>
         <div className="rv-buttons">
           <button disabled={checking} title="Ask GitHub whether the PR has new commits that touch any finding" onClick={() => checkDrift(true)}>{checking ? "Checking…" : "Check for changes"}</button>
+          <button disabled={busy || !(queueable + queued)} title={queueable + queued ? `Trust the review: queue every undecided finding and post all ${queueable + queued} comments to the PR at once` : "Every finding with a comment is already posted, ignored, or being fixed"} onClick={() => setConfirmingAll(true)}>Comment all</button>
           <button disabled={busy} title="Approve, comment on, or request changes to the PR without posting the queued comments inline" onClick={() => setFinish({ inline: false, at: Date.now() })}>Submit review</button>
           <button className={showFinish?.inline ? "on" : "primary"} disabled={!queued || busy} title={queued ? `Send the ${queued} queued comment${queued === 1 ? "" : "s"} as one GitHub review, with a verdict` : "Queue findings with “Comment on PR” first"} onClick={() => setFinish({ inline: true, at: Date.now() })}>
             {busy ? "Submitting…" : queued ? `Post ${queued} to PR` : "Post to PR"}
@@ -338,6 +363,47 @@ function FixDialog({ f, onCancel, onStart }: { f: Finding; onCancel: () => void;
         <div className="dfoot">
           <button onClick={onCancel}>Cancel</button>
           <button className="primary" onClick={() => onStart(note)} title="⌘↩">{f.fixRequest ? "Fix again" : "Start fixing"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The "are you sure" before "Comment all": it names what will land on the PR, since every
+ * undecided finding gets queued and posted in one go, with no verdict and no summary.
+ */
+function CommentAllDialog({ review, onCancel, onConfirm }: { review: Review; onCancel: () => void; onConfirm: () => void }) {
+  const undecided = queueableFindings(review);
+  const queued = approvedFindings(review);
+  const total = undecided.length + queued.length;
+  const counts = reviewCounts(review);
+  const skipped = counts.ignored + counts.fixing + counts.dropped + counts.commented;
+  const uncommented = review.findings.filter((f) => f.status === "pending" && !f.comment?.trim()).length;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onCancel(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+  const n = (k: number, word: string) => `${k} ${word}${k === 1 ? "" : "s"}`;
+  const stay = (k: number) => (k === 1 ? "stays" : "stay");
+  return (
+    <div className="overlay" onMouseDown={onCancel}>
+      <div className="dialog rv-fix" role="alertdialog" aria-label="Comment all on the PR" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="dtitle"><span>Post all {total} to PR #{review.pr}?</span><button onClick={onCancel} title="Cancel">✕</button></div>
+        <p className="rv-fix-what"><b>{review.title}</b></p>
+        <p className="m">
+          This trusts the review as written. Every undecided finding is queued and the whole queue goes to GitHub as one review with comments only: no approval, no change request, no summary.
+        </p>
+        <ul className="rv-list rv-confirm-list">
+          <li><strong>{n(undecided.length, "undecided finding")}</strong> will be queued and posted.</li>
+          {queued.length > 0 && <li><strong>{n(queued.length, "finding")}</strong> already queued will post with them.</li>}
+          {skipped > 0 && <li><strong>{n(skipped, "finding")}</strong> already posted, ignored, being fixed, or dropped {stay(skipped)} as decided.</li>}
+          {uncommented > 0 && <li><strong>{n(uncommented, "finding")}</strong> with no prepared comment cannot be posted and {stay(uncommented)} undecided.</li>}
+        </ul>
+        <div className="dfoot">
+          <button onClick={onCancel} autoFocus>Cancel</button>
+          <button className="primary" onClick={onConfirm}>Post all {total} comments</button>
         </div>
       </div>
     </div>

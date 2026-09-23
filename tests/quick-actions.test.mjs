@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import ts from 'typescript';
+import { quickActionParameters } from '../src/shared/quickActions.ts';
 
 const source = ts.createSourceFile('index.ts', readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
 let declaration;
@@ -52,17 +53,18 @@ test('running an action opens a fresh terminal in its workspace and preserves sh
   const { execFileSync } = await import('node:child_process');
   const appSource = readFileSync(new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8');
   const app = ts.createSourceFile('App.tsx', appSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  let action;
+  let action, start;
   function visit(node) {
     if (ts.isVariableDeclaration(node) && node.name.getText(app) === 'runQuickAction') action = node.initializer;
+    if (ts.isVariableDeclaration(node) && node.name.getText(app) === 'startQuickAction') start = node.initializer;
     node.forEachChild(visit);
   }
   visit(app);
-  const code = ts.transpileModule('return ' + action.getText(app), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const code = ts.transpileModule(`const startQuickAction = ${start.getText(app)}; const runQuickAction = ${action.getText(app)}; return runQuickAction`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   const tabs = new Map(), labels = new Map(), commands = new Map(), events = [];
   let panel;
-  const run = new Function('crypto', 'termTabs', 'termLabels', 'pendingCmd', 'setTab', 'window', 'CustomEvent', 'let wantTab; ' + code)(
-    { randomUUID }, tabs, labels, commands, tab => { panel = tab; }, { dispatchEvent: e => events.push(e) }, class { constructor(name, data) { this.type = name; this.detail = data.detail; } });
+  const run = new Function('crypto', 'termTabs', 'termLabels', 'pendingCmd', 'setTab', 'window', 'CustomEvent', 'quickActionParameters', 'setActionArgs', 'let wantTab; ' + code)(
+    { randomUUID }, tabs, labels, commands, tab => { panel = tab; }, { dispatchEvent: e => events.push(e) }, class { constructor(name, data) { this.type = name; this.detail = data.detail; } }, quickActionParameters, () => {});
   const script = "printf '%s\\n' \"a'b\" '$literal'\nprintf '%s' done";
   run({ id: 'branch', path: '/tmp' }, { title: 'CHECK', command: script });
   assert.equal(panel, 'terminal');

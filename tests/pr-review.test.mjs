@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   approvedFindings, commentableLines, groupFindings, isReviewFile, markPosted, parseReview, patchesToDiff,
-  reviewCounts, reviewPayload, serializeReview, updateFinding,
+  queueAll, queueableFindings, reviewCounts, reviewPayload, serializeReview, updateFinding,
 } from '../src/shared/review.ts';
 
 const sample = () => ({
@@ -77,6 +77,22 @@ test('approving and ignoring are reversible; a posted comment is not', () => {
   const posted = markPosted(review, ['T1'], { url: 'https://github.com/x/pull/402#pullrequestreview-1', at: 'now', reviewId: 1 });
   assert.equal(posted.findings[2].status, 'commented');
   assert.throws(() => updateFinding(posted, 'T1', { status: 'ignored' }), /already on GitHub/);
+});
+
+test('comment all queues every undecided finding with a comment and leaves other decisions alone', () => {
+  let review = parseReview(JSON.stringify(sample()));
+  // C1 has no prepared comment, so it cannot be queued
+  assert.deepEqual(queueableFindings(review).map((f) => f.id), ['D1', 'D2', 'T1']);
+  review = updateFinding(review, 'D2', { status: 'ignored' });
+  review = updateFinding(review, 'T1', { status: 'approved' });
+  const queued = queueAll(review);
+  assert.deepEqual(queued.findings.map((f) => f.status), ['approved', 'ignored', 'approved', 'pending']);
+  assert.deepEqual(approvedFindings(queued).map((f) => f.id), ['D1', 'T1']);
+  // nothing to queue: the same object comes back, so no write is needed
+  assert.equal(queueAll(queued), queued);
+  const posted = markPosted(queued, ['D1', 'T1'], { url: 'https://github.com/x/pull/402#pullrequestreview-2', at: 'now', reviewId: 2 });
+  assert.deepEqual(queueableFindings(posted), []);
+  assert.equal(queueAll(posted), posted);
 });
 
 test('an approved finding with no comment text is not posted', () => {
