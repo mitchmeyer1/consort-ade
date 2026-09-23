@@ -610,7 +610,7 @@ function WorkspaceNode({ project: p, state, sel, running, failed, done, onSelect
   const remove = () => confirm(`Remove workspace ${p.name}?\n\nRemoves the checkout of each repo under ${p.path}${chats.length ? ` and deletes ${chats.length} chat(s)` : ""}. The source repositories are untouched.`)
     && void toasts.track(ade.removeProject(p.id), { start: `Removing workspace ${p.name}…`, done: `Workspace ${p.name} removed`, fail: `Couldn't remove workspace ${p.name}` });
   return (
-    <div className="projnode workspace">
+    <div className={"projnode workspace" + (collapsed[p.id] ? " closed" : "")}>
       <div className={"row project" + (active ? " active" : "") + (collapsed[p.id] ? " closed" : "")} onClick={() => onSelect({ type: "project", id: p.id })}>
         <span className="slot caret" title={collapsed[p.id] ? "Expand" : "Collapse"} onClick={(e) => { e.stopPropagation(); toggle(p.id); }}><Ico n="thorn" className="proj" /><span className="chev">{collapsed[p.id] ? "▸" : "▾"}</span></span>
         <span className="grow" title={p.path}>{p.name}{wt && <Dots id={wt.id} running={running} failed={failed} done={done} />}{collapsed[p.id] && <Rollup chats={chats} scopeIds={[]} running={running} failed={failed} done={done} />}</span>
@@ -650,7 +650,7 @@ function ProjectNode({ project: p, state, sel, running, failed, done, onSelect, 
   const wtIds = wts.map((w) => w.id);
   const hiddenChats = collapsed[p.id] ? state.chats.filter((c) => wtIds.includes(c.worktreeId!)) : [];
   return (
-    <div className="projnode">
+    <div className={"projnode" + (collapsed[p.id] ? " closed" : "")}>
       <div className={"row project" + (sel?.type === "project" && sel.id === p.id ? " active" : "") + (collapsed[p.id] ? " closed" : "")} onClick={() => onSelect({ type: "project", id: p.id })}>
         {/* the caret lives in the icon slot: icon at rest, caret on hover or while collapsed */}
         <span className="slot caret" title={collapsed[p.id] ? "Expand" : "Collapse"} onClick={(e) => { e.stopPropagation(); toggle(p.id); }}><Ico n="arch" className="proj" /><span className="chev">{collapsed[p.id] ? "▸" : "▾"}</span></span>
@@ -2678,14 +2678,16 @@ function InstructionsCard({ items }: { items: Instruction[] }) {
   );
 }
 
-function SettingsSection({ icon, title, children, actions, initialOpen = true }: { icon: string; title: string; children: React.ReactNode; actions?: React.ReactNode; initialOpen?: boolean }) {
+/** `count` is how many things the section holds, shown by the chevron so a collapsed section still says what is in it */
+function SettingsSection({ icon, title, children, actions, count, initialOpen = true }: { icon: string; title: string; children: React.ReactNode; actions?: React.ReactNode; count?: number; initialOpen?: boolean }) {
   const [open, setOpen] = useState(initialOpen);
+  // the whole head row toggles; the actions sit before the chevron so every section's chevron lines up at the edge
   return <section className={`card settings-section ${open ? "open" : ""}`}>
-    <div className="settings-section-head">
-      <button className="settings-section-toggle" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
-        <span><Ico n={icon} />{title}</span><span className="settings-chevron">{open ? "▾" : "▸"}</span>
-      </button>
-      {actions && <span className="h4-actions">{actions}</span>}
+    <div className="settings-section-head" onClick={() => setOpen((v) => !v)}>
+      <button className="settings-section-toggle" aria-expanded={open}><Ico n={icon} />{title}</button>
+      {actions && <span className="h4-actions" onClick={(e) => e.stopPropagation()}>{actions}</span>}
+      {count !== undefined && <span className="settings-count" title={`${count} in this section`}>{count}</span>}
+      <span className="settings-chevron" aria-hidden>{open ? "▾" : "▸"}</span>
     </div>
     {open && <div className="settings-section-body">{children}</div>}
   </section>;
@@ -2778,7 +2780,8 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
   };
   return (
     <>
-      <SettingsSection icon="fleur" title="AI connectors" actions={<>
+      {/* collapsed by default so the drawer reads as a list; connectors open when there is nothing set up yet, since that is the first thing to do */}
+      <SettingsSection icon="fleur" title="AI connectors" count={state.keys.length} initialOpen={state.keys.length === 0} actions={<>
             <button className="icon" title="Refresh sign-in state, usage and the model lists" aria-label="Refresh all connectors" onClick={() => { refreshStatus(); refreshUsage(true); ade.refreshModels().catch(() => {}); }}>↻</button>
             <button className="icon" title="Add a connector (API key or another CLI login)" onClick={() => setAdding(true)}>＋</button>
           </>}>
@@ -2788,8 +2791,8 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
         ))}
         {!state.keys.length && <div className="conn-note">No connectors yet.</div>}
       </SettingsSection>
-      <SettingsSection icon="quill" title="Chat rules"><InstructionsCard items={state.instructions ?? []} /></SettingsSection>
-      <SettingsSection icon="star" title="Plugins + skills" initialOpen={false}><ExtensionsCard state={state} /></SettingsSection>
+      <SettingsSection icon="quill" title="Chat rules" count={state.instructions?.length ?? 0} initialOpen={false}><InstructionsCard items={state.instructions ?? []} /></SettingsSection>
+      <SettingsSection icon="star" title="Plugins + skills" count={state.extensions?.length ?? 0} initialOpen={false}><ExtensionsCard state={state} /></SettingsSection>
       <SettingsSection icon="butterfly" title="Appearance">
         <div className="krow">
           <span className="grow">Mode</span>

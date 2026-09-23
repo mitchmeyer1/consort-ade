@@ -46,6 +46,9 @@ input:focus, textarea:focus, select:focus { border-color: var(--line2); }
 .project:hover .slot.caret .chev, .project.closed .slot.caret .chev { display: block; }
 .projnode + .projnode { margin-top: 14px; }
 .projnode + .projnode::before { content: ""; display: block; height: 14px; margin: 0 24px 6px; background: currentColor; opacity: .22; -webkit-mask: url(./assets/icons/vine.png) center / contain no-repeat; mask: url(./assets/icons/vine.png) center / contain no-repeat; }
+/* the vine marks where one project's open contents end; two collapsed rows in a row need no marker, just a short gap */
+.projnode.closed + .projnode.closed { margin-top: 2px; }
+.projnode.closed + .projnode.closed::before { content: none; }
 /* level 2: worktree (sans, medium) */
 .wtlist, .chatlist { margin-left: var(--step); border-left: 1px solid var(--line); }
 .sect.chats { margin-top: 22px; }
@@ -894,19 +897,31 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 
 /* ---------- settings ---------- */
 /* Sections keep the long settings drawer scannable without hiding their native controls. */
-.settings-section { padding: 0; overflow: hidden; }
-.settings-section-head { display: flex; align-items: center; min-height: 42px; }
-.settings-section-toggle { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; border: 0; background: none; color: var(--dim); font-size: 10px; font-weight: 600; letter-spacing: .28em; text-align: left; text-transform: uppercase; }
-.settings-section-toggle:hover { background: var(--line); color: var(--fg); }
-.settings-section-toggle > span:first-child { display: flex; align-items: center; }
+/* flex: none: the drawer body is a column flexbox, and a card that clips its overflow would otherwise shrink to fit the
+   viewport instead of pushing the body to scroll, cutting its content off at the bottom */
+.settings-section { padding: 0; overflow: hidden; flex: none; }
+.settings-section-head { display: flex; align-items: center; min-height: 42px; cursor: pointer; }
+.settings-section-head:hover { background: var(--line); }
+.settings-section-head:hover .settings-section-toggle { color: var(--fg); }
+.settings-section-toggle { flex: 1; min-width: 0; display: flex; align-items: center; padding: 12px 14px; border: 0; background: none; color: var(--dim); font-size: 10px; font-weight: 600; letter-spacing: .28em; text-align: left; text-transform: uppercase; cursor: pointer; }
 .settings-section-toggle .ico { width: 12px; height: 12px; margin-right: 6px; }
-.settings-chevron { font-size: 14px; letter-spacing: 0; }
-.settings-section .h4-actions { display: flex; gap: 2px; margin-right: 9px; letter-spacing: 0; }
+.settings-chevron { flex: none; padding: 0 14px 0 8px; font-size: 14px; color: var(--dim); }
+.settings-count { flex: none; min-width: 18px; padding: 1px 6px; border: 1px solid var(--line2); border-radius: 9px; font: 600 10px/1.4 var(--mono); text-align: center; color: var(--dim); letter-spacing: 0; }
+.settings-section-head:hover .settings-count { color: var(--fg); }
+.settings-section .h4-actions { display: flex; gap: 2px; margin-right: 2px; letter-spacing: 0; }
 .settings-section .h4-actions button.icon { font-size: 14px; line-height: 1; padding: 2px 5px; }
-.settings-section-body { padding: 0 14px 12px; border-top: 1px solid var(--line); }
-/* each connector is a block: identity line, plan meters, then its switches — no badge soup */
-.settings-section-body .conn:first-child { padding-top: 12px; }
-.extensions { display: flex; flex-direction: column; gap: 10px; padding-top: 10px; }
+/* one 12px inset on every side of a body, whatever it holds; connectors carry their own vertical padding between rows */
+.settings-section-body { padding: 12px 14px; border-top: 1px solid var(--line); }
+.settings-section-body > .conn:first-child { padding-top: 0; }
+.settings-section-body > .conn:last-of-type { padding-bottom: 0; }
+.instructions .conn-note { margin-bottom: 8px; }
+.settings-section-body > .krow:first-child { padding-top: 0; } .settings-section-body > .krow:last-child { padding-bottom: 0; }
+.extensions { display: flex; flex-direction: column; gap: 10px; }
+/* form fields inside the drawer are scaled to its 11-13px text, not the full-page dialog size */
+.settings-section-body .field > label { font-size: 12px; }
+.settings-section-body .field > label small { font-size: 11px; }
+.settings-section-body .field input, .settings-section-body .field select { padding: 8px 10px; font-size: 13px; }
+.settings-section-body .field { gap: 6px; }
 .extension-kind { align-self: flex-start; }
 .extension-actions { display: flex; justify-content: flex-end; margin-top: -2px; }
 .path-pick { display: flex; gap: 6px; }
