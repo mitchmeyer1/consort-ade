@@ -36,6 +36,14 @@ export function workspaceSources(state: Pick<State, "projects">, ws: Project): {
   });
 }
 
+/** The workspace that owns a source repo checkout, if this path is one of its grouped repos. */
+export function workspaceForCheckout(state: Pick<State, "projects">, projectId: string, path: string): Project | undefined {
+  const normalized = path.replace(/\/+$/, "");
+  return state.projects.find((project) => isWorkspace(project) && (project.repos ?? []).some((repo) =>
+    repo.projectId === projectId && `${project.path}/${repo.dir}`.replace(/\/+$/, "") === normalized,
+  ));
+}
+
 /** the sidebar row's one-line summary across repos */
 export function workspaceSummary(status: WorkspaceStatus | null | undefined) {
   const repos = status?.repos.map((r) => r.status).filter((s): s is WorktreeStatus => !!s) ?? [];

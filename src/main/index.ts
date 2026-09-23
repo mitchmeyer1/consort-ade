@@ -12,7 +12,7 @@ import { installCommand } from "./worktreeInstall";
 import * as agents from "./agents";
 import { browserLaunch, type BrowserInfo } from "./openArtifact";
 import { isScratch, scratchWorktree } from "../shared/scratch";
-import { isWorkspace, repoDirs, reposForPr, slugify, workspaceSources } from "../shared/workspace";
+import { isWorkspace, repoDirs, reposForPr, slugify, workspaceForCheckout, workspaceSources } from "../shared/workspace";
 import * as ws from "./workspaces";
 import { probeClaudeModels } from "./claudeModels";
 import { forgetCodexModels } from "./codexModels";
@@ -151,9 +151,21 @@ async function syncWorktrees(projectId: string) {
   const p = project(projectId);
   if (!p || isWorkspace(p)) return; // a workspace's checkouts belong to its source repos
   const live = await git.listWorktrees(p.path);
-  ensureRootWorktree(store.data.worktrees, p, live.find((w) => w.path === p.path)?.branch ?? "(detached)");
+  // A workspace creates real Git worktrees in its source repos. They belong only to the workspace
+  // scope, never to the individual source-project tree. Move old chat records onto that scope once.
+  const grouped = new Map(live.flatMap((entry) => {
+    const owner = workspaceForCheckout(store.data, projectId, entry.path);
+    const scope = owner && store.data.worktrees.find((worktree) => worktree.projectId === owner.id && worktree.workspace);
+    return owner && scope ? [[entry.path, scope.id] as const] : [];
+  }));
+  for (const old of store.data.worktrees.filter((worktree) => worktree.projectId === projectId && grouped.has(worktree.path))) {
+    const workspaceId = grouped.get(old.path)!;
+    for (const chat of store.data.chats) if (chat.worktreeId === old.id) chat.worktreeId = workspaceId;
+  }
+  const sourceLive = live.filter((entry) => !grouped.has(entry.path));
+  ensureRootWorktree(store.data.worktrees, p, sourceLive.find((w) => w.path === p.path)?.branch ?? "(detached)");
   const mine = store.data.worktrees.filter((w) => w.projectId === projectId);
-  for (const l of live) {
+  for (const l of sourceLive) {
     const w = mine.find((w) => w.path === l.path);
     if (w) w.branch = l.branch;
     else {
@@ -170,11 +182,11 @@ async function syncWorktrees(projectId: string) {
   ]);
   if (env.length || hooks) {
     await Promise.all(
-      live.filter((l) => l.path !== p.path).map((l) => prepareWorktree(p.path, l.path, { env, hooks })),
+      sourceLive.filter((l) => l.path !== p.path).map((l) => prepareWorktree(p.path, l.path, { env, hooks })),
     );
   }
   store.data.worktrees = store.data.worktrees.filter(
-    (w) => w.projectId !== projectId || w.root || live.some((l) => l.path === w.path),
+    (w) => w.projectId !== projectId || w.root || sourceLive.some((l) => l.path === w.path),
   );
   const alive = new Set(store.data.worktrees.map((w) => w.id));
   store.data.chats = store.data.chats.filter((c) => alive.has(c.worktreeId));

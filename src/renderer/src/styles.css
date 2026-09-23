@@ -121,7 +121,7 @@ details.tool pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--lin
 .drawer { width: 460px; border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; height: 100vh; }
 .drawer .dhead { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--line); font-family: var(--display); font-weight: 600; font-size: 17px; -webkit-app-region: drag; }
 .drawer .dhead * { -webkit-app-region: no-drag; }
-.drawer .dbody { flex: 1; overflow: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.drawer .dbody { flex: 1; min-height: 0; overflow: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; }
 .card h4 { margin: 0 0 8px; font-size: 10px; letter-spacing: .28em; text-transform: uppercase; color: var(--dim); font-weight: 600; }
 /* standing instructions: one line each, a checkbox to pause it, × to drop it */
