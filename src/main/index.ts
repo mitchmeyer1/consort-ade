@@ -32,7 +32,7 @@ import { askSide } from "./sideChat";
 import { Reminders } from "./reminders";
 import { Notifier, type Notice } from "../shared/notices";
 import { SETUP_TERM, setupDoneNotice, setupStartNotice } from "../shared/worktreeSetup";
-import { commentAll, findReview, readReview, reinvestigate, reviewDrift, setFinding, setFixRequest, submitReview, ReviewWatchers } from "./prReview";
+import { queueAllFindings, findReview, readReview, reinvestigate, reviewDrift, setFinding, setFixRequest, submitReview, ReviewWatchers } from "./prReview";
 import { fixPrompt } from "../shared/review";
 import { pickReviewChat } from "../shared/reviewRunner";
 import { defaultConnector, selectedModel } from "../shared/defaultConnector";
@@ -495,7 +495,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   findReview: (id: string, pr?: number) => findReview(wt(id).path, pr),
   updateReviewFinding: (id: string, target: string, findingId: string, patch: { status?: import("../shared/review").FindingStatus; comment?: string }) => setFinding(artifactPath(id, target), findingId, patch),
   submitReview: (id: string, target: string, opts: { event: import("../shared/review").ReviewEvent; body: string; inline: boolean; draft: boolean }) => submitReview(artifactPath(id, target), opts, id),
-  commentAllFindings: (id: string, target: string) => commentAll(artifactPath(id, target), id),
+  queueAllFindings: (id: string, target: string) => queueAllFindings(artifactPath(id, target)),
   reviewDrift: (id: string, target: string) => reviewDrift(artifactPath(id, target)),
   // the worktree id lets the side job run on the review chat's connector and model rather than the Settings default
   reinvestigateFinding: (id: string, target: string, findingId: string) => reinvestigate(artifactPath(id, target), findingId, id),

@@ -461,3 +461,17 @@ export function pickReviewFile(files: { name: string; mtime: number }[], pr?: nu
 
 /** the PR number a review chat is named for, as prChatName writes it */
 export const prNumberOf = (name: string) => { const m = /PR #(\d+)/.exec(name); return m ? Number(m[1]) : undefined; };
+
+/**
+ * Read something another process may be writing this instant. A review file is rewritten whole
+ * by the agent and by every decision made in the view, and a read that lands mid-write parses as
+ * garbage. Retry a few times, briefly, before believing the failure.
+ */
+export async function settle<T>(read: () => Promise<T>, tries = 4, delayMs = 120): Promise<T> {
+  let last: unknown;
+  for (let i = 0; i < tries; i++) {
+    try { return await read(); } catch (e) { last = e; }
+    if (i < tries - 1) await new Promise((r) => setTimeout(r, delayMs));
+  }
+  throw last;
+}

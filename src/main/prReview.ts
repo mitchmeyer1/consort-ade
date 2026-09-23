@@ -10,7 +10,7 @@ import {
   applyVerdict, approvedFindings, commentableLines, draftBodyPrompt, driftBases, driftedFindings, fallbackReviewBody, parseReview, parseVerdict,
   patchesToDiff, queueAll, recordSubmission, reviewPayload, serializeReview, updateFinding, verdictSummary, verifiedHead,
   type FindingStatus, type Review, type ReviewEvent, type VerdictReport,
-  pickReviewFile, reviewSummary, recordFixRequest, type ReviewSummary,
+  pickReviewFile, reviewSummary, recordFixRequest, settle, type ReviewSummary,
 } from "../shared/review";
 import { store } from "./store";
 import { reviewRunner } from "../shared/reviewRunner";
@@ -33,7 +33,7 @@ export function repoOf(review: Review) {
 }
 
 export async function readReview(path: string) {
-  return { path, review: parseReview(await fs.readFile(path, "utf8")) };
+  return { path, review: await settle(async () => parseReview(await fs.readFile(path, "utf8"))) };
 }
 
 /** note on the finding which chat is fixing it */
@@ -52,15 +52,20 @@ export async function findReview(worktreePath: string, pr?: number): Promise<{ p
   const name = pickReviewFile(files, pr);
   if (!name) return null;
   try {
-    const review = parseReview(await fs.readFile(join(dir, name), "utf8"));
+    // the agent (or this process) may be mid-write: a half-written file must not read as "no review",
+    // or the drawer swaps the review out from under whoever is typing in it
+    const review = await settle(async () => parseReview(await fs.readFile(join(dir, name), "utf8")));
     return { path: join(".consort", "pr-review", name), summary: reviewSummary(review) };
   } catch {
     return null;
   }
 }
 
+/** write whole-or-nothing: readers never see a truncated file, however quickly they follow the watcher */
 async function writeReview(path: string, review: Review) {
-  await fs.writeFile(path, serializeReview(review));
+  const tmp = join(dirname(path), `.${basename(path)}.${process.pid}.tmp`);
+  await fs.writeFile(tmp, serializeReview(review));
+  await fs.rename(tmp, path);
 }
 
 export async function setFinding(path: string, id: string, patch: { status?: FindingStatus; comment?: string }) {
@@ -213,16 +218,15 @@ export async function submitReview(path: string, opts: SubmitOptions, worktreeId
 }
 
 /**
- * "Comment all": queue every undecided finding that has a comment, then post the whole queue as
- * one comments-only review with no verdict. The queue is written first, so a failed post leaves
- * the findings queued rather than undecided and a retry from "Post to PR" picks them up.
+ * "Comment all": queue every undecided finding that has a prepared comment. Nothing is posted here;
+ * the queue rides along inline when the user submits from the finish box, verdict and summary included.
  */
-export async function commentAll(path: string, worktreeId?: string): Promise<{ review: Review; result: SubmitResult }> {
+export async function queueAllFindings(path: string): Promise<Review> {
   const { review } = await readReview(path);
   const queued = queueAll(review);
-  if (!approvedFindings(queued).length) throw new Error("Nothing to comment: every finding with a prepared comment is already posted, ignored, or being fixed.");
+  if (!approvedFindings(queued).length) throw new Error("Nothing to queue: every finding with a prepared comment is already posted, ignored, or being fixed.");
   if (queued !== review) await writeReview(path, queued);
-  return submitReview(path, { event: "COMMENT", body: "", inline: true, draft: false }, worktreeId);
+  return queued;
 }
 
 /** Watch a review file (through its directory, so atomic saves are seen) and call back on change. */

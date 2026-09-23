@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   approvedFindings, commentableLines, groupFindings, isReviewFile, markPosted, parseReview, patchesToDiff,
-  queueAll, queueableFindings, reviewCounts, reviewPayload, serializeReview, updateFinding,
+  queueAll, queueableFindings, reviewCounts, reviewPayload, serializeReview, settle, updateFinding,
 } from '../src/shared/review.ts';
 
 const sample = () => ({
@@ -275,4 +275,14 @@ test('a submission is recorded and marks the comments it carried as posted', asy
   assert.match(prompt, /verdict is Approve/);
   assert.match(prompt, /D1 · high · packages\/core\/src\/services\/utilization-ingestion\.service\.ts:565/);
   assert.match(prompt, /Reply with only the body text/);
+});
+
+test('a read that lands mid-write is retried before it counts as a missing or broken review', async () => {
+  const text = JSON.stringify(sample());
+  let reads = 0;
+  const halfWritten = () => { reads++; return reads < 3 ? text.slice(0, 40) : text; };
+  const review = await settle(async () => parseReview(halfWritten()), 4, 1);
+  assert.equal(review.pr, 402);
+  assert.equal(reads, 3);
+  await assert.rejects(settle(async () => parseReview('nope'), 3, 1), /Not valid JSON/);
 });

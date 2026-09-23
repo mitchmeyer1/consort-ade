@@ -283,8 +283,8 @@ export type Api = {
   updateReviewFinding(worktreeId: string, target: string, findingId: string, patch: { status?: FindingStatus; comment?: string }): Promise<Review>;
   /** submit one GitHub review: verdict, body (drafted by the model when blank and `draft` is set), and the queued comments inline when `inline` is set */
   submitReview(worktreeId: string, target: string, opts: { event: ReviewEvent; body: string; inline: boolean; draft: boolean }): Promise<{ review: Review; result: { url: string; event: ReviewEvent; body: string; drafted: boolean; inline: string[]; general: string[]; headMoved: boolean } }>;
-  /** "Comment all": queue every undecided finding with a comment and post the whole queue as one comments-only review */
-  commentAllFindings(worktreeId: string, target: string): Promise<{ review: Review; result: { url: string; event: ReviewEvent; body: string; drafted: boolean; inline: string[]; general: string[]; headMoved: boolean } }>;
+  /** "Comment all": queue every undecided finding that has a comment; nothing posts until the review is submitted */
+  queueAllFindings(worktreeId: string, target: string): Promise<Review>;
   /** the PR's live head, state and review decision, and the findings whose file changed since they were verified */
   reviewDrift(worktreeId: string, target: string): Promise<{ head: string | null; state: string | null; reviewDecision: string; url: string; drifted: string[] }>;
   /** re-check one finding against the PR's current head with a read-only agent; the verdict is written into the file */
