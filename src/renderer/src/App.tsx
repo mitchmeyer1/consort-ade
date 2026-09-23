@@ -3,7 +3,7 @@ import { toasts, type Toast } from "../../shared/toasts";
 import { canRestore, scrollKey, scrollMemory } from "../../shared/scrollMemory";
 import { PhaseStrip } from "./PhaseStrip";
 import { defaultConnector, selectedModel } from "../../shared/defaultConnector";
-import { modelTiers } from "../../shared/modelTiers";
+import { byCapability, modelTiers, rankModel } from "../../shared/modelTiers";
 import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { lastPrompt } from "../../shared/lastPrompt";
 import { connectorAccess, formatAge, formatReset, modelBlock, usageTone, type ConnectorUsage } from "../../shared/usage";
@@ -205,6 +205,7 @@ export function Toaster({ onOpen }: { onOpen: (open: NonNullable<Toast["open"]>)
 export function App() {
   const [state, setState] = useState<State>(EMPTY);
   const [sel, setSel] = useState<Sel>();
+  const [connectedAgentIds, setConnectedAgentIds] = useState<Set<string>>(new Set());
   // Panel state belongs to the selected view, not the underlying terminal scope.
   // Two chats in the same worktree can therefore keep different panels open.
   const viewKey = sel ? `${sel.type}:${sel.id}` : "home";
@@ -233,6 +234,18 @@ export function App() {
     const f = ade.onToast((n) => toasts.notify(n.kind ?? "info", n.title, n.body, n.open));
     return () => { a(); b(); c(); d(); e(); f(); };
   }, []);
+  // The built-in CLI entries exist before their accounts are connected. A first-use prompt
+  // should therefore disappear only for an API key or a CLI account that is actually signed in.
+  const agentKeyIds = state.keys.map((k) => `${k.id}:${k.auth}`).join("|");
+  useEffect(() => {
+    let disposed = false;
+    Promise.all(state.keys.map(async (key) => {
+      if (key.auth !== "login") return [key.id, true] as const;
+      try { return [key.id, (await ade.authStatus(key.id)).loggedIn] as const; }
+      catch { return [key.id, false] as const; }
+    })).then((results) => { if (!disposed) setConnectedAgentIds(new Set(results.filter(([, connected]) => connected).map(([id]) => id))); });
+    return () => { disposed = true; };
+  }, [agentKeyIds]);
 
   useEffect(() => {
     const update = () => { void ade.setActiveChat(document.hasFocus() && document.visibilityState === "visible" && sel?.type === "chat" ? sel.id : null); };
@@ -321,6 +334,18 @@ export function App() {
     const x = xterms.get(`${sc.id}:auth`);
     if (x) { const c = pendingCmd.get(x.id); if (c) { pendingCmd.delete(x.id); ade.ptyWrite(x.id, c + "\r"); } }
   };
+  const addFirstProject = async () => {
+    const path = await ade.pickFolder();
+    if (!path) return;
+    try {
+      await ade.addProject(path);
+      const next = await ade.getState();
+      setState(next);
+      const added = next.projects.find((p) => p.path === path);
+      if (added) setSel({ type: "project", id: added.id });
+    } catch (e) { alert((e as Error).message); }
+  };
+  const hasConnectedAgent = connectedAgentIds.size > 0;
 
   return (
     <div className="app" style={{ gridTemplateColumns: `${collapsed ? 0 : leftW}px 1fr auto` }}>
@@ -366,6 +391,10 @@ export function App() {
               <div className="sub">AGENTIC DEVELOPMENT ENVIRONMENT</div>
               <div className="est">Arbor Operis et Ramorum Progression ● New York</div>
               <div className="ornament rose" />
+              <div className="empty-actions">
+                {!hasConnectedAgent && <button className="primary" onClick={() => setTab("settings")}>Connect agents</button>}
+                {!state.projects.length && <button onClick={() => void addFirstProject()}>Add projects</button>}
+              </div>
             </div>
             <div className="tagline">Agents to work on your code within feature branch worktrees. Multiple chats per worktree. Multiple worktrees per project.</div>
           </div>
@@ -647,6 +676,39 @@ const ago = (iso: string) => {
 };
 const RUN = { success: "●", failure: "✗", cancelled: "⊘", skipped: "◌" } as Record<string, string>;
 
+/* before a review starts: which connector and which model, preset to the default connector and its top tier */
+function ReviewDialog({ pr, state, onClose, onStart }: { pr: RepoInfo["prs"][number]; state: State; onClose: () => void; onStart: (keyId: string, model: string) => void }) {
+  const [keyId, setKeyId] = useState(defaultConnector(state)?.id ?? state.keys[0]?.id ?? "");
+  const key = state.keys.find((k) => k.id === keyId);
+  const provider = key?.provider ?? "claude";
+  const options = modelOptions(state, provider);
+  const top = () => modelTiers(provider, options).orchestrator;
+  const [model, setModel] = useState(top);
+  useEffect(() => { setModel(top()); }, [keyId]);
+  const delegate = byCapability(options).find((m) => rankModel(m) < rankModel(model)) ?? model;
+  return (
+    <Dialog title={`Review #${pr.number}`} onClose={onClose} footer={<>
+      <button onClick={onClose}>Cancel</button>
+      <button className="primary" disabled={!keyId || !model} onClick={() => onStart(keyId, model)}><Ico n="laurel" /> Review</button>
+    </>}>
+      <p className="m">{pr.title}</p>
+      <div className="two">
+        <Field label="Connector" info="PHI-approved keys are marked">
+          <select value={keyId} onChange={(e) => setKeyId(e.target.value)}>
+            {state.keys.map((k) => <option key={k.id} value={k.id}>{k.provider}: {k.name}{k.phiAllowed ? " · PHI" : ""}</option>)}
+          </select>
+        </Field>
+        <Field label="Model" info="Runs the review; the agents it dispatches use the next tier down">
+          <select value={model} onChange={(e) => setModel(e.target.value)}>
+            {[...new Set([model, ...options])].map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </Field>
+      </div>
+      <div className="m">Orchestrates on {model}{delegate !== model ? `, delegates to ${delegate}` : ""}. Opens a worktree for {pr.branch} if there is none.</div>
+    </Dialog>
+  );
+}
+
 function ProjectPage({ project: p, state, openForm, onRunAction, onSelect }: { project: Project; state: State; openForm: boolean; onRunAction: (wt: Worktree, action: { title: string; command: string }) => void; onSelect: (s: Sel) => void }) {
   const [form, setForm] = useState<false | { branch?: string }>(openForm ? {} : false);
   useEffect(() => { if (openForm) setForm({}); }, [openForm]);
@@ -684,10 +746,13 @@ function ProjectPage({ project: p, state, openForm, onRunAction, onSelect }: { p
   const archivedN = state.worktrees.filter((w) => w.projectId === p.id && w.archived).length;
   const localBranches = new Set(state.worktrees.filter((w) => w.projectId === p.id).map((w) => w.branch));
   const [busyPr, setBusyPr] = useState<number>();
-  // Review = ensure a worktree for the PR branch, then start a pr-writeup chat in it
-  const review = async (pr: RepoInfo["prs"][number]) => {
-    const key = defaultConnector(state);
+  // the Review button opens a picker first: which connector and model run the review
+  const [reviewing, setReviewing] = useState<RepoInfo["prs"][number] | null>(null);
+  // Review = ensure a worktree for the PR branch, then start a pr-writeup chat in it on the chosen connector and model
+  const review = async (pr: RepoInfo["prs"][number], keyId: string, model: string) => {
+    const key = state.keys.find((k) => k.id === keyId);
     if (!key) return alert("Add a connector first (Settings)");
+    setReviewing(null);
     setBusyPr(pr.number);
     try {
       let wt = state.worktrees.find((w) => w.projectId === p.id && w.branch === pr.branch);
@@ -699,10 +764,11 @@ function ProjectPage({ project: p, state, openForm, onRunAction, onSelect }: { p
         wt = (await ade.getState()).worktrees.find((w) => w.projectId === p.id && w.branch === pr.branch);
       }
       if (!wt) throw new Error("worktree not found after create");
-      const tiers = modelTiers(key.provider, modelOptions(state, key.provider));
-      const id = await ade.addChat(wt.id, key.id, { name: prChatName(pr, `Review #${pr.number}`), model: tiers.orchestrator, delegateModel: tiers.delegate, remember: false });
+      // the agents the review dispatches run one tier below the chosen model, or on it when nothing lesser is offered
+      const delegate = byCapability(modelOptions(state, key.provider)).find((m) => rankModel(m) < rankModel(model)) ?? model;
+      const id = await ade.addChat(wt.id, key.id, { name: prChatName(pr, `Review #${pr.number}`), model, delegateModel: delegate, remember: false });
       onSelect({ type: "chat", id });
-      ade.send(id, await ade.skillPrompt("pr-writeup", wt.id, `${pr.number}`, tiers.delegate)).catch((e) => alert(e.message));
+      ade.send(id, await ade.skillPrompt("pr-writeup", wt.id, `${pr.number}`, delegate)).catch((e) => alert(e.message));
     } catch (e: any) { alert(e.message); } finally { setBusyPr(undefined); }
   };
   const [busyIssue, setBusyIssue] = useState<number>();
@@ -755,7 +821,7 @@ function ProjectPage({ project: p, state, openForm, onRunAction, onSelect }: { p
       </span>
       <TurnBadge pr={pr} />
       {localBranches.has(pr.branch) ? <span className="badge">local</span> : <button onClick={() => setForm({ branch: pr.branch })}>open as worktree</button>}
-      <button disabled={busyPr === pr.number} onClick={() => review(pr)}>{busyPr === pr.number ? "…" : "Review"}</button>
+      <button disabled={busyPr === pr.number} onClick={() => state.keys.length ? setReviewing(pr) : alert("Add a connector first (Settings)")}>{busyPr === pr.number ? "…" : "Review"}</button>
     </div>
   );
   const mine = info?.prs.filter((pr) => pr.mine) ?? [];
@@ -780,16 +846,19 @@ function ProjectPage({ project: p, state, openForm, onRunAction, onSelect }: { p
           <button className="icon" title={`GitHub default is ${info.repo.defaultBranch}`} onClick={() => ade.setProjectBase(p.id, `origin/${info.repo!.defaultBranch}`)}>use origin/{info.repo.defaultBranch}</button>
         )}
       </div>
+      {reviewing && <ReviewDialog pr={reviewing} state={state} onClose={() => setReviewing(null)} onStart={(keyId, model) => review(reviewing, keyId, model)} />}
       {form && <NewWorktreeDialog p={p} branchPreset={form.branch} onClose={() => setForm(false)} onRoot={(id) => onSelect({ type: "worktree", id })} />}
 
       <section className="project-quick-actions">
         <h2><Ico n="star" />Quick actions</h2>
+        <p className="sect-note">Saved commands for this project. Run one in any worktree's terminal, pin it to the header, or add a new one.</p>
         <QuickActions project={p} wt={rootWorktree} manage onRun={(action) => { if (rootWorktree) onRunAction(rootWorktree, action); }} />
       </section>
 
       {rootWorktree && <RootCard wt={rootWorktree} state={state} status={root} error={rootError} onRefresh={() => ade.rootStatus(p.id).then((s) => { setRoot(s); setRootError(""); }, (e) => setRootError(e.message))} onSelect={onSelect} />}
 
       <h2>Worktrees {archivedN > 0 && <button className="icon" onClick={() => setShowArchived((x) => !x)}>{showArchived ? "hide" : "show"} {archivedN} archived</button>}</h2>
+      <p className="sect-note">Each branch checked out in its own folder. Open one to chat there, or push it and check it out at root.</p>
       {!wts.length && <div className="m">No worktrees yet — create one above or open a PR below as a worktree.</div>}
       <div className="grid">{wts.map((w) => <WorktreeCard key={w.id} wt={w} state={state} onSelect={onSelect} onCheckout={() => { setCheckout(w); setCommitMessage(""); setCheckoutError(""); }} />)}</div>
 
@@ -805,10 +874,12 @@ function ProjectPage({ project: p, state, openForm, onRunAction, onSelect }: { p
       </Dialog>}
 
       <h2>My PRs {info && <span className="m">({mine.length}{info.me ? ` · ${info.me}` : ""})</span>}</h2>
+      <p className="sect-note">Pull requests you wrote or were asked to review. Open one as a worktree or start an AI review.</p>
       {!info ? <div className="m">loading from GitHub…</div> : !mine.length ? <div className="m">nothing waiting on you</div> : (
         <div className="card list">{mine.map((pr) => <PrRow key={pr.number} pr={pr} />)}</div>
       )}
       <h2>Other open PRs {info && <span className="m">({others.length})</span>}</h2>
+      <p className="sect-note">Everyone else's open pull requests, ready to review or open as a worktree.</p>
       {!info ? null : !others.length ? <div className="m">none</div> : (
         <div className="card list">{others.map((pr) => <PrRow key={pr.number} pr={pr} />)}</div>
       )}
@@ -816,11 +887,13 @@ function ProjectPage({ project: p, state, openForm, onRunAction, onSelect }: { p
       <h2>Open issues {info && <span className="m">({info.issues.length}{info.issues.length >= 50 ? "+" : ""})</span>}
         {info && info.issues.length > ISSUE_ROWS && <button className="icon" onClick={() => setAllIssues((x) => !x)}>{allIssues ? `show ${ISSUE_ROWS}` : `show all ${info.issues.length}`}</button>}
       </h2>
+      <p className="sect-note">Open GitHub issues. Branch and solve creates a worktree on an issue branch and opens a chat that plans the fix.</p>
       {!info ? <div className="m">loading…</div> : !info.issues.length ? <div className="m">none open</div> : (
         <div className="card list">{(allIssues ? info.issues : info.issues.slice(0, ISSUE_ROWS)).map((issue) => <IssueRow key={issue.number} issue={issue} />)}</div>
       )}
 
       <h2>Recent CI runs</h2>
+      <p className="sect-note">The latest workflow runs on this repository, with their branch and result.</p>
       {!info ? <div className="m">loading…</div> : !info.runs.length ? <div className="m">none</div> : (
         <div className="card list">
           {info.runs.map((r, i) => (
@@ -946,6 +1019,7 @@ function WorkspacePage({ project: p, wt, state, openForm, onSelect, onRunAction 
       {!committing && !prDraft && gitError && <div className="error">{gitError}</div>}
       {results && <RepoResults title={results.title} rows={results.rows} />}
       <h2>Repositories</h2>
+      <p className="sect-note">Each repo's checkout on the shared branch: its changes, last commit, pull request and CI.</p>
       <div className="grid repos">
         {(st?.repos ?? (p.repos ?? []).map((r) => ({ projectId: r.projectId, name: state.projects.find((x) => x.id === r.projectId)?.name ?? r.dir, dir: r.dir, path: `${p.path}/${r.dir}`, status: null }))).map((r) => <RepoCard key={r.dir} r={r} />)}
       </div>
@@ -978,6 +1052,7 @@ function WorkspacePage({ project: p, wt, state, openForm, onSelect, onRunAction 
       </Dialog>}
       {form && <NewChatForm wt={wt} state={state} onClose={() => setForm(false)} onDone={(id) => { setForm(false); onSelect({ type: "chat", id }); }} />}
       <h2>Chats</h2>
+      <p className="sect-note">Conversations working across every repo in this workspace. Click one to continue it.</p>
       {!chats.length && <div className="m">No chats in this workspace yet.</div>}
       <div className="grid">
         {chats.map((c) => (
@@ -1087,6 +1162,7 @@ function RootCard({ wt, state, status, error, onRefresh, onSelect }: {
   return <div className="root-panels">
     <section className="card root-card" aria-label="Root">
       <h2><Ico n="thorn" />Root</h2>
+      <p className="sect-note">The repository's own checkout. Switch its branch, open it, or start a chat working directly in it.</p>
       <RootBranchPicker wt={wt} disabled={busy || running} onChanged={() => { setResult(""); setFailure(""); void onRefresh(); }} />
       <div className="path">{wt.path}</div>
       <div className="snip">{chats.length} chat{chats.length === 1 ? "" : "s"} · {status ? status.dirty ? "uncommitted changes" : "clean" : "loading…"}</div>
@@ -1097,6 +1173,7 @@ function RootCard({ wt, state, status, error, onRefresh, onSelect }: {
     </section>
     <form className="card root-commit" aria-label="Commit root changes" onSubmit={submit}>
       <h2>Commit and push</h2>
+      <p className="sect-note">Commit everything changed at root with one message and push it to the branch's origin.</p>
       <div className="root-change-summary">
         {summaryError ? <div className="err" role="alert">{summaryError}</div> : !summary ? <div className="m">Loading changes…</div> : <>
           <div className="root-change-counts"><strong>{summary.changed ? `${summary.changed} changed file${summary.changed === 1 ? "" : "s"}` : "No uncommitted changes"}</strong><span className="m">{summary.ahead} unpushed commit{summary.ahead === 1 ? "" : "s"}</span></div>
@@ -1272,6 +1349,7 @@ function WorktreePage({ wt, state, openForm, onSelect, onRunAction }: { wt: Work
       </Dialog>}
       {form && <NewChatForm wt={wt} state={state} onClose={() => setForm(false)} onDone={(id) => { setForm(false); onSelect({ type: "chat", id }); }} />}
       <h2>Chats</h2>
+      <p className="sect-note">Conversations in this worktree. Click one to continue it, or start a new chat above.</p>
       {!chats.length && <div className="m">No chats in this worktree yet.</div>}
       <div className="grid">
         {chats.map((c) => (
@@ -1286,6 +1364,7 @@ function WorktreePage({ wt, state, openForm, onSelect, onRunAction }: { wt: Work
       {siblings.length > 0 && (
         <>
           <h2>Other worktrees</h2>
+          <p className="sect-note">The project's other branches. Open one to switch to it.</p>
           <div className="grid">{siblings.map((w) => <SiblingCard key={w.id} wt={w} state={state} onSelect={onSelect} />)}</div>
         </>
       )}

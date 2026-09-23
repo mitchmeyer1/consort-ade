@@ -107,8 +107,9 @@ test('the review prompt names the delegate model and keeps the orchestrator off 
   const app = readFileSync(new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8');
   const reviews = app.match(/skillPrompt\("pr-writeup"[^)]*\)/g) ?? [];
   assert.equal(reviews.length, 2, 'both review entry points must be covered');
-  for (const call of reviews) assert.ok(/tiers\.delegate/.test(call), `review entry point must pass the delegate tier: ${call}`);
-  assert.equal((app.match(/delegateModel: tiers\.delegate, remember: false/g) ?? []).length, 2);
+  // the project page derives the delegate from the model picked in the review dialog; the worktree page uses the tier map
+  for (const call of reviews) assert.ok(/\b(?:tiers\.)?delegate\)/.test(call), `review entry point must pass the delegate tier: ${call}`);
+  assert.equal((app.match(/delegateModel: (?:tiers\.)?delegate, remember: false/g) ?? []).length, 2);
 
   const skill = readFileSync(new URL('../skills/pr-writeup/SKILL.md', import.meta.url), 'utf8');
   assert.ok(/## Model tiers/.test(skill), 'the skill must state the tier split');
