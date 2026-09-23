@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { store } from "./store";
+import { cheapestModel } from "../shared/modelTiers";
 
 const run = promisify(execFile);
 
@@ -18,7 +19,7 @@ export async function suggestTitle(path: string, branch: string): Promise<string
   try {
     const { stdout } = await run("git", ["log", "-8", "--format=%s"], { cwd: path });
     const r = await new Anthropic({ apiKey }).messages.create({
-      model: "claude-haiku-4-5-20251001",
+      model: cheapestModel(store.public().models?.claude, "claude-haiku-4-5-20251001"),
       max_tokens: 20,
       messages: [{ role: "user", content: `Branch: ${branch}\nRecent commits:\n${stdout}\n\nReply with only a 2-4 word Title Case name for this line of work. No punctuation, no ticket IDs.` }],
     });
@@ -37,7 +38,7 @@ export async function askOnce(cwd: string, prompt: string): Promise<string> {
   const { [""]: _x, ...base } = process.env as Record<string, string>;
   delete (base as any).ANTHROPIC_API_KEY;
   let text = "";
-  for await (const m of query({ prompt, options: { cwd, model: "claude-haiku-4-5-20251001", tools: [], maxTurns: 1, env: { ...base, ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}) }, systemPrompt: "You answer with only the requested text. No preamble." } }) as AsyncIterable<any>) {
+  for await (const m of query({ prompt, options: { cwd, model: cheapestModel(store.public().models?.claude, "haiku"), tools: [], maxTurns: 1, env: { ...base, ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}) }, systemPrompt: "You answer with only the requested text. No preamble." } }) as AsyncIterable<any>) {
     if (m.type === "assistant") for (const b of m.message?.content ?? []) if (b.type === "text") text += b.text;
     if (m.type === "result" && m.subtype !== "success") throw new Error(m.errors?.join("\n") || m.subtype);
   }

@@ -123,9 +123,10 @@ details.tool pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--lin
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; }
 .card h4 { margin: 0 0 8px; font-size: 10px; letter-spacing: .28em; text-transform: uppercase; color: var(--dim); font-weight: 600; }
 /* standing instructions: one line each, a checkbox to pause it, × to drop it */
-.instr { display: flex; align-items: flex-start; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); font-size: 14px; line-height: 1.4; cursor: pointer; }
-.instr input { margin-top: 3px; }
-.instr .grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.instr { display: flex; align-items: flex-start; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); font-size: 13px; line-height: 1.4; }
+.instr input { margin-top: 2px; flex: none; }
+.instr .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.instr.open .grow { white-space: pre-wrap; overflow-wrap: anywhere; }
 .instr.off .grow { color: var(--dim); text-decoration: line-through; text-decoration-color: var(--line2); }
 .instr .icon { color: var(--dim); } .instr .icon:hover { color: var(--fg); }
 .instr-add { display: flex; gap: 8px; margin-top: 10px; }
@@ -165,8 +166,8 @@ details.tool pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--lin
 .badges { display: flex; gap: 4px; }
 
 /* dialogs (layout after the reference: title row, stacked labelled fields, dashed dropzone, split footer) */
-.overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: grid; place-items: center; z-index: 10; }
-.dialog { width: 560px; max-width: calc(100vw - 40px); max-height: calc(100vh - 40px); overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 22px; padding: 22px 24px; display: flex; flex-direction: column; gap: 18px; }
+.overlay { position: fixed; inset: 0; background: rgba(0,0,0,.72); backdrop-filter: blur(10px) saturate(.65); -webkit-backdrop-filter: blur(10px) saturate(.65); display: grid; place-items: center; z-index: 10; }
+.dialog { width: 560px; max-width: calc(100vw - 40px); max-height: calc(100vh - 40px); overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 22px; padding: 22px 24px; display: flex; flex-direction: column; gap: 18px; box-shadow: 0 24px 70px rgba(0,0,0,.55); }
 .dialog .dtitle { display: flex; align-items: center; justify-content: space-between; font-family: var(--display); font-size: 22px; font-weight: 600; }
 .dialog .dtitle button { width: 30px; height: 30px; border-radius: 3px; padding: 0; background: var(--card); border-color: transparent; color: var(--dim); }
 .field { display: flex; flex-direction: column; gap: 8px; }
@@ -273,6 +274,22 @@ input.edit { padding: 1px 6px; font: inherit; width: 100%; min-width: 0; backgro
 .row.worktree .meta { order: 2; flex-basis: 100%; min-width: 0; display: flex; align-items: center; gap: 6px; padding-left: calc(var(--slot) + 6px); }
 /* third line: who the branch belongs to, then where it stands */
 .row.worktree .meta.status { order: 3; flex-wrap: wrap; margin-top: 3px; }
+/* workspaces: one status line per repo under the shared branch */
+.badge.ws { margin-left: 6px; font-size: 9px; letter-spacing: .08em; text-transform: uppercase; vertical-align: middle; }
+.row.worktree .meta.repo { gap: 6px; }
+.row.worktree .meta.repo .repo-name { font-family: var(--mono); font-size: 11px; color: var(--fg); flex: none; }
+.newproj-mode { margin-bottom: 12px; }
+.repo-picks { display: flex; flex-direction: column; gap: 6px; }
+.repo-picks .check small { color: var(--dim); font-size: 11px; margin-left: 6px; }
+.repo-results { display: grid; gap: 4px; }
+.repo-results .rrow { display: flex; gap: 12px; font-size: 13px; }
+.repo-results .rrow .name { font-family: var(--mono); min-width: 150px; color: var(--dim); }
+.repo-results .rrow.bad { color: var(--err); }
+.repo-results .rrow.skipped { color: var(--dim); }
+.card.repo h3 { font-family: var(--display); font-weight: 600; font-size: 17px; margin: 0 0 8px; display: flex; align-items: baseline; gap: 8px; }
+.card.repo h3 small { color: var(--dim); font-size: 11px; }
+.card.repo .rmeta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+.card.repo .files { font-size: 11px; margin: 6px 0; }
 .row.worktree .contributor { font-size: 10.5px; color: var(--dim); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 45%; }
 .row.worktree .branch { flex: 0 1 auto; min-width: 0; font-size: 10.5px; color: var(--dim); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row.worktree .meta:empty { display: none; }
@@ -294,9 +311,9 @@ input.edit { padding: 1px 6px; font: inherit; width: 100%; min-width: 0; backgro
 :root[data-bg="frost2"] { --bg: rgba(10,10,10,.5);  --panel: rgba(18,17,16,.4);  --card: rgba(22,21,19,.45); }
 :root[data-theme="light"][data-bg="frost"]  { --bg: rgba(243,234,214,.72); --panel: rgba(236,226,203,.62); --card: rgba(231,220,195,.6); }
 :root[data-theme="light"][data-bg="frost2"] { --bg: rgba(243,234,214,.5);  --panel: rgba(236,226,203,.4);  --card: rgba(231,220,195,.45); }
-.seg { display: flex; border: 1px solid var(--line2); border-radius: 3px; overflow: hidden; }
-.seg button { border: none; border-radius: 0 !important; padding: 4px 10px; font-size: 12px; }
-.seg button + button { border-left: 1px solid var(--line2); }
+.seg { display: inline-flex; width: fit-content; max-width: 100%; padding: 2px; gap: 2px; border: 1px solid var(--line2); border-radius: 3px; background: var(--bg); }
+.seg button { border: none; border-radius: 2px !important; padding: 5px 10px; font-size: 12px; white-space: nowrap; }
+.seg button + button { border-left: none; }
 .seg button.on { background: var(--cream); color: var(--ink); }
 /* the archived toggle sits at worktree depth, outside the guide line */
 .row.worktree.archived-toggle { margin-left: var(--step); margin-top: 4px; }
@@ -835,9 +852,15 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 :root[data-theme="light"] .phases .phase-step.on { color: #246dc2; }
 @media (prefers-reduced-motion: reduce) { .phases .phase-step.on { animation: none; } }
 
-/* Workspace-local quick actions */
+/* Project quick actions: managed on the project page and runnable from any worktree. */
 .workspace-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 28px; flex-wrap: wrap; }
 .workspace-heading-info { flex: 1 1 280px; min-width: 0; }
+.project-quick-actions { margin: 22px 0; }
+.project-quick-actions > h2 { margin-bottom: 8px; }
+.project-quick-actions > h2 .ico { width: 15px; height: 15px; margin-right: 7px; vertical-align: -1px; }
+.project-quick-actions .quick-actions { max-width: none; margin-left: 0; }
+.project-quick-actions .quick-actions > h4 { display: none; }
+.project-quick-actions .quick-action-tiles { justify-content: flex-start; }
 .quick-actions { flex: 0 1 420px; margin-left: auto; min-width: 112px; }
 .quick-actions > h4 { text-align: right; margin: 0 0 8px; }
 .quick-action-tiles { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }

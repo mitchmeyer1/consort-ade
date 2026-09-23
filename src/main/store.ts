@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { defaultConnector } from "../shared/defaultConnector";
 import { codexModels } from "./codexModels";
+import { MODELS } from "../shared/types";
 import { ensureRootWorktree } from "./rootWorktree";
 import { migrateQuickActions } from "../shared/quickActions";
 import type { State, Chat, Appearance } from "../shared/types";
@@ -42,6 +43,7 @@ export class Store {
     this.data.defaultKeyId = defaultConnector(this.data)?.id;
     // Every project has a permanent chat scope at its existing checkout.
     for (const p of this.data.projects) {
+      if (p.kind === "workspace") continue;
       const existing = this.data.worktrees.find((w) => w.projectId === p.id && w.path === p.path);
       ensureRootWorktree(this.data.worktrees, p, existing?.branch ?? "(unknown)");
     }
@@ -52,7 +54,8 @@ export class Store {
 
   public(): State {
     const { secrets: _s, ...rest } = this.data;
-    return { ...rest, models: { codex: codexModels(this.data.keys) } };
+    // Codex keeps its own catalog on disk; Claude's list is whatever the CLI last reported, else the seed
+    return { ...rest, models: { codex: codexModels(this.data.keys), claude: this.data.modelCatalog?.claude?.models?.length ? this.data.modelCatalog.claude.models : MODELS.claude } };
   }
 
   onChange(cb: (s: State) => void) {

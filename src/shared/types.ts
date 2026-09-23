@@ -3,9 +3,13 @@ export type Phase = (typeof PHASES)[number];
 export const SIMPLE_PHASES: readonly Phase[] = ["waiting", "executing", "complete"];
 export const phasesFor = (steps?: 3 | 5): readonly Phase[] => steps === 3 ? SIMPLE_PHASES : PHASES;
 export type Provider = "claude" | "codex";
+/**
+ * Seed lists only, for a machine that has never reached either provider. The live lists are
+ * pulled on every start: Claude's from the CLI (main/claudeModels.ts), Codex's from its own
+ * catalog (main/codexModels.ts), and the last good Claude list is kept in state.
+ */
 export const MODELS: Record<Provider, string[]> = {
   claude: ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
-  // fallback only: the live list comes from Codex's own catalog (see main/codexModels.ts)
   codex: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
 };
 
@@ -29,8 +33,14 @@ export type { IssueDetail, IssueInfo, IssueLink } from "./issues";
 export type { PrDraft } from "./createPr";
 export type PrDraftText = { title: string; body: string };
 export type QuickAction = { id: string; title: string; command: string; pinned?: boolean };
+/** one repo of a workspace: which project it came from and the folder it sits in under the workspace path */
+export type WorkspaceRepo = { projectId: string; dir: string };
 export type Project = {
   id: string; name: string; path: string; defaultBase: string; baseSetByUser?: boolean;
+  /** a multi-repo workspace: `path` is a folder holding a worktree of each repo on `branch` (see shared/workspace.ts) */
+  kind?: "workspace";
+  repos?: WorkspaceRepo[];
+  branch?: string;
   /** BUILD, START SERVER…: shown on every worktree of the project, run in the one you are in (see shared/quickActions.ts) */
   quickActions?: QuickAction[];
 };
@@ -38,7 +48,14 @@ export type Worktree = {
   id: string; projectId: string; name: string; title: string; path: string; branch: string; archived: boolean; root?: boolean;
   /** a repoless chat's folder in the app's hidden data directory: no project, no git (see shared/scratch.ts) */
   scratch?: true;
+  /** the single chat scope of a workspace project: its path is the workspace folder */
+  workspace?: true;
 };
+/** one repo's git state inside a workspace; status is null while unknown */
+export type RepoStatus = { projectId: string; name: string; dir: string; path: string; status: WorktreeStatus | null };
+export type WorkspaceStatus = { branch: string; repos: RepoStatus[] };
+/** the outcome of a fanned-out git action for one repo */
+export type RepoResult = { name: string; ok: boolean; detail: string; skipped?: boolean; url?: string; number?: number };
 /** the worktree's own PR; the turn fields follow the same rule as the project page's PR list */
 export type PrInfo = { number: number; state: "OPEN" | "MERGED" | "CLOSED"; draft: boolean; url: string; title: string; author: string; review: string; /** GitHub's check rollup for the PR head, raw, for the CI summary */ checks: unknown[] } & Partial<PrTurn>;
 export type WorktreeStatus = {
@@ -131,6 +148,8 @@ export type State = {
   projects: Project[]; worktrees: Worktree[]; chats: Chat[]; keys: ApiKey[]; defaultKeyId?: string; appearance: Appearance; models?: Partial<Record<Provider, string[]>>;
   /** standing instructions appended to every chat's prompt (see shared/instructions.ts) */
   instructions?: import("./instructions").Instruction[];
+  /** the last model list each provider reported, with when; `models` above is derived from it */
+  modelCatalog?: Partial<Record<Provider, { models: string[]; at: number }>>;
 };
 export type PermissionRequest = { id: string; chatId: string; tool: string; input: unknown };
 export type { ConnectorUsage, UsageWindow } from "./usage";
@@ -162,6 +181,13 @@ export type Api = {
   autoTitle(id: string): Promise<void>;
   archiveWorktree(id: string, on: boolean): Promise<void>;
   worktreeStatus(id: string): Promise<WorktreeStatus | null>;
+  /** a multi-repo workspace from existing projects; resolves to the id of its one worktree */
+  addWorkspace(name: string, branch: string, projectIds: string[]): Promise<string>;
+  workspaceStatus(projectId: string): Promise<WorkspaceStatus | null>;
+  commitWorkspace(projectId: string, message: string): Promise<RepoResult[]>;
+  pullWorkspace(projectId: string): Promise<RepoResult[]>;
+  pushWorkspace(projectId: string): Promise<RepoResult[]>;
+  createWorkspacePrs(projectId: string, draft: PrDraft): Promise<RepoResult[]>;
   addChat(worktreeId: string, keyId: string, opts?: { name?: string; model?: string; delegateModel?: string; remember?: boolean }): Promise<string>;
   /** a chat with no repo: makes a hidden scratch folder for it and returns the chat id */
   addScratchChat(keyId: string, opts?: { name?: string; model?: string }): Promise<string>;
@@ -218,6 +244,8 @@ export type Api = {
   openExternal(url: string): Promise<void>;
   setAppearance(a: Partial<Appearance>): Promise<void>;
   setInstructions(items: import("./instructions").Instruction[]): Promise<void>;
+  /** re-ask every connector which models it offers; the picker updates when they answer */
+  refreshModels(): Promise<void>;
   effectiveTheme(): Promise<"dark" | "light">;
   onTheme(cb: (t: "dark" | "light") => void): () => void;
   repoInfo(projectId: string): Promise<RepoInfo>;

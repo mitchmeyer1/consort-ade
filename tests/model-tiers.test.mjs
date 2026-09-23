@@ -2,7 +2,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
-import { modelTiers } from '../src/shared/modelTiers.ts';
+import { byCapability, cheapestModel, modelTiers, rankModel } from '../src/shared/modelTiers.ts';
+
+test('a release that did not exist when Consort shipped ranks itself by family and version', () => {
+  const live = ['claude-opus-5', 'claude-fable-5-1', 'claude-sonnet-5', 'claude-haiku-4-5-20251001', 'claude-fable-6', 'claude-opus-5-2'];
+  assert.deepEqual(byCapability(live), ['claude-fable-6', 'claude-fable-5-1', 'claude-opus-5-2', 'claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001']);
+  assert.deepEqual(modelTiers('claude', live), { orchestrator: 'claude-fable-6', delegate: 'claude-fable-5-1' });
+  assert.deepEqual(modelTiers('codex', ['gpt-5.6-sol', 'gpt-7-nova', 'gpt-6-astra']), { orchestrator: 'gpt-7-nova', delegate: 'gpt-6-astra' });
+  assert.ok(rankModel('claude-mythos-5-1') > rankModel('claude-opus-9'), 'family outranks version');
+  assert.ok(rankModel('claude-haiku-4-5-20251001') < rankModel('claude-haiku-4-6'), 'a date stamp is not a version');
+  assert.equal(cheapestModel(live, 'haiku'), 'claude-haiku-4-5-20251001');
+  assert.equal(cheapestModel([], 'haiku'), 'haiku');
+});
 
 
 test('each provider orchestrates on its strongest model and delegates one tier down', () => {
@@ -45,6 +56,8 @@ function harness() {
   const store = {
     data: { keys: [{ id: 'k', provider: 'claude', defaultModel: 'claude-sonnet-5' }], chats: [] },
     save() { this.saved = (this.saved ?? 0) + 1; },
+    // the live list the picker shows; addChat falls back to its first entry
+    public() { return { models: { claude: ['claude-fable-5-1', 'claude-opus-5'] } }; },
   };
   const deps = {
     randomUUID: () => `chat-${store.data.chats.length}`,

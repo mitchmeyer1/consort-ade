@@ -15,7 +15,9 @@ import { Lockup, Mark } from "./Logo";
 import { artifactLinkAction, artifactLinks, artifactWhen, chatArtifacts, localImageTarget, withFrameScrollbars } from "../../shared/artifacts";
 import { parseFollowups, type Followup } from "../../shared/followups";
 import { isScratch, scratchChats } from "../../shared/scratch";
-import { BREVITY, type Instruction } from "../../shared/instructions";
+import type { Instruction } from "../../shared/instructions";
+import { isWorkspace, reposForPr, reposToCommit, slugify, workspaceSummary } from "../../shared/workspace";
+import type { RepoResult, WorkspaceStatus } from "../../shared/types";
 import { attachmentName, isImageAttachment } from "../../shared/attachments";
 import { reminderLabel } from "../../shared/reminders";
 import { prChatName } from "../../shared/prChat";
@@ -48,6 +50,17 @@ function useStatus(id?: string, revision = 0) {
     const t = setInterval(tick, 15000);
     return () => clearInterval(t);
   }, [id, revision]);
+  return st;
+}
+function useWorkspaceStatus(projectId?: string, revision = 0) {
+  const [st, setSt] = useState<WorkspaceStatus | null>(null);
+  useEffect(() => {
+    if (!projectId) return;
+    const tick = () => ade.workspaceStatus(projectId).then(setSt);
+    tick();
+    const t = setInterval(tick, 15000);
+    return () => clearInterval(t);
+  }, [projectId, revision]);
   return st;
 }
 type ReviewFile = { path: string; summary: ReviewSummary };
@@ -265,6 +278,9 @@ export function App() {
   const project = sel?.type === "project" ? state.projects.find((p) => p.id === sel.id) : undefined;
   const wtProject = worktree && state.projects.find((p) => p.id === worktree.projectId);
   const scratch = isScratch(worktree);
+  // a workspace project and its single worktree are the same view
+  const wsProject = worktree && wtProject && isWorkspace(wtProject) ? wtProject : project && isWorkspace(project) ? project : undefined;
+  const wsWorktree = wsProject ? (worktree ?? state.worktrees.find((w) => w.projectId === wsProject.id)) : undefined;
   const crumb = worktree && wtProject ? `${wtProject.name}/${worktree.branch}` : scratch ? "Chats" : project ? project.name : "Consort ADE";
   useEffect(() => { document.title = chat ? `${crumb} · ${chat.name}` : crumb; }, [crumb, chat?.name]);
   const answer = (id: string, allow: boolean) => {
@@ -336,10 +352,12 @@ export function App() {
         </div>
         {chat ? (
           <ChatPane key={chat.id} chat={chat} worktree={worktree} keys={state.keys} models={state.models} perms={perms.filter((p) => p.chatId === chat.id)} ptys={ptys} answer={answer} reviewFile={reviewFile} onOpenReview={() => setTab("review")} onOpenMd={(target) => { if (worktree) ade.artifactMenu(worktree.id, target).then((action) => { if (action === "open") openMd(target); }).catch((e) => alert(e.message)); }} />
+        ) : wsProject && wsWorktree ? (
+          <WorkspacePage key={wsProject.id} project={wsProject} wt={wsWorktree} state={state} openForm={!!(sel && "form" in sel && sel.form)} onRunAction={runQuickAction} onSelect={setSel} />
         ) : worktree ? (
           <WorktreePage key={worktree.id} wt={worktree} state={state} openForm={sel?.type === "worktree" && !!sel.form} onRunAction={runQuickAction} onSelect={setSel} />
         ) : project ? (
-          <ProjectPage key={project.id} project={project} state={state} openForm={sel?.type === "project" && !!sel.form} onSelect={setSel} />
+          <ProjectPage key={project.id} project={project} state={state} openForm={sel?.type === "project" && !!sel.form} onRunAction={runQuickAction} onSelect={setSel} />
         ) : (
           <div className="empty">
             <div>
@@ -367,10 +385,7 @@ export function App() {
 function Sidebar({ state, sel, running, failed, done, onSelect, onCollapse }: { state: State; sel?: Sel; running: Set<string>; failed: Set<string>; done: Set<string>; onSelect: (s: Sel) => void; onCollapse: () => void }) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const toggle = (id: string) => setCollapsed((c) => ({ ...c, [id]: !c[id] }));
-  const addProject = async () => {
-    const p = await ade.pickFolder();
-    if (p) ade.addProject(p).catch((e) => alert(e.message));
-  };
+  const [newProject, setNewProject] = useState(false);
   // repoless chats: not on any code, each working out of a hidden folder of its own
   const [newChat, setNewChat] = useState(false);
   const chats = recentChats(scratchChats(state));
@@ -380,11 +395,13 @@ function Sidebar({ state, sel, running, failed, done, onSelect, onCollapse }: { 
       <div className="brandrow"><Lockup /></div>
       <div className="sect">
         <span>Projects</span>
-        <button className="icon" title="Add project" onClick={addProject}>＋</button>
+        <button className="icon" title="Add a project or a multi-repo workspace" onClick={() => setNewProject(true)}>＋</button>
       </div>
-      {state.projects.map((p) => (
-        <ProjectNode key={p.id} project={p} state={state} sel={sel} running={running} failed={failed} done={done} onSelect={onSelect} collapsed={collapsed} toggle={toggle} />
-      ))}
+      {state.projects.map((p) => isWorkspace(p)
+        ? <WorkspaceNode key={p.id} project={p} state={state} sel={sel} running={running} failed={failed} done={done} onSelect={onSelect} collapsed={collapsed} toggle={toggle} />
+        : <ProjectNode key={p.id} project={p} state={state} sel={sel} running={running} failed={failed} done={done} onSelect={onSelect} collapsed={collapsed} toggle={toggle} />
+      )}
+      {newProject && <NewProjectDialog state={state} onClose={() => setNewProject(false)} onWorkspace={(id) => { setNewProject(false); onSelect({ type: "worktree", id }); }} />}
       <div className="sect chats">
         <span>Chats</span>
         <button className="icon" title="New chat (no repo)" onClick={() => !needKey() && setNewChat(true)}>＋</button>
@@ -446,6 +463,102 @@ function NewWorktreeDialog({ p, onClose, branchPreset, onRoot }: { p: Project; o
       <Field label="Base ref" info="Change the project default on its page"><input value={base} onChange={(e) => setBase(e.target.value)} /></Field>
       </>}
     </Dialog>
+  );
+}
+
+/* "+" in the Projects header: a repo folder, or a workspace built from several projects already here */
+function NewProjectDialog({ state, onClose, onWorkspace }: { state: State; onClose: () => void; onWorkspace: (worktreeId: string) => void }) {
+  const [mode, setMode] = useState<"repo" | "workspace">("repo");
+  const [name, setName] = useState("");
+  const [branch, setBranch] = useState("");
+  const [branchTouched, setBranchTouched] = useState(false);
+  const [picked, setPicked] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const repos = state.projects.filter((p) => !isWorkspace(p));
+  const addRepo = async () => {
+    const p = await ade.pickFolder();
+    if (!p) return;
+    try { await ade.addProject(p); onClose(); } catch (e) { alert((e as Error).message); }
+  };
+  const setNameAndBranch = (n: string) => { setName(n); if (!branchTouched) setBranch(slugify(n)); };
+  const toggleRepo = (id: string) => setPicked((x) => x.includes(id) ? x.filter((y) => y !== id) : [...x, id]);
+  const create = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const id = await toasts.track(ade.addWorkspace(name, branch, picked), { start: `Creating workspace ${name}…`, done: `Workspace ${name} ready`, fail: `Couldn't create workspace ${name}` });
+      if (id) onWorkspace(id);
+    } catch { /* the toast carries the error */ } finally { setBusy(false); }
+  };
+  return (
+    <Dialog title="Add to Consort" onClose={() => { if (!busy) onClose(); }} footer={<>
+      <button disabled={busy} onClick={onClose}>Cancel</button>
+      {mode === "repo"
+        ? <button className="primary" onClick={addRepo}>Choose folder…</button>
+        : <button className="primary" disabled={busy || !name.trim() || !branch.trim() || picked.length < 2} onClick={create}>{busy ? "Creating…" : "Create workspace"}</button>}
+    </>}>
+      <div className="seg newproj-mode">
+        <button className={mode === "repo" ? "on" : ""} onClick={() => setMode("repo")}><Ico n="arch" /> Repository</button>
+        <button className={mode === "workspace" ? "on" : ""} onClick={() => setMode("workspace")}><Ico n="thorn" /> Multi-repo workspace</button>
+      </div>
+      {mode === "repo" ? (
+        <p>A git repository on this machine. Its branches become worktrees you can open chats on.</p>
+      ) : (
+        <>
+          <p>One folder, one branch, several repos: a worktree of each chosen project is checked out inside it, and chats work across all of them. Commit and PR fan out per repo.</p>
+          <Field label="Name"><input autoFocus value={name} placeholder="Billing rework" onChange={(e) => setNameAndBranch(e.target.value)} /></Field>
+          <Field label="Branch" info="Created in every repo from its own base branch, or checked out if it already exists"><input value={branch} placeholder="mm/billing-rework" onChange={(e) => { setBranch(e.target.value); setBranchTouched(true); }} /></Field>
+          <div className="field">
+            <label>Repositories <small>pick at least two</small></label>
+            {repos.length < 2 && <div className="m">Add the repositories as projects first; a workspace is built from projects already in Consort.</div>}
+            <div className="repo-picks">
+              {repos.map((p) => (
+                <label key={p.id} className="check"><input type="checkbox" checked={picked.includes(p.id)} onChange={() => toggleRepo(p.id)} /> {p.name} <small className="mono">{p.path}</small></label>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+    </Dialog>
+  );
+}
+
+/* a workspace in the sidebar: the project, its one scope on the shared branch, a status line per repo, then its chats */
+function WorkspaceNode({ project: p, state, sel, running, failed, done, onSelect, collapsed, toggle }: {
+  project: Project; state: State; sel?: Sel; running: Set<string>; failed: Set<string>; done: Set<string>; onSelect: (s: Sel) => void;
+  collapsed: Record<string, boolean>; toggle: (id: string) => void;
+}) {
+  const wt = state.worktrees.find((w) => w.projectId === p.id);
+  const st = useWorkspaceStatus(p.id);
+  const chats = wt ? recentChats(state.chats.filter((c) => c.worktreeId === wt.id)) : [];
+  const active = (sel?.type === "project" && sel.id === p.id) || (wt && sel?.type === "worktree" && sel.id === wt.id);
+  const remove = () => confirm(`Remove workspace ${p.name}?\n\nRemoves the checkout of each repo under ${p.path}${chats.length ? ` and deletes ${chats.length} chat(s)` : ""}. The source repositories are untouched.`)
+    && void toasts.track(ade.removeProject(p.id), { start: `Removing workspace ${p.name}…`, done: `Workspace ${p.name} removed`, fail: `Couldn't remove workspace ${p.name}` });
+  return (
+    <div className="projnode workspace">
+      <div className={"row project" + (active ? " active" : "") + (collapsed[p.id] ? " closed" : "")} onClick={() => onSelect({ type: "project", id: p.id })}>
+        <span className="slot caret" title={collapsed[p.id] ? "Expand" : "Collapse"} onClick={(e) => { e.stopPropagation(); toggle(p.id); }}><Ico n="thorn" className="proj" /><span className="chev">{collapsed[p.id] ? "▸" : "▾"}</span></span>
+        <span className="grow" title={p.path}>{p.name}<span className="badge ws">workspace</span>{wt && <Dots id={wt.id} running={running} failed={failed} done={done} />}</span>
+        <span className="tools" onClick={(e) => e.stopPropagation()}>
+          {wt && <button className="icon" title="New chat here" onClick={() => onSelect({ type: "worktree", id: wt.id, form: true })}>＋</button>}
+          <button className="icon" title="Remove workspace" onClick={remove}>×</button>
+        </span>
+      </div>
+      {!collapsed[p.id] && wt && <div className="wtlist"><div>
+        <div className={"row worktree" + (active ? " active" : "")} onClick={() => { onSelect({ type: "worktree", id: wt.id }); if (done.has(wt.id)) void ade.ptySeenScope(wt.id); }}>
+          <span className="slot"><Ico n="branch" className="wt" /></span>
+          <span className="grow"><small className="branch" title={p.branch}>{p.branch}</small></span>
+          {/* one line per repo: its name, then the same chips a worktree row shows */}
+          {(st?.repos ?? (p.repos ?? []).map((r) => ({ projectId: r.projectId, name: state.projects.find((x) => x.id === r.projectId)?.name ?? r.dir, dir: r.dir, path: "", status: null }))).map((r) => (
+            <span key={r.dir} className="meta status repo" title={r.path || r.dir}>
+              <small className="repo-name">{r.name}</small>
+              {r.status ? <Badges st={r.status} /> : <small className="m">…</small>}
+            </span>
+          ))}
+        </div>
+        {chats.length > 0 && <div className="chatlist">{chats.map((c) => <ChatRow key={c.id} c={c} sel={sel} onSelect={onSelect} />)}</div>}
+      </div></div>}
+    </div>
   );
 }
 
@@ -534,7 +647,7 @@ const ago = (iso: string) => {
 };
 const RUN = { success: "●", failure: "✗", cancelled: "⊘", skipped: "◌" } as Record<string, string>;
 
-function ProjectPage({ project: p, state, openForm, onSelect }: { project: Project; state: State; openForm: boolean; onSelect: (s: Sel) => void }) {
+function ProjectPage({ project: p, state, openForm, onRunAction, onSelect }: { project: Project; state: State; openForm: boolean; onRunAction: (wt: Worktree, action: { title: string; command: string }) => void; onSelect: (s: Sel) => void }) {
   const [form, setForm] = useState<false | { branch?: string }>(openForm ? {} : false);
   useEffect(() => { if (openForm) setForm({}); }, [openForm]);
   const [info, setInfo] = useState<RepoInfo>();
@@ -669,6 +782,11 @@ function ProjectPage({ project: p, state, openForm, onSelect }: { project: Proje
       </div>
       {form && <NewWorktreeDialog p={p} branchPreset={form.branch} onClose={() => setForm(false)} onRoot={(id) => onSelect({ type: "worktree", id })} />}
 
+      <section className="project-quick-actions">
+        <h2><Ico n="star" />Quick actions</h2>
+        <QuickActions project={p} wt={rootWorktree} manage onRun={(action) => { if (rootWorktree) onRunAction(rootWorktree, action); }} />
+      </section>
+
       {rootWorktree && <RootCard wt={rootWorktree} state={state} status={root} error={rootError} onRefresh={() => ade.rootStatus(p.id).then((s) => { setRoot(s); setRootError(""); }, (e) => setRootError(e.message))} onSelect={onSelect} />}
 
       <h2>Worktrees {archivedN > 0 && <button className="icon" onClick={() => setShowArchived((x) => !x)}>{showArchived ? "hide" : "show"} {archivedN} archived</button>}</h2>
@@ -716,6 +834,161 @@ function ProjectPage({ project: p, state, openForm, onSelect }: { project: Proje
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/* one repo of a workspace on its page: the same facts GitCard shows, compact, with the repo named */
+function RepoCard({ r }: { r: WorkspaceStatus["repos"][number] }) {
+  const st = r.status;
+  return (
+    <div className="card repo">
+      <h3>{r.name} <small className="mono">{r.dir}/</small></h3>
+      {!st ? <div className="m">loading…</div> : (
+        <>
+          <div className="rmeta"><span className="badge">{st.branch}</span><Badges st={st} /><span className="m">vs {st.base}: {st.merged ? "merged" : st.inBase ? "in base" : `↑${st.ahead} ↓${st.behind}`}</span></div>
+          <div>{st.dirty ? `${st.dirty} changed file${st.dirty === 1 ? "" : "s"}` : "clean"}</div>
+          {st.files && <pre className="files">{st.files.split("\n").slice(0, 6).join("\n")}{st.dirty > 6 ? "\n…" : ""}</pre>}
+          <div className="m">{st.last ? `${st.last.subject} · ${st.last.author} · ${st.last.age}` : "no commits"}</div>
+          {st.pr && <div><a href="#" onClick={(e) => { e.preventDefault(); ade.openExternal(st.pr!.url); }}>#{st.pr.number} {st.pr.title}</a> <span className="m">{st.pr.draft ? "draft" : st.pr.state.toLowerCase()}</span></div>}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* the results of a fanned-out git action, one line per repo */
+function RepoResults({ title, rows }: { title: string; rows: RepoResult[] }) {
+  return (
+    <div className="repo-results" role="status">
+      <div className="m">{title}</div>
+      {rows.map((r) => (
+        <div key={r.name} className={"rrow" + (r.ok ? "" : " bad") + (r.skipped ? " skipped" : "")}>
+          <span className="name">{r.name}</span>
+          <span>{r.url ? <a href="#" onClick={(e) => { e.preventDefault(); ade.openExternal(r.url!); }}>{r.detail}</a> : r.detail}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * A workspace's page: several repos on one branch. Commit takes one message and lands in every
+ * repo with changes; Pull and Push touch every repo; Create PRs opens one per repo with work and
+ * links them together. Each repo keeps its own card, so what is where stays visible.
+ */
+function WorkspacePage({ project: p, wt, state, openForm, onSelect, onRunAction }: { project: Project; wt: Worktree; state: State; openForm: boolean; onSelect: (s: Sel) => void; onRunAction: (wt: Worktree, action: { title: string; command: string }) => void }) {
+  const [revision, setRevision] = useState(0);
+  const st = useWorkspaceStatus(p.id, revision);
+  const chats = recentChats(state.chats.filter((c) => c.worktreeId === wt.id));
+  const anyRunning = chats.some((c) => c.running);
+  const [busy, setBusy] = useState(false);
+  const [results, setResults] = useState<{ title: string; rows: RepoResult[] } | null>(null);
+  const [gitError, setGitError] = useState("");
+  const [committing, setCommitting] = useState(false);
+  const [message, setMessage] = useState("");
+  const [prDraft, setPrDraft] = useState<{ title: string; body: string; draft: boolean } | null>(null);
+  const [prGen, setPrGen] = useState<{ busy: boolean; note?: string }>({ busy: false });
+  const [form, setForm] = useState(openForm);
+  useEffect(() => { if (openForm) setForm(true); }, [openForm]);
+  const needKey = () => (state.keys.length ? false : (alert("Add a connector first (Settings)"), true));
+  const dirty = reposToCommit(st);
+  const prRepos = reposForPr(st);
+  const sum = workspaceSummary(st);
+  const branch = p.branch ?? wt.branch;
+  const fanout = async (title: string, action: () => Promise<RepoResult[]>) => {
+    if (busy) return;
+    setBusy(true); setGitError(""); setResults(null);
+    try { setResults({ title, rows: await action() }); }
+    catch (e) { setGitError((e as Error).message); }
+    finally { setBusy(false); setRevision((n) => n + 1); }
+  };
+  const commit = async () => {
+    await fanout(`Commit to ${branch}`, () => ade.commitWorkspace(p.id, message));
+    setMessage(""); setCommitting(false);
+  };
+  const generatePr = async () => {
+    if (prGen.busy) return;
+    setPrGen({ busy: true });
+    try {
+      const { title, body } = await ade.suggestPr(wt.id, branch);
+      if (!title && !body) { setPrGen({ busy: false, note: `Nothing to summarize: no commits on ${branch} in any repo.` }); return; }
+      setPrDraft((d) => d && { ...d, title: title || d.title, body: body || d.body });
+      setPrGen({ busy: false });
+    } catch (e) { setPrGen({ busy: false, note: (e as Error).message.split("\n")[0] }); }
+  };
+  const createPrs = async () => {
+    if (!prDraft) return;
+    const draft = prDraft;
+    await fanout(`Pull requests for ${branch}`, () => ade.createWorkspacePrs(p.id, draft));
+    setPrDraft(null);
+  };
+  return (
+    <div className="page">
+      <div className="workspace-heading">
+        <div className="workspace-heading-info">
+          <h1>{p.name} <span className="badge ws">workspace</span></h1>
+          <div className="meta-rows">
+            <div><span className="badge">{branch}</span> <span className="m">{p.repos?.length ?? 0} repos · {sum.dirty ? `${sum.dirty} changed` : "clean"}{sum.ahead ? ` · ↑${sum.ahead}` : ""}{sum.behind ? ` · ↓${sum.behind}` : ""}{sum.prs ? ` · ${sum.prs} PR${sum.prs === 1 ? "" : "s"}` : ""}</span></div>
+            <div className="path">{p.path}</div>
+          </div>
+        </div>
+        <QuickActions key={wt.id} project={p} wt={wt} manage onRun={(action) => onRunAction(wt, action)} />
+      </div>
+      <div className="actions">
+        <button className="primary" onClick={() => !needKey() && setForm((f) => !f)}><Ico n="quill" /> New chat</button>
+        <button disabled={busy || anyRunning || !dirty.length} title={dirty.length ? `Commit the changes in ${dirty.map((r) => r.dir).join(", ")} with one message, then push` : "No repo has changes"} onClick={() => { setGitError(""); setCommitting(true); }}><Ico n="wheat" /> Commit…{dirty.length > 0 && <span className="m"> {dirty.length}/{st?.repos.length}</span>}</button>
+        <button disabled={busy || anyRunning || !st} onClick={() => fanout(`Pull ${branch}`, () => ade.pullWorkspace(p.id))}>{busy ? "Working…" : "Pull all"}</button>
+        <button disabled={busy || anyRunning || !st} onClick={() => fanout(`Push ${branch}`, () => ade.pushWorkspace(p.id))}>{busy ? "Working…" : "Push all"}</button>
+        <button className="create-pr" disabled={busy || anyRunning || !prRepos.length} title={prRepos.length ? `Open a PR in ${prRepos.map((r) => r.dir).join(", ")}` : "No repo has commits without a PR"} onClick={() => { setGitError(""); setPrGen({ busy: false }); setPrDraft({ title: `${p.name}`, body: "", draft: false }); }}><Ico n="grapes" /> Create PRs{prRepos.length > 0 && <span className="m"> {prRepos.length}</span>}</button>
+      </div>
+      {anyRunning && <div className="m">Commit, pull, push and PRs are available when this workspace's chats finish.</div>}
+      {!committing && !prDraft && gitError && <div className="error">{gitError}</div>}
+      {results && <RepoResults title={results.title} rows={results.rows} />}
+      <h2>Repositories</h2>
+      <div className="grid repos">
+        {(st?.repos ?? (p.repos ?? []).map((r) => ({ projectId: r.projectId, name: state.projects.find((x) => x.id === r.projectId)?.name ?? r.dir, dir: r.dir, path: `${p.path}/${r.dir}`, status: null }))).map((r) => <RepoCard key={r.dir} r={r} />)}
+      </div>
+      {committing && <Dialog title={`Commit to ${branch}`} onClose={() => { if (!busy) setCommitting(false); }} footer={<>
+        <button disabled={busy} onClick={() => setCommitting(false)}>Cancel</button>
+        <button className="primary" disabled={busy || !message.trim() || anyRunning} onClick={commit}>{busy ? "Committing…" : `Commit in ${dirty.length} repo${dirty.length === 1 ? "" : "s"} + push`}</button>
+      </>}>
+        <p>One message, every repo with changes. Repos with a clean tree are left alone.</p>
+        {dirty.map((r) => <div key={r.dir}><div className="mono">{r.dir}/</div><pre className="files">{r.status?.files}</pre></div>)}
+        <Field label="Commit message"><input autoFocus value={message} disabled={busy} onChange={(e) => setMessage(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && message.trim()) void commit(); }} /></Field>
+        {gitError && <div className="error">{gitError}</div>}
+      </Dialog>}
+      {prDraft && <Dialog title={`Create PRs: ${branch}`} onClose={() => { if (!busy) setPrDraft(null); }} footer={<>
+        <button disabled={busy} onClick={() => setPrDraft(null)}>Cancel</button>
+        <button className="primary" disabled={busy || !prDraft.title.trim() || anyRunning} onClick={createPrs}>{busy ? "Creating…" : `Create ${prRepos.length} ${prDraft.draft ? "draft " : ""}PR${prRepos.length === 1 ? "" : "s"}`}</button>
+      </>}>
+        <p>Pushes {branch} and opens a pull request in each repo with commits to review. Every PR gets the same title and description, plus links to the others.</p>
+        <ul className="m">{prRepos.map((r) => <li key={r.dir}>{r.name}: {branch} → {prBaseBranch(r.status!.base)}{r.status!.dirty ? ` · ${r.status!.dirty} uncommitted change${r.status!.dirty === 1 ? "" : "s"} stay behind` : ""}</li>)}</ul>
+        <div className={"pr-fields" + (prGen.busy ? " thinking" : "")} aria-busy={prGen.busy}>
+          <div className="field">
+            <label>Title<button className="icon generate" disabled={busy || prGen.busy} title="Draft a title and bullet points from the commits in every repo" onClick={generatePr}><Ico n="star" />Generate</button></label>
+            <input autoFocus value={prDraft.title} disabled={busy || prGen.busy} onChange={(e) => setPrDraft({ ...prDraft, title: e.target.value })} />
+          </div>
+          <Field label="Description" optional><textarea rows={6} value={prDraft.body} disabled={busy || prGen.busy} placeholder="What changed and why, across the repos" onChange={(e) => setPrDraft({ ...prDraft, body: e.target.value })} /></Field>
+          {prGen.busy && <div className="m" role="status">Drafting from the commits in every repo…</div>}
+        </div>
+        {prGen.note && <div className="m" role="status">{prGen.note}</div>}
+        <div className="field"><label className="check"><input type="checkbox" checked={prDraft.draft} disabled={busy} onChange={(e) => setPrDraft({ ...prDraft, draft: e.target.checked })} /> Open as drafts</label></div>
+        {gitError && <div className="error" role="alert">{gitError}</div>}
+      </Dialog>}
+      {form && <NewChatForm wt={wt} state={state} onClose={() => setForm(false)} onDone={(id) => { setForm(false); onSelect({ type: "chat", id }); }} />}
+      <h2>Chats</h2>
+      {!chats.length && <div className="m">No chats in this workspace yet.</div>}
+      <div className="grid">
+        {chats.map((c) => (
+          <div key={c.id} className={"card click" + (chatStatus(c) === "reminder" ? " reminded" : "")} onClick={() => onSelect({ type: "chat", id: c.id })} onContextMenu={(e) => { e.preventDefault(); void ade.chatMenu(c.id); }}>
+            <div className="t">{c.running && <span className="spin" />} <Editable value={c.name} onSave={(n) => ade.renameChat(c.id, n)} /></div>
+            <div className="m">{c.provider} · {c.model} · {c.messages.length} msgs{c.error ? " · error" : ""}</div>
+            <div className="snip">{lastText(c) || "—"}</div>
+            <MiniBar phase={c.phase} steps={c.phaseSteps} />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1020,8 +1293,8 @@ function WorktreePage({ wt, state, openForm, onSelect, onRunAction }: { wt: Work
   );
 }
 
-// the project's actions, run in this worktree
-function QuickActions({ project, wt, onRun }: { project: Project; wt: Worktree; onRun: (action: { title: string; command: string }) => void }) {
+// Actions are managed once on the project. Worktrees only expose the project's run buttons.
+function QuickActions({ project, wt, manage = false, onRun }: { project: Project; wt?: Worktree; manage?: boolean; onRun: (action: { title: string; command: string }) => void }) {
   const [adding, setAdding] = useState(false);
   const [title, setTitle] = useState("");
   const [command, setCommand] = useState("");
@@ -1043,13 +1316,13 @@ function QuickActions({ project, wt, onRun }: { project: Project; wt: Worktree; 
     finally { setBusy(false); }
   };
   return <section className="quick-actions" aria-label="Quick actions">
-    <h4>Quick actions</h4>
+    {manage && <h4><Ico n="star" />Quick actions</h4>}
     <div className="quick-action-tiles">
       {(project.quickActions ?? []).map(action => <div className="quick-action-tile" key={action.id}>
-        <button className="quick-action-run" title={`Run ${action.title} in ${wt.path}`} onClick={() => onRun(action)}>
-          <Ico n="terminal" /><span>{action.title}</span>
+        <button className="quick-action-run" disabled={!wt} title={wt ? `Run ${action.title} in ${wt.path}` : "A root worktree is still being prepared"} onClick={() => onRun(action)}>
+          <Ico n="star" /><span>{action.title}</span>
         </button>
-        <details className="quick-action-menu">
+        {manage && <details className="quick-action-menu">
           <summary aria-label={`Options for ${action.title}`}>⋯</summary>
           <div className="quick-action-menu-items">
             <button onClick={(e) => {
@@ -1058,9 +1331,9 @@ function QuickActions({ project, wt, onRun }: { project: Project; wt: Worktree; 
             }}>{action.pinned ? "Unpin from header" : "Pin to header"}</button>
             <button onClick={(e) => { e.currentTarget.closest("details")?.removeAttribute("open"); setError(""); setDeleting(action); }}>Delete action…</button>
           </div>
-        </details>
+        </details>}
       </div>)}
-      <button className="quick-action-new" onClick={() => { setError(""); setAdding(true); }}><span aria-hidden="true">＋</span>New Action</button>
+      {manage && <button className="quick-action-new" onClick={() => { setError(""); setAdding(true); }}><span aria-hidden="true">＋</span>New Action</button>}
     </div>
     {adding && <Dialog title="New quick action" onClose={() => { if (!busy) setAdding(false); }} footer={<>
       <button disabled={busy} onClick={() => setAdding(false)}>Cancel</button>
@@ -1068,7 +1341,7 @@ function QuickActions({ project, wt, onRun }: { project: Project; wt: Worktree; 
     </>}>
       <Field label="Title"><input aria-label="Action title" autoFocus value={title} onChange={e => setTitle(e.target.value)} placeholder="BUILD" disabled={busy} /></Field>
       <Field label="Bash command"><textarea aria-label="Bash command" className="quick-action-code" rows={6} spellCheck={false} value={command} onChange={e => setCommand(e.target.value)} placeholder="pnpm package:mac" disabled={busy} /></Field>
-      <div className="m">Saved for every worktree in {project.name}. Runs in the worktree you press it from — here, {wt.path}.</div>
+      <div className="m">Saved for every worktree in {project.name}. {wt ? `Runs here in ${wt.path}.` : "It will run from the worktree you choose."}</div>
       {error && <div className="error" role="alert">{error}</div>}
     </Dialog>}
     {deleting && <Dialog title="Delete quick action" onClose={() => { if (!busy) setDeleting(null); }} footer={<>
@@ -1119,7 +1392,7 @@ function NewChatForm({ wt, scratch, state, onClose, onDone }: { wt?: Worktree; s
   const [name, setName] = useState(wt?.title ?? "");
   const [keyId, setKeyId] = useState(defaultConnector(state)?.id ?? "");
   const provider = state.keys.find((k) => k.id === keyId)?.provider ?? "claude";
-  const preferredModel = () => { const key = state.keys.find((k) => k.id === keyId); return key ? selectedModel(state, key, MODELS[provider][0]) : MODELS[provider][0]; };
+  const preferredModel = () => { const first = modelOptions(state, provider)[0] ?? MODELS[provider][0]; const key = state.keys.find((k) => k.id === keyId); return key ? selectedModel(state, key, first) : first; };
   const [model, setModel] = useState(preferredModel);
   const [custom, setCustom] = useState(false);
   const [prompt, setPrompt] = useState("");
@@ -2250,24 +2523,22 @@ function Meters({ usage, signedOut, now }: { usage?: ConnectorUsage; signedOut: 
   );
 }
 
-/* standing instructions for every chat: add a line, switch it off without losing it, remove it */
+/* standing instructions for every chat: one line each, click to read the whole thing, switch off without losing it, × to remove */
 function InstructionsCard({ items }: { items: Instruction[] }) {
   const [draft, setDraft] = useState("");
+  const [open, setOpen] = useState<string | null>(null);
   const save = (next: Instruction[]) => ade.setInstructions(next).catch((e) => alert(e.message));
   const add = (text: string) => { const t = text.trim(); if (!t) return; save([...items, { id: crypto.randomUUID(), text: t, enabled: true }]); setDraft(""); };
-  const hasBrevity = items.some((i) => i.text === BREVITY);
   return (
     <div className="card instructions">
-      <h4><Ico n="quill" />Every chat
-        {!hasBrevity && <span className="h4-actions"><button className="icon" title="Add the brevity instruction" onClick={() => add(BREVITY)}>＋ brevity</button></span>}
-      </h4>
+      <h4><Ico n="quill" />Every chat</h4>
       <div className="conn-note">Standing instructions appended to every chat's prompt, on every connector and model. They apply from the next message.</div>
       {items.map((i) => (
-        <label key={i.id} className={"instr" + (i.enabled ? "" : " off")}>
-          <input type="checkbox" checked={i.enabled} onChange={(e) => save(items.map((x) => x.id === i.id ? { ...x, enabled: e.target.checked } : x))} />
-          <span className="grow">{i.text}</span>
-          <button className="icon" title="Remove" aria-label={`Remove instruction: ${i.text}`} onClick={(e) => { e.preventDefault(); save(items.filter((x) => x.id !== i.id)); }}>×</button>
-        </label>
+        <div key={i.id} className={"instr" + (i.enabled ? "" : " off") + (open === i.id ? " open" : "")}>
+          <input type="checkbox" checked={i.enabled} aria-label={i.enabled ? "Pause this instruction" : "Resume this instruction"} onChange={(e) => save(items.map((x) => x.id === i.id ? { ...x, enabled: e.target.checked } : x))} />
+          <span className="grow" title={open === i.id ? "Collapse" : "Show the whole instruction"} onClick={() => setOpen((o) => (o === i.id ? null : i.id))}>{i.text}</span>
+          <button className="icon" title="Remove" aria-label="Remove instruction" onClick={() => save(items.filter((x) => x.id !== i.id))}>×</button>
+        </div>
       ))}
       <div className="instr-add">
         <input value={draft} placeholder={items.length ? "Add another instruction…" : "e.g. Respond with brevity."} onChange={(e) => setDraft(e.target.value)}
@@ -2324,7 +2595,7 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
       <div className="card connectors">
         <h4><Ico n="fleur" />AI connectors
           <span className="h4-actions">
-            <button className="icon" title="Refresh sign-in state and usage" aria-label="Refresh all connectors" onClick={() => { refreshStatus(); refreshUsage(true); }}>↻</button>
+            <button className="icon" title="Refresh sign-in state, usage and the model lists" aria-label="Refresh all connectors" onClick={() => { refreshStatus(); refreshUsage(true); ade.refreshModels().catch(() => {}); }}>↻</button>
             <button className="icon" title="Add a connector (API key or another CLI login)" onClick={() => setAdding(true)}>＋</button>
           </span>
         </h4>

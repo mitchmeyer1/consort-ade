@@ -32,21 +32,30 @@ export async function listWorktrees(repo: string) {
     });
 }
 
-export async function addWorktree(repo: string, name: string, branch: string, base: string) {
-  const directory = resolve(repo, ".consort-worktrees");
-  const path = resolve(directory, name);
-  const child = relative(directory, path);
+/**
+ * A new worktree goes under `directory` when given (the app's library folder, or a workspace),
+ * else under the repo's own .consort-worktrees, which is then kept out of git's view.
+ */
+export async function addWorktree(repo: string, name: string, branch: string, base: string, directory?: string) {
+  const inRepo = !directory;
+  const parent = directory ? resolve(directory) : resolve(repo, ".consort-worktrees");
+  const path = resolve(parent, name);
+  const child = relative(parent, path);
   if (!name.trim() || !child || child === ".." || child.startsWith("../") || isAbsolute(child)) {
-    throw new Error("Worktree name must identify a folder inside .consort-worktrees.");
+    throw new Error(`Worktree name must identify a folder inside ${inRepo ? ".consort-worktrees" : parent}.`);
   }
-  // The common exclude file applies across branches without dirtying .gitignore.
-  const exclude = (await git(repo, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude")).trim();
-  let current = "";
-  try { current = await fs.readFile(exclude, "utf8"); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  if (!current.split(/\r?\n/).includes("/.consort-worktrees/")) {
-    await fs.mkdir(dirname(exclude), { recursive: true });
-    await fs.appendFile(exclude, `${current && !current.endsWith("\n") ? "\n" : ""}/.consort-worktrees/\n`);
+  if (inRepo) {
+    // The common exclude file applies across branches without dirtying .gitignore.
+    const exclude = (await git(repo, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude")).trim();
+    let current = "";
+    try { current = await fs.readFile(exclude, "utf8"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    if (!current.split(/\r?\n/).includes("/.consort-worktrees/")) {
+      await fs.mkdir(dirname(exclude), { recursive: true });
+      await fs.appendFile(exclude, `${current && !current.endsWith("\n") ? "\n" : ""}/.consort-worktrees/\n`);
+    }
+  } else {
+    await fs.mkdir(parent, { recursive: true });
   }
   await git(repo, "fetch", "--quiet").catch(() => {});
   const exists = await git(repo, "rev-parse", "--verify", "--quiet", branch).then(() => true, () => false);
@@ -566,6 +575,11 @@ export async function createPr(path: string, expectedBranch: string, base: strin
     if (!url) throw new Error(`gh pr create finished but printed no PR URL. ${out.trim()}`);
     return { url, number: Number(/\/pull\/(\d+)/.exec(url)?.[1]) || undefined };
   });
+}
+
+/** rewrite a PR's body, used to add the sibling links once every workspace PR exists */
+export async function editPrBody(path: string, number: number, body: string) {
+  await run("gh", ["pr", "edit", String(number), "--body", body], { cwd: path, timeout: 60_000, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
 }
 
 // Hold the checkout lock across both steps; a retry can push an already saved commit.

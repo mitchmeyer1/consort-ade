@@ -5,7 +5,7 @@ import { Codex } from "@openai/codex-sdk";
 import { store } from "./store";
 import { loginEnv } from "./auth";
 import { transcriptDigest } from "./agents";
-import { modelTiers } from "../shared/modelTiers";
+import { cheapestModel, modelTiers } from "../shared/modelTiers";
 import { SIDE_SYSTEM, sideChatPrompt, type SideMessage, type SideSnapshot } from "../shared/sideChat";
 import type { Chat } from "../shared/types";
 
@@ -15,7 +15,7 @@ const DIGEST = 14_000;
 // the observer only ever looks; nothing here can touch the job or the tree
 const READ_ONLY_TOOLS = ["Read", "Grep", "Glob", "NotebookRead", "TodoRead"];
 const SIDE_MODEL: Record<Chat["provider"], (offered?: string[]) => string> = {
-  claude: () => "claude-haiku-4-5-20251001",
+  claude: (offered) => cheapestModel(offered, "haiku"),
   codex: (offered) => modelTiers("codex", offered).delegate,
 };
 

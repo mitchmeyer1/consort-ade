@@ -12,6 +12,11 @@ import { installCommand } from "./worktreeInstall";
 import * as agents from "./agents";
 import { browserLaunch, type BrowserInfo } from "./openArtifact";
 import { isScratch, scratchWorktree } from "../shared/scratch";
+import { isWorkspace, repoDirs, reposForPr, slugify, workspaceSources } from "../shared/workspace";
+import * as ws from "./workspaces";
+import { probeClaudeModels } from "./claudeModels";
+import { forgetCodexModels } from "./codexModels";
+import type { Project, RepoResult, RepoStatus, WorkspaceStatus, Worktree } from "../shared/types";
 import { askOnce, humanize, suggestTitle } from "./namer";
 import { parsePrSuggestion, prSuggestionPrompt } from "../shared/createPr";
 import { commitFromChat } from "./commitChat";
@@ -114,8 +119,29 @@ const repoCache = new Map<string, { t: number; p: Promise<unknown> }>();
 const wt = (id: string) => store.data.worktrees.find((w) => w.id === id)!;
 const project = (id: string) => store.data.projects.find((p) => p.id === id)!;
 
+/**
+ * Where Consort keeps what it checks out: single-project worktrees under worktrees/<repo>, and
+ * multi-repo workspaces under workspaces/<name>, both inside the app's data directory rather
+ * than the repo. That works the same on every machine and keeps checkouts out of the repo tree.
+ */
+const libraryDir = (...parts: string[]) => join(app.getPath("userData"), ...parts);
+const worktreesRoot = (p: Project) => libraryDir("worktrees", basename(p.path));
+const workspacesRoot = () => libraryDir("workspaces");
+
+/** the repos of a workspace as git targets; a source project that was removed is skipped */
+const targetsOf = (p: Project): ws.RepoTarget[] =>
+  workspaceSources(store.data, p).map(({ project: src, dir, path }) => ({ projectId: src.id, name: src.name, dir, path, repo: src.path, base: src.defaultBase }));
+/** the workspace project a worktree belongs to, if it is a workspace's scope */
+const workspaceOf = (w: Worktree | undefined): Project | undefined => {
+  if (!w?.workspace) return undefined;
+  const p = store.data.projects.find((p) => p.id === w.projectId);
+  return p && isWorkspace(p) ? p : undefined;
+};
+const wsStatusCache = new Map<string, { t: number; p: Promise<WorkspaceStatus | null> }>();
+
 async function syncWorktrees(projectId: string) {
   const p = project(projectId);
+  if (!p || isWorkspace(p)) return; // a workspace's checkouts belong to its source repos
   const live = await git.listWorktrees(p.path);
   ensureRootWorktree(store.data.worktrees, p, live.find((w) => w.path === p.path)?.branch ?? "(detached)");
   const mine = store.data.worktrees.filter((w) => w.projectId === projectId);
@@ -259,7 +285,10 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     await syncWorktrees(id);
     store.save();
   },
-  removeProject: (id: string) => {
+  removeProject: async (id: string) => {
+    const p = project(id);
+    // a workspace owns its checkouts: hand each back to its source repo and drop the folder
+    if (p && isWorkspace(p)) await ws.removeWorkspaceTree(p.path, targetsOf(p));
     const wts = store.data.worktrees.filter((w) => w.projectId === id).map((w) => w.id);
     store.data.chats = store.data.chats.filter((c) => !wts.includes(c.worktreeId));
     store.data.worktrees = store.data.worktrees.filter((w) => w.projectId !== id);
@@ -284,7 +313,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   },
   addWorktree: async (projectId: string, name: string, branch: string, base: string) => {
     const repo = project(projectId).path;
-    const path = await git.addWorktree(repo, name, branch, base);
+    const path = await git.addWorktree(repo, name, branch, base, worktreesRoot(project(projectId)));
     // The tree is already on disk; a copy failure must not undo it.
     await prepareWorktree(repo, path);
     await syncWorktrees(projectId);
@@ -318,9 +347,75 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     store.save();
   },
   // ponytail: 20s cache so sidebar + page + cards polling don't hammer gh
+  // ---- workspaces: several repos, one branch, one chat scope
+  addWorkspace: async (name: string, branch: string, projectIds: string[]) => {
+    const title = name.trim(), ref = branch.trim();
+    if (!title) throw new Error("Name the workspace.");
+    if (!ref) throw new Error("Enter the branch to check out in every repo.");
+    const sources = projectIds.map((id) => store.data.projects.find((p) => p.id === id)).filter((p): p is Project => !!p && !isWorkspace(p));
+    if (sources.length < 2) throw new Error("Pick at least two projects.");
+    const slug = slugify(title);
+    if (store.data.projects.some((p) => isWorkspace(p) && basename(p.path) === slug)) throw new Error(`A workspace folder named ${slug} already exists.`);
+    const root = join(workspacesRoot(), slug);
+    const repos = repoDirs(sources);
+    const targets = await ws.createWorkspaceTree(root, ref, repos.map(({ projectId, dir }) => {
+      const src = sources.find((s) => s.id === projectId)!;
+      return { projectId, name: src.name, dir, repo: src.path, base: src.defaultBase };
+    }));
+    const id = randomUUID(), wtId = randomUUID();
+    store.data.projects.push({ id, name: title, path: root, defaultBase: "", kind: "workspace", branch: ref, repos });
+    store.data.worktrees.push({ id: wtId, projectId: id, name: slug, title, path: root, branch: ref, archived: false, workspace: true });
+    store.save();
+    // env files and installs per repo, same as any new worktree; the terminal scope is the workspace
+    for (const t of targets) {
+      const src = sources.find((s) => s.id === t.projectId)!;
+      prepareWorktree(src.path, t.path).catch(() => {}).then(() => startInstall(wtId, src.path, t.path));
+    }
+    return wtId;
+  },
+  workspaceStatus: (projectId: string) => {
+    const p = store.data.projects.find((p) => p.id === projectId);
+    if (!p || !isWorkspace(p)) return null;
+    const hit = wsStatusCache.get(projectId);
+    if (hit && Date.now() - hit.t < 20_000) return hit.p;
+    const promise = ws.workspaceStatuses(targetsOf(p))
+      .then((rows): WorkspaceStatus => ({ branch: p.branch ?? "", repos: rows.map(({ target, status }): RepoStatus => ({ projectId: target.projectId, name: target.name, dir: target.dir, path: target.path, status })) }))
+      .catch(() => null);
+    wsStatusCache.set(projectId, { t: Date.now(), p: promise });
+    return promise;
+  },
+  commitWorkspace: async (projectId: string, message: string) => {
+    const p = project(projectId);
+    if (!p || !isWorkspace(p)) throw new Error("Workspace no longer exists.");
+    if (store.data.chats.some((c) => c.running && store.data.worktrees.find((w) => w.id === c.worktreeId)?.projectId === projectId)) throw new Error("Wait for this workspace's chats to finish before committing.");
+    try { return await ws.commitAll(targetsOf(p), p.branch ?? "", message); }
+    finally { wsStatusCache.delete(projectId); for (const t of targetsOf(p)) git.forgetRemoteStatus(t.path); }
+  },
+  pullWorkspace: async (projectId: string) => {
+    const p = project(projectId);
+    if (!p || !isWorkspace(p)) throw new Error("Workspace no longer exists.");
+    try { return await ws.pullAll(targetsOf(p), p.branch ?? ""); }
+    finally { wsStatusCache.delete(projectId); for (const t of targetsOf(p)) git.forgetRemoteStatus(t.path); }
+  },
+  pushWorkspace: async (projectId: string) => {
+    const p = project(projectId);
+    if (!p || !isWorkspace(p)) throw new Error("Workspace no longer exists.");
+    try { return await ws.pushAll(targetsOf(p), p.branch ?? ""); }
+    finally { wsStatusCache.delete(projectId); for (const t of targetsOf(p)) git.forgetRemoteStatus(t.path); }
+  },
+  createWorkspacePrs: async (projectId: string, draft: PrDraft): Promise<RepoResult[]> => {
+    const p = project(projectId);
+    if (!p || !isWorkspace(p)) throw new Error("Workspace no longer exists.");
+    const status = await handlers.workspaceStatus!(projectId);
+    const eligible = new Set(reposForPr(status).map((r) => r.dir));
+    const targets = targetsOf(p).filter((t) => eligible.has(t.dir));
+    if (!targets.length) throw new Error("No repo has commits to open a PR for.");
+    try { return await ws.createPrs(targets, p.branch ?? "", draft, p.name); }
+    finally { wsStatusCache.delete(projectId); for (const t of targets) { git.forgetRemoteStatus(t.path); repoCache.delete(t.projectId); git.forgetRepoInfo(t.repo); } }
+  },
   worktreeStatus: (id: string) => {
     const w = store.data.worktrees.find((w) => w.id === id);
-    if (!w || isScratch(w)) return null;
+    if (!w || isScratch(w) || w.workspace) return null;
     const hit = statusCache.get(id);
     if (hit && Date.now() - hit.t < 20_000) return hit.p;
     const base = project(w.projectId).defaultBase;
@@ -407,17 +502,28 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   unwatchReview: (id: string, target: string) => { reviewWatchers.remove(artifactPath(id, target)); },
   authStatus: (keyId: string) => authStatus(keyId),
   connectorUsage: (keyId: string, force?: boolean) => { const k = store.data.keys.find((k) => k.id === keyId); if (!k) throw new Error("Connector not found"); return usage.read(k, { force }); },
-  commitInfo: (id: string) => git.commitInfo(wt(id).path),
-  commit: async (id: string, message: string) => { const r = await git.commit(wt(id).path, message); statusCache.delete(id); return r; },
+  commitInfo: (id: string) => { const p = workspaceOf(wt(id)); return p ? ws.workspaceCommitInfo(targetsOf(p), p.branch ?? "") : git.commitInfo(wt(id).path); },
+  commit: async (id: string, message: string) => {
+    const p = workspaceOf(wt(id));
+    if (p) {
+      const results: RepoResult[] = await handlers.commitWorkspace!(p.id, message);
+      const done = results.filter((r) => !r.skipped);
+      if (done.some((r) => !r.ok)) throw new Error(done.map((r) => `${r.name}: ${r.detail}`).join(" · "));
+      return done.length ? done.map((r) => `${r.name}: ${r.detail}`).join(" · ") : "Nothing to commit in any repo.";
+    }
+    const r = await git.commit(wt(id).path, message); statusCache.delete(id); return r;
+  },
   suggestCommit: async (id: string) => {
-    const diff = await git.diffForSummary(wt(id).path);
+    const p = workspaceOf(wt(id));
+    const diff = p ? await ws.workspaceDiffForSummary(targetsOf(p)) : await git.diffForSummary(wt(id).path);
     if (!diff.trim()) return "";
     return askOnce(wt(id).path, `Write a git commit message for this diff.\nFormat: a short imperative subject line (max 60 chars), a blank line, then 1 to 5 bullets, each ONE sentence, each starting with "- ". No other text.\n\n${diff}`);
   },
   suggestPr: async (id: string, branch: string) => {
     const w = wt(id);
     if (!w) throw new Error("Worktree no longer exists.");
-    const input = await git.branchDiffForSummary(w.path, branch, project(w.projectId).defaultBase);
+    const wsp = workspaceOf(w);
+    const input = wsp ? await ws.workspacePrSummary(targetsOf(wsp), branch) : await git.branchDiffForSummary(w.path, branch, project(w.projectId).defaultBase);
     if (!input.commits.trim() && !input.patch.trim()) return { title: "", body: "" };
     return parsePrSuggestion(await askOnce(w.path, prSuggestionPrompt(input)));
   },
@@ -449,6 +555,16 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     applyAppearance();
     store.save();
   },
+  // Every Claude connector is asked what it offers; the union is the picker's list, kept in
+  // state so the next launch starts from it. A connector that cannot answer changes nothing.
+  refreshModels: async () => {
+    forgetCodexModels();
+    const keys = store.data.keys.filter((k) => k.provider === "claude");
+    const lists = await Promise.all(keys.map((k) => probeClaudeModels(k, k.auth === "key" ? store.getSecret(k.id) : undefined).catch(() => [] as string[])));
+    const models = [...new Set(lists.flat())];
+    if (models.length) { (store.data.modelCatalog ??= {}).claude = { models, at: Date.now() }; }
+    store.save();
+  },
   // standing instructions reach a chat on its next turn; running turns keep the prompt they started with
   setInstructions: (items: import("../shared/instructions").Instruction[]) => {
     store.data.instructions = items.map((i) => ({ id: i.id, text: i.text.trim(), enabled: !!i.enabled })).filter((i) => i.text);
@@ -459,7 +575,8 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     const key = store.data.keys.find((k) => k.id === keyId);
     if (!key) throw new Error("Connector not found.");
     const provider = key.provider;
-    const model = opts.model?.trim() || selectedModel(store.data, key, MODELS[provider][0]);
+    const offered = store.public().models?.[provider];
+    const model = opts.model?.trim() || selectedModel(store.data, key, offered?.[0] ?? MODELS[provider][0]);
     const delegateModel = opts.delegateModel?.trim();
     // A model a task pinned for itself is not the user's choice: remembering a review's
     // orchestrator tier would silently start every later chat on the priciest model.
@@ -653,13 +770,15 @@ ${skill}${rubric}`;
     store.save();
   },
   runCommand: (worktreeId: string, cmd: string) => git.runCommand(wt(worktreeId).path, cmd),
-  diff: (worktreeId: string) => git.diff(wt(worktreeId).path),
+  diff: (worktreeId: string) => { const p = workspaceOf(wt(worktreeId)); return p ? ws.workspaceDiff(targetsOf(p)) : git.diff(wt(worktreeId).path); },
 };
 
 app.whenReady().then(() => {
   startDockerRecovery(join(app.getPath("userData"), "docker-runs"));
   store.load();
   store.save();
+  // the model pickers follow the providers, not a release of Consort: ask on every start
+  handlers.refreshModels!().catch((error: unknown) => console.warn("model refresh failed", error));
   // first-run titles for worktrees imported before titles existed
   for (const w of store.data.worktrees)
     if (w.title === w.name) { w.title = humanize(w.branch); suggestTitle(w.path, w.branch).then((t) => { w.title = t; store.save(); }); }
