@@ -83,23 +83,26 @@ export function messageArtifacts(blocks: Block[]): MadeArtifact[] {
   };
   for (const b of blocks) {
     if (b.type !== "tool" || b.ok === false) continue;
-    if (b.name.startsWith("mcp__")) {
+    // chats saved by older builds, and test fixtures, can carry tool blocks with no name or a non-string input
+    const name = typeof b.name === "string" ? b.name : "";
+    const input = typeof b.input === "string" ? b.input : "";
+    if (name.startsWith("mcp__")) {
       const out = b.output ?? "";
       const title = /"(?:name|title)"\s*:\s*"([^"\n]{1,80})"/.exec(out)?.[1];
-      for (const url of out.match(/https?:\/\/[^\s"'<>)\]}]+/g) ?? []) add(url, title || serverLabel(b.name), true);
+      for (const url of out.match(/https?:\/\/[^\s"'<>)\]}]+/g) ?? []) add(url, title || serverLabel(name), true);
       continue;
     }
-    const tool = b.name.replace(/^mcp__.*__/, "");
+    const tool = name.replace(/^mcp__.*__/, "");
     if (WRITE_TOOLS.test(tool)) {
       // the Claude tools send JSON; Codex sends `add /path` lines, so fall back to scanning for paths
       let paths: string[] = [];
       try {
-        const input = JSON.parse(b.input) as Record<string, unknown>;
-        paths = [input.file_path, input.notebook_path, input.path].filter((v): v is string => typeof v === "string");
-      } catch { paths = Array.from(b.input.matchAll(PATH_LIKE), (m) => m[1]); }
+        const parsed = JSON.parse(input) as Record<string, unknown>;
+        paths = [parsed.file_path, parsed.notebook_path, parsed.path].filter((v): v is string => typeof v === "string");
+      } catch { paths = Array.from(input.matchAll(PATH_LIKE), (m) => m[1]); }
       for (const p of paths) if (DOC_FILE.test(p)) add(p, fileName(p), false);
     } else if (/^bash$/i.test(tool)) {
-      for (const m of b.input.matchAll(REDIRECT)) {
+      for (const m of input.matchAll(REDIRECT)) {
         const p = m[1] ?? m[2] ?? m[3];
         if (p && DOC_FILE.test(p)) add(p, fileName(p), false);
       }

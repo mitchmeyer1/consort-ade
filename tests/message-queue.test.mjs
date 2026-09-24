@@ -10,6 +10,7 @@ import * as planProgress from '../src/shared/planProgress.ts';
 import * as skillSections from '../src/shared/skillSections.ts';
 import * as followups from '../src/shared/followups.ts';
 import * as instructions from '../src/shared/instructions.ts';
+import * as deliverables from '../src/shared/deliverables.ts';
 
 const require = createRequire(import.meta.url);
 const compiled = ts.transpileModule(await readFile(new URL('../src/main/agents.ts', import.meta.url), 'utf8'), {
@@ -45,6 +46,7 @@ async function fixture(t) {
     '../shared/skillSections': skillSections,
     '../shared/followups': followups,
     '../shared/instructions': instructions,
+    '../shared/deliverables': deliverables,
     '@anthropic-ai/claude-agent-sdk': {},
     '@openai/codex-sdk': { Codex: class { startThread() { return thread; } resumeThread() { return thread; } } },
   };
