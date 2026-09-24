@@ -1,4 +1,4 @@
-import type { Message } from "./types";
+import type { Block, Message } from "./types";
 
 // Markdown renders explicit links as ordinary anchors, without artifact metadata.
 export function artifactLinkAction(target: string): "artifact" | "external" | null {
@@ -55,10 +55,71 @@ export function artifactWhen(at: number, now: number, locale?: string): string {
   return `${date}, ${clock(at, locale)}`;
 }
 
+/** a document the agent made during one message: a file it wrote, or a page an MCP tool handed back */
+export type MadeArtifact = { label: string; target: string; remote: boolean };
+
+/** documents, not source: a turn that edits twenty .ts files should not grow twenty buttons */
+const DOC_FILE = /\.(?:md|markdown|txt|html?|pdf|png|jpe?g|gif|webp|svg|csv|json|docx|xlsx|pptx)$/i;
+const WRITE_TOOLS = /^(?:write|edit|multiedit|notebookedit|create_file|str_replace_editor|str_replace_based_edit_tool)$/i;
+/** `cat > plan.md <<EOF`, `pandoc … > out.pdf`: the shell's own way of producing a file */
+const REDIRECT = /(?:^|\s)>>?\s*(?:"([^"]+)"|'([^']+)'|([^\s;|&<>]+))/g;
+const PATH_LIKE = /(?:^|[\s"'`(])((?:\/|\.{1,2}\/|~\/)?[\w.@~-]+(?:\/[\w.@ -]+)*\.[A-Za-z0-9]{1,5})\b/g;
+const MADE_LIMIT = 6;
+
+const fileName = (p: string) => p.split(/[\\/]/).pop() || p;
+/** `mcp__claude_ai_Claude_Docs__create` → `Claude Docs` */
+const serverLabel = (tool: string) => tool.replace(/^mcp__/, "").split("__")[0].replace(/^claude_ai_/, "").replace(/_/g, " ").trim() || "Link";
+
+/**
+ * What one assistant message produced, so the response can end with a way to open it. Text links
+ * are already clickable in the prose; this reads the tool calls, which is where a document written
+ * by `Write`, a shell redirect, or an MCP page the model never pasted a link to would otherwise be lost.
+ */
+export function messageArtifacts(blocks: Block[]): MadeArtifact[] {
+  const made = new Map<string, MadeArtifact>();
+  const add = (target: string, label: string, remote: boolean) => {
+    if (!target || made.has(target) || made.size >= MADE_LIMIT) return;
+    made.set(target, { target, label, remote });
+  };
+  for (const b of blocks) {
+    if (b.type !== "tool" || b.ok === false) continue;
+    if (b.name.startsWith("mcp__")) {
+      const out = b.output ?? "";
+      const title = /"(?:name|title)"\s*:\s*"([^"\n]{1,80})"/.exec(out)?.[1];
+      for (const url of out.match(/https?:\/\/[^\s"'<>)\]}]+/g) ?? []) add(url, title || serverLabel(b.name), true);
+      continue;
+    }
+    const tool = b.name.replace(/^mcp__.*__/, "");
+    if (WRITE_TOOLS.test(tool)) {
+      // the Claude tools send JSON; Codex sends `add /path` lines, so fall back to scanning for paths
+      let paths: string[] = [];
+      try {
+        const input = JSON.parse(b.input) as Record<string, unknown>;
+        paths = [input.file_path, input.notebook_path, input.path].filter((v): v is string => typeof v === "string");
+      } catch { paths = Array.from(b.input.matchAll(PATH_LIKE), (m) => m[1]); }
+      for (const p of paths) if (DOC_FILE.test(p)) add(p, fileName(p), false);
+    } else if (/^bash$/i.test(tool)) {
+      for (const m of b.input.matchAll(REDIRECT)) {
+        const p = m[1] ?? m[2] ?? m[3];
+        if (p && DOC_FILE.test(p)) add(p, fileName(p), false);
+      }
+    }
+  }
+  return [...made.values()];
+}
+
 export function chatArtifacts(messages: Message[]): ChatArtifact[] {
   const files = new Map<string, ChatArtifact>();
+  const record = (label: string, target: string, ts: number) => {
+    const key = target.split("#")[0].replace(/:\d+(?::\d+)?$/, "");
+    const seen = files.get(key);
+    if (seen) seen.updatedAt = Math.max(seen.updatedAt, ts);
+    else files.set(key, { label, target, linkedAt: ts, updatedAt: ts });
+  };
   for (const message of messages) {
     if (message.role !== "assistant") continue;
+    // a document the agent wrote but never linked in its prose belongs here too
+    for (const { label, target } of messageArtifacts(message.blocks)) record(label, target, message.ts);
     for (const block of message.blocks) {
       if (block.type !== "text") continue;
       for (const { label, target } of artifactLinks(block.text)) {
@@ -70,14 +131,12 @@ export function chatArtifacts(messages: Message[]): ChatArtifact[] {
           try { if (!/\.[a-z0-9]{1,10}$/i.test(new URL(target).pathname)) continue; }
           catch { continue; }
         }
-        const key = target.split("#")[0].replace(/:\d+(?::\d+)?$/, "");
-        const seen = files.get(key);
-        if (seen) seen.updatedAt = Math.max(seen.updatedAt, message.ts);
-        else files.set(key, { label, target, linkedAt: message.ts, updatedAt: message.ts });
+        record(label, target, message.ts);
       }
     }
   }
-  return [...files.values()];
+  // newest activity first, as a file browser sorted by "modified"; ties keep the order the files were first linked in
+  return [...files.values()].sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 /**

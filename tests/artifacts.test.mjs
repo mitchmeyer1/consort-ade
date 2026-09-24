@@ -104,3 +104,15 @@ test('artifact timestamps read as today, yesterday, or a dated clock time', asyn
   assert.equal(artifactWhen(at(2026, 8, 3, 9, 4), now, 'en-US'), 'Sep 3, 9:04 AM');
   assert.equal(artifactWhen(at(2025, 11, 24, 8, 30), now, 'en-US'), 'Dec 24, 2025, 8:30 AM');
 });
+
+test('chat artifacts list the most recently linked file first', async () => {
+  const { chatArtifacts } = await import('../src/shared/artifacts.ts');
+  const text = (ts, value) => ({ role: 'assistant', ts, blocks: [{ type: 'text', text: value }] });
+  const order = chatArtifacts([
+    text(1000, '[Old](old.md) [Revisited](revisited.md)'),
+    text(2000, '[Middle](middle.md)'),
+    text(3000, '[Revisited again](revisited.md)'),
+    text(4000, '[Newest](newest.md)'),
+  ]).map((a) => a.target);
+  assert.deepEqual(order, ['newest.md', 'revisited.md', 'middle.md', 'old.md']);
+});

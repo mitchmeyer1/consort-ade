@@ -13,7 +13,7 @@ import { CHAT_MARKS, hasRollup, rollupLabel, rollupStatus } from "../../shared/s
 import { ciLabel, ciTitle, type CiInfo } from "../../shared/ci";
 import { recentChats, recentWorktrees } from "../../shared/conversationOrder";
 import { Lockup, Mark } from "./Logo";
-import { artifactLinkAction, artifactLinks, artifactWhen, chatArtifacts, localImageTarget, withFrameScrollbars } from "../../shared/artifacts";
+import { artifactLinkAction, artifactLinks, artifactWhen, chatArtifacts, localImageTarget, messageArtifacts, withFrameScrollbars } from "../../shared/artifacts";
 import { parseFollowups, type Followup } from "../../shared/followups";
 import { isScratch, scratchChats } from "../../shared/scratch";
 import type { Instruction } from "../../shared/instructions";
@@ -1642,9 +1642,21 @@ function AssistantMessage({ blocks, onOpen, worktreeId, live, onFollowup }: { bl
     });
     return { rows, followups };
   }, [blocks]);
+  // whatever this response made — a doc it wrote, a page an MCP tool created — gets a way to open it,
+  // whether or not the model remembered to link it in its prose
+  const made = React.useMemo(() => (live ? [] : messageArtifacts(blocks)), [blocks, live]);
   return (
     <div className="msg assistant">
       {parsed.rows.map((b, k) => b.type === "text" ? (b.text.trim() ? <Prose key={k} text={b.text} onOpen={onOpen} worktreeId={worktreeId} /> : null) : <ToolRow key={b.id} b={b} onOpen={onOpen} live={live} />)}
+      {made.length > 0 && (
+        <div className="made" role="group" aria-label="Files from this response">
+          {made.map((a) => (
+            <button key={a.target} className="made-link" title={a.target} onClick={() => a.remote ? ade.openExternal(a.target) : onOpen(a.target)}>
+              <Ico n="scroll" />{a.label}<span className="made-chev" aria-hidden="true">{a.remote ? "↗" : "›"}</span>
+            </button>
+          ))}
+        </div>
+      )}
       {parsed.followups.length > 0 && (
         <div className="followups" role="group" aria-label="Suggested follow-ups">
           {parsed.followups.map((f) => <button key={f.prompt} className="followup" title={f.prompt} onClick={() => onFollowup(f.prompt)}>{f.label}</button>)}

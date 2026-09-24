@@ -9,15 +9,15 @@ import { basename, dirname, join } from "node:path";
 import {
   applyVerdict, approvedFindings, commentableLines, draftBodyPrompt, driftBases, driftedFindings, fallbackReviewBody, parseReview, parseVerdict,
   patchesToDiff, queueAll, recordSubmission, reviewPayload, serializeReview, updateFinding, verdictSummary, verifiedHead,
-  type FindingStatus, type Review, type ReviewEvent, type VerdictReport,
+  type FindingStatus, type Review, type ReviewEvent, type ReviewPayload, type VerdictReport,
   pickReviewFile, reviewSummary, recordFixRequest, settle, type ReviewSummary,
 } from "../shared/review";
 import { store } from "./store";
 import { reviewRunner } from "../shared/reviewRunner";
 import { askReadOnly } from "./sideChat";
 
-const gh = (args: string[], cwd: string, input?: string) => new Promise<string>((resolve, reject) => {
-  const child = execFile("gh", args, { cwd, timeout: 30_000, maxBuffer: 1 << 24 }, (error, stdout, stderr) => {
+const gh = (args: string[], cwd: string, input?: string, timeout = 30_000) => new Promise<string>((resolve, reject) => {
+  const child = execFile("gh", args, { cwd, timeout, maxBuffer: 1 << 24 }, (error, stdout, stderr) => {
     if (error) reject(new Error(String(stderr || error.message).trim().split("\n").filter(Boolean).pop() || "gh failed"));
     else resolve(stdout);
   });
@@ -180,6 +180,68 @@ export type SubmitResult = { url: string; event: ReviewEvent; body: string; draf
 const DRAFT_SYSTEM = "You write the top-level body of a pull-request review in the reviewer's own voice. Reply with only the body text: no preamble, no quotes, no markdown headings.";
 
 /**
+ * POST /pulls/{n}/reviews writes every inline comment inside the one request, and GitHub answers
+ * 502/504 long before a large batch lands — PR #460 failed that way with 43 comments. Past this many,
+ * do what the web UI does: open the review pending, add each comment as its own thread, then submit it.
+ */
+const INLINE_BATCH = 10;
+const ADD_THREAD = `mutation($review: ID!, $path: String!, $line: Int!, $body: String!) {
+  addPullRequestReviewThread(input: { pullRequestReviewId: $review, path: $path, line: $line, side: RIGHT, body: $body }) { thread { id } }
+}`;
+
+const STATE_OF: Record<ReviewEvent, string> = { COMMENT: "COMMENTED", APPROVE: "APPROVED", REQUEST_CHANGES: "CHANGES_REQUESTED" };
+
+/**
+ * The review GitHub may have written anyway while timing out on us: ours, at the reviewed commit,
+ * carrying the same body. Found means the post succeeded, so a retry would double the review.
+ */
+async function landedReview(repo: string, pr: number, payload: ReviewPayload, cwd: string) {
+  try {
+    const [me, raw] = await Promise.all([
+      gh(["api", "user", "--jq", ".login"], cwd).then((s) => s.trim(), () => ""),
+      // --paginate concatenates one array per page; stitch them into one before parsing
+      gh(["api", "--paginate", `repos/${repo}/pulls/${pr}/reviews?per_page=100`], cwd).catch(() => "[]"),
+    ]);
+    const list = JSON.parse(raw.trim().replace(/\]\s*\[/g, ","));
+    if (!Array.isArray(list)) return null;
+    return list.filter((r) => (!me || r.user?.login === me) && r.commit_id === payload.commit_id && r.body === payload.body && r.state === STATE_OF[payload.event]).pop() ?? null;
+  } catch {
+    return null; // the check is best effort: when it cannot answer, the caller reports the original failure
+  }
+}
+
+/** One review on the PR, however many comments it carries. Returns GitHub's review object. */
+async function postReview(repo: string, pr: number, payload: ReviewPayload, cwd: string) {
+  const reviews = `repos/${repo}/pulls/${pr}/reviews`;
+  const post = (path: string, body: unknown) => gh(["api", "-X", "POST", path, "--input", "-"], cwd, JSON.stringify(body), 60_000).then((s) => JSON.parse(s));
+  if (payload.comments.length <= INLINE_BATCH) {
+    try {
+      return await post(reviews, payload);
+    } catch (error) {
+      // a timeout here still leaves the review behind often enough that re-posting would duplicate it
+      await new Promise((r) => setTimeout(r, 4000));
+      const landed = await landedReview(repo, pr, payload, cwd);
+      if (landed) return landed;
+      throw error;
+    }
+  }
+  // the body-only create is small and fast; the comments follow one call at a time
+  const pending = await post(reviews, { commit_id: payload.commit_id, body: payload.body });
+  try {
+    for (const c of payload.comments) {
+      const out = JSON.parse(await gh(["api", "graphql", "--input", "-"], cwd,
+        JSON.stringify({ query: ADD_THREAD, variables: { review: String(pending.node_id), path: c.path, line: c.line, body: c.body } })));
+      if (out.errors?.length) throw new Error(`${c.path}:${c.line} — ${out.errors[0].message}`);
+    }
+    return await post(`${reviews}/${pending.id}/events`, { event: payload.event, body: payload.body });
+  } catch (error) {
+    // drop the half-written draft: it is invisible to the author, and it would collide with the next attempt
+    await gh(["api", "-X", "DELETE", `${reviews}/${pending.id}`], cwd).catch(() => {});
+    throw new Error(`${(error as Error).message} (no review was posted; ${payload.comments.length} comments are still queued)`);
+  }
+}
+
+/**
  * Submit one GitHub review: the verdict, a body (Mitch's, or drafted by the model when left
  * blank), and — when asked — every queued comment inline, pinned to the commit the review read.
  * Lines the diff at that commit does not show fall into the body, so a comment is never lost.
@@ -207,7 +269,7 @@ export async function submitReview(path: string, opts: SubmitOptions, worktreeId
   }
   const built = reviewPayload(review, findings, commentable, { event: opts.event, body });
   if (!built) throw new Error("There is nothing to submit: no body and no approved comments.");
-  const response = JSON.parse(await gh(["api", "-X", "POST", `repos/${repo}/pulls/${review.pr}/reviews`, "--input", "-"], cwd, JSON.stringify(built.payload)));
+  const response = await postReview(repo, review.pr, built.payload, cwd);
   const url = String(response.html_url ?? review.url);
   const next = recordSubmission(review, {
     at: new Date().toISOString(), event: opts.event, url, body, inline: findings.map((f) => f.id),
