@@ -11,13 +11,38 @@ export function artifactLinkAction(target: string): "artifact" | "external" | nu
   return !scheme || scheme === "file" ? "artifact" : null;
 }
 
+const EXT = "md|markdown|txt|html?|pdf|png|jpe?g|gif|webp|svg|csv|json|tsx?|jsx?|py|docx|xlsx|pptx";
 // Markdown destinations take precedence so paths with spaces remain intact.
+const BASE_LINK = new RegExp(`\\[([^\\]\\n]+)\\]\\((<[^>\\n]+>|[^)\\n]+)\\)|(?:https?:\\/\\/|file:\\/\\/)[^\\s<>\`]+|(?:\\/?[\\w.@~-]+\\/)*[\\w.@-]+\\.(?:${EXT})\\b(?::\\d+(?::\\d+)?)?`, "gi");
+/** a whole code span that is one path: segments may hold spaces ("Application Support"), which bare prose paths cannot */
+const CODE_PATH = new RegExp(`^(?:file:\\/\\/)?(?:\\/|~\\/|\\.{1,2}\\/)?(?:[^\\/\\n\`]+\\/)*[^\\/\\n\`]+\\.(?:${EXT})(?::\\d+(?::\\d+)?)?$`, "i");
+const SPAN = /`([^`\n]+)`/g;
+
+/**
+ * The path a code span names, or null. Agents put paths in backticks as a matter of style, and a
+ * path under "Application Support" has a space no prose scanner can safely allow, so the span's
+ * boundaries stand in for the word boundaries: if the whole span reads as one file, it is the file.
+ */
+export function codeSpanArtifact(text: string): string | null {
+  const t = text.trim();
+  return t && !/\s{2,}|\s[-|&;]/.test(t) && CODE_PATH.test(t) ? t : null;
+}
+
 export function artifactLinks(text: string) {
-  const pattern = /\[([^\]\n]+)\]\((<[^>\n]+>|[^)\n]+)\)|(?:https?:\/\/|file:\/\/)[^\s<>`]+|(?:\/?[\w.@~-]+\/)*[\w.@-]+\.(?:md|txt|html?|pdf|png|jpe?g|gif|webp|svg|csv|json|tsx?|jsx?|py|docx|xlsx|pptx)\b(?::\d+(?::\d+)?)?/gi;
-  return Array.from(text.matchAll(pattern), (m) => ({
-    index: m.index!, length: m[0].length,
-    label: m[1] ?? m[0], target: m[2] ? m[2].replace(/^<|>$/g, "") : m[0],
-  }));
+  const out: { index: number; length: number; label: string; target: string }[] = [];
+  const scan = (chunk: string, offset: number) => {
+    for (const m of chunk.matchAll(BASE_LINK)) out.push({ index: offset + m.index!, length: m[0].length, label: m[1] ?? m[0], target: m[2] ? m[2].replace(/^<|>$/g, "") : m[0] });
+  };
+  let last = 0;
+  for (const m of text.matchAll(SPAN)) {
+    scan(text.slice(last, m.index), last);
+    const whole = codeSpanArtifact(m[1]);
+    if (whole) out.push({ index: m.index!, length: m[0].length, label: m[1], target: whole });
+    else scan(m[1], m.index! + 1);
+    last = m.index! + m[0].length;
+  }
+  scan(text.slice(last), last);
+  return out;
 }
 
 /**

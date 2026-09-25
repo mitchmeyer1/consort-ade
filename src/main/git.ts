@@ -13,8 +13,16 @@ import { ISSUE_PAGE, PR_PAGE, issueListQuery, mapIssueNode, mapPr, pickPr, prByB
 import { prCreateArgs, prUrlIn, type PrDraft, type PrSummaryInput } from "../shared/createPr.ts";
 
 const run = promisify(execFile);
-const git = async (cwd: string, ...args: string[]) =>
-  (await run("git", args, { cwd, maxBuffer: 1 << 24 })).stdout;
+// git explains itself on stderr; surface that line instead of execFile's bare "Command failed: git …"
+const git = async (cwd: string, ...args: string[]) => {
+  try { return (await run("git", args, { cwd, maxBuffer: 1 << 24 })).stdout; }
+  catch (e) {
+    const err = e as Error & { stdout?: string; stderr?: string; code?: number | string };
+    const reason = String(err.stderr ?? "").trim().split("\n").filter(Boolean).pop();
+    // keep the streams: `git diff --no-index` exits 1 with the diff on stdout, and callers read it from the error
+    throw Object.assign(new Error(reason ? `git ${args[0]}${args[1] ? ` ${args[1]}` : ""}: ${reason}` : err.message), { stdout: err.stdout, stderr: err.stderr, code: err.code });
+  }
+};
 
 export async function isRepo(path: string) {
   return git(path, "rev-parse", "--show-toplevel").then(() => true, () => false);
@@ -64,8 +72,21 @@ export async function addWorktree(repo: string, name: string, branch: string, ba
   return path;
 }
 
+/**
+ * Remove a worktree. A folder git no longer knows about (a creation that failed part-way, or a
+ * checkout pruned from another clone) still has to go: it is deleted outright, but only after git
+ * confirms it is not a registered worktree, so a real checkout is never rm'd behind git's back.
+ */
 export async function removeWorktree(repo: string, path: string) {
-  await git(repo, "worktree", "remove", "--force", path);
+  try { await git(repo, "worktree", "remove", "--force", path); }
+  catch (e) {
+    // only git's own word that the folder is not a checkout justifies deleting it; if git cannot even list, fail as it did
+    let registered: boolean;
+    try { registered = (await listWorktrees(repo)).some((w) => resolve(w.path) === resolve(path)); } catch { throw e; }
+    if (registered) throw e;
+    await fs.rm(path, { recursive: true, force: true });
+  }
+  await git(repo, "worktree", "prune").catch(() => {});
 }
 
 /** the gh login, fetched once per process; it does not change while the app runs */

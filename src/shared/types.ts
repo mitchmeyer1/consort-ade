@@ -91,6 +91,8 @@ export type Block =
 /** one step of the plan the agent declares at the start of a task */
 export type PlanStep = { label: string; startedAt?: number; doneAt?: number; skipped?: boolean };
 export type ChatPlan = { steps: PlanStep[]; current: number; ts: number };
+/** the larger piece of work a chat is one part of: ticked across turns, gone when every item is done (see shared/featureProgress) */
+export type ChatFeature = { title: string; items: { label: string; doneAt?: number }[]; current?: number; ts: number };
 
 /** a row in the progress panel: a review's phase, or a step of the agent's own plan */
 export type StageState = "done" | "active" | "pending" | "skipped";
@@ -131,6 +133,8 @@ export type Chat = {
   queuePaused?: boolean;
   /** the steps the agent laid out for the current task, and how far along it is */
   plan?: ChatPlan;
+  /** the zoomed-out checklist this task belongs to, when the agent decided there is one */
+  feature?: ChatFeature;
   /** the read-only side chat you can ask about this chat's job while it runs */
   sideMessages?: SideMessage[];
   sideBusy?: boolean;

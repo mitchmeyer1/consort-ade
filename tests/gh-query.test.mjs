@@ -78,7 +78,7 @@ test('a GraphQL pull request arrives in the shape the turn rule already reads', 
   assert.equal(p.isDraft, false);
 
   // the rule itself, unchanged, still reaches the same verdict on the mapped payload
-  assert.deepEqual(whoseTurn(p, 'mitch'), { mine: true, role: 'author', turn: 'theirs', why: 'you pushed last' });
+  assert.deepEqual(whoseTurn(p, 'mitch'), { mine: true, role: 'author', turn: 'theirs', why: 'you pushed last', approved: false });
   assert.equal(whoseTurn(p, 'dana').turn, 'yours', 'a pending request to me is my turn');
   assert.equal(whoseTurn(p, 'someone-else').role, null);
 });
@@ -94,7 +94,7 @@ test('the head commit carries the checks, flattened the way the CI chip expects'
 test('a PR with nothing on it maps without throwing', () => {
   const p = mapPr({ number: 7, state: 'MERGED' });
   assert.deepEqual([p.reviews, p.comments, p.commits, p.reviewRequests, p.statusCheckRollup], [[], [], [], [], []]);
-  assert.deepEqual(whoseTurn(p, 'mitch'), { mine: false, role: null, turn: null, why: '' });
+  assert.deepEqual(whoseTurn(p, 'mitch'), { mine: false, role: null, turn: null, why: '', approved: false });
   assert.equal(mapPr(undefined).number, undefined);
 });
 

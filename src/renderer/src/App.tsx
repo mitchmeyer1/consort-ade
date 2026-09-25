@@ -13,7 +13,7 @@ import { CHAT_MARKS, hasRollup, rollupLabel, rollupStatus } from "../../shared/s
 import { ciLabel, ciTitle, type CiInfo } from "../../shared/ci";
 import { recentChats, recentWorktrees } from "../../shared/conversationOrder";
 import { Lockup, Mark } from "./Logo";
-import { artifactLinkAction, artifactLinks, artifactWhen, chatArtifacts, localImageTarget, messageArtifacts, withFrameScrollbars } from "../../shared/artifacts";
+import { artifactLinkAction, artifactLinks, artifactWhen, chatArtifacts, localImageTarget, messageArtifacts, withFrameScrollbars, codeSpanArtifact } from "../../shared/artifacts";
 import { parseFollowups, type Followup } from "../../shared/followups";
 import { isScratch, scratchChats } from "../../shared/scratch";
 import type { Instruction } from "../../shared/instructions";
@@ -31,6 +31,7 @@ import { quickActionParameters, resolveQuickAction } from "../../shared/quickAct
 import { isReviewFile } from "../../shared/review";
 import { ReviewView } from "./ReviewView";
 import { planStages } from "../../shared/planProgress";
+import { featureStages } from "../../shared/featureProgress";
 import type { Stage } from "../../shared/types";
 import { marked } from "marked";
 import { Terminal as XTerm } from "@xterm/xterm";
@@ -94,10 +95,14 @@ const PrBadge = ({ st }: { st: WorktreeStatus }) => {
   return <span className="badge pr" title={`${pr.title}${pr.draft ? " (draft)" : ""}${hint}`} {...open}>{pr.draft ? "◐" : "⎇"} #{pr.number}</span>;
 };
 /** whose move an open PR waits on: the crown when it is yours, quiet when it is theirs; it speaks for the same PR, so it opens it too */
-const TurnBadge = ({ pr }: { pr?: { turn?: "yours" | "theirs" | null; why?: string; url?: string } }) => !pr?.turn ? null : (
-  <span className={"badge turn " + pr.turn} title={`${pr.why ?? ""}${pr.url ? " — click to open on GitHub" : ""}`}
+const TurnBadge = ({ pr }: { pr?: { turn?: "yours" | "theirs" | null; why?: string; url?: string; approved?: boolean } }) => !pr?.turn ? null : (
+  <span className={"badge turn " + pr.turn + (pr.approved ? " approved" : "")} title={`${pr.why ?? ""}${pr.approved ? " · you approved this PR" : ""}${pr.url ? " — click to open on GitHub" : ""}`}
     role={pr.url ? "link" : undefined}
-    onClick={pr.url ? (e) => { e.stopPropagation(); ade.openExternal(pr.url!); } : undefined}>{pr.turn === "yours" ? <><Ico n="crown" /> Your turn</> : "Their turn"}</span>
+    onClick={pr.url ? (e) => { e.stopPropagation(); ade.openExternal(pr.url!); } : undefined}>
+    {pr.turn === "yours" ? <><Ico n="crown" /> Your turn</> : "Their turn"}
+    {/* your approval stands: the turn may be yours again because they pushed or replied, but you have already signed off */}
+    {pr.approved && <span className="turn-approved" aria-label="you approved this PR">✓</span>}
+  </span>
 );
 /** the issue an `issue/<n>` branch was made for; clicking opens it on GitHub */
 const IssueBadge = ({ issue }: { issue?: WorktreeStatus["issue"] }) => !issue ? null : (
@@ -1676,9 +1681,17 @@ function ProseMd({ text, onOpen, worktreeId }: { text: string; onOpen: (p: strin
     const tpl = document.createElement("template");
     tpl.innerHTML = marked.parse(text) as string;
     linkImages(tpl.content);
+    // a code span that is one path becomes a clickable chip whole, spaces and all; other spans are scanned like prose
+    for (const code of Array.from(tpl.content.querySelectorAll("code"))) {
+      if (code.closest("a, pre")) continue;
+      const whole = codeSpanArtifact(code.textContent ?? "");
+      if (!whole) continue;
+      const a = document.createElement("a"); a.href = "#"; a.dataset.artifact = whole; a.className = "mdlink";
+      code.replaceWith(a); a.append(code);
+    }
     const walker = document.createTreeWalker(tpl.content, NodeFilter.SHOW_TEXT);
     const nodes: Text[] = [];
-    for (let n = walker.nextNode(); n; n = walker.nextNode()) if (!(n.parentElement?.closest("a, code, pre"))) nodes.push(n as Text);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) if (!(n.parentElement?.closest("a, pre"))) nodes.push(n as Text);
     for (const n of nodes) {
       const t = n.data, links = artifactLinks(t); if (!links.length) continue;
       const frag = document.createDocumentFragment(); let last = 0;
@@ -1919,13 +1932,14 @@ function ReviewFooter({ chat, review, onOpen }: { chat: Chat; review: ReviewFile
 }
 
 /* Where the work actually is: a review's known phases, or the steps the agent laid out itself. */
-function ProgressPanel({ title, stages }: { title: string; stages: Stage[] }) {
+/** the plan card on the left, or, with `side="right"`, the feature checklist the task belongs to */
+function ProgressPanel({ title, stages, icon = "laurel", side }: { title: string; stages: Stage[]; icon?: string; side?: "right" }) {
   const finished = stages.filter((s) => s.state === "done").length;
   const mark = (state: Stage["state"]) => state === "done" ? "✓" : state === "active" ? <span className="spin" /> : state === "skipped" ? "–" : "·";
   return (
-    <div className="review-progress">
+    <div className={"review-progress" + (side === "right" ? " right" : "")}>
       <div className="rp-card">
-        <div className="rp-head"><Ico n="laurel" />{title}<span className="rp-count">{finished}/{stages.length}</span></div>
+        <div className="rp-head" title={title}><Ico n={icon} /><span className="rp-title">{title}</span><span className="rp-count">{finished}/{stages.length}</span></div>
         {stages.map((s) => (
           <div key={s.id} className={`rp-stage ${s.state}`} title={s.state === "skipped" ? `${s.label} — not run` : undefined}>
             <span className="rp-mark" aria-hidden="true">{mark(s.state)}</span>
@@ -2101,12 +2115,14 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
   // a review follows our own skill, so its stages are known; every other chat shows the plan the agent declared
   const review = reviewProgress(chat);
   const stages = review ?? planStages(chat);
+  const feature = featureStages(chat);
   return (
     <div className={"chatpane" + (over ? " over" : "")} onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setOver(false); }} onDrop={onDrop} onPaste={onPaste}>
       {over && <div className="dropveil">Drop to attach</div>}
       <PhaseStrip phase={chat.phase} steps={chat.phaseSteps} onSelect={(phase) => ade.setPhase(chat.id, phase)} />
       <div className="messages" ref={messagesEl} onScroll={onMessagesScroll}>
         {stages && <ProgressPanel title={review ? "Review" : "Plan"} stages={stages} />}
+        {feature && chat.feature && <ProgressPanel title={chat.feature.title} icon="wreath" side="right" stages={feature} />}
         {recall && !recallHidden && <div className="chat-recall"><span title={recall}>{recall}</span></div>}
         <div className="column">
         {chat.messages.filter((m) => m.blocks.length).map((m) =>

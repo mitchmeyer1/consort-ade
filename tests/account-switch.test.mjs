@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import ts from 'typescript';
 import * as planProgress from '../src/shared/planProgress.ts';
+import * as featureProgress from '../src/shared/featureProgress.ts';
 import * as skillSections from '../src/shared/skillSections.ts';
 import * as followups from '../src/shared/followups.ts';
 import * as instructions from '../src/shared/instructions.ts';
@@ -25,6 +26,7 @@ function fixture() {
     './agentBrowser': { startAgentBrowser: async () => ({ prompt: '', close: async () => {} }) },
     '../shared/types': { PHASES: [] },
     '../shared/planProgress': planProgress,
+    '../shared/featureProgress': featureProgress,
     '../shared/skillSections': skillSections,
     '../shared/followups': followups,
     '../shared/instructions': instructions,

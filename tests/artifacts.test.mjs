@@ -116,3 +116,19 @@ test('chat artifacts list the most recently linked file first', async () => {
   ]).map((a) => a.target);
   assert.deepEqual(order, ['newest.md', 'revisited.md', 'middle.md', 'old.md']);
 });
+
+test('a code span that is one path is a link, spaces and all; other spans are scanned like prose', async () => {
+  const { artifactLinks, codeSpanArtifact } = await import('../src/shared/artifacts.ts');
+  const spaced = '/Users/mitch/Library/Application Support/ade/workspaces/hris/hris-address-plan.html';
+  assert.equal(codeSpanArtifact(spaced), spaced);
+  assert.equal(codeSpanArtifact('roster-flow-old-new.html'), 'roster-flow-old-new.html');
+  assert.equal(codeSpanArtifact('src/app.ts:42'), 'src/app.ts:42');
+  assert.equal(codeSpanArtifact('rate(6 hours)'), null);
+  assert.equal(codeSpanArtifact('hris_*'), null);
+  assert.equal(codeSpanArtifact('pnpm build && open out.html'), null);
+  const text = `HTML: \`${spaced}\` then \`see docs/readme.md now\` and plain two.csv.`;
+  const links = artifactLinks(text);
+  assert.deepEqual(links.map((l) => l.target), [spaced, 'docs/readme.md', 'two.csv']);
+  assert.equal(text.slice(links[0].index, links[0].index + links[0].length), `\`${spaced}\``);
+  assert.equal(text.slice(links[1].index, links[1].index + links[1].length), 'docs/readme.md');
+});

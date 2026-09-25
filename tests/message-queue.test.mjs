@@ -7,6 +7,7 @@ import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import ts from 'typescript';
 import * as planProgress from '../src/shared/planProgress.ts';
+import * as featureProgress from '../src/shared/featureProgress.ts';
 import * as skillSections from '../src/shared/skillSections.ts';
 import * as followups from '../src/shared/followups.ts';
 import * as instructions from '../src/shared/instructions.ts';
@@ -43,6 +44,7 @@ async function fixture(t) {
     './agentEnvironment': { TESTING_PROMPT: '', agentEnvironment: (_, env) => env },
     '../shared/types': { PHASES: ['waiting', 'planning', 'executing', 'validating', 'complete'] },
     '../shared/planProgress': planProgress,
+    '../shared/featureProgress': featureProgress,
     '../shared/skillSections': skillSections,
     '../shared/followups': followups,
     '../shared/instructions': instructions,
