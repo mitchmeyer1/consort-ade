@@ -6,9 +6,11 @@ import { codexModels } from "./codexModels";
 import { MODELS } from "../shared/types";
 import { ensureRootWorktree } from "./rootWorktree";
 import { migrateQuickActions } from "../shared/quickActions";
+import { recoverBenignCodexFailure } from "../shared/codexDiagnostics";
 import type { State, Chat, Appearance } from "../shared/types";
 
 type Persisted = State & { secrets: Record<string, string> };
+const OPENROUTER_SECRET_ID = "openrouter-jev";
 
 const file = () => join(app.getPath("userData"), "state.json");
 const empty = (): Persisted => ({ projects: [], worktrees: [], chats: [], keys: [], secrets: {}, appearance: { theme: "dark", background: "opaque" } as Appearance });
@@ -23,6 +25,9 @@ export class Store {
     } catch {}
     for (const c of this.data.chats) {
       if (c.sessionId) c.sessionKeyId ??= c.keyId;
+      // Older builds stored Codex's harmless skill-budget notice as a failed run.
+      // A turn that reached complete should recover as an unread successful result.
+      recoverBenignCodexFailure(c);
       // running at shutdown, or a transcript that ends mid-turn (unanswered user message / tool call with no result) = dead
       const last = c.messages[c.messages.length - 1];
       const pendingTool = c.messages.some((m) => m.blocks.some((b) => b.type === "tool" && b.ok === undefined));
@@ -55,7 +60,7 @@ export class Store {
   public(): State {
     const { secrets: _s, ...rest } = this.data;
     // Codex keeps its own catalog on disk; Claude's list is whatever the CLI last reported, else the seed
-    return { ...rest, models: { codex: codexModels(this.data.keys), claude: this.data.modelCatalog?.claude?.models?.length ? this.data.modelCatalog.claude.models : MODELS.claude } };
+    return { ...rest, openRouterConfigured: !!this.data.secrets[OPENROUTER_SECRET_ID], models: { codex: codexModels(this.data.keys), claude: this.data.modelCatalog?.claude?.models?.length ? this.data.modelCatalog.claude.models : MODELS.claude } };
   }
 
   onChange(cb: (s: State) => void) {
@@ -86,6 +91,17 @@ export class Store {
     if (!enc) return "";
     try { return safeStorage.decryptString(Buffer.from(enc, "base64")); }
     catch { throw new Error(`Can't decrypt the API key "${this.data.keys.find((k) => k.id === id)?.name ?? id}" — remove it in Settings and add it again.`); }
+  }
+
+  setOpenRouterKey(key: string) {
+    const value = key.trim();
+    if (!value) delete this.data.secrets[OPENROUTER_SECRET_ID];
+    else this.setSecret(OPENROUTER_SECRET_ID, value);
+    this.save();
+  }
+
+  getOpenRouterKey() {
+    return this.getSecret(OPENROUTER_SECRET_ID);
   }
 }
 

@@ -12,6 +12,8 @@ import * as skillSections from '../src/shared/skillSections.ts';
 import * as followups from '../src/shared/followups.ts';
 import * as instructions from '../src/shared/instructions.ts';
 import * as deliverables from '../src/shared/deliverables.ts';
+import * as codexDiagnostics from '../src/shared/codexDiagnostics.ts';
+import * as autopilot from '../src/shared/autopilot.ts';
 
 const require = createRequire(import.meta.url);
 const compiled = ts.transpileModule(await readFile(new URL('../src/main/agents.ts', import.meta.url), 'utf8'), {
@@ -33,7 +35,10 @@ async function fixture(t) {
     const done = new Promise(resolve => { finish = resolve; });
     signal.addEventListener('abort', () => finish(), { once: true });
     runs.push({ prompt, finish });
-    return { events: (async function* () { const event = await done; if (event) yield event; })() };
+    return { events: (async function* () {
+      const event = await done;
+      for (const item of Array.isArray(event) ? event : [event]) if (item) yield item;
+    })() };
   } };
   const store = { data: { chats: [chat], keys: [{ id: 'key', phiAllowed: true }], worktrees: [{ id: 'wt', path: cwd }] }, chat: () => chat, getSecret: () => 'fake', save() {} };
   const mocks = {
@@ -41,6 +46,7 @@ async function fixture(t) {
     './store': { store },
     './auth': { loginEnv: () => ({}) },
     './agentBrowser': { startAgentBrowser: async () => ({ prompt: '', close: async () => {} }) },
+    './autopilotBridge': { startAutopilotBridge: async () => ({ prompt: '', close: async () => {} }) },
     './agentEnvironment': { TESTING_PROMPT: '', agentEnvironment: (_, env) => env },
     '../shared/types': { PHASES: ['waiting', 'planning', 'executing', 'validating', 'complete'] },
     '../shared/planProgress': planProgress,
@@ -49,6 +55,8 @@ async function fixture(t) {
     '../shared/followups': followups,
     '../shared/instructions': instructions,
     '../shared/deliverables': deliverables,
+    '../shared/codexDiagnostics': codexDiagnostics,
+    '../shared/autopilot': autopilot,
     '@anthropic-ai/claude-agent-sdk': {},
     '@openai/codex-sdk': { Codex: class { startThread() { return thread; } resumeThread() { return thread; } } },
   };
@@ -113,6 +121,32 @@ test('a provider failure retains and pauses queued follow-ups', async t => {
   assert.equal(chat.queuePaused, true);
   assert.equal(chat.queuedMessages[0].text, 'later');
   assert.equal(runs.length, 1);
+});
+
+test('a Codex skill-budget notice still completes successfully', async t => {
+  const { agents, chat, runs } = await fixture(t);
+  await agents.send(chat.id, 'finish normally');
+  await until(() => runs.length === 1);
+  runs[0].finish([
+    { type: 'error', message: 'Skill descriptions were shortened to fit the skills context budget. Codex can still see every skill, but some descriptions are shorter.' },
+    { type: 'turn.completed', usage: {} },
+  ]);
+  await until(() => !chat.running);
+  assert.equal(chat.error, undefined);
+  assert.equal(chat.phase, 'complete');
+  assert.equal(chat.unreadCompletion, true);
+  assert.equal(chat.queuePaused, false);
+});
+
+test('an opted-in turn receives supervisor and desktop-driver instructions', async t => {
+  const { agents, chat, runs } = await fixture(t);
+  chat.autopilot = true;
+  await agents.send(chat.id, 'configure the visible app');
+  await until(() => runs.length === 1);
+  assert.match(runs[0].prompt, /Autopilot is enabled for this turn/);
+  assert.match(runs[0].prompt, /configured cheaper agent/);
+  runs[0].finish();
+  await until(() => !chat.running);
 });
 
 test('oversized input is bounded and archived without changing the visible message', async t => {

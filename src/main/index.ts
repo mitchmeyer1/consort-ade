@@ -688,6 +688,10 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     store.save();
   },
   setAutoApprove: (id: string, on: boolean) => agents.setAutoApprove(id, on),
+  setAutopilot: (id: string, on: boolean) => {
+    store.chat(id).autopilot = on;
+    store.save();
+  },
   setPhase: (id: string, phase) => {
     store.chat(id).phase = phase;
     store.chat(id).assessingPrompt = false;
@@ -771,6 +775,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     usage.forget(id);
     store.save();
   },
+  setOpenRouterKey: (key: string) => store.setOpenRouterKey(key),
   answerPermission: (id: string, allow: boolean) => agents.answerPermission(id, allow),
   issuePrompt: async (worktreeId: string, number: number) => {
     const w = wt(worktreeId);

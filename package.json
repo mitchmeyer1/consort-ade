@@ -6,9 +6,10 @@
   "type": "module",
   "scripts": {
     "dev": "electron-vite dev",
-    "build": "electron-vite build",
+    "build:native": "node scripts/build-vision-helper.mjs",
+    "build": "pnpm build:native && electron-vite build",
     "start": "electron-vite preview",
-    "package:mac": "pnpm build && electron-rebuild -f -w node-pty && electron-packager . Consort --platform=darwin --arch=arm64 --icon=build/icon.icns --app-bundle-id=com.aligned.consort --extend-info=build/Info.plist --out=dist --overwrite --asar=false --prune=true --ignore='^/(src|dist|\\.claude|\\.npmrc|electron\\.vite\\.config\\.ts|tsconfig\\.json)$' && codesign --force --deep --sign - dist/Consort-darwin-arm64/Consort.app && echo 'built dist/Consort-darwin-arm64/Consort.app'",
+    "package:mac": "pnpm build && electron-rebuild -f -w node-pty && electron-packager . Consort --platform=darwin --arch=arm64 --icon=build/icon.icns --app-bundle-id=com.aligned.consort --extend-info=build/Info.plist --out=dist --overwrite --asar=false --prune=true --ignore='^/(src|dist|tests|scripts|\\.consort|\\.claude|\\.npmrc|electron\\.vite\\.config\\.ts|tsconfig\\.json)$' && codesign --force --deep --sign - dist/Consort-darwin-arm64/Consort.app && echo 'built dist/Consort-darwin-arm64/Consort.app'",
     "install:mac": "pnpm package:mac && (ps -axo args= | grep -q '^/Applications/Consort.app/Contents/MacOS/Consort' && echo 'Quit Consort first: it is running from /Applications' && exit 1 || true) && rm -rf /Applications/Consort.app && ditto dist/Consort-darwin-arm64/Consort.app /Applications/Consort.app && echo 'installed /Applications/Consort.app'",
     "postinstall": "electron-rebuild -f -w node-pty"
   },

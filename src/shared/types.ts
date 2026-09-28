@@ -120,6 +120,8 @@ export type Chat = {
   phaseSteps?: 3 | 5;
   assessingPrompt?: boolean;
   autoApprove: boolean;
+  /** Explicit per-chat consent for short-lived desktop observation and input helpers. */
+  autopilot?: boolean;
   running: boolean;
   interrupted?: boolean;
   error?: string;
@@ -160,6 +162,8 @@ export type CommitInfo = { files: string; changed: number; log: { hash: string; 
 export type Appearance = { theme: "dark" | "light" | "auto"; background: "opaque" | "frost" | "frost2" };
 export type State = {
   projects: Project[]; worktrees: Worktree[]; chats: Chat[]; keys: ApiKey[]; defaultKeyId?: string; appearance: Appearance; models?: Partial<Record<Provider, string[]>>;
+  /** Whether the dedicated encrypted OpenRouter credential for the Autopilot navigator exists. The key is never exposed. */
+  openRouterConfigured?: boolean;
   /** Extensions Consort installed through Settings; their provider config remains the source of truth. */
   extensions?: InstalledExtension[];
   /** standing instructions appended to every chat's prompt (see shared/instructions.ts) */
@@ -219,6 +223,7 @@ export type Api = {
   askSide(id: string, question: string): Promise<void>;
   clearSide(id: string): Promise<void>;
   setAutoApprove(id: string, on: boolean): Promise<void>;
+  setAutopilot(id: string, on: boolean): Promise<void>;
   setPhase(id: string, phase: Phase): Promise<void>;
   send(chatId: string, text: string, files?: string[]): Promise<void>;
   resumeQueue(chatId: string): Promise<void>;
@@ -236,6 +241,7 @@ export type Api = {
   setKeyPhi(id: string, on: boolean): Promise<void>;
   renameKey(id: string, name: string): Promise<void>;
   removeKey(id: string): Promise<void>;
+  setOpenRouterKey(key: string): Promise<void>;
   onPermission(cb: (r: PermissionRequest) => void): () => void;
   answerPermission(id: string, allow: boolean): Promise<void>;
   addQuickAction(projectId: string, title: string, command: string): Promise<void>;

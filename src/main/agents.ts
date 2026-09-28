@@ -16,6 +16,9 @@ import { firstPrompt, reviewDeliverable } from "../shared/skillSections";
 import { FOLLOWUP_PROMPT } from "../shared/followups";
 import { withInstructions } from "../shared/instructions";
 import { BLOCKED_TOOLS, LOCAL_DELIVERABLES_PROMPT } from "../shared/deliverables";
+import { isBenignCodexDiagnostic } from "../shared/codexDiagnostics";
+import { AUTOPILOT_DRIVER_PROMPT, AUTOPILOT_SUGGESTION_PROMPT } from "../shared/autopilot";
+import { startAutopilotBridge } from "./autopilotBridge";
 
 // ponytail: phase tracked via text markers so claude + codex share one mechanism
 const PHASE_PROMPT = `For EVERY new prompt, first assess the task and plan your approach before doing work. The ADE starts at waiting during this assessment.
@@ -29,7 +32,9 @@ When the task changes code, data or configuration, or produces something that ca
 
 ${FEATURE_PROMPT}
 
-${FOLLOWUP_PROMPT}`;
+${FOLLOWUP_PROMPT}
+
+${AUTOPILOT_SUGGESTION_PROMPT}`;
 const PROGRESS_MARKER = /\[(?:steps:(3|5)|phase:(waiting|planning|executing|validating|complete))\]\s*/g;
 
 const PHI_MARKER = /\[phi-required\]\s*/g;
@@ -314,6 +319,7 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
   running.set(chatId, ac);
   const ui = new Transcript(chat);
   let browser: Awaited<ReturnType<typeof startAgentBrowser>> | undefined;
+  let autopilot: Awaited<ReturnType<typeof startAutopilotBridge>> | undefined;
   try {
     text = `${TESTING_PROMPT}\n\n${beginDockerRun(chatId, chat.worktreeId)}\n\n${text}`;
     try {
@@ -322,14 +328,25 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
     } catch (error) {
       text = `The Consort screenshot helper could not start: ${(error as Error).message}. Shell/code tools are still available.\n\n${text}`;
     }
-    text = boundedPrompt(cwd, text);
-    if (chat.provider === "claude") await runClaude(chat, cwd, apiKey, text, ac, ui);
+    if (chat.autopilot) {
+      try {
+        autopilot = await startAutopilotBridge(cwd, ac.signal, () => !!chat.autopilot, () => store.getOpenRouterKey(), () => stop(chat.id));
+        text = `${AUTOPILOT_DRIVER_PROMPT}\n\n${autopilot.prompt}\n\n${text}`;
+      } catch (error) {
+        text = `Autopilot could not start: ${(error as Error).message}. Do not attempt desktop control this turn.\n\n${text}`;
+      }
+    }
+    if (chat.provider === "claude") {
+      text = boundedPrompt(cwd, text);
+      await runClaude(chat, cwd, apiKey, text, ac, ui);
+    }
     else await runCodex(chat, cwd, apiKey, text, ac, ui);
     // a finished turn that isn't asking the user anything is complete, whatever steps it skipped
     if (!chat.error && !ac.signal.aborted && (chat.assessingPrompt || (chat.phase as Phase) !== "waiting")) chat.phase = "complete";
   } catch (e) {
     if (!ac.signal.aborted) recordRunError(chat, String((e as Error).message ?? e));
   } finally {
+    await autopilot?.close().catch(() => {});
     await browser?.close().catch(() => {});
     await finishDockerRun(chatId).catch(() => {
       chat.messages.push({ id: randomUUID(), role: "system", blocks: [{ type: "text", text: "Docker cleanup could not finish. Consort will retry automatically when Docker is available." }], ts: Date.now() });
@@ -531,7 +548,7 @@ async function runCodex(chat: Chat, cwd: string, apiKey: string, text: string, a
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
     const thread = chat.sessionId ? codex.resumeThread(chat.sessionId, opts) : codex.startThread(opts);
-    const prompt = `${withInstructions(`${PHASE_PROMPT}\n\n${LOCAL_DELIVERABLES_PROMPT}\n\n${phiPrompt(keyAllowsPhi(chat))}`, store.data.instructions)}\n\n${boundedPrompt(cwd, text)}`;
+    const prompt = boundedPrompt(cwd, `${withInstructions(`${PHASE_PROMPT}\n\n${LOCAL_DELIVERABLES_PROMPT}\n\n${phiPrompt(keyAllowsPhi(chat))}`, store.data.instructions)}\n\n${text}`);
     const { events } = await thread.runStreamed(prompt, { signal: ac.signal });
     for await (const ev of events) {
       if (ev.type === "thread.started") chat.sessionId = ev.thread_id;
@@ -545,9 +562,9 @@ async function runCodex(chat: Chat, cwd: string, apiKey: string, text: string, a
           ui.tool({ type: "tool", id: it.id, name: "Bash", input: it.command, output: it.aggregated_output, ok: it.exit_code === undefined ? undefined : it.exit_code === 0 });
         else if (it.type === "file_change")
           ui.tool({ type: "tool", id: it.id, name: "Edit", input: it.changes.map((c) => `${c.kind} ${c.path}`).join("\n"), ok: it.status === "completed" });
-        else if (it.type === "error") recordRunError(chat, it.message);
+        else if (it.type === "error" && !isBenignCodexDiagnostic(it.message)) recordRunError(chat, it.message);
       } else if (ev.type === "turn.failed") recordRunError(chat, ev.error.message);
-      else if (ev.type === "error") recordRunError(chat, ev.message);
+      else if (ev.type === "error" && !isBenignCodexDiagnostic(ev.message)) recordRunError(chat, ev.message);
     }
     ui.finalizeText();
     } catch (error) {

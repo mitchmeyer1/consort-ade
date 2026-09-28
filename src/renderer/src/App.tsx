@@ -2184,6 +2184,7 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
             {chat.running && <button className="commitbtn stopbtn" title="Stop this chat" onClick={() => ade.stop(chat.id)}><span className="stop-square" aria-hidden="true" />Stop</button>}
             {chatStatus(chat) === "running" && <div className="composer-working" role="status"><span className="working-circle" aria-hidden="true" />Working…</div>}
           </span>
+          <label title="Let this chat observe and control visible macOS apps"><input type="checkbox" checked={!!chat.autopilot} onChange={(e) => ade.setAutopilot(chat.id, e.target.checked).catch((e) => alert(e.message))} /> Autopilot</label>
           <label><input type="checkbox" checked={chat.autoApprove} onChange={(e) => ade.setAutoApprove(chat.id, e.target.checked).catch((e) => alert(e.message))} /> Auto-approve</label>
           <label title="Use a PHI-approved key for this chat"><input type="checkbox" checked={!!keys.find((k) => k.id === chat.keyId)?.phiAllowed} onChange={(e) => ade.setPhiMode(chat.id, e.target.checked).catch((e) => alert(e.message))} /> PHI mode</label>
         </div>
@@ -2786,6 +2787,17 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
   const [status, setStatus] = useState<Record<string, AuthState>>({});
   const [usage, setUsage] = useState<Record<string, ConnectorUsage>>({});
   const [now, setNow] = useState(Date.now());
+  const [openRouterKey, setOpenRouterKey] = useState("");
+  const [savingOpenRouter, setSavingOpenRouter] = useState(false);
+  const saveOpenRouter = async (remove = false) => {
+    if (savingOpenRouter || (!remove && !openRouterKey.trim())) return;
+    setSavingOpenRouter(true);
+    try {
+      await ade.setOpenRouterKey(remove ? "" : openRouterKey);
+      setOpenRouterKey("");
+    } catch (e) { alert((e as Error).message); }
+    finally { setSavingOpenRouter(false); }
+  };
   // status is per connector: each extra CLI login has its own config dir and therefore its own sign-in state
   const keyIds = state.keys.map((k) => k.id).join("|");
   const loginIds = state.keys.filter((k) => k.auth === "login").map((k) => k.id).join("|");
@@ -2818,6 +2830,21 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
             onSignIn={() => onSignIn(k.id)} onRename={() => setRenaming({ id: k.id, name: k.name })} onRefresh={() => { refreshStatus(); refreshUsage(true, k.id); }} />
         ))}
         {!state.keys.length && <div className="conn-note">No connectors yet.</div>}
+      </SettingsSection>
+      <SettingsSection icon="butterfly" title="OpenRouter navigator" count={state.openRouterConfigured ? 1 : 0} initialOpen={false}>
+        <div className="conn-note">One dedicated OpenRouter API key for Jev-powered Autopilot navigation. It is encrypted via macOS Keychain and is never used as a chat connector.</div>
+        <div className="conn-sub" style={{ marginBottom: 10 }}>
+          <span className={`dot ${state.openRouterConfigured ? "ok" : ""}`} aria-hidden />
+          <span>{state.openRouterConfigured ? "Jev navigator configured" : "Jev navigator not configured"}</span>
+        </div>
+        <Field label={state.openRouterConfigured ? "Replace key" : "API key"} info="Stored encrypted; the saved value is never shown again.">
+          <input type="password" autoComplete="off" placeholder="sk-or-v1-…" value={openRouterKey} onChange={(e) => setOpenRouterKey(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && openRouterKey.trim()) void saveOpenRouter(); }} />
+        </Field>
+        <div className="extension-actions">
+          <button className="primary" disabled={savingOpenRouter || !openRouterKey.trim()} onClick={() => void saveOpenRouter()}>{savingOpenRouter ? "Saving…" : state.openRouterConfigured ? "Replace key" : "Save key"}</button>
+          {state.openRouterConfigured && <button disabled={savingOpenRouter} onClick={() => confirm("Remove the OpenRouter key?") && void saveOpenRouter(true)}>Remove</button>}
+        </div>
       </SettingsSection>
       <SettingsSection icon="quill" title="Chat rules" count={state.instructions?.length ?? 0} initialOpen={false}><InstructionsCard items={state.instructions ?? []} /></SettingsSection>
       <SettingsSection icon="star" title="Plugins + skills" count={state.extensions?.length ?? 0} initialOpen={false}><ExtensionsCard state={state} /></SettingsSection>
