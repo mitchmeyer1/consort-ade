@@ -18,7 +18,8 @@ export const modelOptions = (state: { models?: Partial<Record<Provider, string[]
   state.models?.[provider]?.length ? state.models[provider]! : MODELS[provider];
 
 /** configDir: extra CLI logins keep their own credentials there (CLAUDE_CONFIG_DIR / CODEX_HOME); the built-in login uses the CLI default */
-export type ApiKey = { id: string; name: string; provider: Provider; phiAllowed: boolean; auth: "login" | "key"; configDir?: string; defaultModel?: string };
+/** pool: a Claude login connector that runs each chat on whichever seat the seat chooser names (see shared/seatPool.ts) */
+export type ApiKey = { id: string; name: string; provider: Provider; phiAllowed: boolean; auth: "login" | "key"; configDir?: string; defaultModel?: string; pool?: boolean };
 import type { Contributor } from "./contributors";
 import type { SideMessage } from "./sideChat";
 import type { FindingStatus, Review, ReviewEvent, ReviewSummary, VerdictReport } from "./review";
@@ -47,8 +48,9 @@ export type InstalledExtension = {
 export type WorkspaceRepo = { projectId: string; dir: string };
 export type Project = {
   id: string; name: string; path: string; defaultBase: string; baseSetByUser?: boolean;
-  /** a multi-repo workspace: `path` is a folder holding a worktree of each repo on `branch` (see shared/workspace.ts) */
-  kind?: "workspace";
+  /** a multi-repo workspace: `path` is a folder holding a worktree of each repo on `branch` (see shared/workspace.ts);
+   *  a home: a plain folder you start work from, one chat scope and nothing git-shaped (see shared/scratch.ts) */
+  kind?: "workspace" | "home";
   repos?: WorkspaceRepo[];
   branch?: string;
   /** BUILD, START SERVER…: shown on every worktree of the project, run in the one you are in (see shared/quickActions.ts) */
@@ -60,6 +62,8 @@ export type Worktree = {
   scratch?: true;
   /** the single chat scope of a workspace project: its path is the workspace folder */
   workspace?: true;
+  /** the scratch scope /ship runs in: the command-center folder, never deleted with its chats */
+  ship?: true;
 };
 /** one repo's git state inside a workspace; status is null while unknown */
 export type RepoStatus = { projectId: string; name: string; dir: string; path: string; status: WorktreeStatus | null };
@@ -103,7 +107,11 @@ export type Stage = {
 };
 
 /** attachments: staged paths of the files sent with the message, shown as thumbnails/chips under it */
-export type Message = { id: string; role: "user" | "assistant" | "system"; blocks: Block[]; ts: number; attachments?: string[] };
+export type Message = { id: string; role: "user" | "assistant" | "system"; blocks: Block[]; ts: number; attachments?: string[];
+  /** a /clear divider: the model's context starts below this row */
+  kind?: "clear" };
+/** how full the model's context window was at the last turn's final API call */
+export type ChatContext = { used: number; window: number; at: number };
 
 export type Chat = {
   id: string;
@@ -116,6 +124,17 @@ export type Chat = {
   delegateModel?: string;
   sessionId?: string;
   sessionKeyId?: string; // connector that owns the provider session
+  /** on the seat pool: the seat (CLAUDE_CONFIG_DIR) this chat is pinned to */
+  seatDir?: string;
+  /** seats that hit a limit during the current turn, so an automatic switch never circles back */
+  seatTried?: string[];
+  /** a /ship run: which feature and what it was asked to do */
+  ship?: { slug?: string; action: string };
+  /** /clear was run: the next send starts a fresh session without the transcript digest */
+  cleared?: boolean;
+  context?: ChatContext;
+  /** per-chat override of the global "Show tool calls" setting (see shared/toolFold) */
+  showToolCalls?: boolean;
   phase: Phase;
   phaseSteps?: 3 | 5;
   assessingPrompt?: boolean;
@@ -170,6 +189,15 @@ export type State = {
   instructions?: import("./instructions").Instruction[];
   /** the last model list each provider reported, with when; `models` above is derived from it */
   modelCatalog?: Partial<Record<Provider, { models: string[]; at: number }>>;
+  /** the seat chooser script behind the pool connector, and its last reading of every seat */
+  seatChooser?: string;
+  seatPool?: import("./seatPool").SeatPool;
+  /** /ship runs start with auto-approve on (the skill drives git, gh and its own CLI) */
+  shipAutoApprove?: boolean;
+  /** every tool call as its own row; off folds consecutive calls into a summary line (see shared/toolFold) */
+  showToolCalls?: boolean;
+  /** the last sync of the Ship board with ClickUp */
+  shipSync?: import("./ship").ShipSync;
 };
 export type PermissionRequest = { id: string; chatId: string; tool: string; input: unknown };
 export type { ConnectorUsage, UsageWindow } from "./usage";
@@ -226,6 +254,13 @@ export type Api = {
   setAutopilot(id: string, on: boolean): Promise<void>;
   setPhase(id: string, phase: Phase): Promise<void>;
   send(chatId: string, text: string, files?: string[]): Promise<void>;
+  /** /clear: drop the provider session, keep the transcript, leave a divider */
+  clearChat(chatId: string): Promise<void>;
+  setShowToolCalls(on: boolean): Promise<void>;
+  /** the chat's own choice; null follows the global setting again */
+  setChatToolCalls(chatId: string, on: boolean | null): Promise<void>;
+  /** the slash commands the chat's seat and worktree offer, read without a model call and cached until restart */
+  listCommands(chatId: string): Promise<import("./commands").SlashEntry[]>;
   resumeQueue(chatId: string): Promise<void>;
   removeQueuedMessage(chatId: string, messageId: string): Promise<void>;
   pickFiles(): Promise<string[]>;
@@ -234,6 +269,16 @@ export type Api = {
   setChatKey(id: string, keyId: string): Promise<void>;
   switchAgent(id: string, keyId: string, model: string): Promise<void>;
   continueChat(id: string): Promise<void>;
+  /** move a Claude chat to another seat (the chooser's pick when `dir` is omitted) and pick a failed run back up */
+  switchSeat(id: string, dir?: string): Promise<void>;
+  refreshSeats(): Promise<void>;
+  setSeatChooser(path: string): Promise<void>;
+  shipBoard(): Promise<import("./ship").ShipBoard>;
+  /** move every feature's stage to its ClickUp status (through the skill's own reconcile) */
+  syncShip(): Promise<import("./ship").ShipSync>;
+  /** start a fresh chat running one /ship command; returns its id */
+  shipRun(command: string, opts?: { slug?: string; action?: string; name?: string; files?: string[] }): Promise<string>;
+  setShipAutoApprove(on: boolean): Promise<void>;
   setPhiMode(id: string, on: boolean): Promise<void>;
   stop(chatId: string): Promise<void>;
   addKey(name: string, provider: Provider, key: string, phiAllowed: boolean, auth?: "login" | "key"): Promise<void>;

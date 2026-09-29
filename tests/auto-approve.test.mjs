@@ -9,6 +9,12 @@ import * as skillSections from '../src/shared/skillSections.ts';
 import * as followups from '../src/shared/followups.ts';
 import * as instructions from '../src/shared/instructions.ts';
 import * as deliverables from '../src/shared/deliverables.ts';
+import * as autopilot from '../src/shared/autopilot.ts';
+import * as codexDiagnostics from '../src/shared/codexDiagnostics.ts';
+import * as seatPool from '../src/shared/seatPool.ts';
+import * as ship from '../src/shared/ship.ts';
+import * as commands from '../src/shared/commands.ts';
+import * as context from '../src/shared/context.ts';
 const require = createRequire(import.meta.url);
 const compiled = ts.transpileModule(readFileSync(new URL('../src/main/agents.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -30,6 +36,7 @@ function fixture(autoApprove = false) {
     './auth': { loginEnv: () => ({}) },
     './agentEnvironment': { TESTING_PROMPT: '', agentEnvironment: (_, env) => env, isInstallCommand: cmd => cmd === 'pnpm install' },
     './agentBrowser': { startAgentBrowser: async () => ({ prompt: '', close: async () => {} }) },
+    './autopilotBridge': { startAutopilotBridge: async () => ({ prompt: '', close: async () => {} }) },
     '../shared/types': { PHASES: [] },
     '../shared/planProgress': planProgress,
     '../shared/featureProgress': featureProgress,
@@ -37,6 +44,13 @@ function fixture(autoApprove = false) {
     '../shared/followups': followups,
     '../shared/instructions': instructions,
     '../shared/deliverables': deliverables,
+    '../shared/autopilot': autopilot,
+    '../shared/codexDiagnostics': codexDiagnostics,
+    '../shared/seatPool': seatPool,
+    '../shared/ship': ship,
+    '../shared/commands': commands,
+    '../shared/context': context,
+    './seatPool': { DEFAULT_SEAT: '/personal', runChooser: async () => { throw new Error('no chooser in tests'); }, sessionOnSeat: () => true },
     '@openai/codex-sdk': { Codex: class {} },
     '@anthropic-ai/claude-agent-sdk': { query: args => {
       calls.push(args);

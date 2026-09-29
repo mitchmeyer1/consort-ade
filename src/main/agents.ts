@@ -19,6 +19,11 @@ import { BLOCKED_TOOLS, LOCAL_DELIVERABLES_PROMPT } from "../shared/deliverables
 import { isBenignCodexDiagnostic } from "../shared/codexDiagnostics";
 import { AUTOPILOT_DRIVER_PROMPT, AUTOPILOT_SUGGESTION_PROMPT } from "../shared/autopilot";
 import { startAutopilotBridge } from "./autopilotBridge";
+import { DEFAULT_SEAT, runChooser, sessionOnSeat } from "./seatPool";
+import { applyRateInfo, describeLimit, earliestReset, isUsageLimitText, limitFromRateEvent, resetLabel, SEAT_CONTINUE_PROMPT, seatLoad, seatName, seatOf, type LimitHit } from "../shared/seatPool";
+import { isSlashCommand, withAttachments } from "../shared/ship";
+import { CLEAR_DIVIDER, type SlashEntry } from "../shared/commands";
+import { contextWindowOf, promptTokens } from "../shared/context";
 
 // ponytail: phase tracked via text markers so claude + codex share one mechanism
 const PHASE_PROMPT = `For EVERY new prompt, first assess the task and plan your approach before doing work. The ADE starts at waiting during this assessment.
@@ -26,6 +31,8 @@ Choose the progress flow before using tools or answering, and emit [steps:3] or 
 Use 3 steps ONLY for simple factual or conversational questions requiring no code/file changes, substantial research, or validation: waiting → executing → complete. Plan briefly during the initial assessment, then emit [phase:executing] before answering and [phase:complete] when finished. Never jump straight to complete.
 Use 5 steps for all other tasks: ${PHASES.join(" → ")}. Emit [steps:5], then [phase:planning] and describe the plan before acting. Continue through [phase:executing], [phase:validating], and [phase:complete] in order. Do not skip planning or validation. If a simple task grows in scope, upgrade with [steps:5] and plan before continuing.
 Every phase marker belongs on its own line. Emit [phase:waiting] if you need user input; otherwise finish at complete. Select the flow anew for every prompt, including follow-ups and queued messages, regardless of the previous turn's flow.
+
+Exception: a skill step that asks the user and waits (e.g. a grilling round). Post the questions, emit [phase:waiting], end the turn; never answer for the user or continue past them, even if told the user cannot answer.
 
 Also lay out the specific work as a plan the user can watch. Once you know the approach and before your first tool call, emit on its own line [plan: first step | second step | verify step] — 2 to 6 steps, each an imperative phrase of at most six words naming a real unit of this task ("read the store", "add the field", "run the tests"), not the generic phases above. List them in the order you will do them, and emit [step:N] on its own line as you start step N (1-based), counting up, so the user sees where you are. If a step turns out wrong, emit a fresh [plan: …] rather than reworking the old one. Skip the plan entirely for a question you answer without tools. Agents you dispatch are attached to the step that is live when you dispatch them, so no marker is needed for them.
 When the task changes code, data or configuration, or produces something that can be run, the last step is a check you actually run, named concretely: the repository's test suite or typecheck, the screenshot helper against the running app for anything visual, the CLI or endpoint you changed, a query against the data you migrated. Do the check, read its output, and say what it showed. If a check fails, fix and re-run it rather than reporting the failure as done; if nothing can be run, say plainly what you could not verify instead of claiming it passed. An investigation, an explanation, a plan for someone else to carry out, or a question answered from reading has no verification step — do not add one for form's sake. A step you never started is reported to the user as skipped, so do not declare work you will not do.
@@ -166,10 +173,15 @@ export async function switchAgent(chatId: string, keyId: string, model: string) 
   if (chat.running) await stopAndWait(chatId);
   // A model the provider can't resume onto needs the same treatment as a change of agent: new session, fresh context.
   const restarts = providerChanged || (modelChanged && modelPinsSession(key.provider));
+  // the seats share ~/.claude's projects/ folder, so a Claude session survives a move onto or off the pool
+  const from = keyOf(chat);
+  const seatMove = connectorChanged && !restarts && key.provider === "claude" && !!(key.pool || from?.pool) && !!key.phiAllowed === !!from?.phiAllowed
+    && !!chat.sessionId && sessionOnSeat(key.pool ? chat.seatDir ?? store.data.seatPool?.pick ?? DEFAULT_SEAT : key.configDir ?? DEFAULT_SEAT, chat.sessionId);
   // Nothing to hand over without a live session: the next message already carries the transcript (see runSend).
   const handover = restarts && !!chat.sessionId && chat.messages.some((m) => m.role !== "system");
   const digest = handover ? transcriptDigest(chat) : "";
-  if (connectorChanged || restarts) {
+  if (seatMove) chat.sessionKeyId = keyId;
+  else if (connectorChanged || restarts) {
     chat.sessionId = undefined;
     chat.sessionKeyId = undefined;
   }
@@ -185,8 +197,99 @@ export async function switchAgent(chatId: string, keyId: string, model: string) 
   await send(chatId, prompt, [], { silent: true });
 }
 
+const note = (chat: Chat, text: string) => chat.messages.push({ id: randomUUID(), role: "system", blocks: [{ type: "text", text }], ts: Date.now() });
+const isPool = (chat: Chat) => !!keyOf(chat)?.pool;
+const limitLabel = (hit: LimitHit) => `${describeLimit(hit)}${hit.resetsAt ? ` (resets ${resetLabel(hit.resetsAt)})` : ""}`;
+
+/**
+ * A pool chat keeps its seat, and that seat's warm prompt cache, until the seat is spent; only then,
+ * or on its first message, does the chooser name one.
+ */
+async function ensureSeat(chat: Chat) {
+  const cur = seatOf(store.data.seatPool, chat.seatDir);
+  if (chat.seatDir && !(cur && (cur.blocked || seatLoad(cur, chat.model) >= 100))) return;
+  const command = store.data.seatChooser;
+  let pick: string | undefined;
+  if (command) {
+    try { const pool = await runChooser(command, { model: chat.model, maxAge: 60 }); store.data.seatPool = pool; pick = pool.pick; }
+    catch { pick = store.data.seatPool?.pick; }
+  }
+  chat.seatDir = pick ?? chat.seatDir ?? DEFAULT_SEAT;
+}
+
+/**
+ * The seat stopped mid-turn: move the same session to the seat with the most headroom that this
+ * turn hasn't already spent, and tell it to carry on. With nowhere left to go, say when the first
+ * seat reopens instead.
+ */
+async function recoverFromLimit(chatId: string, hit: LimitHit) {
+  const chat = store.data.chats.find((c) => c.id === chatId);
+  if (!chat || chat.running) return;
+  const from = chat.seatDir;
+  const tried = [...new Set([...(chat.seatTried ?? []), ...(from ? [from] : [])])];
+  const command = store.data.seatChooser;
+  let pool = store.data.seatPool;
+  let why = "";
+  if (command) {
+    try { pool = await runChooser(command, { exclude: tried, model: chat.model, maxAge: 60 }); store.data.seatPool = pool; }
+    catch (e) { why = ` The seat chooser failed: ${(e as Error).message}.`; }
+  } else why = " No seat chooser is set in Settings.";
+  const next = command && !why ? pool?.pick : undefined;
+  if (!next || tried.includes(next) || pool?.pickBlocked) {
+    const reset = earliestReset(pool);
+    recordRunError(chat, `${seatName(pool, from)} hit its ${limitLabel(hit)}, and no other seat has headroom${reset ? `; the first one frees up ${resetLabel(reset)}` : ""}.${why} Pick a seat from the seat menu to force one, or continue after the reset.`);
+    chat.seatTried = undefined;
+    store.save();
+    return;
+  }
+  chat.seatDir = next;
+  chat.seatTried = tried;
+  note(chat, `${seatName(pool, from)} hit its ${limitLabel(hit)}. Continuing on ${seatName(pool, next)}.`);
+  chat.queuePaused = false;
+  store.save();
+  await runSend(chatId, SEAT_CONTINUE_PROMPT, [], { silent: true }).catch((e) => { recordRunError(chat, String((e as Error).message ?? e)); store.save(); });
+}
+
+/**
+ * Moves a chat onto the seat pool (or to another seat within it) and picks the work back up.
+ * `dir` forces a seat, even one over the chooser's ceilings; without it the chooser picks among the others.
+ */
+export async function switchSeat(chatId: string, dir?: string) {
+  const chat = store.chat(chatId);
+  const pool = store.data.keys.find((k) => k.pool);
+  if (!pool) throw new Error("No seat pool yet: set the seat chooser in Settings.");
+  if (chat.provider !== "claude") throw new Error("Seats are Claude logins; this chat runs on Codex.");
+  const from = keyOf(chat);
+  // a PHI chat's session may hold PHI, and the pool is not approved for it
+  if (!!from?.phiAllowed !== !!pool.phiAllowed) throw new Error(`This chat is on ${from?.name ?? "a PHI connector"}, and the seat pool is not approved for PHI.`);
+  const wasRunning = chat.running;
+  if (wasRunning) await stopAndWait(chatId);
+  const current = from?.pool ? chat.seatDir : undefined;
+  let target = dir;
+  if (!target) {
+    const command = store.data.seatChooser;
+    if (!command) throw new Error("No seat chooser is set in Settings.");
+    const fresh = await runChooser(command, { exclude: current ? [current] : [], model: chat.model, maxAge: 60 });
+    store.data.seatPool = fresh;
+    target = fresh.pick;
+    if (!target) throw new Error("There is no other seat to move to.");
+  }
+  chat.keyId = pool.id;
+  chat.seatDir = target;
+  chat.seatTried = undefined;
+  // seats share one projects/ folder, so the session normally comes along
+  if (chat.sessionId && sessionOnSeat(target, chat.sessionId)) chat.sessionKeyId = pool.id;
+  else { chat.sessionId = undefined; chat.sessionKeyId = undefined; }
+  note(chat, `Moved to seat ${seatName(store.data.seatPool, target)}${current ? ` from ${seatName(store.data.seatPool, current)}` : ""}.`);
+  const resume = wasRunning || !!chat.error || !!chat.interrupted;
+  chat.queuePaused = false;
+  store.save();
+  if (resume) await continueChat(chatId, wasRunning ? "You were stopped mid-task so this session could move to another account." : undefined);
+  else void flushQueued(chatId);
+}
+
 // pick a dead chat back up: what changed on disk since, what the agent produced, and (if the session is gone) the transcript
-export async function continueChat(chatId: string) {
+export async function continueChat(chatId: string, reason?: string) {
   const chat = store.chat(chatId);
   if (chat.running) return;
   const cwd = store.data.worktrees.find((w) => w.id === chat.worktreeId)!.path;
@@ -196,7 +299,7 @@ export async function continueChat(chatId: string) {
     sh(["log", "-5", "--format=%h %s (%cr)"]),
     new Promise<string>((res) => execFile("find", [".consort", "-type", "f", "-newermt", "-2 days"], { cwd }, (_e, out) => res(out || ""))),
   ]);
-  const why = chat.error ? `Your previous run failed with: ${chat.error}` : "The app was closed while you were mid-task, so your previous run was cut off.";
+  const why = reason ?? (chat.error ? `Your previous run failed with: ${chat.error}` : "The app was closed while you were mid-task, so your previous run was cut off.");
   // a resumed review has lost the skill text from its context: the digest keeps only the head of the first prompt,
   // and the file schema lives at the tail. Re-attach that tail, or the run drifts to a Markdown page nobody can act on.
   const first = firstPrompt(chat);
@@ -263,6 +366,62 @@ export async function flushQueued(chatId: string) {
   }
 }
 
+/** /clear: the next send starts a fresh provider session with no transcript digest; the transcript stays on screen behind a divider */
+export function clearChat(chatId: string) {
+  const chat = store.chat(chatId);
+  if (chat.running) throw new Error("Stop the chat before clearing its context.");
+  chat.sessionId = undefined;
+  chat.sessionKeyId = undefined;
+  chat.cleared = true;
+  chat.context = undefined;
+  chat.feature = undefined;
+  chat.error = undefined;
+  chat.interrupted = undefined;
+  chat.messages.push({ id: randomUUID(), role: "system", kind: "clear", blocks: [{ type: "text", text: CLEAR_DIVIDER }], ts: Date.now() });
+  store.save();
+}
+
+// the slash commands a seat + worktree offers, read from the CLI at init with no model call; one fetch per pair until restart
+const commandCache = new Map<string, SlashEntry[]>();
+const inflight = new Map<string, Promise<SlashEntry[]>>();
+const commandKey = (chat: Chat, cwd: string) => `${isPool(chat) ? chat.seatDir ?? "" : keyOf(chat)?.configDir ?? chat.keyId}|${cwd}`;
+const toEntries = (list: unknown): SlashEntry[] => (Array.isArray(list) ? list : []).filter((c) => c && typeof c.name === "string")
+  .map((c) => ({ name: c.name, description: c.description ?? "", ...(c.argumentHint ? { argumentHint: c.argumentHint } : {}) }));
+export async function listCommands(chatId: string): Promise<SlashEntry[]> {
+  const chat = store.chat(chatId);
+  if (chat.provider !== "claude") return [];
+  const cwd = store.data.worktrees.find((w) => w.id === chat.worktreeId)?.path;
+  if (!cwd) return [];
+  if (isPool(chat) && !chat.seatDir) await ensureSeat(chat);
+  const key = commandKey(chat, cwd);
+  const hit = commandCache.get(key);
+  if (hit) return hit;
+  let run = inflight.get(key);
+  if (!run) {
+    run = probeCommands(chat, cwd).then((list) => { commandCache.set(key, list); return list; }).finally(() => inflight.delete(key));
+    inflight.set(key, run);
+  }
+  return run;
+}
+async function probeCommands(chat: Chat, cwd: string): Promise<SlashEntry[]> {
+  const seat = isPool(chat) && chat.seatDir ? { CLAUDE_CONFIG_DIR: chat.seatDir } : {};
+  const apiKey = store.getSecret(chat.keyId);
+  const abortController = new AbortController();
+  const timer = setTimeout(() => abortController.abort(), 60_000);
+  const q = query({ prompt: "hi", options: { cwd, abortController, tools: [], maxTurns: 1, settingSources: ["user", "project", "local"],
+    env: agentEnvironment(cwd, { ...envWithout("ANTHROPIC_API_KEY"), ...loginEnv(keyOf(chat)), ...seat, ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}) }) } });
+  try {
+    for await (const m of q as AsyncIterable<SDKMessage>)
+      if (m.type === "system" && m.subtype === "init") {
+        const list = toEntries(await q.supportedCommands());
+        abortController.abort();
+        return list;
+      }
+  } catch (e) { if (!abortController.signal.aborted) throw e; }
+  finally { clearTimeout(timer); }
+  return [];
+}
+
 export async function send(chatId: string, text: string, files: string[] = [], opts: { silent?: boolean } = {}) {
   if (opts.silent) return runSend(chatId, text, files, opts);
   const chat = store.chat(chatId);
@@ -278,6 +437,13 @@ export async function send(chatId: string, text: string, files: string[] = [], o
 async function runSend(chatId: string, text: string, files: string[] = [], opts: { silent?: boolean; queuedId?: string } = {}) {
   const chat = store.chat(chatId);
   if (chat.running) throw new Error("chat is busy");
+  const pooled = isPool(chat);
+  let lost = false;
+  if (pooled) {
+    await ensureSeat(chat);
+    if (chat.running) throw new Error("chat is busy");
+    if (chat.sessionId && !sessionOnSeat(chat.seatDir!, chat.sessionId)) { chat.sessionId = undefined; chat.sessionKeyId = undefined; lost = true; }
+  }
   const cwd = store.data.worktrees.find((w) => w.id === chat.worktreeId)!.path;
   // A session belongs to the login that created it, not just to the provider.
   // Also recover chats that hit this bug before session ownership was recorded.
@@ -295,15 +461,20 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
   const apiKey = store.getSecret(chat.keyId);
   const staged = opts.queuedId ? files : stageFiles(cwd, files);
   const shown = text; // what the user typed; the files ride along as `attachments` and render as thumbnails
-  if (!chat.sessionId && chat.messages.length && !opts.silent) {
+  // the CLI expands a skill only when the prompt starts with its command, and anything added becomes its arguments
+  // (the attachment list rides along as arguments, so a screenshot no longer demotes /ship new to a plain prompt)
+  const slash = chat.provider === "claude" && !opts.silent && isSlashCommand(text);
+  // a silent continue normally rides its session; one that lost it to a seat move needs the transcript too
+  if (!slash && !chat.sessionId && !chat.cleared && chat.messages.length && (!opts.silent || lost)) {
     text = `This is a fresh provider session for an existing chat in the same worktree. Use this transcript to retain the task and decisions; check the current files before repeating work.\n\n${transcriptDigest(chat)}\n\nCurrent user message:\n${text}`;
   }
-  if (staged.length) text = `${text}\n\nAttached files (read them from disk):\n${staged.map((f) => `- ${f}`).join("\n")}`;
+  text = withAttachments(text, staged);
   // the feature outlives the turn, so the agent is reminded where it stands (a fresh session or a compacted context has no other way to know)
-  if (chat.feature && !featureComplete(chat.feature)) text = `${text}\n\n${featureSummary(chat.feature)}`;
+  if (!slash && chat.feature && !featureComplete(chat.feature)) text = `${text}\n\n${featureSummary(chat.feature)}`;
   if (!opts.silent) chat.messages.push({ id: randomUUID(), role: "user", blocks: [{ type: "text", text: shown }], ts: Date.now(), ...(staged.length ? { attachments: staged } : {}) });
   if (opts.queuedId) chat.queuedMessages = chat.queuedMessages?.filter((m) => m.id !== opts.queuedId);
   chat.unreadCompletion = false;
+  chat.cleared = undefined; // a clear means clear: this send starts the fresh session with nothing but its own text
   chat.plan = undefined; // the plan belongs to the task being answered, not the chat
   // a reminder that has landed is answered by working here; one still counting down keeps its time
   if (chat.remindAt !== undefined && chat.remindAt <= Date.now()) chat.remindAt = undefined;
@@ -320,13 +491,19 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
   const ui = new Transcript(chat);
   let browser: Awaited<ReturnType<typeof startAgentBrowser>> | undefined;
   let autopilot: Awaited<ReturnType<typeof startAutopilotBridge>> | undefined;
+  let hit: LimitHit | undefined;
   try {
-    text = `${TESTING_PROMPT}\n\n${beginDockerRun(chatId, chat.worktreeId)}\n\n${text}`;
-    try {
-      browser = await startAgentBrowser(cwd, ac.signal);
-      text = `${browser.prompt}\n\n${text}`;
-    } catch (error) {
-      text = `The Consort screenshot helper could not start: ${(error as Error).message}. Shell/code tools are still available.\n\n${text}`;
+    // /ship's standup keeps its dev servers and databases up between the build and test sessions, so a ship
+    // chat gets no per-turn Docker project: one would rename its Compose stack and tear it down at turn end
+    const docker = chat.ship ? "" : beginDockerRun(chatId, chat.worktreeId);
+    if (!slash) {
+      text = `${TESTING_PROMPT}\n\n${docker ? `${docker}\n\n` : ""}${text}`;
+      try {
+        browser = await startAgentBrowser(cwd, ac.signal);
+        text = `${browser.prompt}\n\n${text}`;
+      } catch (error) {
+        text = `The Consort screenshot helper could not start: ${(error as Error).message}. Shell/code tools are still available.\n\n${text}`;
+      }
     }
     if (chat.autopilot) {
       try {
@@ -336,13 +513,16 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
         text = `Autopilot could not start: ${(error as Error).message}. Do not attempt desktop control this turn.\n\n${text}`;
       }
     }
-    if (chat.provider === "claude") {
-      text = boundedPrompt(cwd, text);
-      await runClaude(chat, cwd, apiKey, text, ac, ui);
-    }
+    // Codex bounds inside runCodex, once the instructions are on; bounding here too would archive the input twice
+    if (chat.provider === "claude") hit = await runClaude(chat, cwd, apiKey, boundedPrompt(cwd, text), ac, ui);
     else await runCodex(chat, cwd, apiKey, text, ac, ui);
+    // off the pool there is no other seat to move to: say which limit, and when it lifts
+    if (hit && !pooled) {
+      recordRunError(chat, `${keyOf(chat)?.name ?? "This login"} hit its ${limitLabel(hit)}.${store.data.keys.some((k) => k.pool) ? " Switch seat to continue on another account." : ""}`);
+      hit = undefined;
+    }
     // a finished turn that isn't asking the user anything is complete, whatever steps it skipped
-    if (!chat.error && !ac.signal.aborted && (chat.assessingPrompt || (chat.phase as Phase) !== "waiting")) chat.phase = "complete";
+    if (!hit && !chat.error && !ac.signal.aborted && (chat.assessingPrompt || (chat.phase as Phase) !== "waiting")) chat.phase = "complete";
   } catch (e) {
     if (!ac.signal.aborted) recordRunError(chat, String((e as Error).message ?? e));
   } finally {
@@ -354,16 +534,20 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
     running.delete(chatId);
     chat.running = false;
     chat.assessingPrompt = false;
-    if (chat.plan && !ac.signal.aborted && !chat.error) chat.plan = finishPlan(chat.plan, Date.now());
-    if (chat.feature && featureComplete(chat.feature) && !ac.signal.aborted && !chat.error) chat.feature = undefined;
+    // a limit hit is not the end of the turn: the plan and feature carry over to the seat that picks it up
+    const done = !ac.signal.aborted && !chat.error && !hit;
+    if (chat.plan && done) chat.plan = finishPlan(chat.plan, Date.now());
+    if (chat.feature && featureComplete(chat.feature) && done) chat.feature = undefined;
+    if (done) chat.seatTried = undefined;
     chat.permissions = [];
-    if (!ac.signal.aborted && !chat.error && (chat.phase as Phase) !== "waiting") {
+    if (done && (chat.phase as Phase) !== "waiting") {
       chat.phase = "complete";
       chat.unreadCompletion = !chat.queuedMessages?.length;
-    } else if (ac.signal.aborted) chat.phase = "waiting";
-    if (ac.signal.aborted || chat.error) chat.queuePaused = true;
+    } else if (ac.signal.aborted || hit) chat.phase = "waiting";
+    if (ac.signal.aborted || chat.error || hit) chat.queuePaused = true;
     store.save();
-    void flushQueued(chatId);
+    if (hit && !ac.signal.aborted) void recoverFromLimit(chatId, hit);
+    else void flushQueued(chatId);
   }
 }
 
@@ -458,9 +642,17 @@ class Transcript {
  */
 const delegateModelEnv = (chat: Chat) => chat.delegateModel ? { CLAUDE_CODE_SUBAGENT_MODEL: chat.delegateModel } : {};
 
-async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, ac: AbortController, ui: Transcript) {
+// Question dialogs have nowhere to render here; without the tool the agent asks in its reply and waits.
+const HIDDEN_TOOLS = ["AskUserQuestion"];
+
+/** runs one turn; returns the usage limit that stopped it, if one did */
+async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, ac: AbortController, ui: Transcript): Promise<LimitHit | undefined> {
   chat.sessionKeyId = chat.keyId;
+  const seat = isPool(chat) && chat.seatDir ? { CLAUDE_CONFIG_DIR: chat.seatDir } : {};
+  let rejected: LimitHit | undefined;
+  let limitText: string | undefined;
   const partialJson = new Map<number, { id: string; name: string; json: string }>();
+  let lastPrompt: number | undefined; // the prompt size of the turn's latest API call, for the context meter
   const q = query({
     prompt: text,
     options: {
@@ -472,8 +664,10 @@ async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, 
       settingSources: ["user", "project", "local"],
       systemPrompt: { type: "preset", preset: "claude_code", append: withInstructions(`${PHASE_PROMPT}\n\n${LOCAL_DELIVERABLES_PROMPT}\n\n${phiPrompt(keyAllowsPhi(chat))}`, store.data.instructions) },
       // hosted docs are never a deliverable here (see shared/deliverables); block the connector outright, whatever the account has enabled
-      disallowedTools: BLOCKED_TOOLS,
-      env: agentEnvironment(cwd, { ...envWithout("ANTHROPIC_API_KEY"), ...loginEnv(keyOf(chat)), ...dockerRunEnvironment(chat.id), ...delegateModelEnv(chat), ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}) }),
+      disallowedTools: [...BLOCKED_TOOLS, ...HIDDEN_TOOLS],
+      env: agentEnvironment(cwd, { ...envWithout("ANTHROPIC_API_KEY"), ...loginEnv(keyOf(chat)), ...seat, ...dockerRunEnvironment(chat.id), ...delegateModelEnv(chat), ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}) }),
+      // a spent seat must end the turn, not sit waiting hours for its reset: Consort moves the session instead
+      settings: { autoContinueAtUsageLimit: false },
       permissionMode: chat.autoApprove ? "bypassPermissions" : "acceptEdits",
       // permits a later switch into bypass; canUseTool still gates every call
       allowDangerouslySkipPermissions: true,
@@ -509,6 +703,9 @@ async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, 
   for await (const m of q as AsyncIterable<SDKMessage>) {
     if (m.type === "system" && m.subtype === "init") {
       chat.sessionId = m.session_id;
+    } else if (m.type === "system" && (m as any).subtype === "commands_changed") {
+      // skills discovered mid-turn: the SDK says to replace the cached list wholesale
+      commandCache.set(commandKey(chat, cwd), toEntries((m as any).commands));
     } else if (m.type === "stream_event") {
       const e = m.event as any;
       if (e.type === "message_start") ui.newMessage();
@@ -531,14 +728,31 @@ async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, 
       if (Array.isArray(content))
         for (const c of content)
           if (c.type === "tool_result") ui.toolResult(c.tool_use_id, flatten(c.content), !c.is_error);
+    } else if (m.type === "rate_limit_event") {
+      // every turn reports its seat's windows; a rejection names the window that stopped it and when it lifts
+      const info = (m as any).rate_limit_info;
+      if (isPool(chat)) store.data.seatPool = applyRateInfo(store.data.seatPool, chat.seatDir, info);
+      rejected = limitFromRateEvent(info) ?? rejected;
+    } else if (m.type === "assistant" && promptTokens((m.message as any)?.usage)) {
+      lastPrompt = promptTokens((m.message as any)?.usage);
+      if (m.error === "rate_limit" || m.error === "billing_error") { const said = flatten((m.message as any)?.content); if (isUsageLimitText(said)) limitText = said; }
+    } else if (m.type === "assistant" && (m.error === "rate_limit" || m.error === "billing_error")) {
+      const said = flatten((m.message as any)?.content);
+      if (isUsageLimitText(said)) limitText = said;
     } else if (m.type === "result") {
-      if (m.subtype !== "success") recordRunError(chat, (m as any).errors?.join("\n") || m.subtype);
+      // a usage limit ends the turn as a "success" flagged is_error, with the limit notice as its result
+      const said = [(m as any).result, ...((m as any).errors ?? [])].find(isUsageLimitText);
+      if (said) limitText = said;
+      else if (m.subtype !== "success") recordRunError(chat, (m as any).errors?.join("\n") || m.subtype);
+      const window = contextWindowOf((m as any).modelUsage, chat.model);
+      if (lastPrompt && window) chat.context = { used: lastPrompt, window, at: Date.now() };
       ui.finalizeText();
     }
   }
   } finally {
     sessions.delete(chat.id);
   }
+  return limitText && !ac.signal.aborted ? { text: limitText, window: rejected?.window, resetsAt: rejected?.resetsAt } : undefined;
 }
 
 async function runCodex(chat: Chat, cwd: string, apiKey: string, text: string, ac: AbortController, ui: Transcript) {

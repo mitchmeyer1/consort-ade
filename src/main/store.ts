@@ -48,7 +48,7 @@ export class Store {
     this.data.defaultKeyId = defaultConnector(this.data)?.id;
     // Every project has a permanent chat scope at its existing checkout.
     for (const p of this.data.projects) {
-      if (p.kind === "workspace") continue;
+      if (p.kind === "workspace" || p.kind === "home") continue; // a home's scope is its own root, named for the folder
       const existing = this.data.worktrees.find((w) => w.projectId === p.id && w.path === p.path);
       ensureRootWorktree(this.data.worktrees, p, existing?.branch ?? "(unknown)");
     }

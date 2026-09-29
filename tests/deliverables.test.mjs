@@ -10,7 +10,7 @@ test('every chat is told to keep deliverables local and away from Claude Docs', 
   const agents = readFileSync(new URL('../src/main/agents.ts', import.meta.url), 'utf8');
   // both providers get the rule, and the Claude session blocks the connector's tools as well
   assert.equal(agents.split('LOCAL_DELIVERABLES_PROMPT').length - 1, 3, 'import + Claude prompt + Codex prompt');
-  assert.match(agents, /disallowedTools: BLOCKED_TOOLS/);
+  assert.match(agents, /disallowedTools: \[\.\.\.BLOCKED_TOOLS, \.\.\.HIDDEN_TOOLS\]/);
 });
 
 test('the block list covers the Claude Docs server and each of its tools, and nothing else', () => {

@@ -11,7 +11,7 @@ import { hooksDirectory, localEnvFiles, prepareWorktree } from "./worktreeFiles"
 import { installCommand } from "./worktreeInstall";
 import * as agents from "./agents";
 import { browserLaunch, type BrowserInfo } from "./openArtifact";
-import { isScratch, scratchWorktree } from "../shared/scratch";
+import { homeScopes, homeWorktree, isHome, isScratch, scratchWorktree } from "../shared/scratch";
 import { isWorkspace, repoDirs, reposForPr, slugify, workspaceForCheckout, workspaceSources } from "../shared/workspace";
 import * as ws from "./workspaces";
 import { probeClaudeModels } from "./claudeModels";
@@ -41,6 +41,13 @@ import { MODELS, type Api, type Appearance, type PrDraft } from "../shared/types
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { homedir } from "node:os";
+import { createSeatMonitor, ensurePoolKey } from "./seatPool";
+import { poolUsage } from "../shared/seatPool";
+import { readShipBoard, SHIP_HOME, SHIP_WORKTREE_ID } from "./ship";
+import { createShipSync } from "./shipSync";
+import { cheapestModel } from "../shared/modelTiers";
+import { shipActionOf, shipChatName } from "../shared/ship";
+import { ShipRelink } from "./shipRelink";
 
 // ADE_DATA_DIR isolates state for test instances
 // GUI apps get a bare PATH; borrow the login shell's so git/gh/claude resolve like in a terminal
@@ -149,7 +156,7 @@ const wsStatusCache = new Map<string, { t: number; p: Promise<WorkspaceStatus | 
 
 async function syncWorktrees(projectId: string) {
   const p = project(projectId);
-  if (!p || isWorkspace(p)) return; // a workspace's checkouts belong to its source repos
+  if (!p || isWorkspace(p) || isHome(p)) return; // a workspace's checkouts belong to its source repos; a home has no git
   const live = await git.listWorktrees(p.path);
   // A workspace creates real Git worktrees in its source repos. They belong only to the workspace
   // scope, never to the individual source-project tree. Move old chat records onto that scope once.
@@ -214,6 +221,25 @@ function startInstall(scopeId: string, repo: string, path: string) {
     })
     .catch((error) => console.error("worktree install failed to start", error));
 }
+
+// the seat meters: refreshed every few minutes, and on demand after a limit or a switch
+const shipRelink = new ShipRelink();
+const seats = createSeatMonitor({
+  command: () => store.data.seatChooser || undefined,
+  publish: (pool) => { store.data.seatPool = pool; store.save(); },
+  last: () => store.data.seatPool,
+});
+
+// the Ship board's stages, brought in line with ClickUp on a seat that has the ClickUp connector
+const shipSync = createShipSync({
+  seats: () => {
+    const pool = store.data.keys.some((k) => k.pool) ? store.data.seatPool : undefined;
+    if (!pool?.pick) return [loginEnv(store.data.keys.find((k) => k.id === "login-claude")).CLAUDE_CONFIG_DIR];
+    return [pool.pick, ...pool.seats.filter((s) => s.dir !== pool.pick && !s.blocked).map((s) => s.dir)];
+  },
+  model: () => cheapestModel(store.public().models?.claude, "haiku"),
+  publish: (sync) => { store.data.shipSync = sync; store.save(); },
+});
 
 const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   getState: () => store.public(),
@@ -298,15 +324,31 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     return r.canceled ? null : r.filePaths[0];
   },
   addProject: async (path: string) => {
-    if (!(await git.isRepo(path))) throw new Error("not a git repo");
     if (store.data.projects.some((p) => p.path === path)) return;
     const id = randomUUID();
+    if (!(await git.isRepo(path))) {
+      // a plain folder is a home: one scratch scope at its path. The /ship scope already sits on
+      // ~/command-center, so the home adopts it rather than opening a second scope on the same folder.
+      const project: Project = { id, name: basename(path), path, defaultBase: "", kind: "home" };
+      store.data.projects.push(project);
+      const existing = store.data.worktrees.find((w) => isScratch(w) && !w.projectId && w.path === path);
+      if (existing) Object.assign(existing, { projectId: id, name: project.name, title: project.name, root: true });
+      else store.data.worktrees.push(homeWorktree(randomUUID(), project));
+      store.save();
+      return;
+    }
     store.data.projects.push({ id, name: basename(path), path, defaultBase: "origin/main" });
     await syncWorktrees(id);
     store.save();
   },
   removeProject: async (id: string) => {
     const p = project(id);
+    if (p && isHome(p)) {
+      for (const w of homeScopes(store.data, id)) Object.assign(w, { projectId: "", root: false, ...(w.ship ? { name: "ship", title: "/ship" } : {}) });
+      store.data.projects = store.data.projects.filter((p) => p.id !== id);
+      store.save();
+      return;
+    }
     // a workspace owns its checkouts: hand each back to its source repo and drop the folder
     if (p && isWorkspace(p)) await ws.removeWorkspaceTree(p.path, targetsOf(p));
     const wts = store.data.worktrees.filter((w) => w.projectId === id).map((w) => w.id);
@@ -522,7 +564,45 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   watchReview: (id: string, target: string) => { reviewWatchers.add(artifactPath(id, target)); },
   unwatchReview: (id: string, target: string) => { reviewWatchers.remove(artifactPath(id, target)); },
   authStatus: (keyId: string) => authStatus(keyId),
-  connectorUsage: (keyId: string, force?: boolean) => { const k = store.data.keys.find((k) => k.id === keyId); if (!k) throw new Error("Connector not found"); return usage.read(k, { force }); },
+  connectorUsage: async (keyId: string, force?: boolean) => {
+    const k = store.data.keys.find((k) => k.id === keyId);
+    if (!k) throw new Error("Connector not found");
+    if (!k.pool) return usage.read(k, { force });
+    if (force) await seats.refresh(20);
+    return poolUsage(k.id, store.data.seatPool);
+  },
+  switchSeat: (id: string, dir?: string) => agents.switchSeat(id, dir),
+  refreshSeats: () => seats.refresh(20),
+  setSeatChooser: (path: string) => {
+    const chooser = path.trim();
+    if (chooser && !existsSync(chooser)) throw new Error(`No file at ${chooser}.`);
+    // an empty path turns the pool's refreshes off; the connector stays for the chats already on it
+    store.data.seatChooser = chooser;
+    ensurePoolKey(store.data);
+    if (!chooser) store.data.seatPool = undefined;
+    store.save();
+    if (chooser) void seats.refresh(0);
+  },
+  shipBoard: () => readShipBoard(),
+  syncShip: () => shipSync.sync(),
+  setShipAutoApprove: (on: boolean) => { store.data.shipAutoApprove = on; store.save(); },
+  // every /ship command is a fresh chat in ~/command-center: the skill needs its build and its test in separate sessions
+  shipRun: async (command: string, opts: { slug?: string; action?: string; name?: string; files?: string[] } = {}) => {
+    if (!existsSync(SHIP_HOME)) throw new Error(`/ship runs from ${SHIP_HOME}, which doesn't exist.`);
+    if (!store.data.worktrees.some((w) => w.id === SHIP_WORKTREE_ID))
+      store.data.worktrees.push({ id: SHIP_WORKTREE_ID, projectId: "", name: "ship", title: "/ship", path: SHIP_HOME, branch: "", archived: false, scratch: true, ship: true });
+    const key = store.data.keys.find((k) => k.pool) ?? store.data.keys.find((k) => k.id === "login-claude");
+    if (!key) throw new Error("No Claude connector to run /ship on.");
+    const action = opts.action ?? shipActionOf(command);
+    const id: string = handlers.addChat!(SHIP_WORKTREE_ID, key.id, { name: shipChatName(action, opts.slug, opts.name), remember: false });
+    const chat = store.chat(id);
+    chat.ship = { ...(opts.slug ? { slug: opts.slug } : {}), action };
+    // the skill runs long unattended stretches (standups, test sessions, PR loops); a toggle in the Ship tab turns this off
+    chat.autoApprove = store.data.shipAutoApprove ?? true;
+    store.save();
+    await agents.send(id, command, opts.files ?? []);
+    return id;
+  },
   commitInfo: (id: string) => { const p = workspaceOf(wt(id)); return p ? ws.workspaceCommitInfo(targetsOf(p), p.branch ?? "") : git.commitInfo(wt(id).path); },
   commit: async (id: string, message: string) => {
     const p = workspaceOf(wt(id));
@@ -650,12 +730,16 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     store.data.worktrees.push(scratchWorktree(id, path, opts.name?.trim() || "Chat"));
     return handlers.addChat!(id, keyId, { name: opts.name, model: opts.model });
   },
+  clearChat: (id: string) => agents.clearChat(id),
+  setShowToolCalls: (on: boolean) => { store.data.showToolCalls = on; store.save(); },
+  setChatToolCalls: (id: string, on: boolean | null) => { const chat = store.chat(id); chat.showToolCalls = on ?? undefined; store.save(); },
+  listCommands: (id: string) => agents.listCommands(id),
   renameChat: (id: string, name: string) => {
     const chat = store.chat(id);
     chat.name = name;
     // a repoless chat's worktree is only its folder; its title follows the chat
     const w = store.data.worktrees.find((w) => w.id === chat.worktreeId);
-    if (w && isScratch(w)) w.title = name;
+    if (w && isScratch(w) && !w.ship && !w.projectId) w.title = name;
     store.save();
   },
   chatMenu: (id: string) => new Promise<void>((done) => {
@@ -681,7 +765,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     store.data.chats = store.data.chats.filter((c) => c.id !== id);
     // a repoless chat owns its folder: the last chat on a scratch worktree takes the folder with it
     const w = chat && store.data.worktrees.find((w) => w.id === chat.worktreeId);
-    if (w && isScratch(w) && !store.data.chats.some((c) => c.worktreeId === w.id)) {
+    if (w && isScratch(w) && !w.ship && !w.projectId && !store.data.chats.some((c) => c.worktreeId === w.id)) {
       store.data.worktrees = store.data.worktrees.filter((x) => x.id !== w.id);
       if (w.path.startsWith(scratchRoot())) rmSync(w.path, { recursive: true, force: true });
     }
@@ -739,6 +823,8 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     store.save();
   },
   setKeyPhi: (id: string, on: boolean) => {
+    // the seats are subscription logins with no BAA; PHI stays on the claude-work profile
+    if (on && store.data.keys.find((k) => k.id === id)?.pool) throw new Error("The seat pool can't be approved for PHI.");
     store.data.keys.find((k) => k.id === id)!.phiAllowed = on;
     store.save();
   },
@@ -770,6 +856,8 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     if (id.startsWith("login-")) return;
     const key = store.data.keys.find((k) => k.id === id);
     if (key?.configDir && key.configDir.startsWith(join(app.getPath("userData"), "logins"))) rmSync(key.configDir, { recursive: true, force: true });
+    // an empty chooser keeps the next launch from putting the pool back
+    if (key?.pool) { store.data.seatChooser = ""; store.data.seatPool = undefined; }
     store.data.keys = store.data.keys.filter((k) => k.id !== id);
     delete store.data.secrets[id];
     usage.forget(id);
@@ -834,7 +922,10 @@ ${skill}${rubric}`;
 app.whenReady().then(() => {
   startDockerRecovery(join(app.getPath("userData"), "docker-runs"));
   store.load();
+  ensurePoolKey(store.data);
   store.save();
+  seats.start();
+  shipRelink.start();
   // the model pickers follow the providers, not a release of Consort: ask on every start
   handlers.refreshModels!().catch((error: unknown) => console.warn("model refresh failed", error));
   // first-run titles for worktrees imported before titles existed
