@@ -11,7 +11,9 @@ test('an issue branch names the issue and the folder stays flat', () => {
 test('the branch is the link back to the issue', () => {
   assert.equal(issueNumberOf('issue/42'), 42);
   assert.equal(issueNumberOf('issue/42-login-bug'), undefined);
-  assert.equal(issueNumberOf('feature/issue/42'), undefined);
+  // a branch prefix from Settings sits in front of the issue path
+  assert.equal(issueNumberOf('mm/issue/42'), 42);
+  assert.equal(issueNumberOf('feature/issue-42'), undefined);
   assert.equal(issueNumberOf('main'), undefined);
   assert.equal(issueNumberOf(undefined), undefined);
 });

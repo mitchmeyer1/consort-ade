@@ -1,201 +1,242 @@
 /**
- * The /ship pipeline as Consort sees it: one folder per feature under ~/command-center/pipeline,
- * each with a state.json the skill keeps. Consort only reads it; every change goes through the
- * skill, run as a fresh chat per command (the skill needs separate build and test sessions).
+ * /ship: one feature from a ticket to a merged PR through fixed stages. The feature is a
+ * worktree: Consort creates the branch, keeps the state on the worktree record, and mirrors
+ * the stage onto the ticket (a GitHub issue through `ship:<stage>` labels, a ClickUp task
+ * through its status). Each stage runs as a chat in that worktree; the agent reports what
+ * happened with markers in its reply, the way it reports plan steps, and Consort applies
+ * them. Artifacts (SPEC.md, issues/, TEST-REPORT.md, HANDOFF.md) live in the worktree under
+ * .consort/ship/, outside git. Merging is never the pipeline's action.
  */
-
 export const SHIP_STAGES = ["Grilling", "Spec'd", "Implementing", "Ready to Test", "Revising", "In Review", "Merged", "Closed"] as const;
+export type ShipStage = (typeof SHIP_STAGES)[number];
+export const SHIP_DIR = ".consort/ship";
+export const SHIP_DONE: readonly ShipStage[] = ["Merged", "Closed"];
 
-export type ShipFeature = {
-  slug: string;
+export type ShipSource = "github" | "clickup";
+export type ShipTicket = {
+  source: ShipSource;
+  /** the issue number, or the ClickUp task id */
+  id: string;
+  url: string;
   title: string;
-  /** the ClickUp task id; the skill's own commands address a feature by it */
-  ticket?: string;
-  clickupUrl?: string;
-  stage: string;
-  paused: boolean;
-  built?: boolean;
-  repos: string[];
-  prs: string[];
-  /** the skill's own note on what comes next, often a /ship command with a remark after it */
-  next?: string;
-  lastTransition?: number;
-  lastNote?: string;
-  report?: string;
-  /** the latest test round's story results */
-  tests?: { pass: number; total: number };
-  folder: string;
-  /** the background PR-review poller is alive */
-  polling?: boolean;
+  /** GitHub: owner/name, from the issue url */
+  repo?: string;
 };
-export type ShipBoard = { root: string; features: ShipFeature[]; error?: string };
+export type ShipEvent = { at: number; stage: ShipStage; note?: string };
+export type ShipSync = { at: number; ok: boolean; error?: string };
+export type ShipFeedbackFrom = "user" | "bot" | "teammate";
+export type ShipFeature = {
+  ticket: ShipTicket;
+  slug: string;
+  stage: ShipStage;
+  paused?: boolean;
+  /** the branch is pushed and every ticket is done; the test session comes next */
+  built?: boolean;
+  /** the agent's own note on what comes next, a /ship command */
+  next?: string;
+  prs: string[];
+  history: ShipEvent[];
+  /** worktree-relative paths */
+  spec?: string;
+  report?: string;
+  tests?: { pass: number; total: number };
+  feedbackFrom?: ShipFeedbackFrom;
+  reviewRound?: number;
+  /** the last write of the stage to the ticket */
+  sync?: ShipSync;
+};
 
-const str = (v: unknown) => (typeof v === "string" && v.trim() ? v : undefined);
-const strs = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
-const time = (v: unknown) => { const t = typeof v === "string" ? Date.parse(v) : NaN; return Number.isFinite(t) ? t : undefined; };
+/** what a /ship command asks for */
+export type ShipForm = { form: "list" | "new" | "resume" | "feedback" | "approve" | "pr-loop" | "pause"; ref?: string; idea?: string; feedback?: string };
+const RESERVED = new Set(["approve", "pr-loop", "pause", "new"]);
 
-export function parseShipState(raw: unknown, folder: string, polling = false): ShipFeature | undefined {
-  const s = raw as Record<string, any> | null;
-  if (!s || typeof s !== "object" || !str(s.slug) || !str(s.stage)) return;
-  const history = Array.isArray(s.history) ? s.history : [];
-  const stories = s.report?.summary && typeof s.report.summary === "object" ? Object.values(s.report.summary as Record<string, { status?: string }>) : [];
-  return {
-    slug: s.slug, title: str(s.title) ?? s.slug, ticket: str(s.clickup_task_id), clickupUrl: str(s.clickup_url),
-    stage: s.stage, paused: !!s.paused, built: typeof s.built === "boolean" ? s.built : undefined,
-    repos: strs(s.repos), prs: strs(s.prs), next: str(s.next_step),
-    lastTransition: time(s.last_transition), lastNote: str(history.at(-1)?.comment),
-    report: str(s.report?.html) ?? str(s.report?.md), folder, polling,
-    ...(stories.length ? { tests: { pass: stories.filter((x) => x?.status === "PASS").length, total: stories.length } } : {}),
-  };
+export const isShipCommand = (text: string) => /^\/ship(\s|$)/i.test(text.trim());
+export const isSlashCommand = (text: string) => /^\/[a-z][\w:-]*(?:\s|$)/i.test(text.trim());
+
+/**
+ * `/ship`, `/ship new <idea>`, `/ship [ref] approve|pr-loop|"<feedback>"`, `/ship pause [ref]`.
+ * The ref is optional inside a ship worktree, where the feature is known.
+ */
+export function parseShipCommand(text: string): ShipForm | undefined {
+  const t = text.trim();
+  const m = /^\/ship(?:\s+([\s\S]*))?$/i.exec(t);
+  if (!m) return;
+  const rest = (m[1] ?? "").trim();
+  if (!rest) return { form: "list" };
+  const [first, ...tail] = rest.split(/\s+/);
+  const word = first.toLowerCase();
+  if (word === "new") { const idea = rest.slice(first.length).trim(); return idea ? { form: "new", idea } : { form: "new" }; }
+  if (word === "pause") return { form: "pause", ...(tail[0] ? { ref: tail[0] } : {}) };
+  const quoted = /^"([\s\S]*)"$/.exec(rest) ?? /^"([\s\S]*)"$/.exec(rest.slice(first.length).trim());
+  if (quoted && rest.startsWith('"')) return { form: "feedback", feedback: quoted[1] };
+  const ref = RESERVED.has(word) ? undefined : first;
+  const verbRest = ref ? rest.slice(first.length).trim() : rest;
+  const verb = verbRest.split(/\s+/)[0]?.toLowerCase() ?? "";
+  if (verb === "approve") return { form: "approve", ...(ref ? { ref } : {}) };
+  if (verb === "pr-loop") return { form: "pr-loop", ...(ref ? { ref } : {}) };
+  if (verb === "pause") return { form: "pause", ...(ref ? { ref } : {}) };
+  const fb = /^"([\s\S]*)"$/.exec(verbRest);
+  if (fb) return { form: "feedback", feedback: fb[1], ...(ref ? { ref } : {}) };
+  if (verbRest && !ref) return { form: "resume" };
+  return { form: "resume", ...(ref ? { ref } : {}), ...(verbRest ? { feedback: verbRest } : {}) };
 }
 
-/** active work first, in pipeline order, most recently moved first within a stage; finished work last */
-export function sortShip(features: ShipFeature[]) {
-  const rank = (f: ShipFeature) => { const i = SHIP_STAGES.indexOf(f.stage as (typeof SHIP_STAGES)[number]); return (f.paused ? 20 : 0) + (i < 0 ? 10 : i >= 6 ? 30 + i : i); };
-  return [...features].sort((a, b) => rank(a) - rank(b) || (b.lastTransition ?? 0) - (a.lastTransition ?? 0));
+/** "/ship approve" → "approve": names the chat after what it was asked to do */
+export const shipActionOf = (command: string): string => {
+  const f = parseShipCommand(command);
+  return !f ? "run" : f.form === "resume" ? "next" : f.form;
+};
+
+/** a few words of the title, for branch and folder names */
+export function shipSlug(title: string, max = 4): string {
+  const words = title.toLowerCase().replace(/['’]/g, "").replace(/[^a-z0-9]+/g, " ").trim().split(" ").filter(Boolean);
+  const stop = new Set(["a", "an", "the", "to", "of", "for", "and", "in", "on", "with", "is", "as", "so", "that", "it"]);
+  const kept = words.filter((w) => !stop.has(w));
+  return (kept.length ? kept : words).slice(0, max).join("-") || "feature";
 }
 
-export const shipId = (f: Pick<ShipFeature, "ticket" | "slug">) => f.ticket ?? f.slug;
+/** every branch Consort generates gets the prefix from Settings: "mm" + "hris-address-494" → "mm/hris-address-494" */
+export function withBranchPrefix(prefix: string | undefined, name: string): string {
+  const p = (prefix ?? "").trim().replace(/^\/+|\/+$/g, "");
+  return p ? `${p}/${name}` : name;
+}
+export const shipBranch = (prefix: string | undefined, slug: string, id: string) => withBranchPrefix(prefix, `${slug}-${id.toLowerCase()}`);
+export const shipFolder = (slug: string, id: string) => `${slug}-${id.toLowerCase()}`;
 
-/** the runnable part of the skill's next-step note: "/ship X pr-loop (round 3…)" → "/ship X pr-loop" */
-export function nextCommand(f: ShipFeature): string | undefined {
-  const m = /^\s*(\/ship(?:\s+(?!\()[^\s(]+)*)/.exec(f.next ?? "");
-  return m?.[1].trim();
+/** "Ready to Test" → "ship:ready-to-test"; the GitHub label that carries the stage */
+export const stageLabel = (stage: ShipStage) => `ship:${stage.toLowerCase().replace(/['’]/g, "").replace(/[^a-z0-9]+/g, "-")}`;
+export const SHIP_LABELS = SHIP_STAGES.map(stageLabel);
+export const stageIndex = (stage: ShipStage) => SHIP_STAGES.indexOf(stage);
+export const isShipStage = (s: string): s is ShipStage => (SHIP_STAGES as readonly string[]).includes(s);
+export const shipDone = (f: Pick<ShipFeature, "stage">) => SHIP_DONE.includes(f.stage);
+
+/** the ticket as the footer names it: #494 for an issue, the task id for ClickUp */
+export const ticketRef = (t: ShipTicket) => (t.source === "github" ? `#${t.id}` : t.id);
+
+// the agent's markers: one line each, stripped from the visible reply (see shipPrompt.ts)
+export const SHIP_STAGE_MARKER = /\[ship-stage:\s*([^\]|]+?)\s*(?:\|\s*([^\]]*?)\s*)?\]\s*/g;
+export const SHIP_BUILT_MARKER = /\[ship-built\]\s*/g;
+export const SHIP_PR_MARKER = /\[ship-pr:\s*([^\]]+?)\s*\]\s*/g;
+export const SHIP_NEXT_MARKER = /\[ship-next:\s*([^\]]+?)\s*\]\s*/g;
+export const SHIP_SPEC_MARKER = /\[ship-spec:\s*([^\]]+?)\s*\]\s*/g;
+export const SHIP_REPORT_MARKER = /\[ship-report:\s*([^\]|]+?)\s*(?:\|\s*(\d+)\s*\/\s*(\d+)\s*)?\]\s*/g;
+export const SHIP_PAUSE_MARKER = /\[ship-(pause|resume)\]\s*/g;
+export const SHIP_FEEDBACK_MARKER = /\[ship-feedback:\s*(user|bot|teammate)\s*\]\s*/g;
+export const SHIP_ROUND_MARKER = /\[ship-review-round:\s*(\d+)\s*\]\s*/g;
+const ALL_MARKERS = [SHIP_STAGE_MARKER, SHIP_BUILT_MARKER, SHIP_PR_MARKER, SHIP_NEXT_MARKER, SHIP_SPEC_MARKER, SHIP_REPORT_MARKER, SHIP_PAUSE_MARKER, SHIP_FEEDBACK_MARKER, SHIP_ROUND_MARKER];
+
+export type ShipChange = {
+  stage?: ShipStage; note?: string; built?: true; prs?: string[]; next?: string; spec?: string; report?: string;
+  tests?: { pass: number; total: number }; paused?: boolean; feedbackFrom?: ShipFeedbackFrom; reviewRound?: number;
+};
+
+const all = (re: RegExp, text: string) => { re.lastIndex = 0; return [...text.matchAll(re)]; };
+
+/** every ship marker in a reply, folded into one change; the last stage marker wins */
+export function parseShipMarkers(text: string): ShipChange | undefined {
+  const c: ShipChange = {};
+  for (const m of all(SHIP_STAGE_MARKER, text)) {
+    const stage = SHIP_STAGES.find((s) => s.toLowerCase() === m[1].trim().toLowerCase());
+    if (stage) { c.stage = stage; if (m[2]?.trim()) c.note = m[2].trim(); }
+  }
+  if (all(SHIP_BUILT_MARKER, text).length) c.built = true;
+  const prs = all(SHIP_PR_MARKER, text).map((m) => m[1].trim()).filter((u) => /^https?:\/\//.test(u));
+  if (prs.length) c.prs = prs;
+  const next = all(SHIP_NEXT_MARKER, text).at(-1)?.[1].trim();
+  if (next) c.next = next;
+  const spec = all(SHIP_SPEC_MARKER, text).at(-1)?.[1].trim();
+  if (spec) c.spec = spec;
+  const report = all(SHIP_REPORT_MARKER, text).at(-1);
+  if (report) { c.report = report[1].trim(); if (report[2] && report[3]) c.tests = { pass: Number(report[2]), total: Number(report[3]) }; }
+  const pause = all(SHIP_PAUSE_MARKER, text).at(-1)?.[1];
+  if (pause) c.paused = pause === "pause";
+  const from = all(SHIP_FEEDBACK_MARKER, text).at(-1)?.[1] as ShipFeedbackFrom | undefined;
+  if (from) c.feedbackFrom = from;
+  const round = all(SHIP_ROUND_MARKER, text).at(-1)?.[1];
+  if (round) c.reviewRound = Number(round);
+  return Object.keys(c).length ? c : undefined;
 }
 
-const quote = (s: string) => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+export function stripShipMarkers(text: string): string {
+  let out = text;
+  for (const re of ALL_MARKERS) { re.lastIndex = 0; out = out.replace(re, ""); }
+  return out;
+}
+
+/** a new feature record, at the start of the pipeline */
+export function newShipFeature(ticket: ShipTicket, slug: string, now: number, stage: ShipStage = "Grilling"): ShipFeature {
+  return { ticket, slug, stage, prs: [], history: [{ at: now, stage, note: "Started." }], next: "/ship" };
+}
+
+/** the feature after a reply's markers; a stage change is one history event, PRs accumulate once each */
+export function applyShipChange(f: ShipFeature, c: ShipChange, now: number): ShipFeature {
+  const out: ShipFeature = { ...f, prs: [...f.prs], history: [...f.history] };
+  if (c.stage && c.stage !== f.stage) {
+    out.stage = c.stage;
+    out.history.push({ at: now, stage: c.stage, ...(c.note ? { note: c.note } : {}) });
+    if (c.stage === "Revising" || c.stage === "Implementing") out.report = undefined, out.tests = undefined;
+    if (c.stage !== "In Review" && c.stage !== "Revising") out.feedbackFrom = undefined;
+  } else if (c.note) out.history.push({ at: now, stage: f.stage, note: c.note });
+  if (c.built) out.built = true;
+  for (const pr of c.prs ?? []) if (!out.prs.includes(pr)) out.prs.push(pr);
+  if (c.next) out.next = c.next;
+  if (c.spec) out.spec = c.spec;
+  if (c.report) { out.report = c.report; out.tests = c.tests; }
+  if (c.paused !== undefined) out.paused = c.paused || undefined;
+  if (c.feedbackFrom) out.feedbackFrom = c.feedbackFrom;
+  if (c.reviewRound !== undefined) out.reviewRound = c.reviewRound;
+  return out;
+}
+
+/** every /ship reply ends with this line; the agent writes it from the state after its markers */
+export const shipFooter = (f: ShipFeature) => `Stage: ${f.stage}${f.paused ? " (paused)" : ""} · Ticket: ${ticketRef(f.ticket)} · Next: ${shipDone(f) ? "none - feature closed" : f.next ?? "/ship"}`;
+
 export type ShipAction = { id: string; label: string; command: string; title?: string; primary?: boolean; ask?: string };
 
 /** the buttons a feature gets at its stage; `ask` actions need text from the user, substituted for {text} */
 export function shipActions(f: ShipFeature): ShipAction[] {
-  const id = shipId(f);
-  if (f.stage === "Merged" || f.stage === "Closed") return [];
-  const next = nextCommand(f);
+  if (shipDone(f)) return [];
+  if (f.paused) return [{ id: "resume", label: "Resume", command: "/ship", primary: true }];
   const out: ShipAction[] = [];
-  if (f.paused) return [{ id: "resume", label: "Resume", command: `/ship ${id}`, primary: true }];
-  out.push({ id: "next", label: "Run next step", command: next ?? `/ship ${id}`, title: f.next, primary: true });
-  if (f.stage === "Ready to Test") out.push({ id: "approve", label: "Approve", command: `/ship ${id} approve`, title: "Tests pass: open the PR" });
-  if (f.stage === "In Review" && next !== `/ship ${id} pr-loop`) out.push({ id: "pr-loop", label: "PR loop", command: `/ship ${id} pr-loop`, title: "Answer review threads and CI" });
-  if (["Ready to Test", "Revising", "In Review", "Implementing"].includes(f.stage))
-    out.push({ id: "feedback", label: "Feedback…", command: `/ship ${id} {text}`, ask: "Feedback for this feature" });
-  out.push({ id: "pause", label: "Pause", command: `/ship pause ${id}` });
+  const next = f.next && isShipCommand(f.next) ? f.next.replace(/\s*\([^)]*\)\s*$/, "").trim() : "/ship";
+  const label = f.stage === "Grilling" ? "Continue grilling" : f.stage === "Spec'd" ? "Implement" : f.stage === "Implementing" && f.built ? "Run the test session" : f.stage === "Implementing" ? "Continue building" : f.stage === "In Review" ? "Review round" : "Run next step";
+  out.push({ id: "next", label, command: next, title: f.next, primary: true });
+  if (f.stage === "Ready to Test") out.push({ id: "approve", label: "Approve", command: "/ship approve", title: "Tests pass: mark the PR ready for review" });
+  if (f.stage === "In Review" && next !== "/ship pr-loop") out.push({ id: "pr-loop", label: "PR loop", command: "/ship pr-loop", title: "Answer review threads and CI" });
+  if (["Implementing", "Ready to Test", "Revising", "In Review"].includes(f.stage)) out.push({ id: "feedback", label: "Feedback…", command: '/ship "{text}"', ask: "Feedback for this feature" });
+  out.push({ id: "pause", label: "Pause", command: "/ship pause", title: "Write a handoff so a fresh session can resume cold" });
   return out;
 }
 
-/** fills an `ask` action's {text}, quoted the way the skill's feedback form expects */
-export const fillShipCommand = (command: string, text: string) => command.replace("{text}", quote(text.trim()));
+const quote = (s: string) => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+/** fills an `ask` action's {text}, quoted the way the pipeline expects */
+export const fillShipCommand = (command: string, text: string) => command.replace('"{text}"', quote(text.trim()));
 
-/** "/ship 86akm7a8g pr-loop" → "pr-loop"; names the chat after what it was asked to do */
-export function shipActionOf(command: string) {
-  const [, , ...rest] = command.trim().split(/\s+/);
-  if (command.trim().startsWith("/ship new")) return "new";
-  if (command.trim().startsWith("/ship pause")) return "pause";
-  const verb = rest[0];
-  return !verb ? "next" : verb.startsWith('"') ? "feedback" : verb;
-}
+/** the chat name for a /ship run: "ship · #494 · approve" */
+export const shipChatName = (action: string, ticket: ShipTicket) => `ship · ${ticketRef(ticket)} · ${action}`;
 
-/** a message that is a slash command goes to the agent as typed: prompt text around it would become its arguments */
-/** the name a new-feature chat gets at creation: the idea's first six words, so no two `new` chats read alike */
+/** the name a new-feature chat gets from an idea: its first six words */
 export function shipIdeaName(idea: string, max = 6): string {
   const words = idea.replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
   const name = words.slice(0, max).join(" ");
   return words.length > max ? `${name}…` : name;
 }
-/** the chat name for a /ship run; the slug wins once the skill has picked one */
-export const shipChatName = (action: string, slug?: string, name?: string) => `ship · ${slug ?? (name?.trim() || "new")} · ${action}`;
+
 /** the attachment list as the prompt carries it: after a slash command it is part of the skill's arguments */
 export const withAttachments = (text: string, files: string[]) => files.length ? `${text}\n\nAttached files (read them from disk):\n${files.map((f) => `- ${f}`).join("\n")}` : text;
 
-/** a running `new` chat and the feature folder the skill just created for it */
-export type NewShipChat = { id: string; name: string; since: number; slug?: string; action: string };
-export type NewShipFeature = { slug: string; title: string; at: number };
-const words = (s: string) => new Set(s.toLowerCase().replace(/^ship · /, "").replace(/ · \w+$/, "").split(/[^a-z0-9]+/).filter((w) => w.length > 2));
-/**
- * Relink: a `new` chat has no slug until the skill's `init` writes state.json, so a feature folder that
- * appeared after the chat started, and that no chat claims yet, belongs to the unlinked `new` chat whose
- * name (the idea's first words) shares the most words with the feature's title; ties go to the older chat.
- */
-export function matchNewChats(chats: NewShipChat[], features: NewShipFeature[], grace = 60_000): { chatId: string; slug: string }[] {
-  const taken = new Set(chats.map((c) => c.slug).filter(Boolean));
-  const free = chats.filter((c) => c.action === "new" && !c.slug).sort((a, b) => a.since - b.since);
-  const out: { chatId: string; slug: string }[] = [];
-  for (const f of features.filter((f) => !taken.has(f.slug)).sort((a, b) => a.at - b.at)) {
-    const candidates = free.filter((c) => f.at >= c.since - grace && !out.some((o) => o.chatId === c.id));
-    if (!candidates.length) continue;
-    const title = words(`${f.title} ${f.slug.replace(/-/g, " ")}`);
-    const score = (c: NewShipChat) => [...words(c.name)].filter((w) => title.has(w)).length;
-    const best = candidates.reduce((a, b) => (score(b) > score(a) ? b : a));
-    if (score(best) > 0 || candidates.length === 1) out.push({ chatId: best.id, slug: f.slug });
-  }
-  return out;
+/** "https://app.clickup.com/t/86akm7a8g" or a bare id → "86akm7a8g" */
+export function clickupIdFrom(text: string): string | undefined {
+  const t = text.trim();
+  const m = /clickup\.com\/t\/(?:\d+\/)?([A-Za-z0-9-]+)/.exec(t) ?? /^([A-Za-z0-9]{6,12}|[A-Z]+-\d+)$/.exec(t);
+  return m?.[1];
 }
 
-export const isSlashCommand = (text: string) => /^\/[a-z][\w:-]*(?:\s|$)/i.test(text.trim());
-
-/**
- * Syncing with ClickUp. ClickUp owns each feature's stage; the skill's own `ship.py reconcile` moves a
- * state.json to it. Consort fetches the list's tasks on a seat, hands them over, and shows what moved.
- */
-export type ShipTask = { id: string; status: string; name?: string; url?: string };
-export type ShipSync = {
-  at: number;
-  /** features whose stage moved to match ClickUp */
-  changed: { slug: string; ticket: string; from?: string; to: string }[];
-  /** open ClickUp tasks with no feature folder here; `/ship <id>` brings one back */
-  remote: ShipTask[];
-  /** features whose ClickUp status isn't a stage, left as they are */
-  unmapped: { slug: string; status: string }[];
-  /** the seat the tasks were read on */
-  seat?: string;
-  error?: string;
-};
-
-/** the ClickUp filter tool, by the connector that provides it: the user's own MCP server or claude.ai's */
-export const CLICKUP_FILTER_TOOLS = ["mcp__clickup__clickup_filter_tasks", "mcp__claude_ai_ClickUp__clickup_filter_tasks"];
-
-/** "claude.ai Figma" → "mcp__claude_ai_Figma", the prefix every one of its tools carries */
-export const mcpPrefix = (server: string) => `mcp__${server.replace(/[^A-Za-z0-9_-]/g, "_")}`;
-
-/**
- * Everything but `tool`, denied by server where possible: a server that finishes connecting after the
- * session starts still can't add its tools (each tool schema costs context on every turn).
- */
-export function denyAllBut(tool: string, tools: string[], servers: string[]) {
-  const own = tool.split("__").slice(0, 2).join("__");
-  return [...servers.map(mcpPrefix).filter((p) => p !== own), ...tools.filter((t) => t.startsWith(`${own}__`) && t !== tool)];
-}
-
-const text = (v: unknown) => (typeof v === "string" ? v : typeof v === "number" ? String(v) : undefined);
-
-/** one task from a filter_tasks result; the status is a string or ClickUp's `{ status }` object */
-export function toShipTask(raw: unknown): ShipTask | undefined {
-  const t = raw as Record<string, any> | null;
-  const id = text(t?.id);
-  const status = text(t?.status) ?? text(t?.status?.status);
-  if (!id || !status) return;
-  return { id, status, ...(text(t?.name) ? { name: text(t?.name) } : {}), ...(text(t?.url) ? { url: text(t?.url) } : {}) };
-}
-
-/** a filter_tasks tool result as the session relays it: its tasks, and whether ClickUp has another page */
-export function parseFilterResult(content: unknown): { tasks: ShipTask[]; more: boolean } | undefined {
-  const body = typeof content === "string" ? content : Array.isArray(content) ? content.map((c) => (c?.type === "text" ? c.text : "")).join("") : "";
-  try {
-    const j = JSON.parse(body);
-    const list = Array.isArray(j) ? j : Array.isArray(j?.tasks) ? j.tasks : undefined;
-    if (!list) return;
-    return { tasks: list.map(toShipTask).filter((t: ShipTask | undefined): t is ShipTask => !!t), more: j?.has_more === true };
-  } catch { return; }
-}
-
-/** the board syncs itself on open when the last sync is older than this; the button syncs any time */
-export const SHIP_SYNC_MAX_AGE = 10 * 60_000;
-export const shipSyncDue = (sync: ShipSync | undefined, now: number) => !sync || now - sync.at > SHIP_SYNC_MAX_AGE;
-
-/** what the last sync changed, one line each, for the board's notes */
-export function shipSyncNotes(sync: ShipSync | undefined): string[] {
-  if (!sync) return [];
-  return [
-    ...sync.changed.map((c) => `${c.slug}: ${c.from ?? "?"} → ${c.to} (from ClickUp)`),
-    ...sync.unmapped.map((u) => `${u.slug}: ClickUp says "${u.status}", which isn't a /ship stage; left as is`),
-  ];
+/** "https://github.com/owner/name/issues/494" → { repo: "owner/name", number: 494 } */
+export function githubIssueFrom(text: string): { repo?: string; number: number } | undefined {
+  const t = text.trim();
+  const url = /github\.com\/([^/\s]+\/[^/\s]+)\/issues\/(\d+)/.exec(t);
+  if (url) return { repo: url[1], number: Number(url[2]) };
+  const bare = /^#?(\d+)$/.exec(t);
+  return bare ? { number: Number(bare[1]) } : undefined;
 }

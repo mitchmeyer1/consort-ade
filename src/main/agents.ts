@@ -21,7 +21,7 @@ import { AUTOPILOT_DRIVER_PROMPT, AUTOPILOT_SUGGESTION_PROMPT } from "../shared/
 import { startAutopilotBridge } from "./autopilotBridge";
 import { DEFAULT_SEAT, runChooser, sessionOnSeat } from "./seatPool";
 import { applyRateInfo, describeLimit, earliestReset, isUsageLimitText, limitFromRateEvent, resetLabel, SEAT_CONTINUE_PROMPT, seatLoad, seatName, seatOf, type LimitHit } from "../shared/seatPool";
-import { isSlashCommand, withAttachments } from "../shared/ship";
+import { applyShipChange, isSlashCommand, parseShipMarkers, stripShipMarkers, withAttachments, type ShipFeature } from "../shared/ship";
 import { CLEAR_DIVIDER, type SlashEntry } from "../shared/commands";
 import { contextWindowOf, promptTokens } from "../shared/context";
 
@@ -354,7 +354,7 @@ export async function flushQueued(chatId: string) {
   try {
     while (!chat.running && !chat.queuePaused && chat.queuedMessages?.length) {
       const next = chat.queuedMessages[0];
-      await runSend(chatId, next.text, next.files, { queuedId: next.id });
+      await runSend(chatId, next.text, next.files, { queuedId: next.id, ...(next.display ? { display: next.display } : {}) });
       if (chat.error || chat.interrupted) chat.queuePaused = true;
     }
   } catch (error) {
@@ -422,19 +422,19 @@ async function probeCommands(chat: Chat, cwd: string): Promise<SlashEntry[]> {
   return [];
 }
 
-export async function send(chatId: string, text: string, files: string[] = [], opts: { silent?: boolean } = {}) {
+export async function send(chatId: string, text: string, files: string[] = [], opts: { silent?: boolean; display?: string } = {}) {
   if (opts.silent) return runSend(chatId, text, files, opts);
   const chat = store.chat(chatId);
   const cwd = store.data.worktrees.find((w) => w.id === chat.worktreeId)!.path;
   const staged = stageFiles(cwd, files);
-  (chat.queuedMessages ??= []).push({ id: randomUUID(), text, files: staged });
+  (chat.queuedMessages ??= []).push({ id: randomUUID(), text, files: staged, ...(opts.display ? { display: opts.display } : {}) });
   chat.lastChattedAt = Date.now();
   if (!chat.running) chat.queuePaused = false;
   store.save();
   void flushQueued(chatId);
 }
 
-async function runSend(chatId: string, text: string, files: string[] = [], opts: { silent?: boolean; queuedId?: string } = {}) {
+async function runSend(chatId: string, text: string, files: string[] = [], opts: { silent?: boolean; queuedId?: string; display?: string } = {}) {
   const chat = store.chat(chatId);
   if (chat.running) throw new Error("chat is busy");
   const pooled = isPool(chat);
@@ -460,7 +460,7 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
   }
   const apiKey = store.getSecret(chat.keyId);
   const staged = opts.queuedId ? files : stageFiles(cwd, files);
-  const shown = text; // what the user typed; the files ride along as `attachments` and render as thumbnails
+  const shown = opts.display ?? text; // what the user typed; the files ride along as `attachments` and render as thumbnails
   // the CLI expands a skill only when the prompt starts with its command, and anything added becomes its arguments
   // (the attachment list rides along as arguments, so a screenshot no longer demotes /ship new to a plain prompt)
   const slash = chat.provider === "claude" && !opts.silent && isSlashCommand(text);
@@ -493,9 +493,7 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
   let autopilot: Awaited<ReturnType<typeof startAutopilotBridge>> | undefined;
   let hit: LimitHit | undefined;
   try {
-    // /ship's standup keeps its dev servers and databases up between the build and test sessions, so a ship
-    // chat gets no per-turn Docker project: one would rename its Compose stack and tear it down at turn end
-    const docker = chat.ship ? "" : beginDockerRun(chatId, chat.worktreeId);
+    const docker = beginDockerRun(chatId, chat.worktreeId);
     if (!slash) {
       text = `${TESTING_PROMPT}\n\n${docker ? `${docker}\n\n` : ""}${text}`;
       try {
@@ -550,6 +548,10 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
     else void flushQueued(chatId);
   }
 }
+
+/** called when a reply moved a /ship feature; main writes the stage to the ticket */
+let shipChanged: (worktreeId: string, before: ShipFeature, after: ShipFeature, note?: string) => void = () => {};
+export const onShipChanged = (fn: typeof shipChanged) => { shipChanged = fn; };
 
 class Transcript {
   private msg?: Chat["messages"][number];
@@ -618,6 +620,13 @@ class Transcript {
       }
       if (FEATURE_CLEAR_MARKER.test(b.text)) this.chat.feature = undefined;
       FEATURE_CLEAR_MARKER.lastIndex = 0;
+      // a /ship turn reports stage moves, PRs and artifacts on the feature's worktree; the ticket follows
+      const shipChange = parseShipMarkers(b.text);
+      if (shipChange) {
+        const w = store.data.worktrees.find((x) => x.id === this.chat.worktreeId);
+        if (w?.ship) { const before = w.ship; w.ship = applyShipChange(w.ship, shipChange, Date.now()); shipChanged(w.id, before, w.ship, shipChange.note); }
+      }
+      b.text = stripShipMarkers(b.text);
       b.text = b.text.replace(PROGRESS_MARKER, "").replace(PLAN_MARKER, "").replace(STEP_MARKER, "").replace(PHI_MARKER, "")
         .replace(FEATURE_MARKER, "").replace(FEATURE_DONE_MARKER, "").replace(FEATURE_NOW_MARKER, "").replace(FEATURE_CLEAR_MARKER, "");
     }

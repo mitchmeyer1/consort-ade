@@ -26,7 +26,7 @@ test('filtering puts prefix matches first, then names containing the query, with
   assert.deepEqual(filterCommands(sdk, 'zzz'), []);
   // the native description wins over the SDK's when both list a name
   assert.equal(filterCommands(sdk, 'compact')[0].native, true);
-  assert.equal(NATIVE_COMMANDS.map((c) => c.name).join(','), 'clear,compact');
+  assert.equal(NATIVE_COMMANDS.map((c) => c.name).join(','), 'clear,compact,ship');
 });
 
 test('completing an entry leaves the cursor after the command, ready for arguments', () => {

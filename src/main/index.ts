@@ -43,11 +43,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { homedir } from "node:os";
 import { createSeatMonitor, ensurePoolKey } from "./seatPool";
 import { poolUsage } from "../shared/seatPool";
-import { readShipBoard, SHIP_HOME, SHIP_WORKTREE_ID } from "./ship";
-import { createShipSync } from "./shipSync";
-import { cheapestModel } from "../shared/modelTiers";
-import { shipActionOf, shipChatName } from "../shared/ship";
-import { ShipRelink } from "./shipRelink";
+import * as shipApi from "./ship";
+import { newShipFeature, parseShipCommand, shipActionOf, shipBranch, shipChatName, shipFolder, shipIdeaName, shipSlug, type ShipFeature, type ShipForm, type ShipTicket } from "../shared/ship";
+import { shipPrompt } from "../shared/shipPrompt";
 
 // ADE_DATA_DIR isolates state for test instances
 // GUI apps get a bare PATH; borrow the login shell's so git/gh/claude resolve like in a terminal
@@ -223,23 +221,46 @@ function startInstall(scopeId: string, repo: string, path: string) {
 }
 
 // the seat meters: refreshed every few minutes, and on demand after a limit or a switch
-const shipRelink = new ShipRelink();
 const seats = createSeatMonitor({
   command: () => store.data.seatChooser || undefined,
   publish: (pool) => { store.data.seatPool = pool; store.save(); },
   last: () => store.data.seatPool,
 });
 
-// the Ship board's stages, brought in line with ClickUp on a seat that has the ClickUp connector
-const shipSync = createShipSync({
-  seats: () => {
-    const pool = store.data.keys.some((k) => k.pool) ? store.data.seatPool : undefined;
-    if (!pool?.pick) return [loginEnv(store.data.keys.find((k) => k.id === "login-claude")).CLAUDE_CONFIG_DIR];
-    return [pool.pick, ...pool.seats.filter((s) => s.dir !== pool.pick && !s.blocked).map((s) => s.dir)];
-  },
-  model: () => cheapestModel(store.public().models?.claude, "haiku"),
-  publish: (sync) => { store.data.shipSync = sync; store.save(); },
-});
+
+const clickUpKey = () => { try { return store.getClickUpKey() || undefined; } catch { return undefined; } };
+const shipKey = () => {
+  const k = store.data.keys.find((k) => k.id === store.data.defaultKeyId && k.provider === "claude") ?? store.data.keys.find((k) => k.provider === "claude") ?? store.data.keys[0];
+  if (!k) throw new Error("Add a connector first (Settings).");
+  return k;
+};
+/** one /ship turn: the stage prompt for the feature, in a chat of its worktree, shown as the command typed */
+async function runShipTurn(w: Worktree, form: ShipForm, typed: string, files: string[], keyId: string, reuse?: string): Promise<string> {
+  const f = w.ship!;
+  const p = project(w.projectId);
+  const deps = { repoPath: p.path, clickupKey: clickUpKey() };
+  const ticketBody = f.stage === "Grilling" ? await shipApi.ticketBody(f.ticket, deps) : undefined;
+  const prompt = shipPrompt({ feature: f, form, worktree: w.path, branch: w.branch, base: p.defaultBase, ticketBody });
+  const action = shipActionOf(typed);
+  const id: string = reuse ?? handlers.addChat!(w.id, keyId, { name: shipChatName(action, f.ticket), remember: false });
+  const chat = store.chat(id);
+  chat.ship = { action };
+  // the pipeline runs long unattended stretches (builds, test sessions, PR loops); Settings › Ship turns this off
+  if (!reuse) chat.autoApprove = store.data.shipAutoApprove ?? true;
+  store.save();
+  await agents.send(id, prompt, files, { display: typed });
+  return id;
+}
+/** the ticket follows the feature: a stage move writes the label or status and a comment; the spec rides on Spec'd */
+async function writeTicket(worktreeId: string, note: string | undefined, before?: ShipFeature) {
+  const w = store.data.worktrees.find((x) => x.id === worktreeId);
+  const p = w && project(w.projectId);
+  if (!w?.ship || !p) return;
+  if (before && before.stage === w.ship.stage && (!w.ship.spec || before.spec === w.ship.spec)) return;
+  w.ship.sync = await shipApi.syncTicket(w.ship, note, { repoPath: p.path, clickupKey: clickUpKey() }, w.path);
+  store.save();
+}
+agents.onShipChanged((worktreeId, before, _after, note) => { void writeTicket(worktreeId, note, before); });
 
 const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   getState: () => store.public(),
@@ -344,7 +365,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   removeProject: async (id: string) => {
     const p = project(id);
     if (p && isHome(p)) {
-      for (const w of homeScopes(store.data, id)) Object.assign(w, { projectId: "", root: false, ...(w.ship ? { name: "ship", title: "/ship" } : {}) });
+      for (const w of homeScopes(store.data, id)) Object.assign(w, { projectId: "", root: false });
       store.data.projects = store.data.projects.filter((p) => p.id !== id);
       store.save();
       return;
@@ -583,25 +604,62 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     store.save();
     if (chooser) void seats.refresh(0);
   },
-  shipBoard: () => readShipBoard(),
-  syncShip: () => shipSync.sync(),
   setShipAutoApprove: (on: boolean) => { store.data.shipAutoApprove = on; store.save(); },
-  // every /ship command is a fresh chat in ~/command-center: the skill needs its build and its test in separate sessions
-  shipRun: async (command: string, opts: { slug?: string; action?: string; name?: string; files?: string[] } = {}) => {
-    if (!existsSync(SHIP_HOME)) throw new Error(`/ship runs from ${SHIP_HOME}, which doesn't exist.`);
-    if (!store.data.worktrees.some((w) => w.id === SHIP_WORKTREE_ID))
-      store.data.worktrees.push({ id: SHIP_WORKTREE_ID, projectId: "", name: "ship", title: "/ship", path: SHIP_HOME, branch: "", archived: false, scratch: true, ship: true });
-    const key = store.data.keys.find((k) => k.pool) ?? store.data.keys.find((k) => k.id === "login-claude");
-    if (!key) throw new Error("No Claude connector to run /ship on.");
-    const action = opts.action ?? shipActionOf(command);
-    const id: string = handlers.addChat!(SHIP_WORKTREE_ID, key.id, { name: shipChatName(action, opts.slug, opts.name), remember: false });
-    const chat = store.chat(id);
-    chat.ship = { ...(opts.slug ? { slug: opts.slug } : {}), action };
-    // the skill runs long unattended stretches (standups, test sessions, PR loops); a toggle in the Ship tab turns this off
-    chat.autoApprove = store.data.shipAutoApprove ?? true;
+  setClickUpKey: (key: string) => store.setClickUpKey(key),
+  setBranchPrefix: (prefix: string) => { store.data.branchPrefix = prefix.trim().replace(/^\/+|\/+$/g, ""); store.save(); },
+  // /ship: a feature is a worktree. Resolve the ticket (or open one from the idea), cut the branch from the
+  // project's base like any new worktree, record the feature on it, and open its first chat at Grilling.
+  shipStart: async (projectId: string, from: { source: "github"; number: number } | { source: "clickup"; id: string } | { idea: string }, files: string[] = []) => {
+    const p = project(projectId);
+    if (!p) throw new Error("Project no longer exists.");
+    if (isWorkspace(p) || isHome(p)) throw new Error("/ship needs a git project; workspaces and home folders can't ship yet.");
+    const key = shipKey();
+    let ticket: ShipTicket;
+    if ("idea" in from) {
+      const idea = from.idea.trim();
+      if (!idea) throw new Error("Describe the feature first.");
+      ticket = await shipApi.createGithubIssue(p.path, shipIdeaName(idea, 8).replace(/…$/, ""), `${idea}\n\n_Opened by /ship in Consort._`);
+    } else if (from.source === "github") ticket = await shipApi.githubTicket(p.path, from.number);
+    else {
+      const k = clickUpKey();
+      if (!k) throw new Error("Add a ClickUp API key in Settings › Ship first.");
+      ticket = await shipApi.clickupTicket(k, from.id);
+    }
+    const slug = shipSlug(ticket.title);
+    const branch = shipBranch(store.data.branchPrefix, slug, ticket.id);
+    let w = store.data.worktrees.find((x) => x.projectId === projectId && x.branch === branch);
+    if (!w) {
+      await handlers.addWorktree!(projectId, shipFolder(slug, ticket.id), branch, p.defaultBase);
+      w = store.data.worktrees.find((x) => x.projectId === projectId && x.branch === branch);
+    }
+    if (!w) throw new Error("The worktree was not created.");
+    if (!w.ship) { w.ship = newShipFeature(ticket, slug, Date.now()); w.title = ticket.title; }
+    await shipApi.excludeConsortDir(w.path).catch(() => {});
     store.save();
-    await agents.send(id, command, opts.files ?? []);
-    return id;
+    void writeTicket(w.id, "Started.");
+    return runShipTurn(w, { form: "resume" }, "/ship", files, key.id);
+  },
+  shipRun: async (worktreeId: string, command: string) => {
+    const w = wt(worktreeId);
+    if (!w?.ship) throw new Error("This worktree is not a /ship feature.");
+    const form = parseShipCommand(command);
+    if (!form || form.form === "new") throw new Error("Not a /ship command for this feature.");
+    if (form.form === "list") form.form = "resume";
+    return runShipTurn(w, form, command, [], shipKey().id);
+  },
+  // typed in a chat: the stage runs there when the chat is idle, else in a fresh chat of the same worktree
+  shipCommand: async (chatId: string, text: string, files: string[] = []) => {
+    const chat = store.chat(chatId);
+    const w = wt(chat.worktreeId);
+    const form = parseShipCommand(text);
+    if (!form) throw new Error("Not a /ship command.");
+    if (!w.ship) {
+      if (form.form !== "new" || !form.idea) throw new Error(w.projectId && !isScratch(w) ? "This worktree is not a /ship feature. Start one with /ship new <idea>, or from the project page." : "/ship runs in a project worktree; open a project and start it there.");
+      return handlers.shipStart!(w.projectId, { idea: form.idea }, files);
+    }
+    if (form.form === "new") throw new Error("This worktree already ships a feature; start another from the project page.");
+    if (form.form === "list") form.form = "resume";
+    return runShipTurn(w, form, text, files, chat.keyId, chat.running ? undefined : chatId);
   },
   commitInfo: (id: string) => { const p = workspaceOf(wt(id)); return p ? ws.workspaceCommitInfo(targetsOf(p), p.branch ?? "") : git.commitInfo(wt(id).path); },
   commit: async (id: string, message: string) => {
@@ -925,7 +983,6 @@ app.whenReady().then(() => {
   ensurePoolKey(store.data);
   store.save();
   seats.start();
-  shipRelink.start();
   // the model pickers follow the providers, not a release of Consort: ask on every start
   handlers.refreshModels!().catch((error: unknown) => console.warn("model refresh failed", error));
   // first-run titles for worktrees imported before titles existed

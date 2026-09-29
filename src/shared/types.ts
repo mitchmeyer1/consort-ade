@@ -62,8 +62,8 @@ export type Worktree = {
   scratch?: true;
   /** the single chat scope of a workspace project: its path is the workspace folder */
   workspace?: true;
-  /** the scratch scope /ship runs in: the command-center folder, never deleted with its chats */
-  ship?: true;
+  /** a /ship feature: this worktree is its branch, and the record carries its stage (see shared/ship.ts) */
+  ship?: import("./ship").ShipFeature;
 };
 /** one repo's git state inside a workspace; status is null while unknown */
 export type RepoStatus = { projectId: string; name: string; dir: string; path: string; status: WorktreeStatus | null };
@@ -129,7 +129,7 @@ export type Chat = {
   /** seats that hit a limit during the current turn, so an automatic switch never circles back */
   seatTried?: string[];
   /** a /ship run: which feature and what it was asked to do */
-  ship?: { slug?: string; action: string };
+  ship?: { action: string };
   /** /clear was run: the next send starts a fresh session without the transcript digest */
   cleared?: boolean;
   context?: ChatContext;
@@ -150,7 +150,8 @@ export type Chat = {
   permissions?: PermissionRequest[];
   messages: Message[];
   lastChattedAt?: number;
-  queuedMessages?: { id: string; text: string; files: string[] }[];
+  /** display: what the user sees for the message when the text sent is a prompt built for them (a /ship turn) */
+  queuedMessages?: { id: string; text: string; files: string[]; display?: string }[];
   queuePaused?: boolean;
   /** the steps the agent laid out for the current task, and how far along it is */
   plan?: ChatPlan;
@@ -182,7 +183,9 @@ export type Appearance = { theme: "dark" | "light" | "auto"; background: "opaque
 export type State = {
   projects: Project[]; worktrees: Worktree[]; chats: Chat[]; keys: ApiKey[]; defaultKeyId?: string; appearance: Appearance; models?: Partial<Record<Provider, string[]>>;
   /** Whether the dedicated encrypted OpenRouter credential for the Autopilot navigator exists. The key is never exposed. */
-  openRouterConfigured?: boolean;
+  openRouterConfigured?: boolean; 
+  /** a ClickUp API key is saved (Settings › Ship); never exposed */
+  clickUpConfigured?: boolean;
   /** Extensions Consort installed through Settings; their provider config remains the source of truth. */
   extensions?: InstalledExtension[];
   /** standing instructions appended to every chat's prompt (see shared/instructions.ts) */
@@ -196,8 +199,8 @@ export type State = {
   shipAutoApprove?: boolean;
   /** every tool call as its own row; off folds consecutive calls into a summary line (see shared/toolFold) */
   showToolCalls?: boolean;
-  /** the last sync of the Ship board with ClickUp */
-  shipSync?: import("./ship").ShipSync;
+  /** every branch Consort generates starts with this: "mm" gives mm/hris-address-494 */
+  branchPrefix?: string;
 };
 export type PermissionRequest = { id: string; chatId: string; tool: string; input: unknown };
 export type { ConnectorUsage, UsageWindow } from "./usage";
@@ -273,12 +276,15 @@ export type Api = {
   switchSeat(id: string, dir?: string): Promise<void>;
   refreshSeats(): Promise<void>;
   setSeatChooser(path: string): Promise<void>;
-  shipBoard(): Promise<import("./ship").ShipBoard>;
-  /** move every feature's stage to its ClickUp status (through the skill's own reconcile) */
-  syncShip(): Promise<import("./ship").ShipSync>;
-  /** start a fresh chat running one /ship command; returns its id */
-  shipRun(command: string, opts?: { slug?: string; action?: string; name?: string; files?: string[] }): Promise<string>;
+  /** start a /ship feature on a project: from a GitHub issue, a ClickUp task, or an idea (which becomes an issue); returns the first chat's id */
+  shipStart(projectId: string, from: { source: "github"; number: number } | { source: "clickup"; id: string } | { idea: string }, files?: string[]): Promise<string>;
+  /** a /ship command typed in a chat: runs the stage in that chat's worktree, or starts a feature; returns the chat that ran it */
+  shipCommand(chatId: string, text: string, files?: string[]): Promise<string>;
+  /** run a /ship command for a feature worktree in a fresh chat there (the progress bar's buttons); returns the chat id */
+  shipRun(worktreeId: string, command: string): Promise<string>;
   setShipAutoApprove(on: boolean): Promise<void>;
+  setClickUpKey(key: string): Promise<void>;
+  setBranchPrefix(prefix: string): Promise<void>;
   setPhiMode(id: string, on: boolean): Promise<void>;
   stop(chatId: string): Promise<void>;
   addKey(name: string, provider: Provider, key: string, phiAllowed: boolean, auth?: "login" | "key"): Promise<void>;

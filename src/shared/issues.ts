@@ -10,11 +10,14 @@ export type IssueDetail = IssueInfo & { body: string; discussion: { author: stri
 export type IssueLink = { number: number; title: string; state: "OPEN" | "CLOSED"; url: string };
 
 /** the branch and folder a "Branch and solve" worktree gets; the branch name is the link back to the issue */
-export const issueBranch = (n: number) => `issue/${n}`;
+import { withBranchPrefix } from "./ship.ts";
+
+/** the branch Branch and solve makes for an issue, under the prefix from Settings when there is one */
+export const issueBranch = (n: number, prefix?: string) => withBranchPrefix(prefix, `issue/${n}`);
 export const issueFolder = (n: number) => `issue-${n}`;
 /** the issue a branch was made for, or undefined when the branch is not an issue branch */
 export function issueNumberOf(branch: string | undefined) {
-  const m = /^issue\/(\d+)$/.exec(branch ?? "");
+  const m = /(?:^|\/)issue\/(\d+)$/.exec(branch ?? "");
   return m ? Number(m[1]) : undefined;
 }
 export const issueChatName = (issue: { number: number }) => `Issue #${issue.number}`;

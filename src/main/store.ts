@@ -11,6 +11,7 @@ import type { State, Chat, Appearance } from "../shared/types";
 
 type Persisted = State & { secrets: Record<string, string> };
 const OPENROUTER_SECRET_ID = "openrouter-jev";
+const CLICKUP_SECRET_ID = "clickup-ship";
 
 const file = () => join(app.getPath("userData"), "state.json");
 const empty = (): Persisted => ({ projects: [], worktrees: [], chats: [], keys: [], secrets: {}, appearance: { theme: "dark", background: "opaque" } as Appearance });
@@ -60,7 +61,7 @@ export class Store {
   public(): State {
     const { secrets: _s, ...rest } = this.data;
     // Codex keeps its own catalog on disk; Claude's list is whatever the CLI last reported, else the seed
-    return { ...rest, openRouterConfigured: !!this.data.secrets[OPENROUTER_SECRET_ID], models: { codex: codexModels(this.data.keys), claude: this.data.modelCatalog?.claude?.models?.length ? this.data.modelCatalog.claude.models : MODELS.claude } };
+    return { ...rest, openRouterConfigured: !!this.data.secrets[OPENROUTER_SECRET_ID], clickUpConfigured: !!this.data.secrets[CLICKUP_SECRET_ID], models: { codex: codexModels(this.data.keys), claude: this.data.modelCatalog?.claude?.models?.length ? this.data.modelCatalog.claude.models : MODELS.claude } };
   }
 
   onChange(cb: (s: State) => void) {
@@ -102,6 +103,17 @@ export class Store {
 
   getOpenRouterKey() {
     return this.getSecret(OPENROUTER_SECRET_ID);
+  }
+
+  setClickUpKey(key: string) {
+    const value = key.trim();
+    if (!value) delete this.data.secrets[CLICKUP_SECRET_ID];
+    else this.setSecret(CLICKUP_SECRET_ID, value);
+    this.save();
+  }
+
+  getClickUpKey() {
+    return this.getSecret(CLICKUP_SECRET_ID);
   }
 }
 

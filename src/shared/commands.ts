@@ -5,6 +5,7 @@ export type SlashEntry = { name: string; description: string; argumentHint?: str
 export const NATIVE_COMMANDS: SlashEntry[] = [
   { name: "clear", description: "Start a fresh session for this chat. The transcript stays on screen; the model forgets it.", native: true },
   { name: "compact", description: "Compact the session's context (the CLI's own /compact).", argumentHint: "[focus]", native: true },
+  { name: "ship", description: "Run the feature pipeline here: the next step, approve, pr-loop, \"<feedback>\", pause; or new <idea> to start one.", argumentHint: "[new <idea> | approve | pr-loop | \"<feedback>\" | pause]", native: true },
 ];
 
 /** the command being typed, only while the composer holds a lone /word (a space after it means arguments, no popup) */

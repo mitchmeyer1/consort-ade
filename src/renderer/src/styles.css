@@ -1192,31 +1192,6 @@ button.rv-chip:hover { background: var(--card); color: var(--fg); border-color: 
 .composer .seat-picker option { background: var(--popover); color: var(--fg); }
 
 /* /ship */
-.sect.ship-sect { margin-top: 22px; cursor: pointer; border-radius: 3px; }
-.sect.ship-sect:hover, .sect.ship-sect.sel { color: var(--fg); background: var(--line); }
-.ship-new { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; }
-.ship-new.over { border-color: var(--cream); }
-.ship-new-bar .attach { color: var(--dim); padding: 2px 6px; }
-.ship-new textarea { width: 100%; min-height: 38px; max-height: 240px; padding: 6px 4px; border: none; background: none; resize: none; font-size: 14px; line-height: 1.45; }
-.ship-new textarea:focus { outline: none; }
-.ship-new-bar { display: flex; align-items: center; gap: 8px; }
-.ship-new-bar .grow { flex: 1; }
-.ship-new-bar input.ship-name { flex: 0 1 320px; min-width: 0; padding: 4px 8px; font-size: 12px; }
-.ship-opts { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--dim); }
-.ship-opts .grow { flex: 1; }
-.ship-stage h2 { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
-.ship-stage h2 .m { color: var(--dim); font-family: var(--body); font-size: 12px; font-weight: 400; }
-.ship-grid { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
-.ship-card { display: flex; flex-direction: column; gap: 6px; }
-.ship-card .badges { margin-top: 0; }
-.ship-card .badge[role="link"] { cursor: pointer; }
-.ship-card .badge[role="link"]:hover { color: var(--fg); border-color: var(--line2); }
-.ship-card.paused { opacity: .7; }
-.ship-card.running { border-color: #64adff55; }
-.ship-card .snip { margin-top: 0; }
-.ship-next { font-size: 12px; line-height: 1.4; }
-.ship-next .m { margin-right: 6px; text-transform: uppercase; letter-spacing: .2em; font-size: 9.5px; }
-.ship-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
 .ship-actions button { font-size: 12px; padding: 3px 10px; }
 .ship-ask { display: flex; flex-direction: column; gap: 6px; }
 .ship-ask textarea { resize: vertical; font-size: 13px; }
@@ -1236,3 +1211,41 @@ button.rv-chip:hover { background: var(--card); color: var(--fg); border-color: 
 .ship-remote-task [role="link"] { cursor: pointer; }
 .ship-remote-task [role="link"]:hover { color: var(--fg); }
 .ship-remote-task button.icon { font-size: 11px; padding: 0 4px; }
+
+/* /ship: the stage bar above a feature worktree's chats, the Ship drawer, the project page's ClickUp box */
+.ship-bar { display: flex; flex-direction: column; gap: 8px; margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--card, transparent); }
+.ship-bar.compact { max-width: 860px; margin: 8px auto 0; width: 100%; padding: 6px 10px; }
+.ship-bar.paused { opacity: .75; }
+.ship-bar .stages { display: flex; align-items: center; gap: 0; overflow: hidden; }
+.ship-bar .stage { display: inline-flex; align-items: center; gap: 6px; flex: 1 1 0; min-width: 0; font-size: 11px; letter-spacing: .04em; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; position: relative; }
+.ship-bar .stage::before { content: ""; position: absolute; left: 0; right: 0; top: 4px; height: 2px; background: var(--line); z-index: 0; }
+.ship-bar .stage .sdot { position: relative; z-index: 1; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--line2); background: var(--bg); flex-shrink: 0; }
+.ship-bar .stage.done::before { background: var(--cream); }
+.ship-bar .stage.done .sdot { background: var(--cream); border-color: var(--cream); }
+.ship-bar .stage.now { color: var(--fg); font-weight: 600; }
+.ship-bar .stage.now .sdot { border-color: var(--cream); background: var(--bg); box-shadow: 0 0 0 3px color-mix(in srgb, var(--cream) 30%, transparent); }
+.ship-bar .stage.now::before { background: linear-gradient(90deg, var(--cream), var(--line)); }
+.ship-bar.compact .stage { flex: 0 0 auto; }
+.ship-bar.compact .stage.now { flex: 1 1 auto; }
+.ship-bar.compact .stage:not(.now) { width: 14px; }
+.ship-bar-side { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ship-bar-side .badge[role="link"] { cursor: pointer; }
+.ship-bar-side button { margin-left: auto; }
+.ship-bar-side button + button { margin-left: 0; }
+.ship-bar .ship-ask { width: 100%; }
+.ship-ask textarea { width: 100%; }
+.badge.ship { color: var(--cream); cursor: pointer; }
+.topbar .tabs .shipbtn { color: var(--cream); }
+.ship-panel { display: flex; flex-direction: column; gap: 8px; }
+.ship-panel h2 { margin: 0; }
+.ship-panel h3 { margin: 12px 0 2px; font-size: 11px; letter-spacing: .2em; text-transform: uppercase; color: var(--dim); }
+.ship-panel .link { cursor: pointer; text-decoration: underline dotted; }
+.ship-panel .ship-next-line { font-family: var(--mono); font-size: 12px; }
+.ship-panel .ship-next-line .m { margin-right: 6px; text-transform: uppercase; letter-spacing: .2em; font-size: 9.5px; }
+.ship-docs { display: flex; flex-wrap: wrap; gap: 6px; }
+.ship-docs .linkish { padding: 3px 8px; }
+.ship-history { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.ship-sync-error { color: var(--warn); }
+.ship-clickup { display: flex; gap: 8px; align-items: center; margin-bottom: 18px; }
+.ship-clickup input { flex: 1; }
+.ship-opt { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); margin: 4px 0 6px; }
