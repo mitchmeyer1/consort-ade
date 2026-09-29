@@ -37,7 +37,7 @@ export function ShipBar({ wt, chats, compact, onOpenChat }: { wt: Worktree; chat
     <div className={"ship-bar" + (compact ? " compact" : "") + (f.paused ? " paused" : "")} role="group" aria-label={`/ship ${f.stage}`}>
       <div className="stages" title={f.history.map((h) => `${new Date(h.at).toLocaleDateString()} ${h.stage}${h.note ? `: ${h.note}` : ""}`).join("\n")}>
         {SHIP_STAGES.map((s, i) => (
-          <span key={s} className={"stage" + (i < at ? " done" : i === at ? " now" : "")}><span className="sdot" aria-hidden />{compact && i !== at ? "" : s}</span>
+          <span key={s} className={"stage" + (i < at ? " done" : i === at ? " now" : "")}><span className="sdot" aria-hidden />{compact && i !== at ? "" : <span className="lbl">{s}</span>}</span>
         ))}
       </div>
       <div className="ship-bar-side">

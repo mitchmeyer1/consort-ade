@@ -1219,6 +1219,8 @@ button.rv-chip:hover { background: var(--card); color: var(--fg); border-color: 
 .ship-bar .stages { display: flex; align-items: center; gap: 0; overflow: hidden; }
 .ship-bar .stage { display: inline-flex; align-items: center; gap: 6px; flex: 1 1 0; min-width: 0; font-size: 11px; letter-spacing: .04em; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; position: relative; }
 .ship-bar .stage::before { content: ""; position: absolute; left: 0; right: 0; top: 4px; height: 2px; background: var(--line); z-index: 0; }
+.ship-bar .stage .lbl { position: relative; z-index: 1; padding: 0 6px 0 0; background: var(--bg); overflow: hidden; text-overflow: ellipsis; }
+.ship-bar .stage.now .lbl { background: var(--bg); }
 .ship-bar .stage .sdot { position: relative; z-index: 1; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--line2); background: var(--bg); flex-shrink: 0; }
 .ship-bar .stage.done::before { background: var(--cream); }
 .ship-bar .stage.done .sdot { background: var(--cream); border-color: var(--cream); }
