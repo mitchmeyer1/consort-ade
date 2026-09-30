@@ -582,7 +582,7 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 .messages { padding: 24px 0; gap: 0; isolation: isolate; }
 /* floating recall of the last prompt: sticks to the top-right of the transcript, takes no layout room */
 .chat-recall { position: sticky; top: 0; z-index: 3; align-self: stretch; height: 0; display: flex; justify-content: center; pointer-events: none; }
-.chat-recall button { pointer-events: auto; display: flex; align-items: baseline; gap: 8px; width: min(860px, 100% - 36px); margin: 6px 18px 0; padding: 8px 14px; border: 1px solid var(--line2); border-radius: 0 0 12px 12px; background: var(--card-solid); box-shadow: 0 6px 18px var(--shadow); color: var(--fg); font: inherit; font-size: 12px; line-height: 16px; text-align: left; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-recall button { pointer-events: auto; flex: none; box-sizing: border-box; display: flex; align-items: baseline; gap: 8px; width: min(860px, 100% - 36px); height: 34px; margin: 0 18px; padding: 8px 14px; border: 1px solid var(--line2); border-radius: 0 0 12px 12px; background: var(--card-solid); box-shadow: 0 6px 18px var(--shadow); color: var(--fg); font: inherit; font-size: 12px; line-height: 16px; text-align: left; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chat-recall button .m { flex: none; font-size: 9.5px; letter-spacing: .2em; text-transform: uppercase; }
 .chat-recall button:hover { border-color: var(--cream); }
 /* review progress: the recall chip's opposite number, top-left, taking no layout room */
