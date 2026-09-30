@@ -21,8 +21,8 @@ import { BLOCKED_TOOLS, LOCAL_DELIVERABLES_PROMPT } from "../shared/deliverables
 import { isBenignCodexDiagnostic } from "../shared/codexDiagnostics";
 import { AUTOPILOT_DRIVER_PROMPT, AUTOPILOT_SUGGESTION_PROMPT } from "../shared/autopilot";
 import { startAutopilotBridge } from "./autopilotBridge";
-import { DEFAULT_SEAT, runChooser, sessionOnSeat } from "./seatPool";
-import { applyRateInfo, describeLimit, earliestReset, isUsageLimitText, limitFromRateEvent, resetLabel, SEAT_CONTINUE_PROMPT, seatLoad, seatName, seatOf, type LimitHit } from "../shared/seatPool";
+import { defaultSeat, pickSeat, readPool, sessionOnSeat } from "./seatPool";
+import { applyRateInfo, describeLimit, earliestReset, isCodexLimitText, isUsageLimitText, limitFromRateEvent, resetLabel, SEAT_CONTINUE_PROMPT, seatLoad, seatName, seatOf, type LimitHit } from "../shared/seatPool";
 import { applyShipChange, isSlashCommand, parseShipMarkers, stripShipMarkers, withAttachments, type ShipFeature } from "../shared/ship";
 import { CLEAR_DIVIDER, type SlashEntry } from "../shared/commands";
 import { contextWindowOf, promptTokens } from "../shared/context";
@@ -155,10 +155,10 @@ export async function switchAgent(chatId: string, keyId: string, model: string) 
   if (chat.running) await stopAndWait(chatId);
   // A model the provider can't resume onto needs the same treatment as a change of agent: new session, fresh context.
   const restarts = providerChanged || (modelChanged && modelPinsSession(key.provider));
-  // the seats share ~/.claude's projects/ folder, so a Claude session survives a move onto or off the pool
+  // a session survives a move onto or off the pool when the target seat can see its transcript
   const from = keyOf(chat);
-  const seatMove = connectorChanged && !restarts && key.provider === "claude" && !!(key.pool || from?.pool)
-    && !!chat.sessionId && sessionOnSeat(key.pool ? chat.seatDir ?? store.data.seatPool?.pick ?? DEFAULT_SEAT : key.configDir ?? DEFAULT_SEAT, chat.sessionId);
+  const seatMove = connectorChanged && !restarts && !!(key.pool || from?.pool)
+    && !!chat.sessionId && sessionOnSeat(key.pool ? chat.seatDir ?? store.data.seatPool?.picks[key.provider]?.dir ?? defaultSeat(key.provider) : key.configDir ?? defaultSeat(key.provider), chat.sessionId, key.provider);
   // Nothing to hand over without a live session: the next message already carries the transcript (see runSend).
   const handover = restarts && !!chat.sessionId && chat.messages.some((m) => m.role !== "system");
   const digest = handover ? transcriptDigest(chat) : "";
@@ -190,13 +190,9 @@ const limitLabel = (hit: LimitHit) => `${describeLimit(hit)}${hit.resetsAt ? ` (
 async function ensureSeat(chat: Chat) {
   const cur = seatOf(store.data.seatPool, chat.seatDir);
   if (chat.seatDir && !(cur && (cur.blocked || seatLoad(cur, chat.model) >= 100))) return;
-  const command = store.data.seatChooser;
-  let pick: string | undefined;
-  if (command) {
-    try { const pool = await runChooser(command, { model: chat.model, maxAge: 60 }); store.data.seatPool = pool; pick = pool.pick; }
-    catch { pick = store.data.seatPool?.pick; }
-  }
-  chat.seatDir = pick ?? chat.seatDir ?? DEFAULT_SEAT;
+  const pool = await readPool().catch(() => store.data.seatPool);
+  const pick = pickSeat(pool, chat.provider, { model: chat.model });
+  chat.seatDir = pick?.dir ?? chat.seatDir ?? defaultSeat(chat.provider);
 }
 
 /**
@@ -209,16 +205,14 @@ async function recoverFromLimit(chatId: string, hit: LimitHit) {
   if (!chat || chat.running) return;
   const from = chat.seatDir;
   const tried = [...new Set([...(chat.seatTried ?? []), ...(from ? [from] : [])])];
-  const command = store.data.seatChooser;
   let pool = store.data.seatPool;
   let why = "";
-  if (command) {
-    try { pool = await runChooser(command, { exclude: tried, model: chat.model, maxAge: 60 }); store.data.seatPool = pool; }
-    catch (e) { why = ` The seat chooser failed: ${(e as Error).message}.`; }
-  } else why = " No seat chooser is set in Settings.";
-  const next = command && !why ? pool?.pick : undefined;
-  if (!next || tried.includes(next) || pool?.pickBlocked) {
-    const reset = earliestReset(pool);
+  try { pool = (await readPool({ force: true })) ?? pool; }
+  catch (e) { why = ` Reading the seats failed: ${(e as Error).message}.`; }
+  const pick = pickSeat(pool, chat.provider, { exclude: tried, model: chat.model });
+  const next = pick && !pick.blocked ? pick.dir : undefined;
+  if (!next || tried.includes(next)) {
+    const reset = earliestReset(pool, chat.provider);
     recordRunError(chat, `${seatName(pool, from)} hit its ${limitLabel(hit)}, and no other seat has headroom${reset ? `; the first one frees up ${resetLabel(reset)}` : ""}.${why} Pick a seat from the seat menu to force one, or continue after the reset.`);
     chat.seatTried = undefined;
     store.save();
@@ -238,27 +232,26 @@ async function recoverFromLimit(chatId: string, hit: LimitHit) {
  */
 export async function switchSeat(chatId: string, dir?: string) {
   const chat = store.chat(chatId);
-  const pool = store.data.keys.find((k) => k.pool);
-  if (!pool) throw new Error("No seat pool yet: set the seat chooser in Settings.");
-  if (chat.provider !== "claude") throw new Error("Seats are Claude logins; this chat runs on Codex.");
+  const pool = store.data.keys.find((k) => k.pool && k.provider === chat.provider);
+  if (!pool) throw new Error(`No seat pool for ${chat.provider}: add a second ${chat.provider === "claude" ? "Claude" : "Codex"} login in Settings.`);
   const from = keyOf(chat);
   const wasRunning = chat.running;
   if (wasRunning) await stopAndWait(chatId);
-  const current = from?.pool ? chat.seatDir : undefined;
+  const current = from?.pool ? chat.seatDir : from?.configDir ?? defaultSeat(chat.provider);
   let target = dir;
   if (!target) {
-    const command = store.data.seatChooser;
-    if (!command) throw new Error("No seat chooser is set in Settings.");
-    const fresh = await runChooser(command, { exclude: current ? [current] : [], model: chat.model, maxAge: 60 });
-    store.data.seatPool = fresh;
-    target = fresh.pick;
-    if (!target) throw new Error("There is no other seat to move to.");
+    const fresh = await readPool({ force: true });
+    const pick = pickSeat(fresh, chat.provider, { exclude: current ? [current] : [], model: chat.model });
+    if (!pick) throw new Error("There is no other seat to move to.");
+    const reset = earliestReset(fresh, chat.provider);
+    if (pick.blocked) throw new Error(`Every other seat is at its limit${reset ? `; the first frees up ${resetLabel(reset)}` : ""}.`);
+    target = pick.dir;
   }
   chat.keyId = pool.id;
   chat.seatDir = target;
   chat.seatTried = undefined;
-  // seats share one projects/ folder, so the session normally comes along
-  if (chat.sessionId && sessionOnSeat(target, chat.sessionId)) chat.sessionKeyId = pool.id;
+  // the session comes along when the target seat can see its transcript
+  if (chat.sessionId && sessionOnSeat(target, chat.sessionId, chat.provider)) chat.sessionKeyId = pool.id;
   else { chat.sessionId = undefined; chat.sessionKeyId = undefined; }
   note(chat, `Moved to seat ${seatName(store.data.seatPool, target)}${current ? ` from ${seatName(store.data.seatPool, current)}` : ""}.`);
   const resume = wasRunning || !!chat.error || !!chat.interrupted;
@@ -495,7 +488,7 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
     // a CLI too old for the model is fetched and the turn run again, once (shared/cliUpdates.ts)
     for (let attempt = 0; attempt < 2; attempt++) {
       if (chat.provider === "claude") hit = await runClaude(chat, cwd, apiKey, boundedPrompt(cwd, text), ac, ui);
-      else await runCodex(chat, cwd, apiKey, text, ac, ui);
+      else hit = await runCodex(chat, cwd, apiKey, text, ac, ui);
       const need = cliUpdateNeeded(chat.error, chat.provider);
       if (!need || attempt || ac.signal.aborted) break;
       const updated = await updateCli(chat.provider, need).catch(() => false);
@@ -757,9 +750,14 @@ async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, 
   return limitText && !ac.signal.aborted ? { text: limitText, window: rejected?.window, resetsAt: rejected?.resetsAt } : undefined;
 }
 
-async function runCodex(chat: Chat, cwd: string, apiKey: string, text: string, ac: AbortController, ui: Transcript) {
+/** runs one turn; returns the usage limit that stopped it, if one did */
+async function runCodex(chat: Chat, cwd: string, apiKey: string, text: string, ac: AbortController, ui: Transcript): Promise<LimitHit | undefined> {
   chat.sessionKeyId = chat.keyId;
-  const codex = new Codex({ ...(apiKey ? { apiKey } : {}), codexPathOverride: codexBin(), env: agentEnvironment(cwd, { ...envWithout("OPENAI_API_KEY"), ...loginEnv(keyOf(chat)), ...dockerRunEnvironment(chat.id) }) });
+  const seat = isPool(chat) && chat.seatDir ? { CODEX_HOME: chat.seatDir } : {};
+  let limitText: string | undefined;
+  // a usage limit is not a run error: the pool moves the chat to another seat instead
+  const fail = (message: string) => { if (isCodexLimitText(message)) limitText = message; else recordRunError(chat, message); };
+  const codex = new Codex({ ...(apiKey ? { apiKey } : {}), codexPathOverride: codexBin(), env: agentEnvironment(cwd, { ...envWithout("OPENAI_API_KEY"), ...loginEnv(keyOf(chat)), ...seat, ...dockerRunEnvironment(chat.id) }) });
   const opts = { ...(chat.model ? { model: chat.model } : {}), workingDirectory: cwd, skipGitRepoCheck: true, sandboxMode: "workspace-write" as const, networkAccessEnabled: true, approvalPolicy: "never" as const };
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -778,13 +776,13 @@ async function runCodex(chat: Chat, cwd: string, apiKey: string, text: string, a
           ui.tool({ type: "tool", id: it.id, name: "Bash", input: it.command, output: it.aggregated_output, ok: it.exit_code === undefined ? undefined : it.exit_code === 0 });
         else if (it.type === "file_change")
           ui.tool({ type: "tool", id: it.id, name: "Edit", input: it.changes.map((c) => `${c.kind} ${c.path}`).join("\n"), ok: it.status === "completed" });
-        else if (it.type === "error" && !isBenignCodexDiagnostic(it.message)) recordRunError(chat, it.message);
-      } else if (ev.type === "turn.failed") recordRunError(chat, ev.error.message);
-      else if (ev.type === "error" && !isBenignCodexDiagnostic(ev.message)) recordRunError(chat, ev.message);
+        else if (it.type === "error" && !isBenignCodexDiagnostic(it.message)) fail(it.message);
+      } else if (ev.type === "turn.failed") fail(ev.error.message);
+      else if (ev.type === "error" && !isBenignCodexDiagnostic(ev.message)) fail(ev.message);
     }
     ui.finalizeText();
     } catch (error) {
-      recordRunError(chat, String((error as Error).message ?? error));
+      fail(String((error as Error).message ?? error));
     }
     if (ac.signal.aborted || !isContextSizeError(chat.error ?? "") || attempt === 1) break;
     const handoff = contextHandoff(chat, cwd);
@@ -793,6 +791,7 @@ async function runCodex(chat: Chat, cwd: string, apiKey: string, text: string, a
     ui.newMessage();
     text = boundedPrompt(cwd, `${handoff}\n\nRequest and runtime instructions for this turn:\n${text}`);
   }
+  return limitText && !ac.signal.aborted ? { text: limitText } : undefined;
 }
 
 const envWithout = (k: string) => { const { [k]: _drop, ...rest } = process.env; return rest; };

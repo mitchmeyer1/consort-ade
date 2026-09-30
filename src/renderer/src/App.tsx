@@ -2150,7 +2150,7 @@ function ChatPane({ chat, worktree, chats, onOpenChat, keys, models, pool, showT
   const composerDone = !!worktree && !!ptys.find((p) => p.id === `${worktree.id}:composer-${chat.id}`)?.done;
   // a Claude chat can hop seats: on the pool to the best other seat, off it onto the pool
   const chatKey = keys.find((k) => k.id === chat.keyId);
-  const canSeat = chat.provider === "claude" && keys.some((k) => k.pool);
+  const canSeat = keys.some((k) => k.pool && k.provider === chat.provider);
   const [errorDetails, setErrorDetails] = useState<string>();
   const [copyStatus, setCopyStatus] = useState("");
   useEffect(() => { setErrorDetails(undefined); setCopyStatus(""); }, [chat.id]);
@@ -2344,7 +2344,7 @@ function ChatPane({ chat, worktree, chats, onOpenChat, keys, models, pool, showT
             <span>Last run failed: <span className="err">{chat.error}</span></span><span className="error-details-link">View details</span>
           </button> : <span>This chat was interrupted when the app closed.</span>}
           <button className="primary" onClick={() => ade.continueChat(chat.id).catch((e) => alert(e.message))}>Continue where it left off</button>
-          {canSeat && <button title="Resume this same session on the seat with the most headroom" onClick={() => ade.switchSeat(chat.id).catch((e) => alert(e.message))}>{chatKey?.pool ? "Switch seat & continue" : "Move to seat pool & continue"}</button>}
+          {canSeat && <button title="Resume this same session on the seat with the most headroom" onClick={() => ade.switchSeat(chat.id).catch((e) => alert(e.message))}>{chatKey?.pool ? "Switch login & continue" : `Continue on Any ${chat.provider === "claude" ? "Claude" : "Codex"}`}</button>}
         </div>
       )}
       {errorDetails !== undefined && <Dialog title="Run error details" onClose={() => setErrorDetails(undefined)} footer={<>
@@ -2867,11 +2867,10 @@ function Connector({ k, isDefault, status, usage, now, onSignIn, onRename, onRef
   onSignIn: () => void; onRename: () => void; onRefresh: () => void; children?: React.ReactNode;
 }) {
   const login = k.auth === "login";
-  const builtIn = k.id.startsWith("login-");
+  const builtIn = k.id.startsWith("login-") || !!k.pool;
   const identity = usage?.account ? [usage.account, usage.plan].filter(Boolean).join(" · ") : status?.loggedIn ? status.detail : usage?.plan;
   const dot = !login ? "ok" : !status ? "" : status.loggedIn ? "ok" : "bad";
   const signedOut = login && status && !status.loggedIn;
-  // the pool's seats sign in from a terminal (CLAUDE_CONFIG_DIR=… claude), and it never carries PHI
   const pool = !!k.pool;
   return (
     <div className="conn" data-testid={`connector-${k.id}`}>
@@ -2886,7 +2885,7 @@ function Connector({ k, isDefault, status, usage, now, onSignIn, onRename, onRef
       </div>
       <div className="conn-sub">
         <span className={`dot ${dot}`} aria-hidden />
-        <span>{k.provider === "claude" ? "Claude" : "Codex"} · {pool ? "seat pool" : login ? "terminal login" : "API key"}</span>
+        <span>{k.provider === "claude" ? "Claude" : "Codex"} · {pool ? "any login · picks the one with headroom" : login ? "terminal login" : "API key"}</span>
         {signedOut ? <span className="conn-bad">not signed in</span> : identity ? <span className="conn-who" title={identity}>{identity}</span> : login && !status ? <span>checking…</span> : null}
       </div>
       <Meters usage={usage} signedOut={!!signedOut && !pool} now={now} />
@@ -3081,7 +3080,7 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
         {state.keys.map((k) => (
           <Connector key={k.id} k={k} isDefault={defaultConnector(state)?.id === k.id} status={status[k.id]} usage={usage[k.id]} now={now}
             onSignIn={() => onSignIn(k.id)} onRename={() => setRenaming({ id: k.id, name: k.name })} onRefresh={() => { refreshStatus(); refreshUsage(true, k.id); }}>
-            {k.pool && <PoolSettings state={state} />}
+            {k.pool && <PoolSettings state={state} provider={k.provider} />}
           </Connector>
         ))}
         {!state.keys.length && <div className="conn-note">No connectors yet.</div>}

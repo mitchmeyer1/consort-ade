@@ -19,7 +19,7 @@ export const modelOptions = (state: { models?: Partial<Record<Provider, string[]
   state.models?.[provider]?.length ? state.models[provider]! : MODELS[provider];
 
 /** configDir: extra CLI logins keep their own credentials there (CLAUDE_CONFIG_DIR / CODEX_HOME); the built-in login uses the CLI default */
-/** pool: a Claude login connector that runs each chat on whichever seat the seat chooser names (see shared/seatPool.ts) */
+/** pool: the provider's "Any …" connector, which runs each chat on whichever login seat has the most headroom (see shared/seatPool.ts) */
 export type ApiKey = { id: string; name: string; provider: Provider; auth: "login" | "key"; configDir?: string; defaultModel?: string; pool?: boolean };
 import type { Contributor } from "./contributors";
 import type { SideMessage } from "./sideChat";
@@ -127,7 +127,7 @@ export type Chat = {
   delegateModel?: string;
   sessionId?: string;
   sessionKeyId?: string; // connector that owns the provider session
-  /** on the seat pool: the seat (CLAUDE_CONFIG_DIR) this chat is pinned to */
+  /** on the seat pool: the login config directory (CLAUDE_CONFIG_DIR or CODEX_HOME) this chat is pinned to */
   seatDir?: string;
   /** seats that hit a limit during the current turn, so an automatic switch never circles back */
   seatTried?: string[];
@@ -195,8 +195,6 @@ export type State = {
   instructions?: import("./instructions").Instruction[];
   /** the last model list each provider reported, with when; `models` above is derived from it */
   modelCatalog?: Partial<Record<Provider, { models: string[]; at: number }>>;
-  /** the seat chooser script behind the pool connector, and its last reading of every seat */
-  seatChooser?: string;
   seatPool?: import("./seatPool").SeatPool;
   /** /ship runs start with auto-approve on (the skill drives git, gh and its own CLI) */
   shipAutoApprove?: boolean;
@@ -278,7 +276,6 @@ export type Api = {
   /** move a Claude chat to another seat (the chooser's pick when `dir` is omitted) and pick a failed run back up */
   switchSeat(id: string, dir?: string): Promise<void>;
   refreshSeats(): Promise<void>;
-  setSeatChooser(path: string): Promise<void>;
   /** start a /ship feature on a project: from a GitHub issue, a ClickUp task, or an idea (which becomes an issue); returns the first chat's id */
   shipStart(projectId: string, from: { source: "github"; number: number } | { source: "clickup"; id: string } | { idea: string }, files?: string[]): Promise<string>;
   /** a /ship command typed in a chat: runs the stage in that chat's worktree, or starts a feature; returns the chat that ran it */

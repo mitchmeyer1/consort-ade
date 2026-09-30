@@ -28,16 +28,23 @@ const seat = (dir, pct) => ({ dir, name: dir.split('/').pop().replace(/^\.claude
  * One pool chat on seat a. Each Claude turn plays the next script: 'limit' ends the turn the way a spent
  * seat does, 'ok' finishes it. The chooser answers from `headroom`, the seats with room left.
  */
-function fixture({ scripts, headroom = ['/s/.claude-b'], key = 'pool', sessionOnSeat = () => true }) {
-  const chat = { id: 'chat', worktreeId: 'wt', provider: 'claude', keyId: key, model: 'claude-opus-5-5', seatDir: key === 'pool' ? '/s/.claude' : undefined, sessionId: 's1', sessionKeyId: key, phase: 'waiting', autoApprove: true, messages: [{ role: 'user', blocks: [{ type: 'text', text: 'Build the thing' }] }] };
-  const keys = [{ id: 'pool', name: 'Claude seat pool', provider: 'claude', pool: true, phiAllowed: false, auth: 'login' }, { id: 'personal', name: 'Claude', provider: 'claude', phiAllowed: false }, { id: 'work', name: 'Claude work', provider: 'claude', phiAllowed: true, configDir: '/s/.claude-work' }];
+function fixture({ scripts, headroom = ['/s/.claude-b'], key = 'pool', sessionOnSeat = () => true, provider = 'claude' }) {
+  const chat = { id: 'chat', worktreeId: 'wt', provider, keyId: key, model: provider === 'claude' ? 'claude-opus-5-5' : 'gpt-6-astra', seatDir: key === 'pool' ? '/s/.claude' : undefined, sessionId: 's1', sessionKeyId: key, phase: 'waiting', autoApprove: true, messages: [{ id: 'm', role: 'user', blocks: [{ type: 'text', text: 'Build the thing' }], ts: 1 }] };
+  const keys = [{ id: 'pool', name: 'Any Claude', provider: 'claude', pool: true, auth: 'login' }, { id: 'personal', name: 'Claude', provider: 'claude', auth: 'login' }, { id: 'work', name: 'Claude work', provider: 'claude', auth: 'login', configDir: '/s/.claude-b' },
+    { id: 'pool-codex', name: 'Any Codex', provider: 'codex', pool: true, auth: 'login' }, { id: 'cx1', name: 'Codex', provider: 'codex', auth: 'login' }, { id: 'cx2', name: 'Codex 2', provider: 'codex', auth: 'login', configDir: '/s/.codex-b' }];
   const calls = [];
   const chooser = [];
-  const store = { data: { chats: [chat], keys, worktrees: [{ id: 'wt', path: '/nonexistent-test-worktree' }], seatChooser: '/bin/chooser', seatPool: { at: 1, pick: '/s/.claude', pickBlocked: false, seats: [seat('/s/.claude', 20), seat('/s/.claude-b', 30), seat('/s/.claude-c', 40)] } }, chat: () => chat, save() {}, getSecret: () => '' };
-  const runChooser = async (_cmd, opts = {}) => {
+  const seatOf = (dir, prov, pct) => ({ provider: prov, keyId: dir, dir, name: dir.split('/').pop().replace(/^\.(claude|codex)-?/, '') || 'default', live: true, blocked: pct >= 95, fiveHour: { pct, resetsAt: Date.now() + 3600_000 }, sevenDay: { pct: 10 }, models: {}, at: Date.now() });
+  const allSeats = () => [seatOf('/s/.claude', 'claude', 50), seatOf('/s/.claude-b', 'claude', 50), seatOf('/s/.claude-c', 'claude', 50), seatOf('/s/.codex', 'codex', 50), seatOf('/s/.codex-b', 'codex', 50)]
+    .map((s) => (headroom.includes(s.dir) || s.dir === '/s/.claude' || s.dir === '/s/.codex' ? s : { ...s, blocked: true, fiveHour: { pct: 100, resetsAt: Date.now() + 3600_000 } }));
+  const store = { data: { chats: [chat], keys, worktrees: [{ id: 'wt', path: '/nonexistent-test-worktree' }], seatPool: { at: 1, seats: allSeats(), picks: {} } }, chat: () => chat, save() {}, getSecret: () => '' };
+  const readPool = async (opts = {}) => {
     chooser.push(opts);
-    const open = headroom.filter((d) => !(opts.exclude ?? []).includes(d));
-    return { ...store.data.seatPool, at: Date.now(), pick: open[0], pickBlocked: false };
+    // the seat that just hit its limit reports as spent on the next read
+    const spent = new Set(chat.seatTried ?? []);
+    const current = store.data.seatPool?.seats?.length ? store.data.seatPool.seats : allSeats();
+    store.data.seatPool = { at: Date.now(), seats: current.map((s) => (spent.has(s.dir) ? { ...s, blocked: true, fiveHour: { pct: 100, resetsAt: Date.now() + 3600_000 } } : s)), picks: {} };
+    return store.data.seatPool;
   };
   const mocks = {
     './dockerLifecycle': { beginDockerRun: () => '', dockerRunEnvironment: () => ({}), finishDockerRun: async () => {} },
@@ -47,7 +54,7 @@ function fixture({ scripts, headroom = ['/s/.claude-b'], key = 'pool', sessionOn
     './agentEnvironment': { TESTING_PROMPT: '', agentEnvironment: (_, env) => env, isInstallCommand: () => false },
     './agentBrowser': { startAgentBrowser: async () => ({ prompt: '', close: async () => {} }) },
     './autopilotBridge': { startAutopilotBridge: async () => ({ prompt: '', close: async () => {} }) },
-    './seatPool': { DEFAULT_SEAT: '/s/.claude', runChooser, sessionOnSeat },
+    './seatPool': { defaultSeat: (p) => (p === 'claude' ? '/s/.claude' : '/s/.codex'), readPool, pickSeat: seatPool.pickSeat, sessionOnSeat },
     '../shared/types': { PHASES: [] },
     '../shared/planProgress': planProgress,
     '../shared/featureProgress': featureProgress,
@@ -62,7 +69,7 @@ function fixture({ scripts, headroom = ['/s/.claude-b'], key = 'pool', sessionOn
     '../shared/ship': ship,
     '../shared/commands': commands,
     '../shared/context': context,
-    '@openai/codex-sdk': { Codex: class {} },
+    '@openai/codex-sdk': { Codex: class { constructor(o) { this.o = o; } startThread(opts) { return this.thread(opts); } resumeThread(_id, opts) { return this.thread(opts); } thread(opts) { const self = this; return { runStreamed: async (prompt) => { const script = scripts[calls.length] ?? 'ok'; calls.push({ prompt, options: { env: self.o.env, model: opts.model } }); return { events: (async function* () { yield { type: 'thread.started', thread_id: 's1' }; if (script === 'limit') yield { type: 'turn.failed', error: { message: "You've hit your usage limit. Try again later." } }; else yield { type: 'item.completed', item: { type: 'agent_message', text: 'done' } }; })() }; } }; } } },
     '@anthropic-ai/claude-agent-sdk': { query: (args) => (async function* () {
       const script = scripts[calls.length] ?? 'ok';
       calls.push(args);
@@ -91,7 +98,7 @@ test('a pool chat that hits its seat\'s limit resumes the same session on the ne
   assert.equal(calls.length, 2);
   assert.equal(calls[0].options.env.CLAUDE_CONFIG_DIR, '/s/.claude', 'the chat keeps its own seat, not the pool\'s current pick');
   assert.equal(calls[0].options.settings.autoContinueAtUsageLimit, false);
-  assert.deepEqual(chooser.at(-1).exclude, ['/s/.claude']);
+  assert.deepEqual(chooser.at(-1), { force: true });
   assert.equal(calls[1].options.env.CLAUDE_CONFIG_DIR, '/s/.claude-b');
   assert.equal(calls[1].options.resume, 's1');
   assert.match(calls[1].prompt, /continues on another account/);
@@ -134,11 +141,11 @@ test('switching seats moves the chat onto the pool, keeps its session and contin
   assert.equal(calls[0].options.resume, 's1');
   assert.equal(calls[0].options.env.CLAUDE_CONFIG_DIR, '/s/.claude-b');
   assert.equal(chat.error, undefined);
-  assert.ok(notes().some((n) => n === 'Moved to seat b.'), notes().join('\n'));
+  assert.ok(notes().some((n) => n === 'Moved to seat b from default.'), notes().join('\n'));
 });
 
 test('a seat that can\'t see the session starts fresh with the transcript', async () => {
-  const { agents, chat, calls, settle } = fixture({ scripts: ['ok'], sessionOnSeat: () => false });
+  const { agents, chat, calls, settle } = fixture({ scripts: ['ok'], sessionOnSeat: () => false, headroom: ['/s/.claude-b', '/s/.claude-c'] });
   chat.error = LIMIT;
   await agents.switchSeat(chat.id, '/s/.claude-c');
   await settle(1);
@@ -147,3 +154,16 @@ test('a seat that can\'t see the session starts fresh with the transcript', asyn
   assert.match(calls[0].prompt, /Build the thing/);
 });
 
+test('a Codex pool chat that hits its usage limit moves to the next Codex login and carries on', async () => {
+  const { agents, chat, calls, settle, notes } = fixture({ scripts: ['limit', 'ok'], key: 'pool-codex', provider: 'codex', headroom: ['/s/.codex-b'] });
+  chat.seatDir = '/s/.codex';
+  await agents.send(chat.id, 'Now wire the tests');
+  await settle(2);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].options.env.CODEX_HOME, '/s/.codex');
+  assert.equal(calls[1].options.env.CODEX_HOME, '/s/.codex-b');
+  assert.match(calls[1].prompt, /continues on another account/);
+  assert.equal(chat.seatDir, '/s/.codex-b');
+  assert.equal(chat.error, undefined);
+  assert.ok(notes().some((n) => /default hit its usage limit\. Continuing on b\./.test(n)), `notes: ${notes().join(' | ')} error: ${chat.error} seatTried: ${chat.seatTried}`);
+});

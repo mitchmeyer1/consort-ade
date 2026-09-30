@@ -45,7 +45,7 @@ import { MODELS, type Api, type Appearance, type PrDraft } from "../shared/types
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { homedir } from "node:os";
-import { createSeatMonitor, ensurePoolKey } from "./seatPool";
+import { configureSeats, ensurePoolKeys, isPoolId } from "./seatPool";
 import { poolUsage } from "../shared/seatPool";
 import * as shipApi from "./ship";
 import { newShipFeature, parseShipCommand, shipActionOf, shipBranch, shipChatName, shipFolder, shipIdeaName, shipSlug, type ShipFeature, type ShipForm, type ShipTicket } from "../shared/ship";
@@ -249,9 +249,10 @@ function startInstall(scopeId: string, repo: string, path: string) {
     .catch((error) => console.error("worktree install failed to start", error));
 }
 
-// the seat meters: refreshed every few minutes, and on demand after a limit or a switch
-const seats = createSeatMonitor({
-  command: () => store.data.seatChooser || undefined,
+// the seat meters: every login's plan usage, read every few minutes and on demand after a limit or a switch
+const seats = configureSeats({
+  keys: () => store.data.keys,
+  read: (key, force) => usage.read(key, { force }),
   publish: (pool) => { store.data.seatPool = pool; store.save(); },
   last: () => store.data.seatPool,
 });
@@ -622,21 +623,11 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     const k = store.data.keys.find((k) => k.id === keyId);
     if (!k) throw new Error("Connector not found");
     if (!k.pool) return usage.read(k, { force });
-    if (force) await seats.refresh(20);
-    return poolUsage(k.id, store.data.seatPool);
+    if (force) await seats.refresh(true);
+    return poolUsage(k.id, store.data.seatPool, k.provider);
   },
   switchSeat: (id: string, dir?: string) => agents.switchSeat(id, dir),
-  refreshSeats: () => seats.refresh(20),
-  setSeatChooser: (path: string) => {
-    const chooser = path.trim();
-    if (chooser && !existsSync(chooser)) throw new Error(`No file at ${chooser}.`);
-    // an empty path turns the pool's refreshes off; the connector stays for the chats already on it
-    store.data.seatChooser = chooser;
-    ensurePoolKey(store.data);
-    if (!chooser) store.data.seatPool = undefined;
-    store.save();
-    if (chooser) void seats.refresh(0);
-  },
+  refreshSeats: async () => { await seats.refresh(true); },
   setShipAutoApprove: (on: boolean) => { store.data.shipAutoApprove = on; store.save(); },
   setClickUpKey: (key: string) => store.setClickUpKey(key),
   setBranchPrefix: (prefix: string) => { store.data.branchPrefix = prefix.trim().replace(/^\/+|\/+$/g, ""); store.save(); },
@@ -930,7 +921,9 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
       mkdirSync(configDir, { recursive: true });
       store.data.keys.push({ id, name, provider, auth, configDir });
     }
+    ensurePoolKeys(store.data);
     store.save();
+    void seats.refresh(true);
   },
   renameKey: (id: string, name: string) => {
     const key = store.data.keys.find((k) => k.id === id);
@@ -941,15 +934,16 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     store.save();
   },
   removeKey: (id: string) => {
-    if (id.startsWith("login-")) return;
+    if (id.startsWith("login-") || isPoolId(id)) return;
     const key = store.data.keys.find((k) => k.id === id);
     if (key?.configDir && key.configDir.startsWith(join(app.getPath("userData"), "logins"))) rmSync(key.configDir, { recursive: true, force: true });
-    // an empty chooser keeps the next launch from putting the pool back
-    if (key?.pool) { store.data.seatChooser = ""; store.data.seatPool = undefined; }
     store.data.keys = store.data.keys.filter((k) => k.id !== id);
     delete store.data.secrets[id];
     usage.forget(id);
+    // a provider left with no logins loses its pool; its seats are re-read either way
+    ensurePoolKeys(store.data);
     store.save();
+    void seats.refresh(true);
   },
   setOpenRouterKey: (key: string) => store.setOpenRouterKey(key),
   answerPermission: (id: string, allow: boolean) => agents.answerPermission(id, allow),
@@ -1013,7 +1007,7 @@ ${skill}${deploy}${rubric}`;
 app.whenReady().then(() => {
   startDockerRecovery(join(app.getPath("userData"), "docker-runs"));
   store.load();
-  ensurePoolKey(store.data);
+  ensurePoolKeys(store.data);
   store.save();
   seats.start();
   // the model pickers follow the providers, not a release of Consort: ask on every start

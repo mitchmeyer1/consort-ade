@@ -1181,6 +1181,7 @@ button.rv-chip:hover { background: var(--card); color: var(--fg); border-color: 
 .seat-bar-fill { position: absolute; inset: 0 auto 0 0; background: var(--fg); opacity: .7; transition: width .5s ease; }
 .seat-bar.high .seat-bar-fill, .seat-bar.full .seat-bar-fill { background: var(--err); opacity: 1; }
 .seat-bar.high .seat-bar-pct, .seat-bar.full .seat-bar-pct { color: var(--err); }
+.seats-provider { padding: 4px 8px 1px; font: 9.5px/1 var(--mono); letter-spacing: .2em; text-transform: uppercase; color: var(--dim); }
 .seats-note, .seats-error { padding: 2px 8px; font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .seats-error { color: var(--err); }
 .pool-settings { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
