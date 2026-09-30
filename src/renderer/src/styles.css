@@ -579,7 +579,7 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 .commit .list .lrow .num { min-width: 64px; }
 
 /* ===== chat transcript, Claude-app style ===== */
-.messages { padding: 24px 0; gap: 0; background: var(--bg); isolation: isolate; }
+.messages { padding: 24px 0; gap: 0; isolation: isolate; }
 /* floating recall of the last prompt: sticks to the top-right of the transcript, takes no layout room */
 .chat-recall { position: sticky; top: 8px; z-index: 3; align-self: flex-end; height: 0; margin-right: 18px; display: flex; align-items: flex-start; justify-content: flex-end; pointer-events: none; }
 .chat-recall span { pointer-events: auto; max-width: min(340px, 40vw); padding: 7px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-solid); box-shadow: 0 6px 18px var(--shadow); color: var(--fg); font-size: 11px; line-height: 15px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; overflow: hidden; }
