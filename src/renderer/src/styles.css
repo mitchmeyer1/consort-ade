@@ -1212,28 +1212,23 @@ button.rv-chip:hover { background: var(--card); color: var(--fg); border-color: 
 .ship-remote-task [role="link"]:hover { color: var(--fg); }
 .ship-remote-task button.icon { font-size: 11px; padding: 0 4px; }
 
-/* /ship: the stage bar above a feature worktree's chats, the Ship drawer, the project page's ClickUp box */
-.ship-bar { display: flex; flex-direction: column; gap: 8px; margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--card, transparent); }
+/* /ship: the stage bar above a feature worktree's chats (eight labelled segments) and above a chat (a thin meter) */
+.ship-bar { display: flex; flex-direction: column; gap: 8px; margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; }
 .ship-bar.compact { max-width: 860px; margin: 8px auto 0; width: 100%; padding: 6px 10px; }
 .ship-bar.paused { opacity: .75; }
-.ship-bar .stages { display: flex; align-items: center; gap: 0; overflow: hidden; }
-.ship-bar .stage { display: inline-flex; align-items: center; gap: 6px; flex: 1 1 0; min-width: 0; font-size: 11px; letter-spacing: .04em; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; position: relative; }
-.ship-bar .stage::before { content: ""; position: absolute; left: 0; right: 0; top: 4px; height: 2px; background: var(--line); z-index: 0; }
-.ship-bar .stage .lbl { position: relative; z-index: 1; padding: 0 6px 0 0; background: var(--bg); overflow: hidden; text-overflow: ellipsis; }
-.ship-bar .stage.now .lbl { background: var(--bg); }
-.ship-bar .stage .sdot { position: relative; z-index: 1; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--line2); background: var(--bg); flex-shrink: 0; }
-.ship-bar .stage.done::before { background: var(--cream); }
-.ship-bar .stage.done .sdot { background: var(--cream); border-color: var(--cream); }
-.ship-bar .stage.now { color: var(--fg); font-weight: 600; }
-.ship-bar .stage.now .sdot { border-color: var(--cream); background: var(--bg); box-shadow: 0 0 0 3px color-mix(in srgb, var(--cream) 30%, transparent); }
-.ship-bar .stage.now::before { background: linear-gradient(90deg, var(--cream), var(--line)); }
-.ship-bar.compact .stage { flex: 0 0 auto; }
-.ship-bar.compact .stage.now { flex: 1 1 auto; }
-.ship-bar.compact .stage:not(.now) { width: 14px; }
-.ship-bar-side { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.ship-bar-side .badge[role="link"] { cursor: pointer; }
-.ship-bar-side button { margin-left: auto; }
-.ship-bar-side button + button { margin-left: 0; }
+.ship-segments { display: flex; gap: 4px; }
+.ship-segments .seg { flex: 1 1 0; min-width: 0; padding: 5px 8px; border-radius: 4px; border: 1px solid var(--line); font-size: 11px; letter-spacing: .03em; color: var(--dim); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ship-segments .seg.done { background: color-mix(in srgb, var(--cream) 22%, transparent); border-color: color-mix(in srgb, var(--cream) 35%, transparent); color: var(--fg); }
+.ship-segments .seg.now { background: var(--cream); border-color: var(--cream); color: var(--bg); font-weight: 700; }
+.ship-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ship-row .grow { flex: 1; }
+.ship-row .badge[role="link"] { cursor: pointer; }
+.ship-meter { display: inline-flex; gap: 3px; width: 120px; flex-shrink: 0; }
+.ship-meter .seg { flex: 1; height: 6px; border-radius: 2px; background: var(--line); }
+.ship-meter .seg.done { background: color-mix(in srgb, var(--cream) 55%, transparent); }
+.ship-meter .seg.now { background: var(--cream); }
+.ship-at { font-size: 12px; font-weight: 600; white-space: nowrap; }
+.ship-at .m { font-weight: 400; font-family: var(--mono); font-size: 11px; }
 .ship-bar .ship-ask { width: 100%; }
 .ship-ask textarea { width: 100%; }
 .badge.ship { color: var(--cream); cursor: pointer; }

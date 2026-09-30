@@ -33,22 +33,36 @@ export function ShipBar({ wt, chats, compact, onOpenChat }: { wt: Worktree; chat
   const actions = shipActions(f);
   const r = useShipRun(wt, onOpenChat);
   const primary = actions.find((a) => a.primary);
+  const history = f.history.map((h) => `${new Date(h.at).toLocaleDateString()} ${h.stage}${h.note ? `: ${h.note}` : ""}`).join("\n");
+  const side = <>
+    <span className="badge issue" role="link" title={f.ticket.title} onClick={() => ade.openExternal(f.ticket.url)}>{ticketRef(f.ticket)}</span>
+    {f.prs.map((pr) => <span key={pr} className="badge pr" role="link" title={pr} onClick={() => ade.openExternal(pr)}>{prLabel(pr)}</span>)}
+    {f.tests && <span className="badge ci" title={f.report}>{f.tests.pass}/{f.tests.total} stories</span>}
+    {f.sync && !f.sync.ok && <span className="badge limited" title={`The ticket was not updated: ${f.sync.error}`}>ticket not synced</span>}
+    {running && <span className="badge ci pending">running</span>}
+    <span className="grow" />
+    {!shipDone(f) && !r.ask && primary && <button className="primary" disabled={r.busy || running} title={primary.title ?? primary.command} onClick={() => r.click(primary)}>{r.busy ? "Starting…" : primary.label}</button>}
+    {!shipDone(f) && !r.ask && !compact && actions.filter((a) => !a.primary).map((a) => <button key={a.id} disabled={r.busy || running} title={a.title ?? a.command} onClick={() => r.click(a)}>{a.label}</button>)}
+  </>;
   return (
     <div className={"ship-bar" + (compact ? " compact" : "") + (f.paused ? " paused" : "")} role="group" aria-label={`/ship ${f.stage}`}>
-      <div className="stages" title={f.history.map((h) => `${new Date(h.at).toLocaleDateString()} ${h.stage}${h.note ? `: ${h.note}` : ""}`).join("\n")}>
-        {SHIP_STAGES.map((s, i) => (
-          <span key={s} className={"stage" + (i < at ? " done" : i === at ? " now" : "")}><span className="sdot" aria-hidden />{compact && i !== at ? "" : <span className="lbl">{s}</span>}</span>
-        ))}
-      </div>
-      <div className="ship-bar-side">
-        <span className="badge issue" role="link" title={f.ticket.title} onClick={() => ade.openExternal(f.ticket.url)}>{ticketRef(f.ticket)}</span>
-        {f.prs.map((pr) => <span key={pr} className="badge pr" role="link" title={pr} onClick={() => ade.openExternal(pr)}>{prLabel(pr)}</span>)}
-        {f.tests && <span className="badge ci" title={f.report}>{f.tests.pass}/{f.tests.total} stories</span>}
-        {f.sync && !f.sync.ok && <span className="badge limited" title={`The ticket was not updated: ${f.sync.error}`}>ticket not synced</span>}
-        {running && <span className="badge ci pending">running</span>}
-        {!shipDone(f) && !r.ask && primary && <button className="primary" disabled={r.busy || running} title={primary.title ?? primary.command} onClick={() => r.click(primary)}>{r.busy ? "Starting…" : primary.label}</button>}
-        {!shipDone(f) && !r.ask && !compact && actions.filter((a) => !a.primary).map((a) => <button key={a.id} disabled={r.busy || running} title={a.title ?? a.command} onClick={() => r.click(a)}>{a.label}</button>)}
-      </div>
+      {compact ? (
+        // one row: a thin eight-segment meter, the stage it is at, then the badges and the next step
+        <div className="ship-row">
+          <span className="ship-meter" title={history} aria-label={`${f.stage}, stage ${at + 1} of ${SHIP_STAGES.length}`}>
+            {SHIP_STAGES.map((s, i) => <span key={s} className={"seg" + (i < at ? " done" : i === at ? " now" : "")} />)}
+          </span>
+          <span className="ship-at">{f.stage}{f.paused ? " · paused" : ""} <span className="m">{at + 1}/{SHIP_STAGES.length}</span></span>
+          {side}
+        </div>
+      ) : (
+        <>
+          <div className="ship-segments" title={history}>
+            {SHIP_STAGES.map((s, i) => <span key={s} className={"seg" + (i < at ? " done" : i === at ? " now" : "")}>{s}</span>)}
+          </div>
+          <div className="ship-row">{side}</div>
+        </>
+      )}
       {r.ask && <div className="ship-ask">
         <textarea autoFocus rows={3} value={r.text} placeholder={r.ask.ask} aria-label={r.ask.ask} onChange={(e) => r.setText(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Escape") r.setAsk(undefined); if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); r.send(); } }} />
