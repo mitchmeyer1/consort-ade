@@ -7,6 +7,7 @@ import { claudeBin, codexBin, loginEnv } from "./auth";
 import { transcriptDigest } from "./agents";
 import { cheapestModel, modelTiers } from "../shared/modelTiers";
 import { SIDE_SYSTEM, sideChatPrompt, type SideMessage, type SideSnapshot } from "../shared/sideChat";
+import { shipStatusSummary } from "../shared/shipPrompt";
 import type { Chat } from "../shared/types";
 
 // keep the panel a check-in log, not a second transcript
@@ -29,7 +30,9 @@ async function snapshot(chat: Chat, cwd: string): Promise<SideSnapshot> {
   ]);
   const blocks = chat.messages.flatMap((m) => m.blocks);
   const lastUser = [...chat.messages].reverse().find((m) => m.role === "user");
+  const feature = store.data.worktrees.find((w) => w.id === chat.worktreeId)?.ship;
   return {
+    ...(feature ? { ship: shipStatusSummary(feature) } : {}),
     name: chat.name,
     provider: chat.provider,
     model: chat.model,

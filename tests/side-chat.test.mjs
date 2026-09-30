@@ -62,3 +62,10 @@ test('a job with hundreds of files only sends the newest', () => {
   assert.match(p, /file-39\.md/);
   assert.doesNotMatch(p, /file-40\.md/);
 });
+
+test('a job in a ship worktree tells the observer the pipeline stage, apart from the turn phase bar', () => {
+  const p = sideChatPrompt(snapshot({ ship: '- Stages: Grilling ✓ → Spec\'d ✓ → [Implementing ← you are here] → …\n- Stage now: Implementing (3 of 8) · step inside it: test session' }), 'what step are we on?');
+  assert.match(p, /## The \/ship pipeline this job belongs to/);
+  assert.match(p, /Stage now: Implementing \(3 of 8\) · step inside it: test session/);
+  assert.doesNotMatch(sideChatPrompt(snapshot(), 'status?'), /ship pipeline/);
+});

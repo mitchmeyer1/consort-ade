@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyShipChange, clickupIdFrom, fillShipCommand, githubIssueFrom, isShipCommand, newShipFeature, parseShipCommand, parseShipMarkers, shipActions, shipBranch, shipChatName, shipFooter, shipSlug, stageLabel, stripShipMarkers, withBranchPrefix } from '../src/shared/ship.ts';
-import { shipHandler, shipPrompt, shipStageLine, shipTurnHeader } from '../src/shared/shipPrompt.ts';
+import { applyShipChange, clickupIdFrom, fillShipCommand, githubIssueFrom, isShipCommand, newShipFeature, parseShipCommand, parseShipMarkers, shipActions, shipBranch, shipBusyLabel, shipStep, shipChatName, shipFooter, shipSlug, stageLabel, stripShipMarkers, withBranchPrefix } from '../src/shared/ship.ts';
+import { shipHandler, shipPrompt, shipStageLine, shipStatusSummary, shipTurnHeader } from '../src/shared/shipPrompt.ts';
 
 const ticket = { source: 'github', id: '494', url: 'https://github.com/aligned/mono/issues/494', title: 'HRIS address propagation', repo: 'aligned/mono' };
 
@@ -128,4 +128,22 @@ test('every ship turn carries the stage line with "you are here" and the step it
   assert.match(p, /\[ship-stage: Implementing \| Breakdown proposed: <n> tickets\.\]/);
   assert.match(p, /\*\*Status:\*\* proposed/);
   assert.match(p, /never re-derive it/);
+});
+
+test('Implementing has two steps, building then the test session; the bar and the observer both name them', () => {
+  const f = { ...newShipFeature(ticket, 'hris-address', 1000), stage: 'Implementing' };
+  assert.equal(shipStep(f), 'building');
+  assert.equal(shipBusyLabel(f), 'Building…');
+  const built = { ...f, built: true };
+  assert.equal(shipStep(built), 'test session');
+  assert.equal(shipBusyLabel(built), 'Test session running…');
+  assert.equal(shipStep({ ...built, report: '.consort/ship/TEST-REPORT.md' }), undefined);
+  assert.equal(shipStep(newShipFeature(ticket, 'x', 1)), undefined);
+  assert.equal(shipBusyLabel(newShipFeature(ticket, 'x', 1)), 'Grilling…');
+  const s = shipStatusSummary(built);
+  assert.match(s, /Stage now: Implementing \(3 of 8\) · step inside it: test session/);
+  assert.match(s, /not the pipeline, so never report it as the ship stage/);
+  assert.match(s, /Test session: prove every story/);
+  assert.match(s, /Branch pushed and built: yes/);
+  assert.match(shipTurnHeader(built), /stage 3 of 8, test session/);
 });

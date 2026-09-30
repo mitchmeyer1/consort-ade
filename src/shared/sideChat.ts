@@ -24,6 +24,8 @@ export type SideSnapshot = {
   files: string[];
   /** git status --short in the worktree */
   gitStatus: string;
+  /** the /ship pipeline state when the job's worktree is a feature (shipStatusSummary) */
+  ship?: string;
 };
 
 /** "1h 12m", "45s" — long jobs are the point, so hours read first */
@@ -67,6 +69,7 @@ export function sideChatPrompt(snapshot: SideSnapshot, question: string, history
   return [
     SIDE_SYSTEM,
     `## The job right now\n${state}`,
+    ...(snapshot.ship ? [`## The /ship pipeline this job belongs to\n${snapshot.ship}`] : []),
     `## Working tree (git status --short)\n${snapshot.gitStatus.trim() || "(clean)"}`,
     `## ${files}`,
     `## The job's transcript so far\n${snapshot.digest || "(nothing yet)"}`,

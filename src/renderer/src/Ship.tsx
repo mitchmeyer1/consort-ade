@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { SHIP_STAGES, clickupIdFrom, fillShipCommand, shipActions, shipDone, stageIndex, ticketRef, type ShipAction, type ShipFeature } from "../../shared/ship";
+import { SHIP_STAGES, clickupIdFrom, fillShipCommand, shipActions, shipBusyLabel, shipDone, shipStep, stageIndex, ticketRef, type ShipAction, type ShipFeature } from "../../shared/ship";
 import { formatAge } from "../../shared/usage";
 import type { Api, Chat, State, Worktree } from "../../shared/types";
 
@@ -40,7 +40,7 @@ export function ShipBar({ wt, chats, compact, chatId, onOpenChat }: { wt: Worktr
     {f.tests && <span className="badge ci" title={f.report}>{f.tests.pass}/{f.tests.total} stories</span>}
     {running && <span className="badge ci pending">running</span>}
     <span className="grow" />
-    {!shipDone(f) && !r.ask && primary && <button className="primary" disabled={r.busy || running} title={primary.title ?? primary.command} onClick={() => r.click(primary)}>{r.busy ? "Starting…" : primary.label}</button>}
+    {!shipDone(f) && !r.ask && primary && <button className="primary" disabled={r.busy || running} title={running ? "A chat of this feature is working on this stage" : primary.title ?? primary.command} onClick={() => r.click(primary)}>{r.busy ? "Starting…" : running ? shipBusyLabel(f) : primary.label}</button>}
     {!shipDone(f) && !r.ask && !compact && actions.filter((a) => !a.primary).map((a) => <button key={a.id} disabled={r.busy || running} title={a.title ?? a.command} onClick={() => r.click(a)}>{a.label}</button>)}
   </>;
   return (
@@ -51,7 +51,7 @@ export function ShipBar({ wt, chats, compact, chatId, onOpenChat }: { wt: Worktr
           <span className="ship-meter" title={history} aria-label={`${f.stage}, stage ${at + 1} of ${SHIP_STAGES.length}`}>
             {SHIP_STAGES.map((s, i) => <span key={s} className={"seg" + (i < at ? " done" : i === at ? " now" : "")} />)}
           </span>
-          <span className="ship-at">{f.stage}{f.paused ? " · paused" : ""} <span className="m">{at + 1}/{SHIP_STAGES.length}</span></span>
+          <span className="ship-at">{f.stage}{shipStep(f) ? ` · ${shipStep(f)}` : ""}{f.paused ? " · paused" : ""} <span className="m">{at + 1}/{SHIP_STAGES.length}</span></span>
           {side}
         </div>
       ) : (

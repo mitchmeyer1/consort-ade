@@ -1,4 +1,4 @@
-import { SHIP_DIR, SHIP_STAGES, shipFooter, stageIndex, ticketRef, type ShipFeature, type ShipForm } from "./ship.ts";
+import { SHIP_DIR, SHIP_STAGES, shipFooter, shipStep, stageIndex, ticketRef, type ShipFeature, type ShipForm } from "./ship.ts";
 
 /**
  * The prompt for one /ship turn: the rules every stage shares, the feature's state, and the
@@ -41,6 +41,22 @@ const HANDLER_TITLE: Record<string, string> = {
 };
 
 /**
+ * The feature's state for someone watching rather than working: the side chat, a summary. Names the stage
+ * as N of 8 with the step inside it, so nobody mistakes the turn's 5-phase flow for the pipeline.
+ */
+export function shipStatusSummary(f: ShipFeature): string {
+  const handler = shipHandler(f, { form: "resume" });
+  const step = shipStep(f);
+  return `This job is one step of Consort's /ship pipeline for ticket ${ticketRef(f.ticket)} "${f.ticket.title}". The pipeline has ${SHIP_STAGES.length} stages; the job's own phase bar (waiting → planning → executing → validating → complete) is the current turn's flow, not the pipeline, so never report it as the ship stage.
+- Stages: ${shipStageLine(f)}
+- Stage now: ${f.stage} (${stageIndex(f.stage) + 1} of ${SHIP_STAGES.length})${step ? ` · step inside it: ${step}` : ""}${f.paused ? " · PAUSED" : ""}
+- What this stage's turn does: ${HANDLER_TITLE[handler] ?? handler}
+- Branch pushed and built: ${f.built ? "yes" : "no"} · Spec: ${f.spec ?? "not written"} · Test report: ${f.report ?? "not written"}${f.tests ? ` (${f.tests.pass}/${f.tests.total} stories pass)` : ""} · PRs: ${f.prs.length ? f.prs.join(", ") : "none"}
+- Next command on record: ${f.next ?? "/ship"}
+- History: ${f.history.slice(-6).map((h) => `${new Date(h.at).toISOString().slice(0, 10)} ${h.stage}${h.note ? `: ${h.note}` : ""}`).join("; ") || "none"}`;
+}
+
+/**
  * The short block every plain message in a ship chat carries, so the agent never loses which process it is in,
  * which step it is on, and what the step must produce. The full handler text rides only when the stage moved
  * or the session is fresh; this header points back at it. `turns` is how many turns this chat has taken at
@@ -50,7 +66,7 @@ export function shipTurnHeader(f: ShipFeature, turns = 1): string {
   const handler = shipHandler(f, { form: "resume" });
   return `/ship status (read before answering; this chat is one run of Consort's /ship pipeline)
 - Feature: ${ticketRef(f.ticket)} "${f.ticket.title}"${f.paused ? " · PAUSED" : ""}
-- Stages: ${shipStageLine(f)}
+- Stages: ${shipStageLine(f)} (stage ${stageIndex(f.stage) + 1} of ${SHIP_STAGES.length}${shipStep(f) ? `, ${shipStep(f)}` : ""})
 - This turn's step: ${HANDLER_TITLE[handler] ?? handler}. Its handler text is earlier in this chat; follow it.
 - ${turns > 1 ? `This is turn ${turns} of this chat at this stage: do not restart the handler from its first step or re-propose what the transcript already settled; continue from where the transcript stands.` : "First turn at this stage in this chat."}
 - Done so far: ${f.history.slice(-4).map((h) => `${h.stage}${h.note ? ` (${h.note})` : ""}`).join("; ") || "nothing"}

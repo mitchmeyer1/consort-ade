@@ -215,6 +215,21 @@ const quote = (s: string) => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"
 /** fills an `ask` action's {text}, quoted the way the pipeline expects */
 export const fillShipCommand = (command: string, text: string) => command.replace('"{text}"', quote(text.trim()));
 
+/**
+ * The step inside the stage, where a stage has more than one: Implementing is "building" until the
+ * branch is pushed, then the "test session" until the report is written. Undefined where the stage is the step.
+ */
+export function shipStep(f: ShipFeature): string | undefined {
+  if (f.stage === "Implementing") return f.built ? (f.report ? undefined : "test session") : "building";
+  return undefined;
+}
+/** what a running ship chat is doing, for the bar's button while it works: the same words as the step */
+export function shipBusyLabel(f: ShipFeature): string {
+  const step = shipStep(f);
+  if (step) return step === "building" ? "Building…" : "Test session running…";
+  return f.stage === "Grilling" ? "Grilling…" : f.stage === "In Review" ? "Review round…" : f.stage === "Revising" ? "Revising…" : "Running…";
+}
+
 /** the chat name for a /ship run: "ship · #494 · approve" */
 export const shipChatName = (action: string, ticket: ShipTicket) => `ship · ${ticketRef(ticket)} · ${action}`;
 
