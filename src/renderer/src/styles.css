@@ -581,8 +581,10 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 /* ===== chat transcript, Claude-app style ===== */
 .messages { padding: 24px 0; gap: 0; isolation: isolate; }
 /* floating recall of the last prompt: sticks to the top-right of the transcript, takes no layout room */
-.chat-recall { position: sticky; top: 8px; z-index: 3; align-self: flex-end; height: 0; margin-right: 18px; display: flex; align-items: flex-start; justify-content: flex-end; pointer-events: none; }
-.chat-recall span { pointer-events: auto; max-width: min(340px, 40vw); padding: 7px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-solid); box-shadow: 0 6px 18px var(--shadow); color: var(--fg); font-size: 11px; line-height: 15px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; overflow: hidden; }
+.chat-recall { position: sticky; top: 0; z-index: 3; align-self: stretch; height: 0; display: flex; justify-content: center; pointer-events: none; }
+.chat-recall button { pointer-events: auto; display: flex; align-items: baseline; gap: 8px; width: min(860px, 100% - 36px); margin: 6px 18px 0; padding: 8px 14px; border: 1px solid var(--line2); border-radius: 0 0 12px 12px; background: var(--card-solid); box-shadow: 0 6px 18px var(--shadow); color: var(--fg); font: inherit; font-size: 12px; line-height: 16px; text-align: left; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-recall button .m { flex: none; font-size: 9.5px; letter-spacing: .2em; text-transform: uppercase; }
+.chat-recall button:hover { border-color: var(--cream); }
 /* review progress: the recall chip's opposite number, top-left, taking no layout room */
 /* foot of a review chat: one quiet card that says the file exists, or that it doesn't */
 .review-ready { display: flex; align-items: center; gap: 12px; padding: 12px 14px; margin-top: 6px; border: 1px solid var(--line2); border-radius: 10px; background: color-mix(in srgb, var(--card) 70%, transparent); }
@@ -832,6 +834,7 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 .composer-options .commitbtn { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); border-color: var(--line); }
 .composer-options .commitbtn .ico { width: 12px; height: 12px; margin: 0; opacity: .8; }
 .composer-options .commitbtn:hover { color: var(--ink); background: var(--cream); border-color: var(--cream); }
+.composer-options .commitbtn.logsbtn[aria-pressed="true"] { color: var(--fg); border-color: var(--line2); }
 .composer-options .commitbtn.armed { color: var(--cream); border-color: var(--cream); background: none; opacity: 1; font-variant-numeric: tabular-nums; }
 /* stop: a filled square, the usual transport glyph, sized like the sprite icons beside it */
 .composer-options .stopbtn .stop-square { width: 9px; height: 9px; flex: 0 0 9px; background: currentColor; border-radius: 1px; }

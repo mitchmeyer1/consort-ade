@@ -39,7 +39,7 @@ import { firstPrompt, reviewDeliverable } from "../../shared/skillSections";
 import { quickActionParameters, resolveQuickAction } from "../../shared/quickActions";
 import { isReviewFile } from "../../shared/review";
 import { ReviewView } from "./ReviewView";
-import { PoolSettings, SeatPicker, SeatsStrip } from "./Seats";
+import { PoolSettings, SeatsStrip } from "./Seats";
 import { planStages } from "../../shared/planProgress";
 import { featureStages } from "../../shared/featureProgress";
 import type { Stage } from "../../shared/types";
@@ -430,7 +430,7 @@ export function App() {
           </div>
         </div>
         {chat ? (
-          <ChatPane key={chat.id} chat={chat} worktree={worktree} chats={state.chats} onOpenChat={(id) => setSel({ type: "chat", id })} keys={state.keys} models={state.models} openRouterConfigured={state.openRouterConfigured} pool={state.seatPool} showTools={showToolCalls(chat, state.showToolCalls)} perms={perms.filter((p) => p.chatId === chat.id)} ptys={ptys} answer={answer} reviewFile={reviewFile} onOpenReview={() => setTab("review")} onOpenMd={(target) => { if (worktree) ade.artifactMenu(worktree.id, target).then((action) => { if (action === "open") openMd(target); }).catch((e) => alert(e.message)); }} />
+          <ChatPane key={chat.id} chat={chat} worktree={worktree} chats={state.chats} onOpenChat={(id) => setSel({ type: "chat", id })} keys={state.keys} models={state.models} openRouterConfigured={state.openRouterConfigured} showTools={showToolCalls(chat, state.showToolCalls)} perms={perms.filter((p) => p.chatId === chat.id)} ptys={ptys} answer={answer} reviewFile={reviewFile} onOpenReview={() => setTab("review")} onOpenMd={(target) => { if (worktree) ade.artifactMenu(worktree.id, target).then((action) => { if (action === "open") openMd(target); }).catch((e) => alert(e.message)); }} />
         ) : wsProject && wsWorktree ? (
           <WorkspacePage key={wsProject.id} project={wsProject} wt={wsWorktree} state={state} openForm={!!(sel && "form" in sel && sel.form)} onRunAction={runQuickAction} onSelect={setSel} />
         ) : (wtProject && isHome(wtProject)) || (project && isHome(project)) ? (
@@ -2145,7 +2145,7 @@ function SideChatPane({ chat }: { chat: Chat }) {
 const AUTOPILOT_HELP = "Lets this chat see your screen and click, type and switch between visible macOS apps to finish a task in another app. The Jev navigator drives it through your OpenRouter key. Off by default; turn it on for one task and off again after.";
 const AUTO_APPROVE_HELP = "Runs every tool call without asking: shell commands, file edits, git, installs. Off by default, so the chat asks before each action that needs permission. Turn on for long unattended work you trust.";
 
-function ChatPane({ chat, worktree, chats, onOpenChat, keys, models, pool, showTools, perms, ptys, answer, reviewFile, onOpenReview, onOpenMd, openRouterConfigured }: { chat: Chat; worktree?: Worktree; chats: Chat[]; onOpenChat: (id: string) => void; keys: State["keys"]; models: State["models"]; pool?: State["seatPool"]; showTools: boolean; perms: PermissionRequest[]; ptys: PtyState[]; answer: (id: string, ok: boolean) => void; reviewFile: ReviewFile | null; onOpenReview: () => void; onOpenMd: (p: string) => void; openRouterConfigured?: boolean }) {
+function ChatPane({ chat, worktree, chats, onOpenChat, keys, models, showTools, perms, ptys, answer, reviewFile, onOpenReview, onOpenMd, openRouterConfigured }: { chat: Chat; worktree?: Worktree; chats: Chat[]; onOpenChat: (id: string) => void; keys: State["keys"]; models: State["models"]; showTools: boolean; perms: PermissionRequest[]; ptys: PtyState[]; answer: (id: string, ok: boolean) => void; reviewFile: ReviewFile | null; onOpenReview: () => void; onOpenMd: (p: string) => void; openRouterConfigured?: boolean }) {
   // the chat's own terminal is on screen whenever the chat is, so a finished command there is seen at once
   const composerDone = !!worktree && !!ptys.find((p) => p.id === `${worktree.id}:composer-${chat.id}`)?.done;
   // a Claude chat can hop seats: on the pool to the best other seat, off it onto the pool
@@ -2297,7 +2297,8 @@ function ChatPane({ chat, worktree, chats, onOpenChat, keys, models, pool, showT
   const lastUserId = [...chat.messages].reverse().find((m) => m.role === "user" && m.blocks.length)?.id;
   useEffect(() => {
     const root = messagesEl.current;
-    const bubble = root?.querySelector<HTMLElement>(".msg.user:last-of-type");
+    const bubbles = root?.querySelectorAll<HTMLElement>(".msg.user");
+    const bubble = bubbles?.[bubbles.length - 1];
     if (!root || !bubble) { setRecallHidden(true); return; }
     const io = new IntersectionObserver(([entry]) => setRecallHidden(!!entry?.isIntersecting), { root, threshold: 0 });
     io.observe(bubble);
@@ -2315,7 +2316,7 @@ function ChatPane({ chat, worktree, chats, onOpenChat, keys, models, pool, showT
       <div className="messages" ref={messagesEl} onScroll={onMessagesScroll}>
         {stages && <ProgressPanel title={review ? "Review" : "Plan"} stages={stages} />}
         {feature && chat.feature && <ProgressPanel title={chat.feature.title} icon="wreath" side="right" stages={feature} />}
-        {recall && !recallHidden && <div className="chat-recall"><span title={recall}>{recall}</span></div>}
+        {recall && !recallHidden && <div className="chat-recall"><button type="button" title="Your last message. Click to scroll to it." onClick={() => { const all = messagesEl.current?.querySelectorAll<HTMLElement>(".msg.user"); all?.[all.length - 1]?.scrollIntoView({ block: "center" }); }}><span className="m">You</span>{recall}</button></div>}
         <div className="column">
         {chat.messages.filter((m) => m.blocks.length).map((m, i, all) =>
           m.role === "user" ? <UserBubble key={m.id} text={m.blocks.map((b) => (b.type === "text" ? b.text : "")).join("\n")} attachments={m.attachments} worktreeId={worktree?.id} /> :
@@ -2380,7 +2381,7 @@ function ChatPane({ chat, worktree, chats, onOpenChat, keys, models, pool, showT
             {chatStatus(chat) === "running" && <div className="composer-working" role="status"><span className="working-circle" aria-hidden="true" />Working…</div>}
           </span>
           {openRouterConfigured && <label><input type="checkbox" checked={!!chat.autopilot} onChange={(e) => ade.setAutopilot(chat.id, e.target.checked).catch((e) => alert(e.message))} /> <span className="help" title={AUTOPILOT_HELP}>Autopilot</span></label>}
-          <label title={chat.showToolCalls === undefined ? "Following the global setting (Settings › Appearance)" : "This chat's own choice; it overrides the global setting"}><input type="checkbox" checked={showTools} onChange={(e) => ade.setChatToolCalls(chat.id, e.target.checked).catch((e) => alert(e.message))} /> Tool calls</label>
+          <button className="commitbtn logsbtn" aria-pressed={showTools} title={`${showTools ? "Full: every tool call as its own row." : "Brief: runs of tool calls fold into one summary line; failed and running calls stay visible."} Click to switch. ${chat.showToolCalls === undefined ? "Following Settings › Appearance." : "This chat's own choice."}`} onClick={() => ade.setChatToolCalls(chat.id, !showTools).catch((e) => alert(e.message))}>AI logs: {showTools ? "full" : "brief"}</button>
           <label><input type="checkbox" checked={chat.autoApprove} onChange={(e) => ade.setAutoApprove(chat.id, e.target.checked).catch((e) => alert(e.message))} /> <span className="help" title={AUTO_APPROVE_HELP}>Auto-approve</span></label>
         </div>
         {side && worktree && <SideChatPane chat={chat} />}
@@ -2423,7 +2424,6 @@ function ChatPane({ chat, worktree, chats, onOpenChat, keys, models, pool, showT
               <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.5l-8.6 8.6a5 5 0 0 1-7-7l9.2-9.2a3.3 3.3 0 0 1 4.7 4.7L10 18.9a1.6 1.6 0 0 1-2.3-2.3l8.5-8.5" /></svg>
             </button>
             <AgentPicker key={chat.id} chat={chat} keys={keys} models={models} />
-            <SeatPicker chat={chat} keys={keys} pool={pool} />
             <span className="grow" />
             <span className="m hint">{commit ? "↩ commit + push · esc cancel" : `${chat.running ? "↩ queue" : "↩ send"} · ⇧↩ newline${!text && history.length ? " · ↑ history" : ""}`}</span>
             <button className="icon enter" title={commit ? "Commit and push (↩)" : chat.running ? "Queue message (↩)" : "Send (↩)"} disabled={commit ? (commit.typed && !text.trim()) : (!text.trim() && !files.length)} onClick={send}>

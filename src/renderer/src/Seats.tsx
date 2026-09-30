@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
-import { resetLabel, seatLoad, seatName, type Seat, type SeatPool, type SeatWindow } from "../../shared/seatPool";
+import { resetLabel, seatName, type Seat, type SeatWindow } from "../../shared/seatPool";
 import { formatAge, formatReset, usageTone } from "../../shared/usage";
-import type { Api, Chat, Provider, State } from "../../shared/types";
+import type { Api, Provider, State } from "../../shared/types";
 
 const ade = (window as any).ade as Api;
 const PROVIDERS: Provider[] = ["claude", "codex"];
@@ -75,36 +75,6 @@ export function SeatsStrip({ state }: { state: State }) {
       </div>
       {open && <SeatRows state={state} now={now} />}
     </div>
-  );
-}
-
-/**
- * The composer's seat menu for a pool chat: which login it is on, and a move to the best other one or
- * a named one. Moving a running chat stops the turn and resumes the same session on the new seat.
- */
-export function SeatPicker({ chat, keys, pool }: { chat: Chat; keys: State["keys"]; pool?: SeatPool }) {
-  const [busy, setBusy] = useState(false);
-  const key = keys.find((k) => k.id === chat.keyId);
-  if (!keys.some((k) => k.pool && k.provider === chat.provider)) return null;
-  const onPool = !!key?.pool;
-  const current = onPool ? chat.seatDir : key?.configDir;
-  const seats = (pool?.seats ?? []).filter((s) => s.provider === chat.provider);
-  const move = async (dir?: string) => {
-    const where = dir ? seatName(pool, dir) : onPool ? "the best other seat" : `Any ${chat.provider === "claude" ? "Claude" : "Codex"}`;
-    if (chat.running && !confirm(`Stop this run and continue it on ${where}?`)) return;
-    setBusy(true);
-    try { await ade.switchSeat(chat.id, dir); } catch (e) { alert((e as Error).message); } finally { setBusy(false); }
-  };
-  const label = busy ? "moving…" : onPool ? `seat · ${current ? seatName(pool, current) : "auto"}` : "seat";
-  return (
-    <select className="seat-picker" aria-label="Seat" title={onPool ? "The login this chat runs on. Pick another to move it; the session comes along when it can." : "Move this chat onto the pool, which switches logins when one hits its limit."}
-      value="" disabled={busy} onChange={(e) => { const v = e.target.value; if (v) void move(v === "best" ? undefined : v); }}>
-      <option value="" hidden>{label}</option>
-      <option value="best">{onPool ? "Best other seat" : `Any ${chat.provider === "claude" ? "Claude" : "Codex"} · best seat`}</option>
-      {seats.map((s) => <option key={s.dir} value={s.dir} disabled={s.dir === current}>
-        {s.name} · {seatLoad(s, chat.model)}%{s.blocked ? " · at limit" : ""}{s.dir === current ? " · current" : ""}
-      </option>)}
-    </select>
   );
 }
 
