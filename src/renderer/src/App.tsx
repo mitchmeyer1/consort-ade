@@ -23,7 +23,7 @@ import { isShipCommand } from "../../shared/ship";
 import { ShipBar, ShipClickUpBox, ShipPanel, shipOfIssue } from "./Ship";
 import { commandQuery, completeCommand, filterCommands, isClearCommand, type SlashEntry } from "../../shared/commands";
 import { contextPercent, contextTone } from "../../shared/context";
-import { foldLabel, groupBlocks, showToolCalls, type ToolBlock } from "../../shared/toolFold";
+import { foldLabel, groupBlocks, mergeAssistantRuns, showToolCalls, type ToolBlock } from "../../shared/toolFold";
 import { homeScopes, isHome } from "../../shared/scratch";
 import type { Instruction } from "../../shared/instructions";
 import { isWorkspace, reposForPr, reposToCommit, slugify, workspaceSummary } from "../../shared/workspace";
@@ -1951,7 +1951,7 @@ function ToolFold({ tools, onOpen, live }: { tools: ToolBlock[]; onOpen: (p: str
     <div className={"toolfold" + (open ? " open" : "")}>
       <button type="button" className="trhead" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
         <span className="chev">{open ? "▾" : "▸"}</span>
-        <span className="hint">{foldLabel(tools)}</span>
+        <span className={"hint" + (live && tools.some((t) => t.ok === undefined) ? " running" : "")}>{foldLabel(tools, live)}</span>
       </button>
       {open && <div className="foldbody">{tools.map((b) => <ToolRow key={b.id} b={b} onOpen={onOpen} live={live} />)}</div>}
     </div>
@@ -2318,7 +2318,7 @@ function ChatPane({ chat, worktree, chats, onOpenChat, keys, models, showTools, 
         {feature && chat.feature && <ProgressPanel title={chat.feature.title} icon="wreath" side="right" stages={feature} />}
         {recall && !recallHidden && <div className="chat-recall"><button type="button" title="Your last message. Click to scroll to it." onClick={() => { const all = messagesEl.current?.querySelectorAll<HTMLElement>(".msg.user"); all?.[all.length - 1]?.scrollIntoView({ block: "center" }); }}><span className="m">You</span>{recall}</button></div>}
         <div className="column">
-        {chat.messages.filter((m) => m.blocks.length).map((m, i, all) =>
+        {(showTools ? chat.messages.filter((m) => m.blocks.length) : mergeAssistantRuns(chat.messages.filter((m) => m.blocks.length))).map((m, i, all) =>
           m.role === "user" ? <UserBubble key={m.id} text={m.blocks.map((b) => (b.type === "text" ? b.text : "")).join("\n")} attachments={m.attachments} worktreeId={worktree?.id} /> :
           m.role === "system" && m.kind === "clear" ? <div key={m.id} className="msg system clear-divider" role="separator"><span>{m.blocks.map((b) => (b.type === "text" ? b.text : "")).join(" ")}</span><time dateTime={new Date(m.ts).toISOString()}>{new Date(m.ts).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</time></div> :
           m.role === "system" ? <div key={m.id} className="msg system">{m.blocks.map((b) => (b.type === "text" ? b.text : "")).join(" ")}</div> : (
