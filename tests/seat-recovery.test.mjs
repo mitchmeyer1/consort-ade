@@ -9,6 +9,8 @@ import * as skillSections from '../src/shared/skillSections.ts';
 import * as followups from '../src/shared/followups.ts';
 import * as instructions from '../src/shared/instructions.ts';
 import * as deliverables from '../src/shared/deliverables.ts';
+import * as processContext from '../src/shared/processContext.ts';
+import * as shipPrompt from '../src/shared/shipPrompt.ts';
 import * as cliUpdates from '../src/shared/cliUpdates.ts';
 import * as autopilot from '../src/shared/autopilot.ts';
 import * as codexDiagnostics from '../src/shared/codexDiagnostics.ts';
@@ -62,6 +64,8 @@ function fixture({ scripts, headroom = ['/s/.claude-b'], key = 'pool', sessionOn
     '../shared/followups': followups,
     '../shared/instructions': instructions,
     '../shared/deliverables': deliverables,
+    '../shared/processContext': processContext,
+    '../shared/shipPrompt': shipPrompt,
     '../shared/cliUpdates': cliUpdates,
     '../shared/autopilot': autopilot,
     '../shared/codexDiagnostics': codexDiagnostics,

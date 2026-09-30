@@ -9,6 +9,8 @@ import * as skillSections from '../src/shared/skillSections.ts';
 import * as followups from '../src/shared/followups.ts';
 import * as instructions from '../src/shared/instructions.ts';
 import * as deliverables from '../src/shared/deliverables.ts';
+import * as processContext from '../src/shared/processContext.ts';
+import * as shipPrompt from '../src/shared/shipPrompt.ts';
 import * as context from '../src/shared/context.ts';
 import * as commands from '../src/shared/commands.ts';
 import * as ship from '../src/shared/ship.ts';
@@ -47,7 +49,7 @@ function fixture({ update, errors = [TOO_OLD] }) {
     './autopilotBridge': { startAutopilotBridge: async () => ({ prompt: '', close: async () => {} }) },
     '../shared/types': { PHASES: [] },
     '../shared/planProgress': planProgress, '../shared/featureProgress': featureProgress, '../shared/skillSections': skillSections,
-    '../shared/followups': followups, '../shared/instructions': instructions, '../shared/deliverables': deliverables, '../shared/seatPool': seatPool, '../shared/ship': ship, '../shared/commands': commands, '../shared/context': context,
+    '../shared/followups': followups, '../shared/instructions': instructions, '../shared/deliverables': deliverables, '../shared/processContext': processContext, '../shared/shipPrompt': shipPrompt, '../shared/seatPool': seatPool, '../shared/ship': ship, '../shared/commands': commands, '../shared/context': context,
     '../shared/autopilot': autopilot, '../shared/codexDiagnostics': codexDiagnostics,
     '@openai/codex-sdk': { Codex: class {} },
     '@anthropic-ai/claude-agent-sdk': { query: args => (async function* () {

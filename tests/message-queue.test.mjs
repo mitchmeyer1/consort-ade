@@ -12,6 +12,8 @@ import * as skillSections from '../src/shared/skillSections.ts';
 import * as followups from '../src/shared/followups.ts';
 import * as instructions from '../src/shared/instructions.ts';
 import * as deliverables from '../src/shared/deliverables.ts';
+import * as processContext from '../src/shared/processContext.ts';
+import * as shipPrompt from '../src/shared/shipPrompt.ts';
 import * as codexDiagnostics from '../src/shared/codexDiagnostics.ts';
 import * as cliUpdates from '../src/shared/cliUpdates.ts';
 import * as autopilot from '../src/shared/autopilot.ts';
@@ -63,6 +65,8 @@ async function fixture(t) {
     '../shared/followups': followups,
     '../shared/instructions': instructions,
     '../shared/deliverables': deliverables,
+    '../shared/processContext': processContext,
+    '../shared/shipPrompt': shipPrompt,
     '../shared/codexDiagnostics': codexDiagnostics,
     '../shared/autopilot': autopilot,
     '../shared/seatPool': seatPool,
@@ -75,7 +79,7 @@ async function fixture(t) {
   };
   const mod = { exports: {} };
   new Function('require', 'module', 'exports', compiled)(name => mocks[name] ?? require(name), mod, mod.exports);
-  return { agents: mod.exports, chat, runs, cwd };
+  return { agents: mod.exports, chat, runs, cwd, store };
 }
 
 test('messages submitted during a run execute once in FIFO order, with independent attachments', async t => {
@@ -266,4 +270,32 @@ test('planning or validation upgrades a simple flow to five steps', async t => {
   assert.equal(chat.phaseSteps, 5);
   assert.equal(chat.phase, 'waiting');
   assert.equal(chat.assessingPrompt, false);
+});
+
+test('continuing a /ship chat re-attaches the stage prompt and the plan it was on, so the pipeline keeps moving', async t => {
+  const { agents, chat, runs, store } = await fixture(t);
+  const wt = store.data.worktrees[0];
+  wt.projectId = 'p'; wt.branch = 'mm/hris-494';
+  wt.ship = ship.newShipFeature({ source: 'github', id: '494', url: 'https://github.com/o/r/issues/494', title: 'HRIS address' }, 'hris', 1);
+  store.data.projects = [{ id: 'p', path: wt.path, defaultBase: 'origin/development' }];
+  chat.messages.push({ id: 'u', role: 'user', blocks: [{ type: 'text', text: '/ship' }], ts: 1 }, { id: 'a', role: 'assistant', blocks: [{ type: 'text', text: 'Q1…' }], ts: 2 });
+  chat.plan = { steps: [{ label: 'read the ticket', doneAt: 1 }, { label: 'ask round one' }], current: 1, ts: 1 };
+  chat.interrupted = true;
+  const resumed = agents.continueChat(chat.id); // resolves when the resumed turn ends
+  // the continue reads git and the .consort folder for real before it sends, so this wait is on the clock, not ticks
+  for (let i = 0; i < 250 && runs.length < 1; i++) await new Promise((r) => setTimeout(r, 20));
+  assert.match(runs[0].prompt, /This chat is a \/ship run/);
+  assert.match(runs[0].prompt, /Grilling — interrogate the idea/);
+  assert.match(runs[0].prompt, /\[ship-stage: <stage> \| <one-line note>\]/);
+  assert.match(runs[0].prompt, /Continue from step 2 \(ask round one\)/);
+  runs[0].finish({ type: 'turn.completed', usage: {} });
+  await resumed;
+  await until(() => !chat.running);
+  // a plain new message on a live session gets neither: the session already knows
+  chat.sessionId = 'live';
+  await agents.send(chat.id, 'thanks');
+  await until(() => runs.length === 2);
+  assert.doesNotMatch(runs[1].prompt, /This chat is a \/ship run/);
+  runs[1].finish({ type: 'turn.completed', usage: {} });
+  await until(() => !chat.running);
 });
