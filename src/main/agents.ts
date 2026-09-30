@@ -314,6 +314,7 @@ Start with one sentence on where things stand, then continue.`;
   await send(chatId, prompt, [], { silent: true, resume: true });
 }
 
+const shipStageOf = (chat: Chat) => store.data.worktrees.find((x) => x.id === chat.worktreeId)?.ship?.stage;
 /** the /ship stage prompt for the feature this chat's worktree is, so a resumed chat keeps moving the pipeline */
 function shipContext(chat: Chat): string {
   const w = store.data.worktrees.find((x) => x.id === chat.worktreeId);
@@ -338,7 +339,7 @@ export async function flushQueued(chatId: string) {
   try {
     while (!chat.running && !chat.queuePaused && chat.queuedMessages?.length) {
       const next = chat.queuedMessages[0];
-      await runSend(chatId, next.text, next.files, { queuedId: next.id, ...(next.display ? { display: next.display } : {}) });
+      await runSend(chatId, next.text, next.files, { queuedId: next.id, ...(next.display ? { display: next.display } : {}), ...(next.shipStage ? { shipStage: next.shipStage } : {}) });
       if (chat.error || chat.interrupted) chat.queuePaused = true;
     }
   } catch (error) {
@@ -406,19 +407,19 @@ async function probeCommands(chat: Chat, cwd: string): Promise<SlashEntry[]> {
   return [];
 }
 
-export async function send(chatId: string, text: string, files: string[] = [], opts: { silent?: boolean; display?: string; resume?: boolean } = {}) {
+export async function send(chatId: string, text: string, files: string[] = [], opts: { silent?: boolean; display?: string; resume?: boolean; shipStage?: string } = {}) {
   if (opts.silent) return runSend(chatId, text, files, opts);
   const chat = store.chat(chatId);
   const cwd = store.data.worktrees.find((w) => w.id === chat.worktreeId)!.path;
   const staged = stageFiles(cwd, files);
-  (chat.queuedMessages ??= []).push({ id: randomUUID(), text, files: staged, ...(opts.display ? { display: opts.display } : {}) });
+  (chat.queuedMessages ??= []).push({ id: randomUUID(), text, files: staged, ...(opts.display ? { display: opts.display } : {}), ...(opts.shipStage ? { shipStage: opts.shipStage } : {}) });
   chat.lastChattedAt = Date.now();
   if (!chat.running) chat.queuePaused = false;
   store.save();
   void flushQueued(chatId);
 }
 
-async function runSend(chatId: string, text: string, files: string[] = [], opts: { silent?: boolean; queuedId?: string; display?: string; resume?: boolean } = {}) {
+async function runSend(chatId: string, text: string, files: string[] = [], opts: { silent?: boolean; queuedId?: string; display?: string; resume?: boolean; shipStage?: string } = {}) {
   const chat = store.chat(chatId);
   if (chat.running) throw new Error("chat is busy");
   const pooled = isPool(chat);
@@ -456,11 +457,16 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
   // the feature outlives the turn, so the agent is reminded where it stands (a fresh session or a compacted context has no other way to know)
   if (!slash && chat.feature && !featureComplete(chat.feature)) text = `${text}\n\n${featureSummary(chat.feature)}`;
   // a resumed turn, or one on a fresh session, is reminded of the multi-step process it is inside: the /ship stage
-  // with its rules and markers, and the plan it was partway through (the checklist and a review are handled above)
-  if (!slash && (opts.resume || (!chat.sessionId && chat.messages.length))) {
-    const context = [shipContext(chat), opts.resume ? planReminder(chat.plan) : ""].filter(Boolean);
-    if (context.length) text = `${text}\n\n${context.join("\n\n")}`;
+  // with its rules and markers, and the plan it was partway through (the checklist and a review are handled above).
+  // A plain message in a ship chat ("continue") gets the stage handler too whenever the stage moved since the chat
+  // last saw one, so the pipeline carries on in the same chat; a turn that already is the stage prompt carries its stage.
+  const shipStage = shipStageOf(chat);
+  if (opts.shipStage) chat.ship = { action: chat.ship?.action ?? "next", stage: opts.shipStage };
+  else if (!slash && shipStage && (opts.resume || (!chat.sessionId && chat.messages.length) || chat.ship?.stage !== shipStage)) {
+    text = `${text}\n\n${shipContext(chat)}`;
+    chat.ship = { action: chat.ship?.action ?? "chat", stage: shipStage };
   }
+  if (!slash && opts.resume && planReminder(chat.plan)) text = `${text}\n\n${planReminder(chat.plan)}`;
   if (!opts.silent) chat.messages.push({ id: randomUUID(), role: "user", blocks: [{ type: "text", text: shown }], ts: Date.now(), ...(staged.length ? { attachments: staged } : {}) });
   if (opts.queuedId) chat.queuedMessages = chat.queuedMessages?.filter((m) => m.id !== opts.queuedId);
   chat.unreadCompletion = false;

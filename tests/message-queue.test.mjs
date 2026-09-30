@@ -291,11 +291,24 @@ test('continuing a /ship chat re-attaches the stage prompt and the plan it was o
   runs[0].finish({ type: 'turn.completed', usage: {} });
   await resumed;
   await until(() => !chat.running);
-  // a plain new message on a live session gets neither: the session already knows
+  // a plain new message on a live session at the same stage gets neither: the session already knows
   chat.sessionId = 'live';
   await agents.send(chat.id, 'thanks');
   await until(() => runs.length === 2);
   assert.doesNotMatch(runs[1].prompt, /This chat is a \/ship run/);
   runs[1].finish({ type: 'turn.completed', usage: {} });
+  await until(() => !chat.running);
+  // the stage moved (grilling wrote the spec): "continue" in the same chat gets the next stage's handler, once
+  wt.ship = { ...wt.ship, stage: "Spec'd" };
+  await agents.send(chat.id, 'continue');
+  await until(() => runs.length === 3);
+  assert.match(runs[2].prompt, /build it, end at "built"/);
+  assert.equal(chat.ship.stage, "Spec'd");
+  runs[2].finish({ type: 'turn.completed', usage: {} });
+  await until(() => !chat.running);
+  await agents.send(chat.id, 'and then?');
+  await until(() => runs.length === 4);
+  assert.doesNotMatch(runs[3].prompt, /build it, end at "built"/);
+  runs[3].finish({ type: 'turn.completed', usage: {} });
   await until(() => !chat.running);
 });

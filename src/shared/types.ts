@@ -132,7 +132,8 @@ export type Chat = {
   /** seats that hit a limit during the current turn, so an automatic switch never circles back */
   seatTried?: string[];
   /** a /ship run: which feature and what it was asked to do */
-  ship?: { action: string };
+  /** a /ship run: what it was asked to do, and the stage whose handler the chat last received */
+  ship?: { action: string; stage?: string };
   /** /clear was run: the next send starts a fresh session without the transcript digest */
   cleared?: boolean;
   context?: ChatContext;
@@ -154,7 +155,7 @@ export type Chat = {
   messages: Message[];
   lastChattedAt?: number;
   /** display: what the user sees for the message when the text sent is a prompt built for them (a /ship turn) */
-  queuedMessages?: { id: string; text: string; files: string[]; display?: string }[];
+  queuedMessages?: { id: string; text: string; files: string[]; display?: string; shipStage?: string }[];
   queuePaused?: boolean;
   /** the steps the agent laid out for the current task, and how far along it is */
   plan?: ChatPlan;
@@ -281,7 +282,8 @@ export type Api = {
   /** a /ship command typed in a chat: runs the stage in that chat's worktree, or starts a feature; returns the chat that ran it */
   shipCommand(chatId: string, text: string, files?: string[]): Promise<string>;
   /** run a /ship command for a feature worktree in a fresh chat there (the progress bar's buttons); returns the chat id */
-  shipRun(worktreeId: string, command: string): Promise<string>;
+  /** in `chatId` when that chat is idle, else the worktree's last idle ship chat, else a new one */
+  shipRun(worktreeId: string, command: string, chatId?: string): Promise<string>;
   setShipAutoApprove(on: boolean): Promise<void>;
   setClickUpKey(key: string): Promise<void>;
   setBranchPrefix(prefix: string): Promise<void>;

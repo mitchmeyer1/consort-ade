@@ -84,7 +84,7 @@ export function parseShipCommand(text: string): ShipForm | undefined {
 /** "/ship approve" → "approve": names the chat after what it was asked to do */
 export const shipActionOf = (command: string): string => {
   const f = parseShipCommand(command);
-  return !f ? "run" : f.form === "resume" ? "next" : f.form;
+  return !f ? "run" : f.form === "resume" || f.form === "list" ? "next" : f.form;
 };
 
 /** a few words of the title, for branch and folder names */

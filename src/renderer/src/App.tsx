@@ -2312,7 +2312,7 @@ function ChatPane({ chat, worktree, chats, onOpenChat, keys, models, showTools, 
     <div className={"chatpane" + (over ? " over" : "")} onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setOver(false); }} onDrop={onDrop} onPaste={onPaste}>
       {over && <div className="dropveil">Drop to attach</div>}
       <PhaseStrip phase={chat.phase} steps={chat.phaseSteps} onSelect={(phase) => ade.setPhase(chat.id, phase)} />
-      {worktree?.ship && <ShipBar wt={worktree} chats={chats} compact onOpenChat={onOpenChat} />}
+      {worktree?.ship && <ShipBar wt={worktree} chats={chats} compact chatId={chat.id} onOpenChat={onOpenChat} />}
       <div className="messages" ref={messagesEl} onScroll={onMessagesScroll}>
         {stages && <ProgressPanel title={review ? "Review" : "Plan"} stages={stages} />}
         {feature && chat.feature && <ProgressPanel title={chat.feature.title} icon="wreath" side="right" stages={feature} />}

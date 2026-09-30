@@ -7,13 +7,13 @@ const ade = (window as any).ade as Api;
 const prLabel = (url: string) => { const m = /\/([^/]+)\/pull\/(\d+)/.exec(url); return m ? `${m[1]} #${m[2]}` : url; };
 
 /** runs one of the feature's buttons in a fresh chat of its worktree, asking for text first when the action needs it */
-function useShipRun(wt: Worktree, onOpenChat: (id: string) => void) {
+function useShipRun(wt: Worktree, onOpenChat: (id: string) => void, chatId?: string) {
   const [busy, setBusy] = useState(false);
   const [ask, setAsk] = useState<ShipAction>();
   const [text, setText] = useState("");
   const run = async (command: string) => {
     setBusy(true);
-    try { onOpenChat(await ade.shipRun(wt.id, command)); }
+    try { const id = await ade.shipRun(wt.id, command, chatId); if (id !== chatId) onOpenChat(id); }
     catch (e) { alert((e as Error).message); }
     finally { setBusy(false); setAsk(undefined); setText(""); }
   };
@@ -26,12 +26,12 @@ function useShipRun(wt: Worktree, onOpenChat: (id: string) => void) {
  * The stage bar of a /ship worktree: every stage with the current one lit, the ticket, and the
  * next step as a button. Sits above the chats of the worktree page and above a chat's messages.
  */
-export function ShipBar({ wt, chats, compact, onOpenChat }: { wt: Worktree; chats: Chat[]; compact?: boolean; onOpenChat: (id: string) => void }) {
+export function ShipBar({ wt, chats, compact, chatId, onOpenChat }: { wt: Worktree; chats: Chat[]; compact?: boolean; chatId?: string; onOpenChat: (id: string) => void }) {
   const f = wt.ship!;
   const at = stageIndex(f.stage);
   const running = chats.some((c) => c.running && c.worktreeId === wt.id);
   const actions = shipActions(f);
-  const r = useShipRun(wt, onOpenChat);
+  const r = useShipRun(wt, onOpenChat, chatId);
   const primary = actions.find((a) => a.primary);
   const history = f.history.map((h) => `${new Date(h.at).toLocaleDateString()} ${h.stage}${h.note ? `: ${h.note}` : ""}`).join("\n");
   const side = <>

@@ -20,7 +20,7 @@ import * as ws from "./workspaces";
 import { discoverModels } from "./modelDiscovery";
 import { allCliStatus, updateAllClis } from "./cliRuntime";
 import { forgetCodexModels } from "./codexModels";
-import type { InstalledExtension, Project, RepoResult, RepoStatus, WorkspaceStatus, Worktree } from "../shared/types";
+import type { Chat, InstalledExtension, Project, RepoResult, RepoStatus, WorkspaceStatus, Worktree } from "../shared/types";
 import { askOnce, humanize, suggestTitle } from "./namer";
 import { parsePrSuggestion, prSuggestionPrompt } from "../shared/createPr";
 import { commitFromChat } from "./commitChat";
@@ -274,11 +274,11 @@ async function runShipTurn(w: Worktree, form: ShipForm, typed: string, files: st
   const action = shipActionOf(typed);
   const id: string = reuse ?? handlers.addChat!(w.id, keyId, { name: shipChatName(action, f.ticket), remember: false });
   const chat = store.chat(id);
-  chat.ship = { action };
+  chat.ship = { action, stage: f.stage };
   // the pipeline runs long unattended stretches (builds, test sessions, PR loops); Settings › Ship turns this off
   if (!reuse) chat.autoApprove = store.data.shipAutoApprove ?? true;
   store.save();
-  await agents.send(id, prompt, files, { display: typed });
+  await agents.send(id, prompt, files, { display: typed, shipStage: f.stage });
   return id;
 }
 /** the ticket follows the feature: a stage move writes the label or status and a comment; the spec rides on Spec'd */
@@ -663,13 +663,18 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     void writeTicket(w.id, "Started.");
     return runShipTurn(w, { form: "resume" }, "/ship", files, key.id);
   },
-  shipRun: async (worktreeId: string, command: string) => {
+  // the stage bar's buttons: the pipeline keeps going in the chat you are in when it is idle, else in the
+  // worktree's most recent idle ship chat; a new chat only when every one of them is busy or there is none
+  shipRun: async (worktreeId: string, command: string, chatId?: string) => {
     const w = wt(worktreeId);
     if (!w?.ship) throw new Error("This worktree is not a /ship feature.");
     const form = parseShipCommand(command);
     if (!form || form.form === "new") throw new Error("Not a /ship command for this feature.");
     if (form.form === "list") form.form = "resume";
-    return runShipTurn(w, form, command, [], shipKey().id);
+    const idle = (c: Chat | undefined) => !!c && c.worktreeId === w.id && !c.running;
+    const current = store.data.chats.find((c) => c.id === chatId);
+    const reuse = idle(current) ? current : store.data.chats.filter((c) => idle(c) && c.ship).sort((a, b) => (b.lastChattedAt ?? 0) - (a.lastChattedAt ?? 0))[0];
+    return runShipTurn(w, form, command, [], reuse?.keyId ?? shipKey().id, reuse?.id);
   },
   // typed in a chat: the stage runs there when the chat is idle, else in a fresh chat of the same worktree
   shipCommand: async (chatId: string, text: string, files: string[] = []) => {
