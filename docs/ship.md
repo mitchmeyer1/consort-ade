@@ -49,7 +49,11 @@ The agent reports with markers Consort strips from the reply: `[ship-stage: <sta
 `[ship-pause]`, `[ship-resume]`, `[ship-feedback: user|bot|teammate]`, `[ship-review-round: N]`
 (`src/shared/ship.ts`). A stage move is written to the ticket by `src/main/ship.ts`: a GitHub issue gets
 the one `ship:<stage>` label (created on first use), a comment with the note and the spec on Spec'd, and
-is closed on Merged; a ClickUp task gets its status set to the stage name and the same comment.
+is closed on Merged; a ClickUp task gets its status set to the list's own status whose name matches the
+stage (any case or punctuation; a list without one gets the comment alone) and the same comment.
+A write that fails is recorded on the feature's `sync` and retried by main on a backoff (30s doubling to
+10 minutes) until it lands, plus at start-up and the moment a ClickUp key is saved. The stage bar shows
+nothing about it; the Ship drawer's last line says when the ticket was updated or that a retry is pending.
 
 Artifacts live in the worktree under `.consort/ship/` (SPEC.md, GRILLING.md, issues/, TEST-REPORT.md,
 HANDOFF.md, review/), excluded from git through the repo's `info/exclude`.

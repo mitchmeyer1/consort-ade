@@ -23,7 +23,10 @@ export type ShipTicket = {
   repo?: string;
 };
 export type ShipEvent = { at: number; stage: ShipStage; note?: string };
-export type ShipSync = { at: number; ok: boolean; error?: string };
+/** the last write of the stage to the ticket; a failed one is retried by main until it lands, `tries` counting the failures in a row */
+export type ShipSync = { at: number; ok: boolean; error?: string; note?: string; tries?: number };
+/** the wait before retry number n (1-based) of a failed ticket write: 30s, 1m, 2m, 4m, 8m, then every 10 minutes */
+export const syncRetryDelay = (n: number) => Math.min(10 * 60_000, 30_000 * 2 ** Math.max(0, n - 1));
 export type ShipFeedbackFrom = "user" | "bot" | "teammate";
 export type ShipFeature = {
   ticket: ShipTicket;

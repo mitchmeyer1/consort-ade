@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { SHIP_LABELS, stageLabel, type ShipFeature, type ShipStage, type ShipTicket } from "../shared/ship";
+import { SHIP_LABELS, stageLabel, type ShipFeature, type ShipStage, type ShipSync, type ShipTicket } from "../shared/ship.ts";
 
 const run = promisify(execFile);
 const gh = async (cwd: string, args: string[]) => (await run("gh", args, { cwd, timeout: 60_000, maxBuffer: 1 << 22 })).stdout;
@@ -13,7 +13,7 @@ const CLICKUP = "https://api.clickup.com/api/v2";
  * the stage back. GitHub carries the stage as one `ship:<stage>` label at a time and the issue
  * closes on Merged; ClickUp carries it as the task status, which must exist on the list.
  * Everything here is best effort for the caller: a ticket that cannot be reached is recorded
- * on the feature's `sync`, never a blocked pipeline.
+ * on the feature's `sync` and main retries it on a backoff (see index.ts), never a blocked pipeline.
  */
 export async function githubTicket(repoPath: string, number: number): Promise<ShipTicket & { body: string }> {
   const j = JSON.parse(await gh(repoPath, ["issue", "view", String(number), "--json", "number,title,url,body"]));
@@ -62,8 +62,23 @@ export async function clickupTicket(key: string, id: string): Promise<ShipTicket
   const t = await clickup(key, `/task/${encodeURIComponent(id)}`);
   return { source: "clickup", id: String(t.id), url: t.url ?? `https://app.clickup.com/t/${t.id}`, title: t.name ?? String(t.id), body: t.markdown_description ?? t.description ?? "", status: t.status?.status };
 }
-/** the ClickUp status is the stage name in lower case, as Peter's list is set up */
-export const setClickupStatus = (key: string, id: string, stage: ShipStage) => clickup(key, `/task/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ status: stage.toLowerCase() }) });
+const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "");
+/**
+ * The status on the task's list that carries the stage: the same name in any case or punctuation
+ * ("Spec'd" ↔ "specd", "Ready to Test" ↔ "READY TO TEST"), else one that starts with or contains it.
+ * Undefined when the list has nothing like it; the stage then rides in the comment alone.
+ */
+export async function clickupStatusFor(key: string, id: string, stage: ShipStage): Promise<string | undefined> {
+  const t = await clickup(key, `/task/${encodeURIComponent(id)}`);
+  const listId = t.list?.id;
+  if (!listId) return;
+  const list = await clickup(key, `/list/${encodeURIComponent(String(listId))}`);
+  const names: string[] = (list.statuses ?? []).map((s: { status?: string }) => s.status).filter((s: unknown): s is string => typeof s === "string");
+  const want = norm(stage);
+  return names.find((n) => norm(n) === want) ?? names.find((n) => norm(n).startsWith(want)) ?? names.find((n) => norm(n).includes(want));
+}
+/** the ClickUp status is set by its name on the list, resolved first so a differently spelt list still syncs */
+export const setClickupStatus = (key: string, id: string, status: string) => clickup(key, `/task/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ status }) });
 export const commentClickup = (key: string, id: string, text: string) => clickup(key, `/task/${encodeURIComponent(id)}/comment`, { method: "POST", body: JSON.stringify({ comment_text: text }) });
 
 export type SyncDeps = { repoPath: string; clickupKey?: string };
@@ -72,7 +87,7 @@ export type SyncDeps = { repoPath: string; clickupKey?: string };
  * Writes a stage change to the ticket: the label or status, a comment with the note, the spec
  * on Spec'd, and the close on Merged. Returns the sync record for the feature.
  */
-export async function syncTicket(f: ShipFeature, note: string | undefined, deps: SyncDeps, worktreePath: string): Promise<ShipFeature["sync"]> {
+export async function syncTicket(f: ShipFeature, note: string | undefined, deps: SyncDeps, worktreePath: string): Promise<ShipSync> {
   const t = f.ticket;
   try {
     const spec = f.stage === "Spec'd" && f.spec ? readSpec(worktreePath, f.spec) : undefined;
@@ -87,8 +102,10 @@ export async function syncTicket(f: ShipFeature, note: string | undefined, deps:
       }
     } else {
       if (!deps.clickupKey) throw new Error("No ClickUp API key in Settings.");
-      await setClickupStatus(deps.clickupKey, t.id, f.stage);
+      const status = await clickupStatusFor(deps.clickupKey, t.id, f.stage);
+      if (status) await setClickupStatus(deps.clickupKey, t.id, status);
       await commentClickup(deps.clickupKey, t.id, comment);
+      if (!status) return { at: Date.now(), ok: true, note: `The list has no "${f.stage}" status; the stage is in the comment.` };
     }
     return { at: Date.now(), ok: true };
   } catch (e) {

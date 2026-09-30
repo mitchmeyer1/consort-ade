@@ -38,7 +38,6 @@ export function ShipBar({ wt, chats, compact, chatId, onOpenChat }: { wt: Worktr
     <span className="badge issue" role="link" title={f.ticket.title} onClick={() => ade.openExternal(f.ticket.url)}>{ticketRef(f.ticket)}</span>
     {f.prs.map((pr) => <span key={pr} className="badge pr" role="link" title={pr} onClick={() => ade.openExternal(pr)}>{prLabel(pr)}</span>)}
     {f.tests && <span className="badge ci" title={f.report}>{f.tests.pass}/{f.tests.total} stories</span>}
-    {f.sync && !f.sync.ok && <span className="badge limited" title={`The ticket was not updated: ${f.sync.error}`}>ticket not synced</span>}
     {running && <span className="badge ci pending">running</span>}
     <span className="grow" />
     {!shipDone(f) && !r.ask && primary && <button className="primary" disabled={r.busy || running} title={primary.title ?? primary.command} onClick={() => r.click(primary)}>{r.busy ? "Starting…" : primary.label}</button>}
@@ -98,7 +97,7 @@ export function ShipPanel({ wt, chats, onOpenChat, onOpenFile }: { wt: Worktree;
       {!!f.prs.length && <><h3>Pull requests</h3><div className="ship-docs">{f.prs.map((pr) => <button key={pr} className="linkish" onClick={() => ade.openExternal(pr)}>{prLabel(pr)}</button>)}</div></>}
       <h3>History</h3>
       <div className="ship-history">{[...f.history].reverse().map((h, i) => <div key={i}><span className="m">{formatAge(h.at, Date.now())}</span> <strong>{h.stage}</strong>{h.note ? ` · ${h.note}` : ""}</div>)}</div>
-      {f.sync && <div className={"conn-note" + (f.sync.ok ? "" : " ship-sync-error")}>{f.sync.ok ? `Ticket updated ${formatAge(f.sync.at, Date.now())}` : `Ticket not updated: ${f.sync.error}`}</div>}
+      {f.sync && <div className={"conn-note" + (f.sync.ok ? "" : " ship-sync-error")}>{f.sync.ok ? `Ticket updated ${formatAge(f.sync.at, Date.now())}${f.sync.note ? ` · ${f.sync.note}` : ""}` : `Ticket update failed ${formatAge(f.sync.at, Date.now())}, retrying: ${f.sync.error}`}</div>}
       {!!own.length && <><h3>Chats</h3><div className="ship-docs">{own.map((c) => <button key={c.id} className="linkish" onClick={() => onOpenChat(c.id)}>{c.name}{c.running ? " · running" : ""}</button>)}</div></>}
     </div>
   );

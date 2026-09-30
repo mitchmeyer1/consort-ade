@@ -48,7 +48,7 @@ import { homedir } from "node:os";
 import { configureSeats, ensurePoolKeys, isPoolId } from "./seatPool";
 import { poolUsage } from "../shared/seatPool";
 import * as shipApi from "./ship";
-import { newShipFeature, parseShipCommand, shipActionOf, shipBranch, shipChatName, shipFolder, shipIdeaName, shipSlug, type ShipFeature, type ShipForm, type ShipTicket } from "../shared/ship";
+import { newShipFeature, parseShipCommand, shipActionOf, shipBranch, shipChatName, shipFolder, shipIdeaName, shipSlug, syncRetryDelay, type ShipFeature, type ShipForm, type ShipTicket } from "../shared/ship";
 import { shipPrompt } from "../shared/shipPrompt";
 
 // ADE_DATA_DIR isolates state for test instances
@@ -281,14 +281,32 @@ async function runShipTurn(w: Worktree, form: ShipForm, typed: string, files: st
   await agents.send(id, prompt, files, { display: typed, shipStage: f.stage });
   return id;
 }
-/** the ticket follows the feature: a stage move writes the label or status and a comment; the spec rides on Spec'd */
-async function writeTicket(worktreeId: string, note: string | undefined, before?: ShipFeature) {
+/**
+ * The ticket follows the feature: a stage move writes the label or status and a comment; the spec rides on
+ * Spec'd. A write that fails (gh not signed in, no ClickUp key yet, the network) is retried on a backoff
+ * until it lands, and again the moment a ClickUp key is saved; nothing asks the user to reconnect.
+ */
+const syncRetry = new Map<string, NodeJS.Timeout>();
+async function writeTicket(worktreeId: string, note: string | undefined, before?: ShipFeature, retry = false) {
   const w = store.data.worktrees.find((x) => x.id === worktreeId);
   const p = w && project(w.projectId);
   if (!w?.ship || !p) return;
-  if (before && before.stage === w.ship.stage && (!w.ship.spec || before.spec === w.ship.spec)) return;
-  w.ship.sync = await shipApi.syncTicket(w.ship, note, { repoPath: p.path, clickupKey: clickUpKey() }, w.path);
+  if (!retry && before && before.stage === w.ship.stage && (!w.ship.spec || before.spec === w.ship.spec)) return;
+  clearTimeout(syncRetry.get(worktreeId)); syncRetry.delete(worktreeId);
+  const sync = await shipApi.syncTicket(w.ship, note, { repoPath: p.path, clickupKey: clickUpKey() }, w.path);
+  const tries = sync.ok ? 0 : (w.ship.sync?.ok === false ? w.ship.sync.tries ?? 1 : 0) + 1;
+  w.ship.sync = { ...sync, ...(tries ? { tries } : {}) };
   store.save();
+  if (!sync.ok) scheduleTicketRetry(worktreeId, tries);
+}
+function scheduleTicketRetry(worktreeId: string, tries: number) {
+  clearTimeout(syncRetry.get(worktreeId));
+  syncRetry.set(worktreeId, setTimeout(() => { void writeTicket(worktreeId, undefined, undefined, true); }, syncRetryDelay(tries)));
+}
+/** every feature whose last ticket write failed gets another go now: at start-up, and when a ClickUp key is saved */
+function retryFailedTickets(source?: ShipTicket["source"]) {
+  for (const w of store.data.worktrees)
+    if (w.ship && w.ship.sync?.ok === false && (!source || w.ship.ticket.source === source)) void writeTicket(w.id, undefined, undefined, true);
 }
 agents.onShipChanged((worktreeId, before, _after, note) => { void writeTicket(worktreeId, note, before); });
 
@@ -629,7 +647,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   switchSeat: (id: string, dir?: string) => agents.switchSeat(id, dir),
   refreshSeats: async () => { await seats.refresh(true); },
   setShipAutoApprove: (on: boolean) => { store.data.shipAutoApprove = on; store.save(); },
-  setClickUpKey: (key: string) => store.setClickUpKey(key),
+  setClickUpKey: (key: string) => { store.setClickUpKey(key); if (key.trim()) retryFailedTickets("clickup"); },
   setBranchPrefix: (prefix: string) => { store.data.branchPrefix = prefix.trim().replace(/^\/+|\/+$/g, ""); store.save(); },
   // /ship: a feature is a worktree. Resolve the ticket (or open one from the idea), cut the branch from the
   // project's base like any new worktree, record the feature on it, and open its first chat at Grilling.
@@ -1012,6 +1030,7 @@ ${skill}${deploy}${rubric}`;
 app.whenReady().then(() => {
   startDockerRecovery(join(app.getPath("userData"), "docker-runs"));
   store.load();
+  retryFailedTickets();
   ensurePoolKeys(store.data);
   store.save();
   seats.start();
