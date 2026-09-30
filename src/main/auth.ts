@@ -15,7 +15,14 @@ export const codexBin = () => cliBinary("codex") ?? "codex";
 // Each CLI keeps credentials in a home directory chosen by an env var, so one machine can hold several logins.
 export const CONFIG_ENV = { claude: "CLAUDE_CONFIG_DIR", codex: "CODEX_HOME" } as const;
 export const loginEnv = (key: ApiKey | undefined): Record<string, string> =>
-  key?.auth === "login" && key.configDir ? { [CONFIG_ENV[key.provider]]: key.configDir } : {};
+  key?.pool ? { CLAUDE_CONFIG_DIR: poolSeat() }
+  : key?.auth === "login" && key.configDir ? { [CONFIG_ENV[key.provider]]: key.configDir } : {};
+/**
+ * The seat pool's best seat right now, for work that isn't tied to one chat (side questions, model lists,
+ * sign-in status). A chat on the pool keeps its own seat (see agents.ts). ~/.claude is named explicitly,
+ * since every seat signs in under CLAUDE_CONFIG_DIR's keychain entry rather than the default one.
+ */
+const poolSeat = () => store.data.seatPool?.pick ?? join(homedir(), ".claude");
 /** The directory Codex reads for globally available skills for this connector. */
 export const codexHome = (key: ApiKey) => key.configDir ?? process.env.CODEX_HOME ?? join(homedir(), ".codex");
 const keyById = (id: string) => { const k = store.data.keys.find((k) => k.id === id); if (!k) throw new Error("Connector not found"); return k; };

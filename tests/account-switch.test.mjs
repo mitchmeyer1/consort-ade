@@ -12,6 +12,10 @@ import * as deliverables from '../src/shared/deliverables.ts';
 import * as autopilot from '../src/shared/autopilot.ts';
 import * as codexDiagnostics from '../src/shared/codexDiagnostics.ts';
 import * as cliUpdates from '../src/shared/cliUpdates.ts';
+import * as seatPool from '../src/shared/seatPool.ts';
+import * as ship from '../src/shared/ship.ts';
+import * as commands from '../src/shared/commands.ts';
+import * as context from '../src/shared/context.ts';
 const require = createRequire(import.meta.url);
 const compiled = ts.transpileModule(readFileSync(new URL('../src/main/agents.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -24,6 +28,7 @@ function fixture() {
   const mocks = {
     "./dockerLifecycle": { beginDockerRun: () => "", dockerRunEnvironment: () => ({}), finishDockerRun: async () => {} },
     './store': { store },
+    './dockerLifecycle': { beginDockerRun: () => '', dockerRunEnvironment: () => ({}), finishDockerRun: async () => {} },
     './auth': { loginEnv: key => ({ CLAUDE_CONFIG_DIR: key.configDir ?? '/personal' }), claudeBin: () => '/bundled/claude', codexBin: () => '/bundled/codex' },
     './cliRuntime': { updateCli: async () => false },
     '../shared/cliUpdates': cliUpdates,
@@ -39,6 +44,11 @@ function fixture() {
     '../shared/deliverables': deliverables,
     '../shared/autopilot': autopilot,
     '../shared/codexDiagnostics': codexDiagnostics,
+    '../shared/seatPool': seatPool,
+    '../shared/ship': ship,
+    '../shared/commands': commands,
+    '../shared/context': context,
+    './seatPool': { DEFAULT_SEAT: '/personal', runChooser: async () => { throw new Error('no chooser in tests'); }, sessionOnSeat: () => true },
     '@openai/codex-sdk': { Codex: class {
       startThread() { return this.resumeThread(); }
       resumeThread() { return { runStreamed: async () => ({ events: (async function* () {

@@ -15,6 +15,10 @@ import * as deliverables from '../src/shared/deliverables.ts';
 import * as codexDiagnostics from '../src/shared/codexDiagnostics.ts';
 import * as cliUpdates from '../src/shared/cliUpdates.ts';
 import * as autopilot from '../src/shared/autopilot.ts';
+import * as seatPool from '../src/shared/seatPool.ts';
+import * as ship from '../src/shared/ship.ts';
+import * as commands from '../src/shared/commands.ts';
+import * as context from '../src/shared/context.ts';
 
 const require = createRequire(import.meta.url);
 const compiled = ts.transpileModule(await readFile(new URL('../src/main/agents.ts', import.meta.url), 'utf8'), {
@@ -45,6 +49,7 @@ async function fixture(t) {
   const mocks = {
     "./dockerLifecycle": { beginDockerRun: () => "", dockerRunEnvironment: () => ({}), finishDockerRun: async () => {} },
     './store': { store },
+    './dockerLifecycle': { beginDockerRun: () => '', dockerRunEnvironment: () => ({}), finishDockerRun: async () => {} },
     './auth': { loginEnv: () => ({}), claudeBin: () => '/bundled/claude', codexBin: () => '/bundled/codex' },
     './cliRuntime': { updateCli: async () => false },
     '../shared/cliUpdates': cliUpdates,
@@ -60,6 +65,11 @@ async function fixture(t) {
     '../shared/deliverables': deliverables,
     '../shared/codexDiagnostics': codexDiagnostics,
     '../shared/autopilot': autopilot,
+    '../shared/seatPool': seatPool,
+    '../shared/ship': ship,
+    '../shared/commands': commands,
+    '../shared/context': context,
+    './seatPool': { DEFAULT_SEAT: '/personal', runChooser: async () => { throw new Error('no chooser in tests'); }, sessionOnSeat: () => true },
     '@anthropic-ai/claude-agent-sdk': {},
     '@openai/codex-sdk': { Codex: class { startThread() { return thread; } resumeThread() { return thread; } } },
   };
@@ -157,7 +167,7 @@ test('oversized input is bounded and archived without changing the visible messa
   const original = 'Original requirement\n' + 'x'.repeat(1_055_378) + '\nLatest correction';
   await agents.send(chat.id, original);
   await until(() => runs.length === 1);
-  assert.ok(runs[0].prompt.length < 125_000);
+  assert.ok(runs[0].prompt.length < 125_000, `prompt length ${runs[0].prompt.length}`);
   assert.match(runs[0].prompt, /Original requirement/);
   assert.match(runs[0].prompt, /Latest correction/);
   const archive = /Full input: (.+?)\. Read/.exec(runs[0].prompt)[1];

@@ -14,7 +14,7 @@ import { browserLaunch, type BrowserInfo } from "./openArtifact";
 import { editMenuTemplate } from "./editMenu";
 import { deployPrompt, type DeployProfile } from "../shared/deployProfile.ts";
 import { spellingSuggestions } from "./spelling";
-import { isScratch, scratchWorktree } from "../shared/scratch";
+import { homeScopes, homeWorktree, isHome, isScratch, scratchWorktree } from "../shared/scratch";
 import { isWorkspace, repoDirs, reposForPr, slugify, workspaceForCheckout, workspaceSources } from "../shared/workspace";
 import * as ws from "./workspaces";
 import { discoverModels } from "./modelDiscovery";
@@ -45,6 +45,11 @@ import { MODELS, type Api, type Appearance, type PrDraft } from "../shared/types
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { homedir } from "node:os";
+import { createSeatMonitor, ensurePoolKey } from "./seatPool";
+import { poolUsage } from "../shared/seatPool";
+import * as shipApi from "./ship";
+import { newShipFeature, parseShipCommand, shipActionOf, shipBranch, shipChatName, shipFolder, shipIdeaName, shipSlug, type ShipFeature, type ShipForm, type ShipTicket } from "../shared/ship";
+import { shipPrompt } from "../shared/shipPrompt";
 
 // ADE_DATA_DIR isolates state for test instances
 // GUI apps get a bare PATH; borrow the login shell's so git/gh/claude resolve like in a terminal
@@ -178,7 +183,7 @@ const wsStatusCache = new Map<string, { t: number; p: Promise<WorkspaceStatus | 
 
 async function syncWorktrees(projectId: string) {
   const p = project(projectId);
-  if (!p || isWorkspace(p)) return; // a workspace's checkouts belong to its source repos
+  if (!p || isWorkspace(p) || isHome(p)) return; // a workspace's checkouts belong to its source repos; a home has no git
   const live = await git.listWorktrees(p.path);
   // A workspace creates real Git worktrees in its source repos. They belong only to the workspace
   // scope, never to the individual source-project tree. Move old chat records onto that scope once.
@@ -243,6 +248,48 @@ function startInstall(scopeId: string, repo: string, path: string) {
     })
     .catch((error) => console.error("worktree install failed to start", error));
 }
+
+// the seat meters: refreshed every few minutes, and on demand after a limit or a switch
+const seats = createSeatMonitor({
+  command: () => store.data.seatChooser || undefined,
+  publish: (pool) => { store.data.seatPool = pool; store.save(); },
+  last: () => store.data.seatPool,
+});
+
+
+const clickUpKey = () => { try { return store.getClickUpKey() || undefined; } catch { return undefined; } };
+const shipKey = () => {
+  const k = store.data.keys.find((k) => k.id === store.data.defaultKeyId && k.provider === "claude") ?? store.data.keys.find((k) => k.provider === "claude") ?? store.data.keys[0];
+  if (!k) throw new Error("Add a connector first (Settings).");
+  return k;
+};
+/** one /ship turn: the stage prompt for the feature, in a chat of its worktree, shown as the command typed */
+async function runShipTurn(w: Worktree, form: ShipForm, typed: string, files: string[], keyId: string, reuse?: string): Promise<string> {
+  const f = w.ship!;
+  const p = project(w.projectId);
+  const deps = { repoPath: p.path, clickupKey: clickUpKey() };
+  const ticketBody = f.stage === "Grilling" ? await shipApi.ticketBody(f.ticket, deps) : undefined;
+  const prompt = shipPrompt({ feature: f, form, worktree: w.path, branch: w.branch, base: p.defaultBase, ticketBody });
+  const action = shipActionOf(typed);
+  const id: string = reuse ?? handlers.addChat!(w.id, keyId, { name: shipChatName(action, f.ticket), remember: false });
+  const chat = store.chat(id);
+  chat.ship = { action };
+  // the pipeline runs long unattended stretches (builds, test sessions, PR loops); Settings › Ship turns this off
+  if (!reuse) chat.autoApprove = store.data.shipAutoApprove ?? true;
+  store.save();
+  await agents.send(id, prompt, files, { display: typed });
+  return id;
+}
+/** the ticket follows the feature: a stage move writes the label or status and a comment; the spec rides on Spec'd */
+async function writeTicket(worktreeId: string, note: string | undefined, before?: ShipFeature) {
+  const w = store.data.worktrees.find((x) => x.id === worktreeId);
+  const p = w && project(w.projectId);
+  if (!w?.ship || !p) return;
+  if (before && before.stage === w.ship.stage && (!w.ship.spec || before.spec === w.ship.spec)) return;
+  w.ship.sync = await shipApi.syncTicket(w.ship, note, { repoPath: p.path, clickupKey: clickUpKey() }, w.path);
+  store.save();
+}
+agents.onShipChanged((worktreeId, before, _after, note) => { void writeTicket(worktreeId, note, before); });
 
 const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   getState: () => store.public(),
@@ -327,15 +374,31 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     return r.canceled ? null : r.filePaths[0];
   },
   addProject: async (path: string) => {
-    if (!(await git.isRepo(path))) throw new Error("not a git repo");
     if (store.data.projects.some((p) => p.path === path)) return;
     const id = randomUUID();
+    if (!(await git.isRepo(path))) {
+      // a plain folder is a home: one scratch scope at its path. The /ship scope already sits on
+      // ~/command-center, so the home adopts it rather than opening a second scope on the same folder.
+      const project: Project = { id, name: basename(path), path, defaultBase: "", kind: "home" };
+      store.data.projects.push(project);
+      const existing = store.data.worktrees.find((w) => isScratch(w) && !w.projectId && w.path === path);
+      if (existing) Object.assign(existing, { projectId: id, name: project.name, title: project.name, root: true });
+      else store.data.worktrees.push(homeWorktree(randomUUID(), project));
+      store.save();
+      return;
+    }
     store.data.projects.push({ id, name: basename(path), path, defaultBase: "origin/main" });
     await syncWorktrees(id);
     store.save();
   },
   removeProject: async (id: string) => {
     const p = project(id);
+    if (p && isHome(p)) {
+      for (const w of homeScopes(store.data, id)) Object.assign(w, { projectId: "", root: false });
+      store.data.projects = store.data.projects.filter((p) => p.id !== id);
+      store.save();
+      return;
+    }
     // a workspace owns its checkouts: hand each back to its source repo and drop the folder
     if (p && isWorkspace(p)) await ws.removeWorkspaceTree(p.path, targetsOf(p));
     const wts = store.data.worktrees.filter((w) => w.projectId === id).map((w) => w.id);
@@ -555,7 +618,82 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   watchReview: (id: string, target: string) => { reviewWatchers.add(artifactPath(id, target)); },
   unwatchReview: (id: string, target: string) => { reviewWatchers.remove(artifactPath(id, target)); },
   authStatus: (keyId: string) => authStatus(keyId),
-  connectorUsage: (keyId: string, force?: boolean) => { const k = store.data.keys.find((k) => k.id === keyId); if (!k) throw new Error("Connector not found"); return usage.read(k, { force }); },
+  connectorUsage: async (keyId: string, force?: boolean) => {
+    const k = store.data.keys.find((k) => k.id === keyId);
+    if (!k) throw new Error("Connector not found");
+    if (!k.pool) return usage.read(k, { force });
+    if (force) await seats.refresh(20);
+    return poolUsage(k.id, store.data.seatPool);
+  },
+  switchSeat: (id: string, dir?: string) => agents.switchSeat(id, dir),
+  refreshSeats: () => seats.refresh(20),
+  setSeatChooser: (path: string) => {
+    const chooser = path.trim();
+    if (chooser && !existsSync(chooser)) throw new Error(`No file at ${chooser}.`);
+    // an empty path turns the pool's refreshes off; the connector stays for the chats already on it
+    store.data.seatChooser = chooser;
+    ensurePoolKey(store.data);
+    if (!chooser) store.data.seatPool = undefined;
+    store.save();
+    if (chooser) void seats.refresh(0);
+  },
+  setShipAutoApprove: (on: boolean) => { store.data.shipAutoApprove = on; store.save(); },
+  setClickUpKey: (key: string) => store.setClickUpKey(key),
+  setBranchPrefix: (prefix: string) => { store.data.branchPrefix = prefix.trim().replace(/^\/+|\/+$/g, ""); store.save(); },
+  // /ship: a feature is a worktree. Resolve the ticket (or open one from the idea), cut the branch from the
+  // project's base like any new worktree, record the feature on it, and open its first chat at Grilling.
+  shipStart: async (projectId: string, from: { source: "github"; number: number } | { source: "clickup"; id: string } | { idea: string }, files: string[] = []) => {
+    const p = project(projectId);
+    if (!p) throw new Error("Project no longer exists.");
+    if (isWorkspace(p) || isHome(p)) throw new Error("/ship needs a git project; workspaces and home folders can't ship yet.");
+    const key = shipKey();
+    let ticket: ShipTicket;
+    if ("idea" in from) {
+      const idea = from.idea.trim();
+      if (!idea) throw new Error("Describe the feature first.");
+      ticket = await shipApi.createGithubIssue(p.path, shipIdeaName(idea, 8).replace(/…$/, ""), `${idea}\n\n_Opened by /ship in Consort._`);
+    } else if (from.source === "github") ticket = await shipApi.githubTicket(p.path, from.number);
+    else {
+      const k = clickUpKey();
+      if (!k) throw new Error("Add a ClickUp API key in Settings › Ship first.");
+      ticket = await shipApi.clickupTicket(k, from.id);
+    }
+    const slug = shipSlug(ticket.title);
+    const branch = shipBranch(store.data.branchPrefix, slug, ticket.id);
+    let w = store.data.worktrees.find((x) => x.projectId === projectId && x.branch === branch);
+    if (!w) {
+      await handlers.addWorktree!(projectId, shipFolder(slug, ticket.id), branch, p.defaultBase);
+      w = store.data.worktrees.find((x) => x.projectId === projectId && x.branch === branch);
+    }
+    if (!w) throw new Error("The worktree was not created.");
+    if (!w.ship) { w.ship = newShipFeature(ticket, slug, Date.now()); w.title = ticket.title; }
+    await shipApi.excludeConsortDir(w.path).catch(() => {});
+    store.save();
+    void writeTicket(w.id, "Started.");
+    return runShipTurn(w, { form: "resume" }, "/ship", files, key.id);
+  },
+  shipRun: async (worktreeId: string, command: string) => {
+    const w = wt(worktreeId);
+    if (!w?.ship) throw new Error("This worktree is not a /ship feature.");
+    const form = parseShipCommand(command);
+    if (!form || form.form === "new") throw new Error("Not a /ship command for this feature.");
+    if (form.form === "list") form.form = "resume";
+    return runShipTurn(w, form, command, [], shipKey().id);
+  },
+  // typed in a chat: the stage runs there when the chat is idle, else in a fresh chat of the same worktree
+  shipCommand: async (chatId: string, text: string, files: string[] = []) => {
+    const chat = store.chat(chatId);
+    const w = wt(chat.worktreeId);
+    const form = parseShipCommand(text);
+    if (!form) throw new Error("Not a /ship command.");
+    if (!w.ship) {
+      if (form.form !== "new" || !form.idea) throw new Error(w.projectId && !isScratch(w) ? "This worktree is not a /ship feature. Start one with /ship new <idea>, or from the project page." : "/ship runs in a project worktree; open a project and start it there.");
+      return handlers.shipStart!(w.projectId, { idea: form.idea }, files);
+    }
+    if (form.form === "new") throw new Error("This worktree already ships a feature; start another from the project page.");
+    if (form.form === "list") form.form = "resume";
+    return runShipTurn(w, form, text, files, chat.keyId, chat.running ? undefined : chatId);
+  },
   commitInfo: (id: string) => { const p = workspaceOf(wt(id)); return p ? ws.workspaceCommitInfo(targetsOf(p), p.branch ?? "") : git.commitInfo(wt(id).path); },
   commit: async (id: string, message: string) => {
     const p = workspaceOf(wt(id));
@@ -689,12 +827,16 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     store.data.worktrees.push(scratchWorktree(id, path, opts.name?.trim() || "Chat"));
     return handlers.addChat!(id, keyId, { name: opts.name, model: opts.model });
   },
+  clearChat: (id: string) => agents.clearChat(id),
+  setShowToolCalls: (on: boolean) => { store.data.showToolCalls = on; store.save(); },
+  setChatToolCalls: (id: string, on: boolean | null) => { const chat = store.chat(id); chat.showToolCalls = on ?? undefined; store.save(); },
+  listCommands: (id: string) => agents.listCommands(id),
   renameChat: (id: string, name: string) => {
     const chat = store.chat(id);
     chat.name = name;
     // a repoless chat's worktree is only its folder; its title follows the chat
     const w = store.data.worktrees.find((w) => w.id === chat.worktreeId);
-    if (w && isScratch(w)) w.title = name;
+    if (w && isScratch(w) && !w.ship && !w.projectId) w.title = name;
     store.save();
   },
   chatMenu: (id: string) => new Promise<void>((done) => {
@@ -720,7 +862,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     store.data.chats = store.data.chats.filter((c) => c.id !== id);
     // a repoless chat owns its folder: the last chat on a scratch worktree takes the folder with it
     const w = chat && store.data.worktrees.find((w) => w.id === chat.worktreeId);
-    if (w && isScratch(w) && !store.data.chats.some((c) => c.worktreeId === w.id)) {
+    if (w && isScratch(w) && !w.ship && !w.projectId && !store.data.chats.some((c) => c.worktreeId === w.id)) {
       store.data.worktrees = store.data.worktrees.filter((x) => x.id !== w.id);
       if (w.path.startsWith(scratchRoot())) rmSync(w.path, { recursive: true, force: true });
     }
@@ -802,6 +944,8 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     if (id.startsWith("login-")) return;
     const key = store.data.keys.find((k) => k.id === id);
     if (key?.configDir && key.configDir.startsWith(join(app.getPath("userData"), "logins"))) rmSync(key.configDir, { recursive: true, force: true });
+    // an empty chooser keeps the next launch from putting the pool back
+    if (key?.pool) { store.data.seatChooser = ""; store.data.seatPool = undefined; }
     store.data.keys = store.data.keys.filter((k) => k.id !== id);
     delete store.data.secrets[id];
     usage.forget(id);
@@ -869,7 +1013,9 @@ ${skill}${deploy}${rubric}`;
 app.whenReady().then(() => {
   startDockerRecovery(join(app.getPath("userData"), "docker-runs"));
   store.load();
+  ensurePoolKey(store.data);
   store.save();
+  seats.start();
   // the model pickers follow the providers, not a release of Consort: ask on every start
   handlers.refreshModels!().catch((error: unknown) => console.warn("model refresh failed", error));
   // so do the CLIs themselves: a release newer than the bundled one is fetched on start and daily (main/cliRuntime.ts)

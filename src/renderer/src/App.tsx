@@ -8,7 +8,7 @@ import { cliSummary, type CliStatus } from "../../shared/cliUpdates";
 import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { lastPrompt } from "../../shared/lastPrompt";
 import { connectorAccess, formatAge, formatReset, modelBlock, usageTone, type ConnectorUsage } from "../../shared/usage";
-import { MODELS, modelOptions, PHASES, phasesFor, type Api, type Block, type Chat, type CommitInfo, type Phase, type PtyState, type PermissionRequest, type Project, type RepoInfo, type RootStatus, type State, type Worktree, type WorktreeStatus } from "../../shared/types";
+import { MODELS, modelOptions, PHASES, phasesFor, type Api, type Block, type Chat, type ChatContext, type CommitInfo, type Phase, type PtyState, type PermissionRequest, type Project, type RepoInfo, type RootStatus, type State, type Worktree, type WorktreeStatus } from "../../shared/types";
 import { chatStatus } from "../../shared/chatStatus";
 import { CHAT_MARKS, hasRollup, rollupLabel, rollupStatus } from "../../shared/statusRollup";
 import { ciLabel, ciTitle, type CiInfo } from "../../shared/ci";
@@ -18,6 +18,13 @@ import { artifactLinkAction, artifactLinks, artifactWhen, chatArtifacts, localIm
 import { parseFollowups, type Followup } from "../../shared/followups";
 import { historyStep, promptHistory, type HistoryNav } from "../../shared/promptHistory";
 import { isScratch, scratchChats } from "../../shared/scratch";
+import { fillNextCommand, parseNextCommands, type NextCommand } from "../../shared/shipNext";
+import { isShipCommand } from "../../shared/ship";
+import { ShipBar, ShipClickUpBox, ShipPanel, shipOfIssue } from "./Ship";
+import { commandQuery, completeCommand, filterCommands, isClearCommand, type SlashEntry } from "../../shared/commands";
+import { contextPercent, contextTone } from "../../shared/context";
+import { foldLabel, groupBlocks, showToolCalls, type ToolBlock } from "../../shared/toolFold";
+import { homeScopes, isHome } from "../../shared/scratch";
 import type { Instruction } from "../../shared/instructions";
 import { isWorkspace, reposForPr, reposToCommit, slugify, workspaceSummary } from "../../shared/workspace";
 import type { RepoResult, WorkspaceStatus } from "../../shared/types";
@@ -32,6 +39,7 @@ import { firstPrompt, reviewDeliverable } from "../../shared/skillSections";
 import { quickActionParameters, resolveQuickAction } from "../../shared/quickActions";
 import { isReviewFile } from "../../shared/review";
 import { ReviewView } from "./ReviewView";
+import { PoolSettings, SeatPicker, SeatsStrip } from "./Seats";
 import { planStages } from "../../shared/planProgress";
 import { featureStages } from "../../shared/featureProgress";
 import type { Stage } from "../../shared/types";
@@ -43,7 +51,7 @@ import "@xterm/xterm/css/xterm.css";
 
 const ade = (window as any).ade as Api;
 const EMPTY: State = { projects: [], worktrees: [], chats: [], keys: [], appearance: { theme: "dark", background: "opaque" } };
-type Tab = "terminal" | "diff" | "editor" | "markdown" | "commit" | "artifacts" | "review" | "settings";
+type Tab = "terminal" | "diff" | "editor" | "markdown" | "commit" | "artifacts" | "review" | "settings" | "ship";
 type Sel = { type: "chat"; id: string } | { type: "worktree"; id: string; form?: boolean } | { type: "project"; id: string; form?: boolean };
 
 function useStatus(id?: string, revision = 0) {
@@ -328,7 +336,7 @@ export function App() {
   // a workspace project and its single worktree are the same view
   const wsProject = worktree && wtProject && isWorkspace(wtProject) ? wtProject : project && isWorkspace(project) ? project : undefined;
   const wsWorktree = wsProject ? (worktree ?? state.worktrees.find((w) => w.projectId === wsProject.id)) : undefined;
-  const crumb = worktree && wtProject ? `${wtProject.name}/${worktree.branch}` : scratch ? "Chats" : project ? project.name : "Consort ADE";
+  const crumb = wtProject && isHome(wtProject) ? wtProject.name : worktree && wtProject ? `${wtProject.name}/${worktree.branch}` : scratch ? "Chats" : project ? project.name : "Consort ADE";
   useEffect(() => { document.title = chat ? `${crumb} · ${chat.name}` : crumb; }, [crumb, chat?.name]);
   const answer = (id: string, allow: boolean) => {
     ade.answerPermission(id, allow);
@@ -405,7 +413,9 @@ export function App() {
               <span className="crumb" title={worktree?.path}>{crumb}</span>
             </div>
           ) : <span className="title">{crumb}</span>}
+          {chat?.context && <ContextMeter context={chat.context} />}
           <div className="tabs">
+            {worktree?.ship && <button className={"shipbtn" + (tab === "ship" ? " on" : "")} aria-pressed={tab === "ship"} title="Everything about this /ship feature: ticket, stage history, spec, report, PRs" onClick={() => toggle("ship")}><Ico n="laurel" /><span>Ship</span></button>}
             {worktree && wtProject?.quickActions?.filter((action) => action.pinned).map((action) => (
               <button key={action.id} className="pinned-action" title={`Run ${action.title} in ${worktree.path}`} onClick={() => runQuickAction(worktree, action)}><Ico n="star" />{action.title}</button>
             ))}
@@ -420,9 +430,11 @@ export function App() {
           </div>
         </div>
         {chat ? (
-          <ChatPane key={chat.id} chat={chat} worktree={worktree} keys={state.keys} models={state.models} openRouterConfigured={state.openRouterConfigured} perms={perms.filter((p) => p.chatId === chat.id)} ptys={ptys} answer={answer} reviewFile={reviewFile} onOpenReview={() => setTab("review")} onOpenMd={(target) => { if (worktree) ade.artifactMenu(worktree.id, target).then((action) => { if (action === "open") openMd(target); }).catch((e) => alert(e.message)); }} />
+          <ChatPane key={chat.id} chat={chat} worktree={worktree} chats={state.chats} onOpenChat={(id) => setSel({ type: "chat", id })} keys={state.keys} models={state.models} openRouterConfigured={state.openRouterConfigured} pool={state.seatPool} showTools={showToolCalls(chat, state.showToolCalls)} perms={perms.filter((p) => p.chatId === chat.id)} ptys={ptys} answer={answer} reviewFile={reviewFile} onOpenReview={() => setTab("review")} onOpenMd={(target) => { if (worktree) ade.artifactMenu(worktree.id, target).then((action) => { if (action === "open") openMd(target); }).catch((e) => alert(e.message)); }} />
         ) : wsProject && wsWorktree ? (
           <WorkspacePage key={wsProject.id} project={wsProject} wt={wsWorktree} state={state} openForm={!!(sel && "form" in sel && sel.form)} onRunAction={runQuickAction} onSelect={setSel} />
+        ) : (wtProject && isHome(wtProject)) || (project && isHome(project)) ? (
+          <HomePage key={(wtProject ?? project)!.id} project={(wtProject ?? project)!} state={state} openForm={!!(sel && "form" in sel && sel.form)} onSelect={setSel} />
         ) : worktree ? (
           <WorktreePage key={worktree.id} wt={worktree} state={state} openForm={sel?.type === "worktree" && !!sel.form} onRunAction={runQuickAction} onSelect={setSel} />
         ) : project ? (
@@ -446,7 +458,7 @@ export function App() {
       </div>
       {tab && (!["terminal", "editor", "diff"].includes(tab) || worktree) && <>
         <div className="resizer right" style={{ right: rightW - 3 }} onMouseDown={drag("right")} />
-        <Drawer key={viewKey} tab={tab} memoryKey={viewKey} state={state} chat={chat} worktree={worktree} scope={worktree ? { id: worktree.id, cwd: worktree.path, title: worktree.title } : project ? { id: project.id, cwd: project.path, title: project.name } : undefined}
+        <Drawer onOpenChat={(id) => setSel({ type: "chat", id })} key={viewKey} tab={tab} memoryKey={viewKey} state={state} chat={chat} worktree={worktree} scope={worktree ? { id: worktree.id, cwd: worktree.path, title: worktree.title } : project ? { id: project.id, cwd: project.path, title: project.name } : undefined}
           ptys={ptys} width={rightW} file={file} reviewPath={reviewFile?.path} onEdit={openEditor} onView={openMd} onSignIn={signIn} onClose={() => setTab(undefined)} />
       </>}
       {actionArgs && <Dialog title={actionArgs.action.title} onClose={() => setActionArgs(undefined)} footer={<>
@@ -470,7 +482,7 @@ function Sidebar({ state, sel, running, failed, done, onSelect, onCollapse }: { 
   const [newProject, setNewProject] = useState(false);
   // repoless chats: not on any code, each working out of a hidden folder of its own
   const [newChat, setNewChat] = useState(false);
-  const chats = recentChats(scratchChats(state));
+  const chats = recentChats(scratchChats(state)).filter((c) => !c.ship);
   const needKey = () => { if (!state.keys.length) { alert("Add a connector in Settings first."); return true; } return false; };
   return (
     <div className="sidebar">
@@ -481,6 +493,8 @@ function Sidebar({ state, sel, running, failed, done, onSelect, onCollapse }: { 
       </div>
       {state.projects.map((p) => isWorkspace(p)
         ? <WorkspaceNode key={p.id} project={p} state={state} sel={sel} running={running} failed={failed} done={done} onSelect={onSelect} collapsed={collapsed} toggle={toggle} />
+        : isHome(p)
+        ? <HomeNode key={p.id} project={p} state={state} sel={sel} onSelect={onSelect} collapsed={collapsed} toggle={toggle} />
         : <ProjectNode key={p.id} project={p} state={state} sel={sel} running={running} failed={failed} done={done} onSelect={onSelect} collapsed={collapsed} toggle={toggle} />
       )}
       {newProject && <NewProjectDialog state={state} onClose={() => setNewProject(false)} onWorkspace={(id) => { setNewProject(false); onSelect({ type: "worktree", id }); }} />}
@@ -493,6 +507,7 @@ function Sidebar({ state, sel, running, failed, done, onSelect, onCollapse }: { 
           : <div className="row hint" onClick={() => !needKey() && setNewChat(true)}><small>Chat or work without a repo.</small></div>}
       </div>
       {newChat && <NewChatForm scratch state={state} onClose={() => setNewChat(false)} onDone={(id) => { setNewChat(false); onSelect({ type: "chat", id }); }} />}
+      <SeatsStrip state={state} />
     </div>
   );
 }
@@ -584,7 +599,7 @@ function NewProjectDialog({ state, onClose, onWorkspace }: { state: State; onClo
         <button className={mode === "workspace" ? "on" : ""} onClick={() => setMode("workspace")}><Ico n="thorn" /> Multi-repo workspace</button>
       </div>
       {mode === "repo" ? (
-        <p>A git repository on this machine. Its branches become worktrees you can open chats on.</p>
+        <p>A git repository on this machine: its branches become worktrees you can open chats on. A plain folder works too: it gets chats only, and they can work in any repo beside it.</p>
       ) : (
         <>
           <p>One folder, one branch, several repos: a worktree of each chosen project is checked out inside it, and chats work across all of them. Commit and PR fan out per repo.</p>
@@ -676,6 +691,53 @@ function ProjectNode({ project: p, state, sel, running, failed, done, onSelect, 
           <small>{showArchived ? "hide" : "show"} {archivedN} archived</small>
         </div>
       )}
+    </div>
+  );
+}
+
+/* a home project in the sidebar: the folder, then its chats; /ship chats stay under Ship */
+function HomeNode({ project: p, state, sel, onSelect, collapsed, toggle }: {
+  project: Project; state: State; sel?: Sel; onSelect: (s: Sel) => void; collapsed: Record<string, boolean>; toggle: (id: string) => void;
+}) {
+  const scopes = homeScopes(state, p.id).map((w) => w.id);
+  const chats = recentChats(state.chats.filter((c) => scopes.includes(c.worktreeId) && !c.ship));
+  const active = (sel?.type === "project" && sel.id === p.id) || (sel?.type === "worktree" && scopes.includes(sel.id));
+  return (
+    <div className={"projnode" + (collapsed[p.id] ? " closed" : "")}>
+      <div className={"row project" + (active ? " active" : "") + (collapsed[p.id] ? " closed" : "")} onClick={() => onSelect({ type: "project", id: p.id })}>
+        <span className="slot caret" title={collapsed[p.id] ? "Expand" : "Collapse"} onClick={(e) => { e.stopPropagation(); toggle(p.id); }}><Ico n="candle" className="proj" /><span className="chev">{collapsed[p.id] ? "▸" : "▾"}</span></span>
+        <span className="grow" title={p.path}>{p.name}</span>
+        <span className="tools" onClick={(e) => e.stopPropagation()}>
+          <button className="icon" title="New chat here" onClick={() => onSelect({ type: "project", id: p.id, form: true })}>＋</button>
+          <button className="icon" title="Remove from Consort (keeps the folder and its chats)" onClick={() => confirm(`Remove ${p.name} from Consort? The folder and its chats stay.`) && ade.removeProject(p.id)}>×</button>
+        </span>
+      </div>
+      {!collapsed[p.id] && !!chats.length && <div className="wtlist chatlist">{chats.map((c) => <ChatRow key={c.id} c={c} sel={sel} onSelect={onSelect} />)}</div>}
+    </div>
+  );
+}
+
+/* the home project's page: where the chats run, and a new one; nothing git-shaped */
+function HomePage({ project: p, state, openForm, onSelect }: { project: Project; state: State; openForm: boolean; onSelect: (s: Sel) => void }) {
+  const [form, setForm] = useState(openForm);
+  useEffect(() => { setForm(openForm); }, [openForm]);
+  const scope = homeScopes(state, p.id)[0];
+  const chats = recentChats(state.chats.filter((c) => c.worktreeId === scope?.id));
+  return (
+    <div className="page">
+      <div>
+        <h1>{p.name}</h1>
+        <div className="path">{p.path}</div>
+        <div className="m" style={{ marginTop: 8 }}>A folder, not a repository. Chats start here and can work in any repo beside it; commits, PRs and status belong to those repos.</div>
+      </div>
+      <div className="actions"><button className="primary" disabled={!scope} onClick={() => setForm((f) => !f)}><Ico n="quill" /> New chat</button></div>
+      {chats.length ? <div className="grid">{chats.map((c) => (
+        <div key={c.id} className="card click" onClick={() => onSelect({ type: "chat", id: c.id })}>
+          <div className="t">{c.name}</div>
+          <div className="m">{c.ship ? "/ship · " : ""}{chatStatus(c) ?? "idle"} · {c.model}</div>
+        </div>
+      ))}</div> : <div className="m">No chats yet.</div>}
+      {form && scope && <NewChatForm wt={scope} state={state} onClose={() => setForm(false)} onDone={(id) => { setForm(false); onSelect({ type: "chat", id }); }} />}
     </div>
   );
 }
@@ -836,7 +898,7 @@ function ProjectPage({ project: p, state, openForm, onRunAction, onSelect }: { p
     if (!key) return alert("Add a connector first (Settings)");
     setBusyIssue(issue.number);
     try {
-      const branch = issueBranch(issue.number);
+      const branch = issueBranch(issue.number, state.branchPrefix);
       let wt = state.worktrees.find((w) => w.projectId === p.id && w.branch === branch);
       if (!wt) {
         const id = toasts.start(`Creating worktree ${branch}…`);
@@ -852,8 +914,15 @@ function ProjectPage({ project: p, state, openForm, onRunAction, onSelect }: { p
       ade.send(id, prompt).catch((e) => alert(e.message));
     } catch (e: any) { alert(e.message); } finally { setBusyIssue(undefined); }
   };
+  // /ship: the issue becomes a feature worktree at Grilling; the first chat interrogates the idea
+  const shipIssue = async (issue: IssueInfo) => {
+    setBusyIssue(issue.number);
+    try { onSelect({ type: "chat", id: await ade.shipStart(p.id, { source: "github", number: issue.number }) }); }
+    catch (e: any) { alert(e.message); } finally { setBusyIssue(undefined); }
+  };
   const IssueRow = ({ issue }: { issue: IssueInfo }) => {
-    const linked = state.worktrees.find((w) => w.projectId === p.id && w.branch === issueBranch(issue.number));
+    const linked = state.worktrees.find((w) => w.projectId === p.id && w.branch === issueBranch(issue.number, state.branchPrefix));
+    const shipped = shipOfIssue(state, p.id, issue.number);
     return (
       <div className="lrow">
         <span className="num">#{issue.number}</span>
@@ -865,7 +934,9 @@ function ProjectPage({ project: p, state, openForm, onRunAction, onSelect }: { p
           </div>
         </span>
         {linked && <span className="badge issue open" role="link" title={`Open worktree ${linked.title}`} onClick={() => onSelect({ type: "worktree", id: linked.id })}><Ico n="candle" /> {linked.branch}</span>}
-        <button disabled={busyIssue === issue.number} title={linked ? `Start a new planning chat in ${linked.branch}` : `Create a worktree on ${issueBranch(issue.number)} and plan the fix`} onClick={() => solve(issue)}>{busyIssue === issue.number ? "…" : linked ? "Solve" : "Branch and solve"}</button>
+        {shipped ? <span className="badge ship" role="link" title={`/ship · ${shipped.branch}`} onClick={() => onSelect({ type: "worktree", id: shipped.id })}><Ico n="laurel" /> {shipped.ship!.stage}</span>
+          : <button disabled={busyIssue === issue.number} title="Ship it: a feature worktree and a chat that grills the idea into a spec, then builds, tests and reviews it" onClick={() => shipIssue(issue)}>{busyIssue === issue.number ? "…" : "Ship"}</button>}
+        <button disabled={busyIssue === issue.number} title={linked ? `Start a new planning chat in ${linked.branch}` : `Create a worktree on ${issueBranch(issue.number, state.branchPrefix)} and plan the fix`} onClick={() => solve(issue)}>{busyIssue === issue.number ? "…" : linked ? "Solve" : "Branch and solve"}</button>
       </div>
     );
   };
@@ -941,6 +1012,11 @@ function ProjectPage({ project: p, state, openForm, onRunAction, onSelect }: { p
         <div className="card list">{others.map((pr) => <PrRow key={pr.number} pr={pr} />)}</div>
       )}
 
+      {state.clickUpConfigured && <>
+        <h2>Ship a ClickUp task</h2>
+        <p className="sect-note">Paste a task id or link. Consort makes the feature worktree, grills the task into a spec, and moves the task's status with each stage.</p>
+        <ShipClickUpBox projectId={p.id} onOpenChat={(id) => onSelect({ type: "chat", id })} />
+      </>}
       <h2>Open issues {info && <span className="m">({info.issues.length}{info.issues.length >= 50 ? "+" : ""})</span>}
         {info && info.issues.length > ISSUE_ROWS && <button className="icon" onClick={() => setAllIssues((x) => !x)}>{allIssues ? `show ${ISSUE_ROWS}` : `show all ${info.issues.length}`}</button>}
       </h2>
@@ -1341,6 +1417,7 @@ function WorktreePage({ wt, state, openForm, onSelect, onRunAction }: { wt: Work
   };
   return (
     <div className="page">
+      {wt.ship && <ShipBar wt={wt} chats={state.chats} onOpenChat={(id) => onSelect({ type: "chat", id })} />}
       <div className="workspace-heading">
         <div className="workspace-heading-info">
         <h1>{wt.root ? "Root" : <><Editable value={wt.title} onSave={(t) => ade.renameWorktree(wt.id, t)} trigger="click" /> <button className="icon" title="Name with AI" onClick={() => ade.autoTitle(wt.id)}><Ico n="star" className="big" /></button></>}</h1>
@@ -1638,7 +1715,9 @@ function useArtifactImages(ref: React.RefObject<HTMLElement | null>, worktreeId:
 
 // One assistant turn: its prose and tool rows, then the follow-ups it suggested as chips.
 // Clicking a chip sends that prompt to this chat (queued if the agent is still working).
-function AssistantMessage({ blocks, onOpen, worktreeId, live, onFollowup }: { blocks: Block[]; onOpen: (p: string) => void; worktreeId?: string; live: boolean; onFollowup: (prompt: string) => void }) {
+// In a /ship chat the last turn's `Next:` footer also becomes chips: click one and the chat is cleared, then the
+// command sent, the clear-then-resume habit in one click (onShipNext is only passed for that last message).
+function AssistantMessage({ blocks, onOpen, worktreeId, live, onFollowup, onShipNext, showTools = true }: { blocks: Block[]; onOpen: (p: string) => void; worktreeId?: string; live: boolean; onFollowup: (prompt: string) => void; onShipNext?: (command: string) => void; showTools?: boolean }) {
   const parsed = React.useMemo(() => {
     const followups: Followup[] = [];
     const rows = blocks.map((b) => {
@@ -1647,14 +1726,19 @@ function AssistantMessage({ blocks, onOpen, worktreeId, live, onFollowup }: { bl
       followups.push(...p.followups);
       return { ...b, text: p.text };
     });
-    return { rows, followups };
-  }, [blocks]);
+    const next = onShipNext ? parseNextCommands(blocks.map((b) => (b.type === "text" ? b.text : "")).join("\n")) : [];
+    return { rows, followups, next };
+  }, [blocks, onShipNext]);
   // whatever this response made — a doc it wrote, a page an MCP tool created — gets a way to open it,
   // whether or not the model remembered to link it in its prose
   const made = React.useMemo(() => (live ? [] : messageArtifacts(blocks)), [blocks, live]);
   return (
     <div className="msg assistant">
-      {parsed.rows.map((b, k) => b.type === "text" ? (b.text.trim() ? <Prose key={k} text={b.text} onOpen={onOpen} worktreeId={worktreeId} /> : null) : <ToolRow key={b.id} b={b} onOpen={onOpen} live={live} />)}
+      {showTools
+        ? parsed.rows.map((b, k) => b.type === "text" ? (b.text.trim() ? <Prose key={k} text={b.text} onOpen={onOpen} worktreeId={worktreeId} /> : null) : <ToolRow key={b.id} b={b} onOpen={onOpen} live={live} />)
+        : groupBlocks(parsed.rows, live).map((s, k) => s.type === "text" ? (s.text.trim() ? <Prose key={k} text={s.text} onOpen={onOpen} worktreeId={worktreeId} /> : null)
+          : s.type === "tool" ? <ToolRow key={s.block.id} b={s.block} onOpen={onOpen} live={live} />
+          : <ToolFold key={s.tools[0].id} tools={s.tools} onOpen={onOpen} live={live} />)}
       {made.length > 0 && (
         <div className="made" role="group" aria-label="Files from this response">
           {made.map((a) => (
@@ -1669,7 +1753,41 @@ function AssistantMessage({ blocks, onOpen, worktreeId, live, onFollowup }: { bl
           {parsed.followups.map((f) => <button key={f.prompt} className="followup" title={f.prompt} onClick={() => onFollowup(f.prompt)}>{f.label}</button>)}
         </div>
       )}
+      {onShipNext && parsed.next.length > 0 && <ShipNextChips next={parsed.next} live={live} onRun={onShipNext} />}
     </div>
+  );
+}
+
+/** the /ship footer's next steps as chips; a command with a "<feedback>" placeholder asks for the text first */
+function ShipNextChips({ next, live, onRun }: { next: NextCommand[]; live: boolean; onRun: (command: string) => void }) {
+  const [ask, setAsk] = useState<NextCommand>();
+  const [text, setText] = useState("");
+  const send = () => { if (!ask || !text.trim()) return; onRun(fillNextCommand(ask.command, text)); setAsk(undefined); setText(""); };
+  return (
+    <div className="followups ship-next" role="group" aria-label="Next /ship step (clears the context first)">
+      {!ask && next.map((n) => (
+        <button key={n.command} className="followup ship-next-chip" disabled={live} title={`Clear the context, then send:\n${n.command}`} onClick={() => (n.needsFeedback ? setAsk(n) : onRun(n.command))}>{n.label}</button>
+      ))}
+      {ask && <div className="ship-ask">
+        <textarea autoFocus rows={3} value={text} placeholder={`Feedback for ${ask.command}`} aria-label="Feedback" onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Escape") setAsk(undefined); if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); } }} />
+        <div className="actions"><button onClick={() => setAsk(undefined)}>Cancel</button><button className="primary" disabled={!text.trim()} onClick={send}>Clear + send ⌘↩</button></div>
+      </div>}
+    </div>
+  );
+}
+
+/** the context meter: percent of the model's window the last turn used; green under 30, yellow to 70, red above */
+function ContextMeter({ context }: { context: ChatContext }) {
+  const percent = contextPercent(context);
+  const tone = contextTone(percent);
+  const k = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+  return (
+    <span className={`context-meter ${tone}`} role="meter" aria-valuenow={percent} aria-valuemin={0} aria-valuemax={100} aria-label="Context used"
+      title={`Context: ${k(context.used)} of ${k(context.window)} tokens (${percent}%) at the last turn's final call. /clear starts fresh.`}>
+      <span className="context-track"><span className="context-fill" style={{ width: `${percent}%` }} /></span>
+      <span className="context-pct">{percent}%</span>
+    </span>
   );
 }
 
@@ -1716,7 +1834,7 @@ function ProseMd({ text, onOpen, worktreeId }: { text: string; onOpen: (p: strin
 }
 
 // files from a drop or paste: real paths when Finder gives them, otherwise read the bytes and stage them
-async function filesFromTransfer(dt: DataTransfer): Promise<string[]> {
+export async function filesFromTransfer(dt: DataTransfer): Promise<string[]> {
   const out: string[] = [];
   const files = [...dt.files];
   const paths = ade.pathsFor(files);
@@ -1789,7 +1907,7 @@ function Lightbox({ worktreeId, path, onClose }: { worktreeId?: string; path: st
   );
 }
 
-function Attachments({ worktreeId, paths, onRemove }: { worktreeId?: string; paths: string[]; onRemove?: (path: string) => void }) {
+export function Attachments({ worktreeId, paths, onRemove }: { worktreeId?: string; paths: string[]; onRemove?: (path: string) => void }) {
   const [zoom, setZoom] = useState<string>();
   if (!paths.length) return null;
   return (
@@ -1814,6 +1932,32 @@ function UserBubble({ text, attachments, worktreeId }: { text: string; attachmen
   );
 }
 
+/** a tool call's input as it reads, not as it was sent: the command bare on top, the other fields as `key: value` lines */
+export function toolInputText(input: string): string {
+  let j: unknown;
+  try { j = JSON.parse(input); } catch { return input; }
+  if (!j || typeof j !== "object" || Array.isArray(j)) return input;
+  const fields = Object.entries(j as Record<string, unknown>);
+  const lead = fields.find(([k]) => k === "command" || k === "content" || k === "prompt");
+  const rest = fields.filter((f) => f !== lead).map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`);
+  const head = lead ? (typeof lead[1] === "string" ? lead[1] : JSON.stringify(lead[1], null, 2)) : "";
+  return [head, ...rest].filter(Boolean).join("\n");
+}
+
+/** a run of quiet tool calls as one line; click for the rows, click again to fold them */
+function ToolFold({ tools, onOpen, live }: { tools: ToolBlock[]; onOpen: (p: string) => void; live: boolean }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={"toolfold" + (open ? " open" : "")}>
+      <button type="button" className="trhead" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+        <span className="chev">{open ? "▾" : "▸"}</span>
+        <span className="hint">{foldLabel(tools)}</span>
+      </button>
+      {open && <div className="foldbody">{tools.map((b) => <ToolRow key={b.id} b={b} onOpen={onOpen} live={live} />)}</div>}
+    </div>
+  );
+}
+
 function ToolRow({ b, onOpen, live }: { b: Extract<Block, { type: "tool" }>; onOpen: (p: string) => void; live: boolean }) {
   const [open, setOpen] = useState(false);
   let hint = b.input.split("\n")[0].slice(0, 110);
@@ -1828,7 +1972,7 @@ function ToolRow({ b, onOpen, live }: { b: Extract<Block, { type: "tool" }>; onO
         {b.ok === false && <span className="status-err">✗</span>}
         {b.ok === undefined && (live ? <span className="spin" /> : <span className="cut" title="cut off">–</span>)}
       </div>
-      {open && <div className="trbody"><pre>{b.input}</pre>{b.output && <pre className="out">{b.output.slice(0, 6000)}</pre>}</div>}
+      {open && <div className="trbody"><pre>{toolInputText(b.input)}</pre>{b.output && <pre className="out">{b.output.slice(0, 6000)}</pre>}</div>}
     </div>
   );
 }
@@ -2001,9 +2145,12 @@ function SideChatPane({ chat }: { chat: Chat }) {
 const AUTOPILOT_HELP = "Lets this chat see your screen and click, type and switch between visible macOS apps to finish a task in another app. The Jev navigator drives it through your OpenRouter key. Off by default; turn it on for one task and off again after.";
 const AUTO_APPROVE_HELP = "Runs every tool call without asking: shell commands, file edits, git, installs. Off by default, so the chat asks before each action that needs permission. Turn on for long unattended work you trust.";
 
-function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFile, onOpenReview, onOpenMd, openRouterConfigured }: { chat: Chat; worktree?: Worktree; keys: State["keys"]; models: State["models"]; perms: PermissionRequest[]; ptys: PtyState[]; answer: (id: string, ok: boolean) => void; reviewFile: ReviewFile | null; onOpenReview: () => void; onOpenMd: (p: string) => void; openRouterConfigured?: boolean }) {
+function ChatPane({ chat, worktree, chats, onOpenChat, keys, models, pool, showTools, perms, ptys, answer, reviewFile, onOpenReview, onOpenMd, openRouterConfigured }: { chat: Chat; worktree?: Worktree; chats: Chat[]; onOpenChat: (id: string) => void; keys: State["keys"]; models: State["models"]; pool?: State["seatPool"]; showTools: boolean; perms: PermissionRequest[]; ptys: PtyState[]; answer: (id: string, ok: boolean) => void; reviewFile: ReviewFile | null; onOpenReview: () => void; onOpenMd: (p: string) => void; openRouterConfigured?: boolean }) {
   // the chat's own terminal is on screen whenever the chat is, so a finished command there is seen at once
   const composerDone = !!worktree && !!ptys.find((p) => p.id === `${worktree.id}:composer-${chat.id}`)?.done;
+  // a Claude chat can hop seats: on the pool to the best other seat, off it onto the pool
+  const chatKey = keys.find((k) => k.id === chat.keyId);
+  const canSeat = chat.provider === "claude" && keys.some((k) => k.pool);
   const [errorDetails, setErrorDetails] = useState<string>();
   const [copyStatus, setCopyStatus] = useState("");
   useEffect(() => { setErrorDetails(undefined); setCopyStatus(""); }, [chat.id]);
@@ -2059,6 +2206,21 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
   const [commit, setCommit] = useState<{ count: number; typed: boolean } | null>(null);
   const text = commit ? commitText : draft.text;
   const setText = (value: string) => { if (commit) setCommitText(value); else chatDrafts.update(chat.id, { text: value }); };
+  // The command popup: open while the box holds a lone /word. The list is the seat's own (read once per seat + worktree
+  // in main); ↑/↓ move, Tab/↩ complete the highlight, Esc closes until the text changes, ↩ with no highlight sends as ever.
+  const [cmds, setCmds] = useState<SlashEntry[]>([]);
+  const [cmdIdx, setCmdIdx] = useState(-1);
+  const [cmdClosed, setCmdClosed] = useState(false);
+  const cmdQuery = commit ? undefined : commandQuery(text);
+  const popup = cmdQuery !== undefined && !cmdClosed;
+  useEffect(() => {
+    if (!popup) return;
+    let live = true;
+    ade.listCommands(chat.id).then((list) => { if (live) setCmds(list); }, () => {});
+    return () => { live = false; };
+  }, [popup, chat.id]);
+  const cmdMatches = popup ? filterCommands(cmds, cmdQuery) : [];
+  const completeCmd = (entry: SlashEntry) => { setText(completeCommand(entry)); setCmdIdx(-1); requestAnimationFrame(() => { box.current?.focus(); resizeComposer(box.current); }); };
   // The box grows with what you type, up to ten lines (or a third of a short window), then scrolls.
   // This sets the actual height; the CSS max-height is the fallback for the same ceiling.
   const resizeComposer = (input: HTMLTextAreaElement | null) => {
@@ -2094,10 +2256,16 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
     return () => clearTimeout(t);
   }, [commit]);
   useEffect(() => { if (commit && chat.running) setCommit(null); }, [chat.running]);
+  // a /ship Next chip: fresh provider session (as /clear), then the command in the same chat
+  const shipNext = React.useCallback((command: string) => ade.clearChat(chat.id).then(() => ade.shipCommand(chat.id, command)).then((id) => { if (id !== chat.id) onOpenChat(id); }).catch((e) => alert(e.message)), [chat.id, onOpenChat]);
   const send = () => {
     if (commit) { if (text.trim() || !commit.typed) fireCommit(text.trim() || undefined); return; }
     if (!text.trim() && !files.length) return;
     setNav(null);
+    // /clear is Consort's, not the model's: the session is dropped here and the transcript stays. A clear means clear, attachments included
+    if (isClearCommand(text)) { ade.clearChat(chat.id).then(() => { setText(""); setFiles(() => []); }, (e) => alert(e.message)); return; }
+    // /ship runs the pipeline: in this chat when it is idle and this worktree ships a feature, else in the chat it opens
+    if (isShipCommand(text)) { ade.shipCommand(chat.id, text.trim(), files).then((id) => { setText(""); setFiles(() => []); if (id !== chat.id) onOpenChat(id); }, (e) => alert(e.message)); return; }
     chatDrafts.submit(chat.id, (draft) => ade.send(chat.id, draft.text.trim() || "See attached files.", draft.files)).catch((e) => alert(e.message));
     jump();
   };
@@ -2143,16 +2311,19 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
     <div className={"chatpane" + (over ? " over" : "")} onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setOver(false); }} onDrop={onDrop} onPaste={onPaste}>
       {over && <div className="dropveil">Drop to attach</div>}
       <PhaseStrip phase={chat.phase} steps={chat.phaseSteps} onSelect={(phase) => ade.setPhase(chat.id, phase)} />
+      {worktree?.ship && <ShipBar wt={worktree} chats={chats} compact onOpenChat={onOpenChat} />}
       <div className="messages" ref={messagesEl} onScroll={onMessagesScroll}>
         {stages && <ProgressPanel title={review ? "Review" : "Plan"} stages={stages} />}
         {feature && chat.feature && <ProgressPanel title={chat.feature.title} icon="wreath" side="right" stages={feature} />}
         {recall && !recallHidden && <div className="chat-recall"><span title={recall}>{recall}</span></div>}
         <div className="column">
-        {chat.messages.filter((m) => m.blocks.length).map((m) =>
+        {chat.messages.filter((m) => m.blocks.length).map((m, i, all) =>
           m.role === "user" ? <UserBubble key={m.id} text={m.blocks.map((b) => (b.type === "text" ? b.text : "")).join("\n")} attachments={m.attachments} worktreeId={worktree?.id} /> :
+          m.role === "system" && m.kind === "clear" ? <div key={m.id} className="msg system clear-divider" role="separator"><span>{m.blocks.map((b) => (b.type === "text" ? b.text : "")).join(" ")}</span><time dateTime={new Date(m.ts).toISOString()}>{new Date(m.ts).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</time></div> :
           m.role === "system" ? <div key={m.id} className="msg system">{m.blocks.map((b) => (b.type === "text" ? b.text : "")).join(" ")}</div> : (
-          <AssistantMessage key={m.id} blocks={m.blocks} onOpen={onOpenMd} worktreeId={worktree?.id} live={chat.running}
-            onFollowup={(prompt) => ade.send(chat.id, prompt).catch((e) => alert(e.message))} />
+          <AssistantMessage key={m.id} blocks={m.blocks} onOpen={onOpenMd} worktreeId={worktree?.id} live={chat.running} showTools={showTools}
+            onFollowup={(prompt) => ade.send(chat.id, prompt).catch((e) => alert(e.message))}
+            onShipNext={chat.ship && i === all.length - 1 ? shipNext : undefined} />
         ))}
         {perms.map((p) => (
           <div key={p.id} className="perm">
@@ -2173,6 +2344,7 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
             <span>Last run failed: <span className="err">{chat.error}</span></span><span className="error-details-link">View details</span>
           </button> : <span>This chat was interrupted when the app closed.</span>}
           <button className="primary" onClick={() => ade.continueChat(chat.id).catch((e) => alert(e.message))}>Continue where it left off</button>
+          {canSeat && <button title="Resume this same session on the seat with the most headroom" onClick={() => ade.switchSeat(chat.id).catch((e) => alert(e.message))}>{chatKey?.pool ? "Switch seat & continue" : "Move to seat pool & continue"}</button>}
         </div>
       )}
       {errorDetails !== undefined && <Dialog title="Run error details" onClose={() => setErrorDetails(undefined)} footer={<>
@@ -2208,6 +2380,7 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
             {chatStatus(chat) === "running" && <div className="composer-working" role="status"><span className="working-circle" aria-hidden="true" />Working…</div>}
           </span>
           {openRouterConfigured && <label><input type="checkbox" checked={!!chat.autopilot} onChange={(e) => ade.setAutopilot(chat.id, e.target.checked).catch((e) => alert(e.message))} /> <span className="help" title={AUTOPILOT_HELP}>Autopilot</span></label>}
+          <label title={chat.showToolCalls === undefined ? "Following the global setting (Settings › Appearance)" : "This chat's own choice; it overrides the global setting"}><input type="checkbox" checked={showTools} onChange={(e) => ade.setChatToolCalls(chat.id, e.target.checked).catch((e) => alert(e.message))} /> Tool calls</label>
           <label><input type="checkbox" checked={chat.autoApprove} onChange={(e) => ade.setAutoApprove(chat.id, e.target.checked).catch((e) => alert(e.message))} /> <span className="help" title={AUTO_APPROVE_HELP}>Auto-approve</span></label>
         </div>
         {side && worktree && <SideChatPane chat={chat} />}
@@ -2215,16 +2388,31 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
           <XTermPane key={chat.id} scope={{ id: worktree.id, cwd: worktree.path, title: worktree.title }} termId={`composer-${chat.id}`} active failed={false} done={composerDone} />
         </div>}
         <div style={code || side ? { display: "none" } : undefined} className={"composer card" + (over ? " over" : "") + (commit ? " committing" : "")}>
+          {popup && cmdMatches.length > 0 && <div className="cmd-popup" role="listbox" aria-label="Commands">
+            {cmdMatches.map((c, i) => <div key={c.name} role="option" aria-selected={i === cmdIdx} className={"cmd-row" + (i === cmdIdx ? " on" : "")}
+              onMouseEnter={() => setCmdIdx(i)} onMouseDown={(e) => { e.preventDefault(); completeCmd(c); }}>
+              <span className="cmd-name">/{c.name}{c.argumentHint && <span className="cmd-hint"> {c.argumentHint}</span>}</span>
+              <span className="cmd-desc">{c.description}</span>
+            </div>)}
+          </div>}
           <textarea ref={box} value={text} rows={1} onChange={(e) => {
             const input = e.currentTarget;
             setText(input.value);
             setNav(null); // typing leaves history: the next ↑ starts again at the newest prompt
+            setCmdClosed(false); setCmdIdx(-1);
             if (commit && !commit.typed && input.value) setCommit({ ...commit, typed: true });
             // The native input event fires before the controlled value has been committed.
             requestAnimationFrame(() => resizeComposer(input));
           }} placeholder={placeholder}
             onKeyDown={(e) => {
               if (e.key === "Escape" && commit) { e.preventDefault(); setCommit(null); setCommitText(""); return; }
+              if (popup && cmdMatches.length) {
+                if (e.key === "ArrowDown") { e.preventDefault(); setCmdIdx((i) => (i + 1) % cmdMatches.length); return; }
+                if (e.key === "ArrowUp") { e.preventDefault(); setCmdIdx((i) => (i <= 0 ? cmdMatches.length : i) - 1); return; }
+                if (e.key === "Tab") { e.preventDefault(); completeCmd(cmdMatches[Math.max(cmdIdx, 0)]); return; }
+                if (e.key === "Enter" && cmdIdx >= 0 && !e.nativeEvent.isComposing) { e.preventDefault(); completeCmd(cmdMatches[cmdIdx]); return; }
+                if (e.key === "Escape") { e.preventDefault(); setCmdClosed(true); return; }
+              }
               if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !e.shiftKey && !e.metaKey && !e.altKey && !e.nativeEvent.isComposing) {
                 if (stepHistory(e.currentTarget, e.key === "ArrowUp" ? "up" : "down")) { e.preventDefault(); return; }
               }
@@ -2235,6 +2423,7 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
               <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.5l-8.6 8.6a5 5 0 0 1-7-7l9.2-9.2a3.3 3.3 0 0 1 4.7 4.7L10 18.9a1.6 1.6 0 0 1-2.3-2.3l8.5-8.5" /></svg>
             </button>
             <AgentPicker key={chat.id} chat={chat} keys={keys} models={models} />
+            <SeatPicker chat={chat} keys={keys} pool={pool} />
             <span className="grow" />
             <span className="m hint">{commit ? "↩ commit + push · esc cancel" : `${chat.running ? "↩ queue" : "↩ send"} · ⇧↩ newline${!text && history.length ? " · ↑ history" : ""}`}</span>
             <button className="icon enter" title={commit ? "Commit and push (↩)" : chat.running ? "Queue message (↩)" : "Send (↩)"} disabled={commit ? (commit.typed && !text.trim()) : (!text.trim() && !files.length)} onClick={send}>
@@ -2285,18 +2474,19 @@ function useScrollMemory(key: string, ref: React.RefObject<HTMLElement | null>, 
 /* ---------- drawer ---------- */
 
 type Scope = { id: string; cwd: string; title: string };
-function Drawer({ tab, state, chat, worktree, scope, ptys, width, file, reviewPath, memoryKey, onEdit, onView, onSignIn, onClose }: { tab: Tab; state: State; chat?: Chat; worktree?: Worktree; scope?: Scope; ptys: PtyState[]; width: number; file?: string; reviewPath?: string; memoryKey: string; onEdit: (p: string) => void; onView: (p: string) => void; onSignIn: (keyId: string) => void; onClose: () => void }) {
+function Drawer({ onOpenChat, tab, state, chat, worktree, scope, ptys, width, file, reviewPath, memoryKey, onEdit, onView, onSignIn, onClose }: { onOpenChat: (id: string) => void; tab: Tab; state: State; chat?: Chat; worktree?: Worktree; scope?: Scope; ptys: PtyState[]; width: number; file?: string; reviewPath?: string; memoryKey: string; onEdit: (p: string) => void; onView: (p: string) => void; onSignIn: (keyId: string) => void; onClose: () => void }) {
   // the body is the scroller for previews, diffs and settings; its place is kept per view + tab + file
   const body = useRef<HTMLDivElement>(null);
   useScrollMemory(scrollKey(memoryKey, tab, file), body, [tab, file]);
   return (
     <div className="drawer" style={{ width }}>
       <div className="dhead">
-        <span><Ico n={{ terminal: "terminal", diff: "branch", editor: "pencil", markdown: "scroll", commit: "wheat", artifacts: "scroll", review: "laurel", settings: "gear" }[tab]} className="big" /> {tab[0].toUpperCase() + tab.slice(1)}{scope && tab !== "settings" ? ` · ${scope.title}` : ""}</span>
+        <span><Ico n={{ terminal: "terminal", diff: "branch", editor: "pencil", markdown: "scroll", commit: "wheat", artifacts: "scroll", review: "laurel", settings: "gear", ship: "laurel" }[tab]} className="big" /> {tab[0].toUpperCase() + tab.slice(1)}{scope && tab !== "settings" ? ` · ${scope.title}` : ""}</span>
         <button className="icon" onClick={onClose}>×</button>
       </div>
       <div className="dbody" ref={body}>
         {tab === "settings" ? <Settings state={state} onSignIn={onSignIn} />
+          : tab === "ship" ? (worktree?.ship ? <ShipPanel key={worktree.id} wt={worktree} chats={state.chats} onOpenChat={onOpenChat} onOpenFile={onView} /> : <div className="card">This worktree is not a /ship feature.</div>)
           : tab === "artifacts" ? (chat ? <ArtifactsView key={chat.id} chat={chat} onOpen={onView} /> : <div className="card">Select a chat to see its artifacts.</div>)
           : tab === "terminal" ? (worktree && scope ? <Terminals key={scope.id} scope={scope} ptys={ptys.filter((p) => p.scopeId === scope.id)} /> : <div className="card">Select Root, a worktree or a chat first.</div>)
           : !worktree ? <div className="card">Select a worktree or chat first.</div>
@@ -2672,32 +2862,35 @@ function CliRuntimes() {
   </div>;
 }
 
-function Connector({ k, isDefault, status, usage, now, onSignIn, onRename, onRefresh }: {
+function Connector({ k, isDefault, status, usage, now, onSignIn, onRename, onRefresh, children }: {
   k: State["keys"][number]; isDefault: boolean; status?: AuthState; usage?: ConnectorUsage; now: number;
-  onSignIn: () => void; onRename: () => void; onRefresh: () => void;
+  onSignIn: () => void; onRename: () => void; onRefresh: () => void; children?: React.ReactNode;
 }) {
   const login = k.auth === "login";
   const builtIn = k.id.startsWith("login-");
   const identity = usage?.account ? [usage.account, usage.plan].filter(Boolean).join(" · ") : status?.loggedIn ? status.detail : usage?.plan;
   const dot = !login ? "ok" : !status ? "" : status.loggedIn ? "ok" : "bad";
   const signedOut = login && status && !status.loggedIn;
+  // the pool's seats sign in from a terminal (CLAUDE_CONFIG_DIR=… claude), and it never carries PHI
+  const pool = !!k.pool;
   return (
     <div className="conn" data-testid={`connector-${k.id}`}>
       <div className="conn-head">
         <div className="conn-name">{k.name}</div>
         <div className="conn-actions">
-          {signedOut && <button onClick={onSignIn}>Sign in</button>}
-          {login && status?.loggedIn && k.configDir && <button title="Sign in again as a different account" onClick={onSignIn}>Switch account</button>}
+          {signedOut && !pool && <button onClick={onSignIn}>Sign in</button>}
+          {login && status?.loggedIn && k.configDir && !pool && <button title="Sign in again as a different account" onClick={onSignIn}>Switch account</button>}
           <button aria-label={`Rename ${k.name}`} onClick={onRename}>Rename</button>
           {!builtIn && <button onClick={() => confirm(`Remove ${k.name}?`) && ade.removeKey(k.id)}>Remove</button>}
         </div>
       </div>
       <div className="conn-sub">
         <span className={`dot ${dot}`} aria-hidden />
-        <span>{k.provider === "claude" ? "Claude" : "Codex"} · {login ? "terminal login" : "API key"}</span>
+        <span>{k.provider === "claude" ? "Claude" : "Codex"} · {pool ? "seat pool" : login ? "terminal login" : "API key"}</span>
         {signedOut ? <span className="conn-bad">not signed in</span> : identity ? <span className="conn-who" title={identity}>{identity}</span> : login && !status ? <span>checking…</span> : null}
       </div>
-      <Meters usage={usage} signedOut={!!signedOut} now={now} />
+      <Meters usage={usage} signedOut={!!signedOut && !pool} now={now} />
+      {children}
       <div className="conn-foot">
         <button className={"tog " + (isDefault ? "on" : "")} aria-pressed={isDefault} title="Used for PR reviews and as the connector new chats start with" onClick={() => !isDefault && ade.setDefaultKey(k.id).catch((e) => alert(e.message))}>Default</button>
         <span className="conn-age">
@@ -2838,6 +3031,16 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
   const [usage, setUsage] = useState<Record<string, ConnectorUsage>>({});
   const [now, setNow] = useState(Date.now());
   const [openRouterKey, setOpenRouterKey] = useState("");
+  const [clickUpKey, setClickUpKey] = useState("");
+  const [savingClickUp, setSavingClickUp] = useState(false);
+  const [prefix, setPrefix] = useState(state.branchPrefix ?? "");
+  const saveClickUp = async (remove = false) => {
+    if (savingClickUp || (!remove && !clickUpKey.trim())) return;
+    setSavingClickUp(true);
+    try { await ade.setClickUpKey(remove ? "" : clickUpKey); setClickUpKey(""); }
+    catch (e) { alert((e as Error).message); }
+    finally { setSavingClickUp(false); }
+  };
   const [savingOpenRouter, setSavingOpenRouter] = useState(false);
   const saveOpenRouter = async (remove = false) => {
     if (savingOpenRouter || (!remove && !openRouterKey.trim())) return;
@@ -2877,7 +3080,9 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
           </>}>
         {state.keys.map((k) => (
           <Connector key={k.id} k={k} isDefault={defaultConnector(state)?.id === k.id} status={status[k.id]} usage={usage[k.id]} now={now}
-            onSignIn={() => onSignIn(k.id)} onRename={() => setRenaming({ id: k.id, name: k.name })} onRefresh={() => { refreshStatus(); refreshUsage(true, k.id); }} />
+            onSignIn={() => onSignIn(k.id)} onRename={() => setRenaming({ id: k.id, name: k.name })} onRefresh={() => { refreshStatus(); refreshUsage(true, k.id); }}>
+            {k.pool && <PoolSettings state={state} />}
+          </Connector>
         ))}
         {!state.keys.length && <div className="conn-note">No connectors yet.</div>}
         <CliRuntimes />
@@ -2898,6 +3103,26 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
           {state.openRouterConfigured && <button disabled={savingOpenRouter} onClick={() => confirm("Remove the OpenRouter key?") && void saveOpenRouter(true)}>Remove</button>}
         </div>
       </SettingsSection>
+      <SettingsSection icon="laurel" title="Ship" count={(state.clickUpConfigured ? 1 : 0) + (state.branchPrefix ? 1 : 0)} initialOpen={false}>
+        <div className="conn-note">/ship takes a feature from a GitHub issue or a ClickUp task to a merged PR: a worktree per feature, grilling into a spec, tickets, build, test report, review. GitHub issues need nothing here beyond gh. A ClickUp key lets the project page ship a task by id and moves the task's status with each stage.</div>
+        <Field label="Branch prefix" info="Every branch Consort generates starts with it: mm gives mm/hris-address-494 and mm/issue/12.">
+          <input value={prefix} placeholder="mm" autoComplete="off" onChange={(e) => setPrefix(e.target.value)} onBlur={() => ade.setBranchPrefix(prefix).catch((e) => alert(e.message))} onKeyDown={(e) => { if (e.key === "Enter") ade.setBranchPrefix(prefix).catch((err) => alert(err.message)); }} />
+        </Field>
+        <label className="ship-opt" title="The pipeline runs long unattended stretches: builds, test sessions, PR loops. Applies to /ship chats started from here on.">
+          <input type="checkbox" checked={state.shipAutoApprove ?? true} onChange={(e) => ade.setShipAutoApprove(e.target.checked).catch((err) => alert(err.message))} /> Auto-approve tools in new /ship chats
+        </label>
+        <div className="conn-sub" style={{ margin: "10px 0" }}>
+          <span className={`dot ${state.clickUpConfigured ? "ok" : ""}`} aria-hidden />
+          <span>{state.clickUpConfigured ? "ClickUp connected" : "ClickUp not connected"}</span>
+        </div>
+        <Field label={state.clickUpConfigured ? "Replace ClickUp key" : "ClickUp API key"} info="A personal API token from ClickUp › Settings › Apps. Stored encrypted; the saved value is never shown again. Task statuses must match the stage names.">
+          <input type="password" autoComplete="off" placeholder="pk_…" value={clickUpKey} onChange={(e) => setClickUpKey(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && clickUpKey.trim()) void saveClickUp(); }} />
+        </Field>
+        <div className="extension-actions">
+          <button className="primary" disabled={savingClickUp || !clickUpKey.trim()} onClick={() => void saveClickUp()}>{savingClickUp ? "Saving…" : state.clickUpConfigured ? "Replace key" : "Save key"}</button>
+          {state.clickUpConfigured && <button disabled={savingClickUp} onClick={() => confirm("Remove the ClickUp key?") && void saveClickUp(true)}>Remove</button>}
+        </div>
+      </SettingsSection>
       <SettingsSection icon="quill" title="Chat rules" count={state.instructions?.length ?? 0} initialOpen={false}><InstructionsCard items={state.instructions ?? []} /></SettingsSection>
       <SettingsSection icon="star" title="Plugins + skills" count={state.extensions?.length ?? 0} initialOpen={false}><ExtensionsCard state={state} /></SettingsSection>
       <SettingsSection icon="butterfly" title="Appearance">
@@ -2906,6 +3131,10 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
           <div className="seg">
             {(["auto", "dark", "light"] as const).map((t) => <button key={t} className={state.appearance.theme === t ? "on" : ""} onClick={() => ade.setAppearance({ theme: t })}>{t !== "auto" && <Ico n={t === "dark" ? "moon" : "sun"} />} {t}</button>)}
           </div>
+        </div>
+        <div className="krow">
+          <span className="grow" title="Off folds consecutive tool calls into one line per run; failed and running calls always show. A chat can override this from its composer.">Show tool calls</span>
+          <label className="switch"><input type="checkbox" checked={!!state.showToolCalls} onChange={(e) => ade.setShowToolCalls(e.target.checked).catch((err) => alert(err.message))} /> {state.showToolCalls ? "every call as a row" : "folded"}</label>
         </div>
         <div className="krow">
           <span className="grow">Background</span>

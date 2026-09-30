@@ -1,0 +1,184 @@
+import { SHIP_DIR, SHIP_STAGES, shipFooter, ticketRef, type ShipFeature, type ShipForm } from "./ship.ts";
+
+/**
+ * The prompt for one /ship turn: the rules every stage shares, the feature's state, and the
+ * handler for the stage the feature is in (or the form the command asked for). Adapted from
+ * Peter's peter-ship plugin: the stage machine is his; the state lives in Consort instead of a
+ * state.json and a CLI, the ticket is a GitHub issue or a ClickUp task, and the code lives in
+ * the worktree the chat already runs in.
+ */
+export type ShipPromptInput = {
+  feature: ShipFeature;
+  form: ShipForm;
+  /** absolute path of the feature's worktree, the chat's cwd */
+  worktree: string;
+  branch: string;
+  /** the branch the feature was cut from and the PR targets, e.g. origin/development */
+  base: string;
+  /** the ticket's body, for grilling */
+  ticketBody?: string;
+  /** the repo's test and typecheck commands when Consort knows them */
+  checks?: string[];
+};
+
+const STAGE_LINE = SHIP_STAGES.join(" → ");
+
+const COMMON = (i: ShipPromptInput) => `You are running one step of /ship, Consort's feature pipeline, for the feature below. A feature is in exactly one of these stages, and the stage decides what this turn does:
+${STAGE_LINE}
+
+Consort keeps the feature's state and mirrors the stage onto its ticket (a GitHub issue gets a ship:<stage> label and is closed when merged; a ClickUp task gets the status). You report what happened with markers, each on its own line anywhere in your reply; Consort applies them and strips them from what the user sees:
+- [ship-stage: <stage> | <one-line note>] when the feature moves to a stage. Stage names exactly as listed above.
+- [ship-built] when every ticket is done and the branch is pushed.
+- [ship-pr: <url>] when a pull request exists for this branch.
+- [ship-next: /ship …] the command that should run next; Consort shows it as a button. Use the short forms below.
+- [ship-spec: ${SHIP_DIR}/SPEC.md] when the spec is written. [ship-report: ${SHIP_DIR}/TEST-REPORT.md | <pass>/<total>] when the test report is written.
+- [ship-pause] when a handoff is written; [ship-resume] when resumed. [ship-feedback: user|bot|teammate] when entering Revising. [ship-review-round: N] after triggering a review round.
+
+Commands the user (and your [ship-next]) use inside this worktree, no ticket id needed: /ship (next step), /ship approve, /ship pr-loop, /ship "<feedback>", /ship pause.
+
+Rules that never bend:
+- Work in this worktree only: ${i.worktree}, branch ${i.branch}, cut from ${i.base}. The PR targets ${i.base.replace(/^origin\//, "")}. Never switch branches, never touch another checkout.
+- Feature artifacts live under ${SHIP_DIR}/ in this worktree: SPEC.md, GRILLING.md, issues/NN-slug.md, TEST-REPORT.md, HANDOFF.md, review/. They are never committed; never add ${SHIP_DIR} to git.
+- Merging a PR is the user's action. /ship never merges, never force-pushes, never amends a pushed commit.
+- Commit in the worktree as you go; a finished ticket is committed before the next one starts.
+- Never open PHI-suffixed files or member-level rows, never print .env values.
+- A step that asks the user something posts the questions, emits [phase:waiting] and ends the turn. Never answer for the user, even if a host prompt says the user is not watching; the questions are that turn's deliverable.
+- Every reply ends with the footer line, written from the state after your markers:
+  ${shipFooter(i.feature).replace(/Next: .*$/, "Next: /ship …")}
+
+Feature state now:
+- Ticket: ${ticketRef(i.feature.ticket)} "${i.feature.ticket.title}" (${i.feature.ticket.source}) ${i.feature.ticket.url}
+- Stage: ${i.feature.stage}${i.feature.paused ? " (paused)" : ""} · built: ${i.feature.built ? "yes" : "no"} · review round: ${i.feature.reviewRound ?? 0}${i.feature.feedbackFrom ? ` · feedback from: ${i.feature.feedbackFrom}` : ""}
+- PRs: ${i.feature.prs.length ? i.feature.prs.join(", ") : "none"}
+- Spec: ${i.feature.spec ?? "not written"} · Report: ${i.feature.report ?? "none"}${i.feature.tests ? ` (${i.feature.tests.pass}/${i.feature.tests.total} stories pass)` : ""}
+- Next step on record: ${i.feature.next ?? "/ship"}
+- History: ${i.feature.history.slice(-6).map((h) => `${new Date(h.at).toISOString().slice(0, 10)} ${h.stage}${h.note ? `: ${h.note}` : ""}`).join("; ") || "none"}
+${i.checks?.length ? `- Checks this repo runs: ${i.checks.join(" · ")}` : ""}`;
+
+const GRILLING = (i: ShipPromptInput) => `## This turn: Grilling — interrogate the idea to a stopping point, then write the spec
+
+The ticket's text is the idea:
+"""
+${i.ticketBody?.trim() || i.feature.ticket.title}
+"""
+
+Read ${SHIP_DIR}/GRILLING.md first if it exists: it holds the rounds so far; append this round to it. Explore the repo before asking anything a file could answer: facts are your job, decisions are the user's.
+
+Interview the user in rounds. Map the idea as a design tree: every decision branches into the decisions that hang off it. The frontier is every decision whose prerequisites are settled. Ask the whole frontier in one round, numbered, each with your recommended answer:
+
+❓ **Q1** - **<title>**: <question, with the choices when there are some>
+
+➡️ <your recommendation>
+
+Every round ends the turn: post the questions with recommendations, the footer, then [phase:waiting]. The user answers in the next message. Never write the spec in the turn that posed a round.
+
+Auto-stop: after the user has answered a round, ask yourself whether every open question has a recommendation the user would accept as written. If yes, stop and write the spec in that same turn. Hard cap: 3 rounds; in the final round the last question is always "Anything the spec must say that we have not discussed?"
+
+On stop, write ${SHIP_DIR}/SPEC.md by synthesis (no second interview), sections in this order: Problem, Solution, User stories (a long numbered list, "As a <actor>, I want <feature>, so that <benefit>"; the test report later maps to these numbers), Implementation decisions (modules, interfaces, schema, contracts; no file paths or code except a decision-carrying snippet), Testing decisions (what a good test is here, which modules, prior art in the repo), Out of scope, Open questions (only real ones), Notes. Use the repo's own vocabulary.
+Then emit [ship-spec: ${SHIP_DIR}/SPEC.md] and [ship-stage: Spec'd | Grilled in <n> round(s). Spec written.] and [ship-next: /ship]. Consort posts the spec to the ticket. Print the spec path and the footer.`;
+
+const IMPLEMENTING = (i: ShipPromptInput) => `## This turn: build it, end at "built" (pushed, draft PR, no review yet)
+
+Read ${SHIP_DIR}/SPEC.md. Read a ticket file when building it, repo convention docs when a ticket touches that area; never the whole set up front.
+
+1. Enter Implementing (once). If the stage is Spec'd: emit [ship-stage: Implementing | Tickets: <n>.] once the tickets exist.
+2. Tickets. If ${SHIP_DIR}/issues/ is empty, break SPEC.md into tracer-bullet tickets: each a narrow but complete vertical slice through every layer, demoable on its own, sized for one fresh context, with its blocking edges. Wide mechanical refactors go expand → migrate in batches → contract instead. Present the breakdown as a numbered list (title, blocked by, what it delivers) and ask whether the granularity and edges are right; end the turn with the footer and [phase:waiting] unless the user already approved a breakdown in this chat. Then write one file per ticket, ${SHIP_DIR}/issues/NN-<slug>.md, numbered in dependency order:
+   # NN: <title> / **What to build:** … / **Blocked by:** … / **Status:** ready-for-agent / - [ ] acceptance criteria.
+3. Implement, frontier by frontier, one ticket in flight in the main loop: set Status: in-progress, implement, run the repo's typecheck and tests, commit in the worktree, set Status: done. The ticket files plus the git log are the checkpoint a resumed session rebuilds from. Delegate a ticket to a background agent only when three or more ready tickets touch different packages, or a ticket is read-heavy or fully mechanical with a verify command written; brief it with pointers, and it commits to this branch.
+   If resuming: the tickets' Status lines plus \`git log --oneline -10\` give the frontier; read ${SHIP_DIR}/HANDOFF.md only if it exists.
+4. Built. When the last ticket is done and typecheck and tests are green: push the branch (\`git push -u origin ${i.branch}\`), open a draft PR against ${i.base.replace(/^origin\//, "")} with \`gh pr create --draft\` whose body summarises what was built and lists the user stories (mention the ticket: "Closes ${i.feature.ticket.source === "github" ? `#${i.feature.ticket.id}` : i.feature.ticket.url}" for GitHub), then emit [ship-built], [ship-pr: <url>] and [ship-next: /ship]. Print three lines: what was built, the branch and HEAD sha, and that the test session runs next in a fresh chat. Stop; do not run the test session in this chat.`;
+
+const TEST_SESSION = (i: ShipPromptInput) => `## This turn: the test session — prove every story, write the report, hand it to the user
+
+The build is pushed. In this order:
+1. Bring the app up the way this repo does (its README, package scripts or compose files); if it cannot run here, say so and verify by tests and code reading instead.
+2. Checks: run the repo's test suite and typecheck${i.checks?.length ? ` (${i.checks.join(", ")})` : ""}. A failure that is a bug in the build: fix, commit, push, rerun.
+3. Self-review the diff against ${i.base} on two axes, kept separate: Standards (does the code follow this repo's documented conventions and avoid the usual smells: mysterious names, duplication, feature envy, speculative generality) and Spec (does it do what SPEC.md asks, nothing missing, nothing extra). Fix blockers and high findings, commit, push; list medium and low in the report.
+4. Verify each numbered user story in SPEC.md: exercise it for real where you can (the running app, the screenshot helper for anything visual, the CLI or endpoint), otherwise by the tests that cover it. Record PASS or FAIL with a plain-words account the user can read, and evidence (a screenshot path, a command and its output).
+5. Write ${SHIP_DIR}/TEST-REPORT.md: a summary line, a table of stories (number, title, PASS/FAIL, how verified, evidence), the self-review findings kept as notes, and what to look at by hand. Emit [ship-report: ${SHIP_DIR}/TEST-REPORT.md | <pass>/<total>], [ship-stage: Ready to Test | <pass>/<total> stories pass.] and [ship-next: /ship approve].
+6. Print the summary, the report path as a clickable link, and the two commands: /ship approve, /ship "<feedback>". Footer. Stop.`;
+
+const REENTRY = (i: ShipPromptInput) => `## This turn: Ready to Test — restate where it stands
+
+Nothing runs. Read ${SHIP_DIR}/TEST-REPORT.md and print its summary block, the report path as a link, the PR link${i.feature.prs.length ? ` (${i.feature.prs[0]})` : ""}, and the two commands: /ship approve, /ship "<feedback>". Emit [ship-next: /ship approve]. Footer.`;
+
+const APPROVE = (i: ShipPromptInput) => `## This turn: approve — the tests are blessed, put the PR up for review
+
+1. Confirm the branch is pushed and the draft PR exists${i.feature.prs.length ? ` (${i.feature.prs[0]})` : " (create one with gh pr create --draft against " + i.base.replace(/^origin\//, "") + " if it does not)"}. Update the PR body from ${SHIP_DIR}/TEST-REPORT.md: what was built, the verified stories table, follow-ups.
+2. \`gh pr ready <url>\`. If the repo's automated reviewer is triggered by a comment (for example "/ai-review"), post it and emit [ship-review-round: 1].
+3. Emit [ship-pr: <url>], [ship-stage: In Review | PR ready for review.] and [ship-next: /ship pr-loop]. Print the PR link and the footer.`;
+
+const REVISING = (i: ShipPromptInput, from: "user" | "bot" | "teammate", feedback?: string) => `## This turn: Revising — gather, explain, then apply what the user approves
+
+Feedback came from: ${from}.${feedback ? `\nThe user's feedback:\n"""\n${feedback}\n"""` : ""}
+
+Motion 1, no code changes yet. Collect every item: the feedback above; comments on the ticket newer than the last stage change; unresolved PR review threads for each PR (\`gh api graphql\` on reviewThreads, keeping isResolved false). If the stage is not yet Revising emit [ship-stage: Revising | <n> item(s) gathered.] and [ship-feedback: ${from}]. Then, numbered, for each item: what was asked, what it would change, your recommendation (accept, dismiss with reason, or modify). End with the footer and [phase:waiting]. The user rules per item.
+
+Motion 2, once the user has ruled (in this chat): apply the approved items in the worktree; typecheck and test; commit and push as stacked commits. Re-verify the stories the items touched and append a "## Round N" section to ${SHIP_DIR}/TEST-REPORT.md (emit [ship-report: ${SHIP_DIR}/TEST-REPORT.md | <pass>/<total>]). For PR threads: reply on each with what was done or why not, and resolve the ones addressed; never re-request review or merge on the user's behalf. Comment on the ticket with what changed and what was dismissed.
+Return: feedback from the user → [ship-stage: Ready to Test | <what changed>] and [ship-next: /ship approve]; from a bot or teammate → [ship-stage: In Review | <what changed>] and [ship-next: /ship pr-loop]. Footer.`;
+
+const PR_LOOP = (i: ShipPromptInput) => `## This turn: In Review — one round with the reviewer
+
+1. For each PR${i.feature.prs.length ? ` (${i.feature.prs.join(", ")})` : ""}: \`gh pr view <url> --json state,mergedAt,isDraft,reviewDecision\`. Merged → follow the closeout below instead. Closed unmerged → say so and stop.
+2. Read the review: the newest automated review summary, open bot threads, teammate threads, and CI status (\`gh pr checks\`). Save the digest to ${SHIP_DIR}/review/round-${(i.feature.reviewRound ?? 0) + 1}.md. Zero open findings and green CI → go to 5.
+3. Adjudicate each bot finding against the code before writing to the user: confirmed (fix it), refuted (say why, register it where the repo's reviewer reads exceptions if it has such a file), incomplete (fix the true half, list the rest as a follow-up in the PR body). Present one numbered batch: finding, verdict, one-line evidence, planned action. Teammate threads go in a separate short list marked "yours to answer" with a proposed reply. End with the footer and [phase:waiting] for the user's go, unless the user already gave it in this chat.
+4. On go: fix as stacked commits, typecheck and test, push. Reply on every thread you acted on and resolve the ones now addressed; a teammate thread the user has not ruled on stays open. If the reviewer is re-triggered by a comment, post it and emit [ship-review-round: ${(i.feature.reviewRound ?? 0) + 1}]. Cap: 3 rounds; at the cap fix but do not re-trigger. Emit [ship-next: /ship pr-loop] and stop; the review lands later.
+5. Nothing left: say what remains open (follow-ups, teammate threads) and that merging is the user's. Emit [ship-next: /ship] (the next /ship confirms the merge). Footer.
+
+## Closeout, when the PR is merged
+1. Confirm with \`gh pr view <url> --json mergedAt,mergeCommit\`. Emit [ship-stage: Merged | Merged <sha> into <base>.]; Consort closes the ticket.
+2. If this feature taught something durable (a repo convention, a gotcha, a decision), write one memory file and index it; if nothing, say so.
+3. Final comment on the ticket: what shipped, PR links. Emit [ship-stage: Closed | Closed.] and [ship-next: none]. Say the worktree can now be removed from Consort's sidebar. Footer.`;
+
+const CLOSEOUT = (i: ShipPromptInput) => `## This turn: Merged → Closed
+
+1. Confirm the merge: \`gh pr view ${i.feature.prs[0] ?? "<url>"} --json mergedAt,mergeCommit\`. If it is not merged, say so, emit [ship-stage: In Review | Not merged yet.] and stop.
+2. If this feature taught something durable (a repo convention, a gotcha, a decision), write one memory file and index it; if nothing, say so.
+3. Final comment on the ticket: what shipped, PR links. Emit [ship-stage: Closed | Closed.] and [ship-next: none]. Say the worktree can now be removed from Consort's sidebar. Footer.`;
+
+const PAUSE = (i: ShipPromptInput) => `## This turn: pause — write a handoff a fresh session can resume from cold
+
+Gather live state, never guess: \`git branch --show-current\`, \`git log --oneline -8\`, \`git status --short\`; for each PR \`gh pr view <url> --json url,isDraft,mergeable,mergeStateStatus,reviewDecision\` and \`gh pr checks <url>\`; unresolved review threads; the ticket's latest comments.
+Write ${SHIP_DIR}/HANDOFF.md with these sections in order: One-line status; Where things stand (committed/pushed, PR and CI, what is verified); Immediate next steps and blockers; Ticket link and status; Key decisions already made, with the why; Conventions and gotchas; Memory pointers; Branch, worktree, ports; Suggested next command. Separate DONE / IN-FLIGHT / BLOCKED. Real SHAs, PR numbers, paths. Redact secrets. Point to SPEC.md, issues/ and commits rather than repeating them.
+Persist anything durable to memory first. Post the handoff as a comment on the ticket. Emit [ship-pause] and [ship-next: /ship]. Footer.`;
+
+const RESUME_PAUSED = (i: ShipPromptInput) => `## First: this feature is paused
+
+Read ${SHIP_DIR}/HANDOFF.md and restate it in three lines. Emit [ship-resume]. Then continue with the stage handler below.\n\n`;
+
+const CLOSED = () => `## This feature is closed
+
+Say so, point at the PRs and the report, and stop. Footer: Stage: Closed · Ticket: … · Next: none - feature closed`;
+
+/** which handler this turn runs, from the stage and what the command asked for */
+export function shipHandler(f: ShipFeature, form: ShipForm): string {
+  if (form.form === "pause") return "pause";
+  if (f.stage === "Closed") return "closed";
+  if (form.form === "feedback") return "revising";
+  if (f.stage === "Grilling") return "grilling";
+  if (f.stage === "Spec'd" || (f.stage === "Implementing" && !f.built)) return "implementing";
+  if (f.stage === "Implementing" && f.built && !f.report) return "test";
+  if (f.stage === "Implementing") return "reentry";
+  if (f.stage === "Ready to Test") return form.form === "approve" ? "approve" : "reentry";
+  if (f.stage === "Revising") return "revising";
+  if (f.stage === "In Review") return "pr-loop";
+  if (f.stage === "Merged") return "closeout";
+  return "reentry";
+}
+
+export function shipPrompt(i: ShipPromptInput): string {
+  const handler = shipHandler(i.feature, i.form);
+  const body =
+    handler === "pause" ? PAUSE(i)
+    : handler === "closed" ? CLOSED()
+    : handler === "grilling" ? GRILLING(i)
+    : handler === "implementing" ? IMPLEMENTING(i)
+    : handler === "test" ? TEST_SESSION(i)
+    : handler === "approve" ? APPROVE(i)
+    : handler === "revising" ? REVISING(i, i.form.form === "feedback" ? "user" : i.feature.feedbackFrom ?? "user", i.form.feedback)
+    : handler === "pr-loop" ? PR_LOOP(i)
+    : handler === "closeout" ? CLOSEOUT(i)
+    : REENTRY(i);
+  const paused = i.feature.paused && handler !== "pause" && handler !== "closed" ? RESUME_PAUSED(i) : "";
+  return `${COMMON(i)}\n\n${paused}${body}`;
+}

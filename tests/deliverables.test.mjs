@@ -11,7 +11,7 @@ test('every chat is told to keep deliverables local and away from Claude Docs', 
   // both providers get the rule through the one base prompt, and the Claude session blocks the connector's tools as well
   assert.match(agents, /const basePrompt = \(\) => \[PHASE_PROMPT, LOCAL_DELIVERABLES_PROMPT/);
   assert.equal(agents.split('basePrompt()').length - 1, 2, 'Claude prompt + Codex prompt');
-  assert.match(agents, /disallowedTools: BLOCKED_TOOLS/);
+  assert.match(agents, /disallowedTools: \[\.\.\.BLOCKED_TOOLS, \.\.\.HIDDEN_TOOLS\]/);
 });
 
 test('the block list covers the Claude Docs server and each of its tools, and nothing else', () => {

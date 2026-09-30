@@ -11,6 +11,7 @@ import type { State, Chat, Appearance, Provider } from "../shared/types";
 
 type Persisted = State & { secrets: Record<string, string> };
 const OPENROUTER_SECRET_ID = "openrouter-jev";
+const CLICKUP_SECRET_ID = "clickup-ship";
 
 const file = () => join(app.getPath("userData"), "state.json");
 const empty = (): Persisted => ({ projects: [], worktrees: [], chats: [], keys: [], secrets: {}, appearance: { theme: "dark", background: "opaque" } as Appearance });
@@ -48,7 +49,7 @@ export class Store {
     this.data.defaultKeyId = defaultConnector(this.data)?.id;
     // Every project has a permanent chat scope at its existing checkout.
     for (const p of this.data.projects) {
-      if (p.kind === "workspace") continue;
+      if (p.kind === "workspace" || p.kind === "home") continue; // a home's scope is its own root, named for the folder
       const existing = this.data.worktrees.find((w) => w.projectId === p.id && w.path === p.path);
       ensureRootWorktree(this.data.worktrees, p, existing?.branch ?? "(unknown)");
     }
@@ -62,7 +63,7 @@ export class Store {
     // what the providers last answered (main/modelDiscovery.ts); Codex also keeps its own catalog on disk; the seed list when neither has spoken
     const catalog = (p: Provider) => this.data.modelCatalog?.[p]?.models ?? [];
     const claude = catalog("claude");
-    return { ...rest, openRouterConfigured: !!this.data.secrets[OPENROUTER_SECRET_ID], models: { codex: [...new Set([...catalog("codex"), ...codexModels(this.data.keys)])], claude: claude.length ? claude : MODELS.claude } };
+    return { ...rest, openRouterConfigured: !!this.data.secrets[OPENROUTER_SECRET_ID], clickUpConfigured: !!this.data.secrets[CLICKUP_SECRET_ID], models: { codex: [...new Set([...catalog("codex"), ...codexModels(this.data.keys)])], claude: claude.length ? claude : MODELS.claude } };
   }
 
   onChange(cb: (s: State) => void) {
@@ -104,6 +105,17 @@ export class Store {
 
   getOpenRouterKey() {
     return this.getSecret(OPENROUTER_SECRET_ID);
+  }
+
+  setClickUpKey(key: string) {
+    const value = key.trim();
+    if (!value) delete this.data.secrets[CLICKUP_SECRET_ID];
+    else this.setSecret(CLICKUP_SECRET_ID, value);
+    this.save();
+  }
+
+  getClickUpKey() {
+    return this.getSecret(CLICKUP_SECRET_ID);
   }
 }
 
