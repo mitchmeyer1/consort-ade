@@ -7,11 +7,12 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { Api, Finding, FindingStatus, Review, Worktree } from "../../shared/types";
 import { CATEGORIES, CATEGORY_LABELS, EVENT_LABELS, REVIEW_EVENTS, SEVERITIES, SEVERITY_LABELS, allDecided, approvedFindings, groupFindings, queueableFindings, reviewCounts, suggestedEvent, verifiedHead, type Category, type ReviewEvent, type Severity } from "../../shared/review";
+import { runtimeLine } from "../../shared/deployProfile.ts";
 import { toasts } from "../../shared/toasts";
 
 const ade = (window as any).ade as Api;
 const Ico = ({ n }: { n: string }) => <i className={`ico ico-${n}`} aria-hidden />;
-const CATEGORY_ICONS: Record<Category, string> = { logic: "celtic", redundant: "grapes", style: "fleur", tests: "chalice", comments: "quill" };
+const CATEGORY_ICONS: Record<Category, string> = { logic: "celtic", redundant: "grapes", style: "fleur", tests: "chalice", comments: "quill", scaling: "vase" };
 const SEV: Record<Severity, string> = { critical: "crit", high: "high", medium: "med", low: "low" };
 const short = (sha?: string | null) => (sha ?? "").slice(0, 7);
 const STATUS_LABEL: Record<FindingStatus, string> = { pending: "undecided", approved: "queued", commented: "posted", ignored: "ignored", dropped: "dropped", fixing: "fixing locally" };
@@ -182,6 +183,8 @@ export function ReviewView({ worktree, path }: { worktree: Worktree; path: strin
         {decision && <span>review <b>{decision}</b></span>}
         {review.ci && <span>CI <b>{review.ci.status}</b></span>}
         {review.repo && <span>repo <b>{review.repo}</b></span>}
+        {/* the ceilings the Scaling findings were measured against, so the reader can check the arithmetic */}
+        {review.deploy && <span title={[review.deploy.summary, ...review.deploy.runtimes.map(runtimeLine)].filter(Boolean).join("\n")}>runs on <b>{review.deploy.platform}</b></span>}
       </div>
       {moved && <div className="rv-banner">
         The PR has new commits since this review (now <b>{short(drift!.head)}</b>).

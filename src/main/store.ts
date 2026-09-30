@@ -7,7 +7,7 @@ import { MODELS } from "../shared/types";
 import { ensureRootWorktree } from "./rootWorktree";
 import { migrateQuickActions } from "../shared/quickActions";
 import { recoverBenignCodexFailure } from "../shared/codexDiagnostics";
-import type { State, Chat, Appearance } from "../shared/types";
+import type { State, Chat, Appearance, Provider } from "../shared/types";
 
 type Persisted = State & { secrets: Record<string, string> };
 const OPENROUTER_SECRET_ID = "openrouter-jev";
@@ -41,10 +41,10 @@ export class Store {
       if (legacy && c.remindAt === undefined) { c.remindAt = legacy; delete (c as Chat & { remindedAt?: number }).remindedAt; }
       c.permissions = [];
     }
-    for (const k of this.data.keys) { k.phiAllowed ??= false; k.auth ??= this.data.secrets[k.id] ? "key" : "login"; }
+    for (const k of this.data.keys) { k.auth ??= this.data.secrets[k.id] ? "key" : "login"; }
     // the CLI logins are always-present connectors; API keys are added on top
     for (const [id, provider, name] of [["login-codex", "codex", "Codex CLI login"], ["login-claude", "claude", "Claude Code login"]] as const)
-      if (!this.data.keys.some((k) => k.id === id)) this.data.keys.unshift({ id, provider, name, phiAllowed: false, auth: "login" });
+      if (!this.data.keys.some((k) => k.id === id)) this.data.keys.unshift({ id, provider, name, auth: "login" });
     this.data.defaultKeyId = defaultConnector(this.data)?.id;
     // Every project has a permanent chat scope at its existing checkout.
     for (const p of this.data.projects) {
@@ -59,8 +59,10 @@ export class Store {
 
   public(): State {
     const { secrets: _s, ...rest } = this.data;
-    // Codex keeps its own catalog on disk; Claude's list is whatever the CLI last reported, else the seed
-    return { ...rest, openRouterConfigured: !!this.data.secrets[OPENROUTER_SECRET_ID], models: { codex: codexModels(this.data.keys), claude: this.data.modelCatalog?.claude?.models?.length ? this.data.modelCatalog.claude.models : MODELS.claude } };
+    // what the providers last answered (main/modelDiscovery.ts); Codex also keeps its own catalog on disk; the seed list when neither has spoken
+    const catalog = (p: Provider) => this.data.modelCatalog?.[p]?.models ?? [];
+    const claude = catalog("claude");
+    return { ...rest, openRouterConfigured: !!this.data.secrets[OPENROUTER_SECRET_ID], models: { codex: [...new Set([...catalog("codex"), ...codexModels(this.data.keys)])], claude: claude.length ? claude : MODELS.claude } };
   }
 
   onChange(cb: (s: State) => void) {

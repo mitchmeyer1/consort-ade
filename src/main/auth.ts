@@ -1,18 +1,16 @@
-import { app } from "electron";
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { promisify } from "node:util";
 import { store } from "./store";
+import { cliBinary } from "./cliRuntime";
 import type { ApiKey } from "../shared/types";
 
 const run = promisify(execFile);
 
-// bundled CLIs from the hoisted node_modules so the packaged app carries them; PATH / ~/.local/bin as fallback
-const nm = (rel: string) => { const p = join(app.getAppPath(), "node_modules", rel); return existsSync(p) ? p : undefined; };
-export const claudeBin = () => nm("@anthropic-ai/claude-agent-sdk-darwin-arm64/claude") ?? join(process.env.HOME ?? "", ".local/bin/claude");
-export const codexBin = () => nm("@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex") ?? "codex";
+// the CLIs Consort runs: a release it downloaded when newer, else the one bundled in the app (main/cliRuntime.ts); PATH / ~/.local/bin as a last resort
+export const claudeBin = () => cliBinary("claude") ?? join(process.env.HOME ?? "", ".local/bin/claude");
+export const codexBin = () => cliBinary("codex") ?? "codex";
 
 // Each CLI keeps credentials in a home directory chosen by an env var, so one machine can hold several logins.
 export const CONFIG_ENV = { claude: "CLAUDE_CONFIG_DIR", codex: "CODEX_HOME" } as const;

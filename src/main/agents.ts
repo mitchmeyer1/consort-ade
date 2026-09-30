@@ -8,7 +8,9 @@ import { Codex } from "@openai/codex-sdk";
 import { store } from "./store";
 import { startAgentBrowser } from "./agentBrowser";
 import { agentEnvironment, isInstallCommand, TESTING_PROMPT } from "./agentEnvironment";
-import { loginEnv } from "./auth";
+import { claudeBin, codexBin, loginEnv } from "./auth";
+import { updateCli } from "./cliRuntime";
+import { CLI_NAMES, cliUpdateNeeded } from "../shared/cliUpdates";
 import { PHASES, type Chat, type Block, type Phase, type PermissionRequest } from "../shared/types";
 import { advancePlan, finishPlan, parsePlan, PLAN_MARKER, startPlan, STEP_MARKER } from "../shared/planProgress";
 import { completeFeatureItems, FEATURE_CLEAR_MARKER, FEATURE_DONE_MARKER, FEATURE_MARKER, FEATURE_NOW_MARKER, FEATURE_PROMPT, featureComplete, featureSummary, focusFeatureItem, parseFeature, startFeature } from "../shared/featureProgress";
@@ -32,31 +34,11 @@ When the task changes code, data or configuration, or produces something that ca
 
 ${FEATURE_PROMPT}
 
-${FOLLOWUP_PROMPT}
-
-${AUTOPILOT_SUGGESTION_PROMPT}`;
+${FOLLOWUP_PROMPT}`;
+// Autopilot exists only once an OpenRouter key is saved; until then the agent is not told to suggest it
+const autopilotAvailable = () => { try { return !!store.getOpenRouterKey?.(); } catch { return false; } };
+const basePrompt = () => [PHASE_PROMPT, LOCAL_DELIVERABLES_PROMPT, ...(autopilotAvailable() ? [AUTOPILOT_SUGGESTION_PROMPT] : [])].join("\n\n");
 const PROGRESS_MARKER = /\[(?:steps:(3|5)|phase:(waiting|planning|executing|validating|complete))\]\s*/g;
-
-const PHI_MARKER = /\[phi-required\]\s*/g;
-const phiPrompt = (allowed: boolean) =>
-  allowed
-    ? "This chat's API key IS approved for PHI (protected health information)."
-    : `This chat's API key is NOT approved for PHI. PHI mode is controlled manually by the user. Do not infer or change PHI mode from message keywords or attachment types.`;
-
-export function setPhiMode(chat: Chat, on: boolean, reason?: string) {
-  const cur = store.data.keys.find((k) => k.id === chat.keyId);
-  if (!!cur?.phiAllowed === on) return true;
-  const next = store.data.keys.find((k) => k.provider === chat.provider && k.phiAllowed === on);
-  const note = next
-    ? `PHI mode ${on ? "on" : "off"} — switched to key "${next.name}"${reason ? ` (${reason})` : ""}.`
-    : `No ${on ? "PHI-approved" : "non-PHI"} ${chat.provider} key configured — add one in Settings.`;
-  if (next) {
-    if (chat.sessionId) chat.sessionKeyId ??= chat.keyId;
-    chat.keyId = next.id;
-  }
-  chat.messages.push({ id: randomUUID(), role: "system", blocks: [{ type: "text", text: note }], ts: Date.now() });
-  return !!next;
-}
 
 // copy uploads into the worktree so the agent can Read them; keep them out of git
 function stageFiles(cwd: string, files: string[]) {
@@ -336,11 +318,20 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
         text = `Autopilot could not start: ${(error as Error).message}. Do not attempt desktop control this turn.\n\n${text}`;
       }
     }
-    if (chat.provider === "claude") {
-      text = boundedPrompt(cwd, text);
-      await runClaude(chat, cwd, apiKey, text, ac, ui);
+    if (chat.provider === "claude") text = boundedPrompt(cwd, text);
+    // a CLI too old for the model is fetched and the turn run again, once (shared/cliUpdates.ts)
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (chat.provider === "claude") await runClaude(chat, cwd, apiKey, text, ac, ui);
+      else await runCodex(chat, cwd, apiKey, text, ac, ui);
+      const need = cliUpdateNeeded(chat.error, chat.provider);
+      if (!need || attempt || ac.signal.aborted) break;
+      const updated = await updateCli(chat.provider, need).catch(() => false);
+      if (!updated || ac.signal.aborted) break;
+      chat.messages.push({ id: randomUUID(), role: "system", blocks: [{ type: "text", text: `${need.reason} ${CLI_NAMES[chat.provider]} was updated; retrying.` }], ts: Date.now() });
+      chat.error = undefined;
+      ui.newMessage();
+      store.save();
     }
-    else await runCodex(chat, cwd, apiKey, text, ac, ui);
     // a finished turn that isn't asking the user anything is complete, whatever steps it skipped
     if (!chat.error && !ac.signal.aborted && (chat.assessingPrompt || (chat.phase as Phase) !== "waiting")) chat.phase = "complete";
   } catch (e) {
@@ -434,7 +425,7 @@ class Transcript {
       }
       if (FEATURE_CLEAR_MARKER.test(b.text)) this.chat.feature = undefined;
       FEATURE_CLEAR_MARKER.lastIndex = 0;
-      b.text = b.text.replace(PROGRESS_MARKER, "").replace(PLAN_MARKER, "").replace(STEP_MARKER, "").replace(PHI_MARKER, "")
+      b.text = b.text.replace(PROGRESS_MARKER, "").replace(PLAN_MARKER, "").replace(STEP_MARKER, "")
         .replace(FEATURE_MARKER, "").replace(FEATURE_DONE_MARKER, "").replace(FEATURE_NOW_MARKER, "").replace(FEATURE_CLEAR_MARKER, "");
     }
     const m = this.assistant();
@@ -465,12 +456,14 @@ async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, 
     prompt: text,
     options: {
       cwd,
+      // resolved per turn, so a CLI downloaded mid-session runs the next turn (main/cliRuntime.ts)
+      pathToClaudeCodeExecutable: claudeBin(),
       model: chat.model,
       resume: chat.sessionId,
       abortController: ac,
       includePartialMessages: true,
       settingSources: ["user", "project", "local"],
-      systemPrompt: { type: "preset", preset: "claude_code", append: withInstructions(`${PHASE_PROMPT}\n\n${LOCAL_DELIVERABLES_PROMPT}\n\n${phiPrompt(keyAllowsPhi(chat))}`, store.data.instructions) },
+      systemPrompt: { type: "preset", preset: "claude_code", append: withInstructions(basePrompt(), store.data.instructions) },
       // hosted docs are never a deliverable here (see shared/deliverables); block the connector outright, whatever the account has enabled
       disallowedTools: BLOCKED_TOOLS,
       env: agentEnvironment(cwd, { ...envWithout("ANTHROPIC_API_KEY"), ...loginEnv(keyOf(chat)), ...dockerRunEnvironment(chat.id), ...delegateModelEnv(chat), ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}) }),
@@ -543,12 +536,12 @@ async function runClaude(chat: Chat, cwd: string, apiKey: string, text: string, 
 
 async function runCodex(chat: Chat, cwd: string, apiKey: string, text: string, ac: AbortController, ui: Transcript) {
   chat.sessionKeyId = chat.keyId;
-  const codex = new Codex({ ...(apiKey ? { apiKey } : {}), env: agentEnvironment(cwd, { ...envWithout("OPENAI_API_KEY"), ...loginEnv(keyOf(chat)), ...dockerRunEnvironment(chat.id) }) });
+  const codex = new Codex({ ...(apiKey ? { apiKey } : {}), codexPathOverride: codexBin(), env: agentEnvironment(cwd, { ...envWithout("OPENAI_API_KEY"), ...loginEnv(keyOf(chat)), ...dockerRunEnvironment(chat.id) }) });
   const opts = { ...(chat.model ? { model: chat.model } : {}), workingDirectory: cwd, skipGitRepoCheck: true, sandboxMode: "workspace-write" as const, networkAccessEnabled: true, approvalPolicy: "never" as const };
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
     const thread = chat.sessionId ? codex.resumeThread(chat.sessionId, opts) : codex.startThread(opts);
-    const prompt = boundedPrompt(cwd, `${withInstructions(`${PHASE_PROMPT}\n\n${LOCAL_DELIVERABLES_PROMPT}\n\n${phiPrompt(keyAllowsPhi(chat))}`, store.data.instructions)}\n\n${text}`);
+    const prompt = boundedPrompt(cwd, `${withInstructions(basePrompt(), store.data.instructions)}\n\n${text}`);
     const { events } = await thread.runStreamed(prompt, { signal: ac.signal });
     for await (const ev of events) {
       if (ev.type === "thread.started") chat.sessionId = ev.thread_id;
@@ -581,7 +574,6 @@ async function runCodex(chat: Chat, cwd: string, apiKey: string, text: string, a
 
 const envWithout = (k: string) => { const { [k]: _drop, ...rest } = process.env; return rest; };
 const keyOf = (chat: Chat) => store.data.keys.find((k) => k.id === chat.keyId);
-const keyAllowsPhi = (chat: Chat) => !!keyOf(chat)?.phiAllowed;
 const pretty = (json: string) => {
   try {
     return JSON.stringify(JSON.parse(json), null, 2);

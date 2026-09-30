@@ -4,6 +4,7 @@ import { canRestore, scrollKey, scrollMemory } from "../../shared/scrollMemory";
 import { PhaseStrip } from "./PhaseStrip";
 import { defaultConnector, selectedModel } from "../../shared/defaultConnector";
 import { byCapability, modelTiers, rankModel } from "../../shared/modelTiers";
+import { cliSummary, type CliStatus } from "../../shared/cliUpdates";
 import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { lastPrompt } from "../../shared/lastPrompt";
 import { connectorAccess, formatAge, formatReset, modelBlock, usageTone, type ConnectorUsage } from "../../shared/usage";
@@ -15,6 +16,7 @@ import { recentChats, recentWorktrees } from "../../shared/conversationOrder";
 import { Lockup, Mark } from "./Logo";
 import { artifactLinkAction, artifactLinks, artifactWhen, chatArtifacts, localImageTarget, messageArtifacts, withFrameScrollbars, codeSpanArtifact } from "../../shared/artifacts";
 import { parseFollowups, type Followup } from "../../shared/followups";
+import { historyStep, promptHistory, type HistoryNav } from "../../shared/promptHistory";
 import { isScratch, scratchChats } from "../../shared/scratch";
 import type { Instruction } from "../../shared/instructions";
 import { isWorkspace, reposForPr, reposToCommit, slugify, workspaceSummary } from "../../shared/workspace";
@@ -418,7 +420,7 @@ export function App() {
           </div>
         </div>
         {chat ? (
-          <ChatPane key={chat.id} chat={chat} worktree={worktree} keys={state.keys} models={state.models} perms={perms.filter((p) => p.chatId === chat.id)} ptys={ptys} answer={answer} reviewFile={reviewFile} onOpenReview={() => setTab("review")} onOpenMd={(target) => { if (worktree) ade.artifactMenu(worktree.id, target).then((action) => { if (action === "open") openMd(target); }).catch((e) => alert(e.message)); }} />
+          <ChatPane key={chat.id} chat={chat} worktree={worktree} keys={state.keys} models={state.models} openRouterConfigured={state.openRouterConfigured} perms={perms.filter((p) => p.chatId === chat.id)} ptys={ptys} answer={answer} reviewFile={reviewFile} onOpenReview={() => setTab("review")} onOpenMd={(target) => { if (worktree) ade.artifactMenu(worktree.id, target).then((action) => { if (action === "open") openMd(target); }).catch((e) => alert(e.message)); }} />
         ) : wsProject && wsWorktree ? (
           <WorkspacePage key={wsProject.id} project={wsProject} wt={wsWorktree} state={state} openForm={!!(sel && "form" in sel && sel.form)} onRunAction={runQuickAction} onSelect={setSel} />
         ) : worktree ? (
@@ -748,9 +750,9 @@ function ReviewDialog({ pr, state, onClose, onStart }: { pr: RepoInfo["prs"][num
     </>}>
       <p className="m">{pr.title}</p>
       <div className="two">
-        <Field label="Connector" info="PHI-approved keys are marked">
+        <Field label="Connector">
           <select value={keyId} onChange={(e) => setKeyId(e.target.value)}>
-            {state.keys.map((k) => <option key={k.id} value={k.id}>{k.provider}: {k.name}{k.phiAllowed ? " · PHI" : ""}</option>)}
+            {state.keys.map((k) => <option key={k.id} value={k.id}>{k.provider}: {k.name}</option>)}
           </select>
         </Field>
         <Field label="Model" info="Runs the review; the agents it dispatches use the next tier down">
@@ -1551,9 +1553,9 @@ function NewChatForm({ wt, scratch, state, onClose, onDone }: { wt?: Worktree; s
       <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} autoFocus placeholder={scratch ? "What is this about?" : undefined} /></Field>
       {scratch && <p className="m">Not on any code. The chat gets a private folder to work out of if it needs one; every connector and model is available.</p>}
       <div className="two">
-        <Field label="Key" info="PHI-approved keys are marked">
+        <Field label="Key">
           <select value={keyId} onChange={(e) => setKeyId(e.target.value)}>
-            {state.keys.map((k) => <option key={k.id} value={k.id}>{k.provider}: {k.name}{k.phiAllowed ? " · PHI" : ""}</option>)}
+            {state.keys.map((k) => <option key={k.id} value={k.id}>{k.provider}: {k.name}</option>)}
           </select>
         </Field>
         <Field label="Model">
@@ -1884,7 +1886,7 @@ function AgentPicker({ chat, keys, models }: { chat: Chat; keys: State["keys"]; 
           <div className="agent-picker-caption">{providerName(provider)}</div>
           {keys.filter((k) => k.provider === provider).map((k) => {
             const access = connectorAccess(usage[k.id], modelOptions({ models }, provider));
-            return <button className={optionClass(access.level)} key={k.id} title={access.reason} onClick={() => setSelected(k.id)} aria-pressed={k.id === chat.keyId}><span>{k.name}{k.phiAllowed ? " · PHI" : ""}</span><span aria-hidden="true">›</span></button>;
+            return <button className={optionClass(access.level)} key={k.id} title={access.reason} onClick={() => setSelected(k.id)} aria-pressed={k.id === chat.keyId}><span>{k.name}</span><span aria-hidden="true">›</span></button>;
           })}
           {!keys.some((k) => k.provider === provider) && <div className="agent-picker-caption">Add a connection in Settings</div>}
         </React.Fragment>)}
@@ -1995,7 +1997,11 @@ function SideChatPane({ chat }: { chat: Chat }) {
   );
 }
 
-function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFile, onOpenReview, onOpenMd }: { chat: Chat; worktree?: Worktree; keys: State["keys"]; models: State["models"]; perms: PermissionRequest[]; ptys: PtyState[]; answer: (id: string, ok: boolean) => void; reviewFile: ReviewFile | null; onOpenReview: () => void; onOpenMd: (p: string) => void }) {
+// what the two composer switches do, on the label's help cursor
+const AUTOPILOT_HELP = "Lets this chat see your screen and click, type and switch between visible macOS apps to finish a task in another app. The Jev navigator drives it through your OpenRouter key. Off by default; turn it on for one task and off again after.";
+const AUTO_APPROVE_HELP = "Runs every tool call without asking: shell commands, file edits, git, installs. Off by default, so the chat asks before each action that needs permission. Turn on for long unattended work you trust.";
+
+function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFile, onOpenReview, onOpenMd, openRouterConfigured }: { chat: Chat; worktree?: Worktree; keys: State["keys"]; models: State["models"]; perms: PermissionRequest[]; ptys: PtyState[]; answer: (id: string, ok: boolean) => void; reviewFile: ReviewFile | null; onOpenReview: () => void; onOpenMd: (p: string) => void; openRouterConfigured?: boolean }) {
   // the chat's own terminal is on screen whenever the chat is, so a finished command there is seen at once
   const composerDone = !!worktree && !!ptys.find((p) => p.id === `${worktree.id}:composer-${chat.id}`)?.done;
   const [errorDetails, setErrorDetails] = useState<string>();
@@ -2091,6 +2097,7 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
   const send = () => {
     if (commit) { if (text.trim() || !commit.typed) fireCommit(text.trim() || undefined); return; }
     if (!text.trim() && !files.length) return;
+    setNav(null);
     chatDrafts.submit(chat.id, (draft) => ade.send(chat.id, draft.text.trim() || "See attached files.", draft.files)).catch((e) => alert(e.message));
     jump();
   };
@@ -2100,6 +2107,22 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
   const addFiles = (paths: string[]) => setFiles((f) => [...new Set([...f, ...paths])]);
   const onDrop = async (e: React.DragEvent) => { e.preventDefault(); setOver(false); addFiles(await filesFromTransfer(e.dataTransfer)); };
   const onPaste = async (e: React.ClipboardEvent) => { if ([...e.clipboardData.items].some((i) => i.kind === "file")) { e.preventDefault(); addFiles(await filesFromTransfer(e.clipboardData)); } };
+  // ↑/↓ in the box walk the prompts already sent, as a shell walks its history
+  const history = React.useMemo(() => promptHistory(chat.messages), [chat.messages]);
+  const [nav, setNav] = useState<HistoryNav>(null);
+  useEffect(() => { setNav(null); }, [commit]);
+  const stepHistory = (input: HTMLTextAreaElement, key: "up" | "down") => {
+    if (commit) return false;
+    const step = historyStep(key, { nav, value: input.value, caret: input.selectionStart ?? 0, history });
+    if (!step.handled) return false;
+    if (step.text !== undefined) {
+      setNav(step.nav ?? null);
+      setText(step.text);
+      // the controlled value lands on the next render, so the caret goes to the end after it
+      requestAnimationFrame(() => { const el = box.current; if (el) el.setSelectionRange(el.value.length, el.value.length); });
+    }
+    return true;
+  };
   const recall = lastPrompt(chat);
   // the recall chip repeats the last prompt; while that bubble is itself on screen the chip would only cover it
   const [recallHidden, setRecallHidden] = useState(true);
@@ -2184,9 +2207,8 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
             {chat.running && <button className="commitbtn stopbtn" title="Stop this chat" onClick={() => ade.stop(chat.id)}><span className="stop-square" aria-hidden="true" />Stop</button>}
             {chatStatus(chat) === "running" && <div className="composer-working" role="status"><span className="working-circle" aria-hidden="true" />Working…</div>}
           </span>
-          <label title="Let this chat observe and control visible macOS apps"><input type="checkbox" checked={!!chat.autopilot} onChange={(e) => ade.setAutopilot(chat.id, e.target.checked).catch((e) => alert(e.message))} /> Autopilot</label>
-          <label><input type="checkbox" checked={chat.autoApprove} onChange={(e) => ade.setAutoApprove(chat.id, e.target.checked).catch((e) => alert(e.message))} /> Auto-approve</label>
-          <label title="Use a PHI-approved key for this chat"><input type="checkbox" checked={!!keys.find((k) => k.id === chat.keyId)?.phiAllowed} onChange={(e) => ade.setPhiMode(chat.id, e.target.checked).catch((e) => alert(e.message))} /> PHI mode</label>
+          {openRouterConfigured && <label><input type="checkbox" checked={!!chat.autopilot} onChange={(e) => ade.setAutopilot(chat.id, e.target.checked).catch((e) => alert(e.message))} /> <span className="help" title={AUTOPILOT_HELP}>Autopilot</span></label>}
+          <label><input type="checkbox" checked={chat.autoApprove} onChange={(e) => ade.setAutoApprove(chat.id, e.target.checked).catch((e) => alert(e.message))} /> <span className="help" title={AUTO_APPROVE_HELP}>Auto-approve</span></label>
         </div>
         {side && worktree && <SideChatPane chat={chat} />}
         {code && worktree && <div className="composer-terminal card">
@@ -2196,12 +2218,16 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
           <textarea ref={box} value={text} rows={1} onChange={(e) => {
             const input = e.currentTarget;
             setText(input.value);
+            setNav(null); // typing leaves history: the next ↑ starts again at the newest prompt
             if (commit && !commit.typed && input.value) setCommit({ ...commit, typed: true });
             // The native input event fires before the controlled value has been committed.
             requestAnimationFrame(() => resizeComposer(input));
           }} placeholder={placeholder}
             onKeyDown={(e) => {
               if (e.key === "Escape" && commit) { e.preventDefault(); setCommit(null); setCommitText(""); return; }
+              if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !e.shiftKey && !e.metaKey && !e.altKey && !e.nativeEvent.isComposing) {
+                if (stepHistory(e.currentTarget, e.key === "ArrowUp" ? "up" : "down")) { e.preventDefault(); return; }
+              }
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); }
             }} />
           <div className="cbar">
@@ -2210,7 +2236,7 @@ function ChatPane({ chat, worktree, keys, models, perms, ptys, answer, reviewFil
             </button>
             <AgentPicker key={chat.id} chat={chat} keys={keys} models={models} />
             <span className="grow" />
-            <span className="m hint">{commit ? "↩ commit + push · esc cancel" : chat.running ? "↩ queue · ⇧↩ newline" : "↩ send · ⇧↩ newline"}</span>
+            <span className="m hint">{commit ? "↩ commit + push · esc cancel" : `${chat.running ? "↩ queue" : "↩ send"} · ⇧↩ newline${!text && history.length ? " · ↑ history" : ""}`}</span>
             <button className="icon enter" title={commit ? "Commit and push (↩)" : chat.running ? "Queue message (↩)" : "Send (↩)"} disabled={commit ? (commit.typed && !text.trim()) : (!text.trim() && !files.length)} onClick={send}>
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19V5" /><path d="M6 11l6-6 6 6" /></svg>
             </button>
@@ -2620,6 +2646,32 @@ type AuthState = { loggedIn: boolean; detail: string };
  * One connector: who it is, how much of its plan is used, and its switches. CLI logins carry
  * plan meters; API keys are billed per token and say so instead of showing bars.
  */
+/**
+ * The Claude Code and Codex binaries the connectors run on. Consort bundles one of each and
+ * downloads a newer release itself when a provider needs it (main/cliRuntime.ts); this shows
+ * which is in use and lets the fetch be asked for by hand.
+ */
+function CliRuntimes() {
+  const [status, setStatus] = useState<CliStatus[]>([]);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { ade.cliStatus().then(setStatus, () => {}); }, []);
+  const update = async () => {
+    if (busy) return;
+    setBusy(true);
+    try { setStatus(await ade.updateClis()); } catch (e) { alert((e as Error).message); }
+    finally { setBusy(false); }
+  };
+  return <div className="cli-runtimes">
+    <div className="conn-note">CLI runtimes. A newer release than the bundled one is fetched on start, daily, and when a model needs it.</div>
+    {status.map((s) => <div className="conn-sub" key={s.provider}>
+      <span className={`dot ${s.source === "missing" ? "" : "ok"}`} aria-hidden />
+      <span>{cliSummary(s)}</span>
+      {s.note && <span className="m" title={s.note}>· {s.note}</span>}
+    </div>)}
+    <button className="tog" disabled={busy} onClick={update}>{busy ? "Checking…" : "Check for CLI updates"}</button>
+  </div>;
+}
+
 function Connector({ k, isDefault, status, usage, now, onSignIn, onRename, onRefresh }: {
   k: State["keys"][number]; isDefault: boolean; status?: AuthState; usage?: ConnectorUsage; now: number;
   onSignIn: () => void; onRename: () => void; onRefresh: () => void;
@@ -2648,7 +2700,6 @@ function Connector({ k, isDefault, status, usage, now, onSignIn, onRename, onRef
       <Meters usage={usage} signedOut={!!signedOut} now={now} />
       <div className="conn-foot">
         <button className={"tog " + (isDefault ? "on" : "")} aria-pressed={isDefault} title="Used for PR reviews and as the connector new chats start with" onClick={() => !isDefault && ade.setDefaultKey(k.id).catch((e) => alert(e.message))}>Default</button>
-        <button className={"tog " + (k.phiAllowed ? "on" : "")} aria-pressed={k.phiAllowed} title="Approved for protected health information" onClick={() => ade.setKeyPhi(k.id, !k.phiAllowed)}>PHI allowed</button>
         <span className="conn-age">
           {signedOut || usage?.unavailable ? "" : usage ? `usage ${formatAge(usage.at, now)}` : "checking usage…"}
           {login && <button className="icon" title="Refresh sign-in state and usage" aria-label={`Refresh ${k.name}`} onClick={onRefresh}>↻</button>}
@@ -2783,7 +2834,6 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
   const [provider, setProvider] = useState<"claude" | "codex">("claude");
   const [key, setKey] = useState("");
   const [auth, setAuth] = useState<"login" | "key">("key");
-  const [phi, setPhi] = useState(false);
   const [status, setStatus] = useState<Record<string, AuthState>>({});
   const [usage, setUsage] = useState<Record<string, ConnectorUsage>>({});
   const [now, setNow] = useState(Date.now());
@@ -2815,8 +2865,8 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(t); }, []);
   const add = async () => {
     const n = state.keys.filter((k) => k.provider === provider && k.auth === "login").length + 1;
-    await ade.addKey(name || (auth === "login" ? `${provider === "claude" ? "Claude Code" : "Codex CLI"} login ${n}` : provider), provider, auth === "key" ? key : "", phi, auth).catch((e) => alert(e.message));
-    setName(""); setKey(""); setPhi(false); setAdding(false);
+    await ade.addKey(name || (auth === "login" ? `${provider === "claude" ? "Claude Code" : "Codex CLI"} login ${n}` : provider), provider, auth === "key" ? key : "", auth).catch((e) => alert(e.message));
+    setName(""); setKey(""); setAdding(false);
   };
   return (
     <>
@@ -2830,9 +2880,11 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
             onSignIn={() => onSignIn(k.id)} onRename={() => setRenaming({ id: k.id, name: k.name })} onRefresh={() => { refreshStatus(); refreshUsage(true, k.id); }} />
         ))}
         {!state.keys.length && <div className="conn-note">No connectors yet.</div>}
+        <CliRuntimes />
       </SettingsSection>
       <SettingsSection icon="butterfly" title="OpenRouter navigator" count={state.openRouterConfigured ? 1 : 0} initialOpen={false}>
-        <div className="conn-note">One dedicated OpenRouter API key for Jev-powered Autopilot navigation. It is encrypted via macOS Keychain and is never used as a chat connector.</div>
+        <div className="conn-note">Adding an OpenRouter key turns on Autopilot: an Autopilot switch appears in every chat, and a chat with it on can see your screen and click, type and switch between visible macOS apps to finish a task in another app. The Jev navigator model does that driving, billed to this key. Without a key the switch is not shown and nothing can control your desktop.</div>
+        <div className="conn-note">The key is used only for that. It is encrypted in the macOS Keychain and is never used as a chat connector.</div>
         <div className="conn-sub" style={{ marginBottom: 10 }}>
           <span className={`dot ${state.openRouterConfigured ? "ok" : ""}`} aria-hidden />
           <span>{state.openRouterConfigured ? "Jev navigator configured" : "Jev navigator not configured"}</span>
@@ -2891,18 +2943,15 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
               </div>
             </Field>
           </div>
-          <Field label="Label" optional><input placeholder={auth === "login" ? `e.g. ${provider} work account` : "e.g. claude-phi"} value={name} onChange={(e) => setName(e.target.value)} autoFocus /></Field>
+          <Field label="Label" optional><input placeholder={auth === "login" ? `e.g. ${provider} work account` : "e.g. claude billing key"} value={name} onChange={(e) => setName(e.target.value)} autoFocus /></Field>
           <div className="m">{auth === "login"
             ? "Adds another CLI login for this provider with its own credentials, so you can sign in to a second account (say, work and personal) and pick one per chat. The original login keeps the CLI's default sign-in. After adding it, press Sign in to run the login in a terminal tab."
-            : "Adds a separate API key, billed per token, e.g. for PHI-approved billing. It has no plan limits, so no usage meters."}</div>
+            : "Adds a separate API key, billed per token. It has no plan limits, so no usage meters."}</div>
           {auth === "key" && (
             <Field label="Key" info="Encrypted at rest via macOS keychain.">
               <input type="password" placeholder="sk-…" value={key} onChange={(e) => setKey(e.target.value)} />
             </Field>
           )}
-          <Field label="Compliance" info="Marks this connector as approved for PHI. Change PHI mode manually in the chat.">
-            <label className="check"><input type="checkbox" checked={phi} onChange={(e) => setPhi(e.target.checked)} /> PHI allowed</label>
-          </Field>
         </Dialog>
       )}
     </>

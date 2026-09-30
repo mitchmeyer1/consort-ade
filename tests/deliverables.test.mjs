@@ -8,8 +8,9 @@ test('every chat is told to keep deliverables local and away from Claude Docs', 
   assert.match(LOCAL_DELIVERABLES_PROMPT, /Never create, update or read Claude Docs/);
   assert.match(LOCAL_DELIVERABLES_PROMPT, /Artifacts drawer/);
   const agents = readFileSync(new URL('../src/main/agents.ts', import.meta.url), 'utf8');
-  // both providers get the rule, and the Claude session blocks the connector's tools as well
-  assert.equal(agents.split('LOCAL_DELIVERABLES_PROMPT').length - 1, 3, 'import + Claude prompt + Codex prompt');
+  // both providers get the rule through the one base prompt, and the Claude session blocks the connector's tools as well
+  assert.match(agents, /const basePrompt = \(\) => \[PHASE_PROMPT, LOCAL_DELIVERABLES_PROMPT/);
+  assert.equal(agents.split('basePrompt()').length - 1, 2, 'Claude prompt + Codex prompt');
   assert.match(agents, /disallowedTools: BLOCKED_TOOLS/);
 });
 

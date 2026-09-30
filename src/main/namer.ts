@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { store } from "./store";
+import { claudeBin } from "./auth";
 import { cheapestModel } from "../shared/modelTiers";
 
 const run = promisify(execFile);
@@ -38,7 +39,7 @@ export async function askOnce(cwd: string, prompt: string): Promise<string> {
   const { [""]: _x, ...base } = process.env as Record<string, string>;
   delete (base as any).ANTHROPIC_API_KEY;
   let text = "";
-  for await (const m of query({ prompt, options: { cwd, model: cheapestModel(store.public().models?.claude, "haiku"), tools: [], maxTurns: 1, env: { ...base, ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}) }, systemPrompt: "You answer with only the requested text. No preamble." } }) as AsyncIterable<any>) {
+  for await (const m of query({ prompt, options: { cwd, pathToClaudeCodeExecutable: claudeBin(), model: cheapestModel(store.public().models?.claude, "haiku"), tools: [], maxTurns: 1, env: { ...base, ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}) }, systemPrompt: "You answer with only the requested text. No preamble." } }) as AsyncIterable<any>) {
     if (m.type === "assistant") for (const b of m.message?.content ?? []) if (b.type === "text") text += b.text;
     if (m.type === "result" && m.subtype !== "success") throw new Error(m.errors?.join("\n") || m.subtype);
   }

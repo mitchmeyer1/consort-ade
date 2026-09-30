@@ -105,7 +105,7 @@ test('findings group into severities then categories, in document order', () => 
   const review = parseReview(JSON.stringify(sample()));
   const groups = groupFindings(review.findings);
   assert.deepEqual(groups.defects.map((g) => [g.key, g.findings.length]), [['critical', 0], ['high', 1], ['medium', 1], ['low', 0]]);
-  assert.deepEqual(groups.items.map((g) => [g.key, g.findings.length]), [['logic', 0], ['redundant', 0], ['style', 0], ['tests', 1], ['comments', 1]]);
+  assert.deepEqual(groups.items.map((g) => [g.key, g.findings.length]), [['logic', 0], ['redundant', 0], ['style', 0], ['tests', 1], ['comments', 1], ['scaling', 0]]);
   const counts = reviewCounts(review);
   assert.equal(counts.defects, 2);
   assert.equal(counts.items, 2);

@@ -9,21 +9,27 @@ import * as skillSections from '../src/shared/skillSections.ts';
 import * as followups from '../src/shared/followups.ts';
 import * as instructions from '../src/shared/instructions.ts';
 import * as deliverables from '../src/shared/deliverables.ts';
+import * as autopilot from '../src/shared/autopilot.ts';
+import * as codexDiagnostics from '../src/shared/codexDiagnostics.ts';
+import * as cliUpdates from '../src/shared/cliUpdates.ts';
 const require = createRequire(import.meta.url);
 const compiled = ts.transpileModule(readFileSync(new URL('../src/main/agents.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText;
 function fixture() {
   const chat = { id: 'chat', worktreeId: 'wt', provider: 'claude', keyId: 'personal', model: 'model', sessionId: 'old-session', sessionKeyId: 'personal', phase: 'waiting', messages: [{ role: 'user', blocks: [{ type: 'text', text: 'Fix the dropdown contrast' }] }] };
-  const keys = [{ id: 'personal', provider: 'claude', phiAllowed: false }, { id: 'work', provider: 'claude', phiAllowed: true, configDir: '/isolated/work' }, { id: 'codex-login', name: 'Codex CLI login', provider: 'codex', phiAllowed: false }];
+  const keys = [{ id: 'personal', provider: 'claude' }, { id: 'work', provider: 'claude', configDir: '/isolated/work' }, { id: 'codex-login', name: 'Codex CLI login', provider: 'codex' }];
   const calls = [];
   const store = { data: { chats: [chat], keys, worktrees: [{ id: 'wt', path: '/nonexistent-test-worktree' }] }, chat: () => chat, save() {}, getSecret: () => '' };
   const mocks = {
     "./dockerLifecycle": { beginDockerRun: () => "", dockerRunEnvironment: () => ({}), finishDockerRun: async () => {} },
     './store': { store },
-    './auth': { loginEnv: key => ({ CLAUDE_CONFIG_DIR: key.configDir ?? '/personal' }) },
+    './auth': { loginEnv: key => ({ CLAUDE_CONFIG_DIR: key.configDir ?? '/personal' }), claudeBin: () => '/bundled/claude', codexBin: () => '/bundled/codex' },
+    './cliRuntime': { updateCli: async () => false },
+    '../shared/cliUpdates': cliUpdates,
     './agentEnvironment': { TESTING_PROMPT: '', agentEnvironment: (_, env) => env },
     './agentBrowser': { startAgentBrowser: async () => ({ prompt: '', close: async () => {} }) },
+    './autopilotBridge': { startAutopilotBridge: async () => ({ prompt: '', close: async () => {} }) },
     '../shared/types': { PHASES: [] },
     '../shared/planProgress': planProgress,
     '../shared/featureProgress': featureProgress,
@@ -31,6 +37,8 @@ function fixture() {
     '../shared/followups': followups,
     '../shared/instructions': instructions,
     '../shared/deliverables': deliverables,
+    '../shared/autopilot': autopilot,
+    '../shared/codexDiagnostics': codexDiagnostics,
     '@openai/codex-sdk': { Codex: class {
       startThread() { return this.resumeThread(); }
       resumeThread() { return { runStreamed: async () => ({ events: (async function* () {
@@ -76,14 +84,6 @@ test('model-only change preserves the same-account session', async () => {
   assert.equal(call.options.resume, 'old-session');
   assert.equal(call.options.model, 'another-model');
 });
-test('manual PHI connector switch does not resume another account session', async () => {
-  const { agents, chat, send } = fixture();
-  agents.setPhiMode(chat, true, 'manual');
-  const call = await send('Check the patient data');
-  assert.equal(chat.keyId, 'work');
-  assert.equal(call.options.resume, undefined);
-  assert.match(call.prompt, /Fix the dropdown contrast/);
-});
 test('an existing missing-session error recovers on the next message', async () => {
   const { chat, send } = fixture();
   chat.error = 'No conversation found with session ID: old-session';
@@ -116,7 +116,7 @@ test('Codex provider diagnostic survives a later SDK process-exit exception', as
   assert.equal(chat.queuePaused, true);
 });
 
-test('PHI keywords do not switch the selected connector', async () => {
+test('message keywords never switch the selected connector', async () => {
   const { chat, send } = fixture();
   const call = await send('Check production patient data in snowflake, PHI, DOB and medical records');
   assert.equal(chat.keyId, 'personal');

@@ -11,10 +11,14 @@ import { hooksDirectory, localEnvFiles, prepareWorktree } from "./worktreeFiles"
 import { installCommand } from "./worktreeInstall";
 import * as agents from "./agents";
 import { browserLaunch, type BrowserInfo } from "./openArtifact";
+import { editMenuTemplate } from "./editMenu";
+import { deployPrompt, type DeployProfile } from "../shared/deployProfile.ts";
+import { spellingSuggestions } from "./spelling";
 import { isScratch, scratchWorktree } from "../shared/scratch";
 import { isWorkspace, repoDirs, reposForPr, slugify, workspaceForCheckout, workspaceSources } from "../shared/workspace";
 import * as ws from "./workspaces";
-import { probeClaudeModels } from "./claudeModels";
+import { discoverModels } from "./modelDiscovery";
+import { allCliStatus, updateAllClis } from "./cliRuntime";
 import { forgetCodexModels } from "./codexModels";
 import type { InstalledExtension, Project, RepoResult, RepoStatus, WorkspaceStatus, Worktree } from "../shared/types";
 import { askOnce, humanize, suggestTitle } from "./namer";
@@ -95,7 +99,19 @@ function createWindow() {
     titleBarStyle: "hiddenInset",
     vibrancy: VIBRANCY[a.background] ?? undefined,
     backgroundColor: a.background === "opaque" ? ((a.theme === "auto" ? (nativeTheme.shouldUseDarkColors ? "dark" : "light") : a.theme) === "light" ? "#f3ead6" : "#0a0a0a") : "#00000000",
-    webPreferences: { preload: join(import.meta.dirname, "../preload/index.mjs"), sandbox: false },
+    webPreferences: { preload: join(import.meta.dirname, "../preload/index.mjs"), sandbox: false, spellcheck: true },
+  });
+  // Chromium underlines the misspelling; the menu that corrects it is ours to draw
+  win.webContents.on("context-menu", async (_event, params) => {
+    const contents = win?.webContents;
+    if (!contents) return;
+    const suggestions = params.dictionarySuggestions?.length ? params.dictionarySuggestions : await spellingSuggestions(params.misspelledWord);
+    if (contents.isDestroyed()) return;
+    const template = editMenuTemplate(params, suggestions, {
+      replace: (word) => contents.replaceMisspelling(word),
+      addToDictionary: (word) => contents.session.addWordToSpellCheckerDictionary(word),
+    });
+    if (template.length) Menu.buildFromTemplate(template).popup({ window: win! });
   });
   win.on("blur", () => { activeChat = null; });
   win.webContents.on("did-start-loading", () => { activeChat = null; });
@@ -117,6 +133,19 @@ function artifactPath(id: string, target: string) {
 const statusCache = new Map<string, { t: number; p: Promise<unknown> }>();
 const repoCache = new Map<string, { t: number; p: Promise<unknown> }>();
 const wt = (id: string) => store.data.worktrees.find((w) => w.id === id)!;
+/**
+ * A review deduces what the project runs on once; every later review of that project is handed
+ * the numbers instead of re-reading its infra. The newest profile wins — a PR that changes a
+ * Lambda's memory reports the new ceiling.
+ */
+function cacheDeployProfile(worktreeId: string, deploy: DeployProfile | undefined) {
+  if (!deploy?.platform) return;
+  const project = store.data.projects.find((p) => p.id === wt(worktreeId)?.projectId);
+  if (!project) return;
+  if (project.deploy && Date.parse(project.deploy.at) > Date.parse(deploy.at)) return;
+  project.deploy = deploy;
+  store.save();
+}
 const project = (id: string) => store.data.projects.find((p) => p.id === id)!;
 
 /**
@@ -491,7 +520,11 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     if ([".docx", ".xlsx", ".pptx", ".zip"].includes(ext)) return { kind: "unsupported" as const, content: "Preview unavailable for this file type. Use Show in Finder to open it in its application." };
     return { kind: ext === ".md" ? "markdown" as const : [".html", ".htm"].includes(ext) ? "html" as const : "text" as const, content: readFileSync(path, "utf8") };
   },
-  readReview: (id: string, target: string) => readReview(artifactPath(id, target)),
+  readReview: async (id: string, target: string) => {
+    const read = await readReview(artifactPath(id, target));
+    cacheDeployProfile(id, read.review.deploy);
+    return read;
+  },
   findReview: (id: string, pr?: number) => findReview(wt(id).path, pr),
   updateReviewFinding: (id: string, target: string, findingId: string, patch: { status?: import("../shared/review").FindingStatus; comment?: string }) => setFinding(artifactPath(id, target), findingId, patch),
   submitReview: (id: string, target: string, opts: { event: import("../shared/review").ReviewEvent; body: string; inline: boolean; draft: boolean }) => submitReview(artifactPath(id, target), opts, id),
@@ -576,15 +609,21 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     applyAppearance();
     store.save();
   },
-  // Every Claude connector is asked what it offers; the union is the picker's list, kept in
-  // state so the next launch starts from it. A connector that cannot answer changes nothing.
+  // Every connector is asked what it offers, from the provider's API and its CLI; the union per
+  // provider is the picker's list, kept in state so the next launch starts from it. A provider
+  // with no answer keeps its last list.
   refreshModels: async () => {
     forgetCodexModels();
-    const keys = store.data.keys.filter((k) => k.provider === "claude");
-    const lists = await Promise.all(keys.map((k) => probeClaudeModels(k, k.auth === "key" ? store.getSecret(k.id) : undefined).catch(() => [] as string[])));
-    const models = [...new Set(lists.flat())];
-    if (models.length) { (store.data.modelCatalog ??= {}).claude = { models, at: Date.now() }; }
+    const found = await discoverModels(store.data.keys, (k) => store.getSecret(k.id));
+    for (const provider of ["claude", "codex"] as const)
+      if (found[provider]?.length) (store.data.modelCatalog ??= {})[provider] = { models: found[provider]!, at: Date.now() };
     store.save();
+  },
+  cliStatus: () => allCliStatus(),
+  // fetch anything newer for either CLI; a new binary may carry models, so the pickers are re-asked
+  updateClis: async () => {
+    if (await updateAllClis()) handlers.refreshModels!().catch(() => {});
+    return allCliStatus();
   },
   // standing instructions reach a chat on its next turn; running turns keep the prompt they started with
   setInstructions: (items: import("../shared/instructions").Instruction[]) => {
@@ -689,6 +728,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   },
   setAutoApprove: (id: string, on: boolean) => agents.setAutoApprove(id, on),
   setAutopilot: (id: string, on: boolean) => {
+    if (on && !store.getOpenRouterKey()) throw new Error("Autopilot needs an OpenRouter key: add one in Settings under OpenRouter navigator.");
     store.chat(id).autopilot = on;
     store.save();
   },
@@ -729,32 +769,24 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   setChatKey: (id: string, keyId: string) => agents.switchAgent(id, keyId, store.chat(id).model),
   switchAgent: (id: string, keyId: string, model: string) => agents.switchAgent(id, keyId, model),
   continueChat: (id: string) => agents.continueChat(id),
-  setPhiMode: (id: string, on: boolean) => {
-    agents.setPhiMode(store.chat(id), on, "manual");
-    store.save();
-  },
   setDefaultKey: (id: string) => {
     if (!store.data.keys.some((key) => key.id === id)) throw new Error("Connector not found.");
     store.data.defaultKeyId = id;
     store.save();
   },
-  setKeyPhi: (id: string, on: boolean) => {
-    store.data.keys.find((k) => k.id === id)!.phiAllowed = on;
-    store.save();
-  },
   stop: (id: string) => agents.stop(id),
-  addKey: (name: string, provider, key: string, phiAllowed: boolean, auth?: "login" | "key") => {
+  addKey: (name: string, provider, key: string, auth?: "login" | "key") => {
     const id = randomUUID();
     auth ??= key ? "key" : "login";
     if (auth === "key") {
       if (!key) throw new Error("Enter an API key.");
-      store.data.keys.push({ id, name, provider, phiAllowed, auth });
+      store.data.keys.push({ id, name, provider, auth });
       store.setSecret(id, key);
     } else {
       // a second CLI login for the same provider: give it a private config dir so its credentials don't collide with the built-in one
       const configDir = join(app.getPath("userData"), "logins", id);
       mkdirSync(configDir, { recursive: true });
-      store.data.keys.push({ id, name, provider, phiAllowed, auth, configDir });
+      store.data.keys.push({ id, name, provider, auth, configDir });
     }
     store.save();
   },
@@ -786,7 +818,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     const dir = join(app.getAppPath(), "skills", name);
     const skill = readFileSync(join(dir, "SKILL.md"), "utf8").replace(/^---[\s\S]*?---\n/, "");
     const worktreePath = wt(worktreeId).path;
-    let progress = "", rubric = "";
+    let progress = "", rubric = "", deploy = "";
     if (name === "pr-writeup") {
       // The agent brief is shared context: it lives once on disk where every review agent
       // reads it, instead of being pasted into each assignment by the orchestrator.
@@ -800,12 +832,15 @@ Runtime rules for this review: dispatch review agents with \`run_in_background: 
 
 `;
       rubric = `\n\n## Review rubric you apply in verification (agents read their own copy from disk — never paste this into an assignment)\n\n${categories}`;
+      // Phase 0.5 needs either the cached ceilings or the order to go and find them.
+      const project = store.data.projects.find((p) => p.id === wt(worktreeId).projectId);
+      deploy = `\n\n## Deployment profile for this project (Phase 0.5)\n\n${deployPrompt(project?.deploy)}`;
     }
     const tier = delegateModel ? `You are the orchestrator, running on this session's strongest model. Dispatch every delegated agent on \`${delegateModel}\` by passing that model on the agent call; the runtime already defaults delegated agents to it. Your tokens go to scope, grouping, short assignments, verification decisions and the final prose — not to reading the diff yourself. Escalate a single agent back to your own model only when a specific verification has already failed at the delegate tier, and say why in the summary.\n\n` : "";
     return `${progress}${tier}Run the following skill${args ? ` with argument: ${args}` : " for the current branch"} in ${worktreePath}. Its sibling files live in ${dir}.
 The Artifact tool is not available here. The deliverable is the review file: write it to .consort/pr-review/pr-<n>.review.json in the worktree, in the schema the skill gives. Consort renders that file and lets Mitch approve or ignore each finding and post the approved ones to GitHub, so do not post comments yourself. Print the operational review summary in chat, then end with a clickable Markdown link to the saved review file using its absolute path.
 
-${skill}${rubric}`;
+${skill}${deploy}${rubric}`;
   },
   // quick actions are the project's: one BUILD for every worktree, run wherever you press it
   addQuickAction: (projectId: string, title: string, command: string) => {
@@ -837,6 +872,10 @@ app.whenReady().then(() => {
   store.save();
   // the model pickers follow the providers, not a release of Consort: ask on every start
   handlers.refreshModels!().catch((error: unknown) => console.warn("model refresh failed", error));
+  // so do the CLIs themselves: a release newer than the bundled one is fetched on start and daily (main/cliRuntime.ts)
+  const sweepClis = () => handlers.updateClis!().catch((error: unknown) => console.warn("CLI update failed", error));
+  setTimeout(sweepClis, 15_000);
+  setInterval(sweepClis, 24 * 3_600_000);
   // first-run titles for worktrees imported before titles existed
   for (const w of store.data.worktrees)
     if (w.title === w.name) { w.title = humanize(w.branch); suggestTitle(w.path, w.branch).then((t) => { w.title = t; store.save(); }); }

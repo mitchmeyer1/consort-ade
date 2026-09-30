@@ -2,7 +2,7 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import { app } from "electron";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { loginEnv } from "./auth";
+import { claudeBin, loginEnv } from "./auth";
 import { normalizeClaudeModels } from "../shared/claudeModels";
 import type { ApiKey } from "../shared/types";
 
@@ -18,7 +18,7 @@ export async function probeClaudeModels(key: ApiKey, apiKey?: string): Promise<s
   const ac = new AbortController();
   async function* idle() { await new Promise<void>((r) => ac.signal.addEventListener("abort", () => r(), { once: true })); }
   const env = { ...envWithout("ANTHROPIC_API_KEY"), ...loginEnv(key), ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}) };
-  const q = query({ prompt: idle(), options: { cwd: probeDir(), abortController: ac, env } });
+  const q = query({ prompt: idle(), options: { cwd: probeDir(), pathToClaudeCodeExecutable: claudeBin(), abortController: ac, env } });
   try {
     const rows = await new Promise<Awaited<ReturnType<typeof q.supportedModels>>>((res, rej) => {
       const t = setTimeout(() => rej(new Error("Claude model list timed out")), PROBE_TIMEOUT);

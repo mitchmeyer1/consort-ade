@@ -13,6 +13,7 @@ import * as followups from '../src/shared/followups.ts';
 import * as instructions from '../src/shared/instructions.ts';
 import * as deliverables from '../src/shared/deliverables.ts';
 import * as codexDiagnostics from '../src/shared/codexDiagnostics.ts';
+import * as cliUpdates from '../src/shared/cliUpdates.ts';
 import * as autopilot from '../src/shared/autopilot.ts';
 
 const require = createRequire(import.meta.url);
@@ -40,11 +41,13 @@ async function fixture(t) {
       for (const item of Array.isArray(event) ? event : [event]) if (item) yield item;
     })() };
   } };
-  const store = { data: { chats: [chat], keys: [{ id: 'key', phiAllowed: true }], worktrees: [{ id: 'wt', path: cwd }] }, chat: () => chat, getSecret: () => 'fake', save() {} };
+  const store = { data: { chats: [chat], keys: [{ id: 'key' }], worktrees: [{ id: 'wt', path: cwd }] }, chat: () => chat, getSecret: () => 'fake', save() {} };
   const mocks = {
     "./dockerLifecycle": { beginDockerRun: () => "", dockerRunEnvironment: () => ({}), finishDockerRun: async () => {} },
     './store': { store },
-    './auth': { loginEnv: () => ({}) },
+    './auth': { loginEnv: () => ({}), claudeBin: () => '/bundled/claude', codexBin: () => '/bundled/codex' },
+    './cliRuntime': { updateCli: async () => false },
+    '../shared/cliUpdates': cliUpdates,
     './agentBrowser': { startAgentBrowser: async () => ({ prompt: '', close: async () => {} }) },
     './autopilotBridge': { startAutopilotBridge: async () => ({ prompt: '', close: async () => {} }) },
     './agentEnvironment': { TESTING_PROMPT: '', agentEnvironment: (_, env) => env },
@@ -175,7 +178,7 @@ test('a context-size failure retries once with a fresh session and preserved his
   assert.equal(chat.sessionId, undefined);
   assert.match(runs[1].prompt, /Original task: review every file/);
   assert.match(runs[1].prompt, /Continue with the final artifact/);
-  assert.match(runs[1].prompt, /IS approved for PHI/);
+  assert.match(runs[1].prompt, /\[steps:3\] or \[steps:5\]/); // the runtime instructions ride along on the retry
   const archive = /Full prior transcript: (.+?);/.exec(runs[1].prompt)[1];
   assert.equal(JSON.parse(await readFile(archive, 'utf8'))[0].blocks[0].text, 'Original task: review every file');
   runs[1].finish({ type: 'turn.failed', error: { message: 'input_too_large' } });

@@ -1,6 +1,6 @@
 ---
 name: pr-writeup
-description: Produce a reviewer's writeup for a pull request — a Flows map of how the feature is actually used (API endpoints, crons, workers), then verified defects by severity plus the CI reviewer's five categories (Logic, Redundant, Style, Tests, Comments), what is well built, and a suggested order of work. Written as a `pr-<n>.review.json` that Consort renders live, with a Comment-on-PR / Ignore decision per finding. Use when asked to review a PR, write up a PR, or get context on a PR before reviewing it.
+description: Produce a reviewer's writeup for a pull request — a Flows map of how the feature is actually used (API endpoints, crons, workers), then verified defects by severity plus the CI reviewer's categories (Logic, Redundant, Style, Tests, Comments, Scaling), what is well built, and a suggested order of work. Written as a `pr-<n>.review.json` that Consort renders live, with a Comment-on-PR / Ignore decision per finding. Use when asked to review a PR, write up a PR, or get context on a PR before reviewing it.
 user-invocable: true
 argument-hint: <pr-number | PR URL | branch | nothing for current branch> [--repo owner/name] [--fanout N]
 allowed-tools: Bash Read Grep Glob Agent Write
@@ -14,9 +14,9 @@ A document Mitch reads *before* reviewing, that leaves him able to review. Two h
 
 Two files in this directory, each with one job:
 - `SKILL.md` — the procedure (this file), including the review-file schema in Phase 5.
-- `categories.md` — the agent brief. The nine labels from `scripts/ci/pr-review.ts`
-  (🟥 🟧 🟨 🟦 severities · ⛓️ 👯 💅 🧪 📜 categories), their rules, and the false-positive
-  traps. The runtime copies it to `.consort/pr-review/categories.md`; agents read it there.
+- `categories.md` — the agent brief. The ten labels (🟥 🟧 🟨 🟦 severities · ⛓️ 👯 💅 🧪 📜 ⚖️
+  categories), their rules, and the false-positive traps. The runtime copies it to
+  `.consort/pr-review/categories.md`; agents read it there.
 
 The deliverable is **data, not a page**: `.consort/pr-review/pr-<n>.review.json`. Consort
 renders it as the writeup, with a *Comment on PR* / *Ignore* decision on every finding and one
@@ -117,6 +117,26 @@ the entrypoints you enumerated in Phase 1 (untraced) · the relevant `CLAUDE.md`
 the test-grep results · the group table from Phase 2 (`group slug | files | hunks | owner
 of which entrypoints`). This is the only place any of that is written down.
 
+## Phase 0.5 — what this project runs on
+
+Every scaling claim is arithmetic against a ceiling, so the ceilings come first. Consort hands
+you this project's **deployment profile** above the skill: either the cached one — platform,
+stack defaults, and each runtime's memory, timeout, disk, concurrency and payload limits — or
+the order to deduce it because nothing is cached yet.
+
+- **Cached.** Take those numbers as fact. Correct any the PR changes (an infra hunk that raises a
+  function to 2048 MB) or that you find to be wrong, and note the correction in the appendix.
+- **Not cached.** Deduce it before the wave, from infra as code, deploy workflows, the README and
+  `package.json` scripts, as the injected instructions list. It is reading config, not code: one
+  pass by you, or one agent when the infra is large. Do not dispatch the review wave on a guess.
+
+Either way the profile ships as the review file's `deploy` object, and Consort caches it on the
+project so the next review is handed it. Put its one-line summary in `brief.md` under
+`## Deployment` with the runtime table, so every agent judges scale against the same numbers.
+
+Where a limit is genuinely undeclared, record it as unknown. "No memory set, so the SST default
+of 1024 MB" is a fact; "probably 1 GB" is not, and a Scaling finding built on it is noise.
+
 ## Phase 1 — Flows
 
 The spine of the document. Enumerate every entrypoint the PR adds or touches, in the repo's
@@ -174,8 +194,8 @@ each wave one message. Each assignment, in this order and nothing more:
 > to `.consort/pr-review/agents/<slug>.md`.
 
 Each agent covers **all** concerns for its files — security, logic, redundancy,
-performance and reliability, style and comments, tests — because those judgements need the
-file open. The group boundary limits the assignment, not the evidence: agents follow
+performance and reliability, scale against the deployment profile, style and comments, tests —
+because those judgements need the file open. The group boundary limits the assignment, not the evidence: agents follow
 callers and callees wherever they lead.
 
 ## Phase 3 — verify, then cut
@@ -244,6 +264,19 @@ that exact line.
   "stats": { "files": 17, "additions": 812, "deletions": 140 },
   "reviewedAt": "2026-09-21T15:04:00Z",
   "ci": { "status": "all required checks pass at 489353a", "url": "<checks url>" },
+  "deploy": {                                 // Phase 0.5: cached by Consort, carried by every review
+    "version": 1,
+    "platform": "SST v3 → AWS Lambda (us-east-1)",
+    "summary": "one plain sentence on how this repo ships",
+    "defaults": { "memoryMb": 1024, "timeoutSec": 30, "diskMb": 512 },
+    "runtimes": [
+      { "name": "member-match worker", "kind": "lambda", "ref": "infra/src/queue.ts:40",
+        "memoryMb": 256, "timeoutSec": 60, "diskMb": 512, "concurrency": "reserved 5",
+        "limits": "SQS batch of 10", "notes": "optional" }
+    ],
+    "sources": ["sst.config.ts", "infra/src/queue.ts", ".github/workflows/deploy.yml"],
+    "at": "2026-09-29T15:04:00Z", "head": "<head sha>"
+  },
   "method": "20-agent fan-out, every cited line re-verified by hand",
   "whatItDoes": "plain prose, no code words",
   "shipsToday": "gates and flags",
@@ -268,6 +301,14 @@ that exact line.
       "fields": { "Costs": "…", "Suite": "standard — tests/standard/x.test.ts", "Test": "the one assertion" },
       "comment": "tests/standard/x.test.ts:3 — ready-to-post comment",
       "status": "pending" },
+    { "id": "SC1", "kind": "item", "category": "scaling",
+      "title": "what runs out, and at what volume",
+      "file": "packages/core/src/services/export.service.ts", "line": 88,
+      "fields": { "Limit": "member-match worker: 256 MB · 60 s — infra/src/queue.ts:40",
+                  "Load": "the whole member table read into one array — 40k rows today, ~6 GB at 1 MB a row",
+                  "Fix": "the smallest one — stream, paginate, or raise the ceiling and say to what" },
+      "comment": "export.service.ts:88 — ready-to-post comment naming both numbers",
+      "status": "pending" },
     { "id": "L1", "kind": "item", "category": "logic",
       "title": "a PR-level concern with no honest line to pin",
       "fields": { "Gap": "…", "Fix": "…" },
@@ -284,12 +325,14 @@ that exact line.
 Rules for the file:
 
 - **ids** are stable and unique: `D1…` for defects in severity order (crit → high → med →
-  low), `L1…` `R1…` `S1…` `T1…` `C1…` for Logic, Redundant, Style, Tests, Comments items.
+  low), `L1…` `R1…` `S1…` `T1…` `C1…` `SC1…` for Logic, Redundant, Style, Tests, Comments,
+  Scaling items.
 - **severity** only on defects; **category** on every item, and on a defect only as its origin.
 - **fields** carry exactly what the category's card shows, in this order — Logic: `Gap`,
   `Fix` · Redundant: `Overlap`, `Do` (name the existing definition's `file:line` in Overlap) ·
   Style: `House way` (with the peer `file:line`), `Fix` · Tests: `Costs`, `Suite`, `Test` ·
-  Comments: `Trimmed` (the replacement comment, newlines allowed).
+  Comments: `Trimmed` (the replacement comment, newlines allowed) · Scaling: `Limit` (the ceiling
+  and where it is declared), `Load` (what the code will consume and at what volume), `Fix`.
 - **comment** on every retained finding: ONE sentence, plain, direct, ready to post. For a
   code-specific finding, open with the exact `file:line`. Model:
   `sigma-md.service.ts:214 — Nothing tests retry429MaxWaitMs — add a test that a retry-after:
@@ -305,6 +348,8 @@ Rules for the file:
   finding is the same. Consort fills `head` and `investigation` itself when Mitch re-checks a
   finding against newer commits; never write them fresh.
 - Order flows money/data-writing first, reads last; defects by severity; items in `file` order.
+- **deploy** carries the profile from Phase 0.5 on every review, cached or freshly deduced, with
+  any correction this PR forces. Omit it only when the repo deploys nothing (a library).
 - Appendix always carries coverage: reviewed head/base, file and block coverage, agent counts
   and waves, per-agent results and incomplete tasks, CI SHA/status/link, "no tests run locally".
 - Nothing else: no extra top-level keys, no HTML, no emoji.

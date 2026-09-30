@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { Codex } from "@openai/codex-sdk";
 import { store } from "./store";
-import { loginEnv } from "./auth";
+import { claudeBin, codexBin, loginEnv } from "./auth";
 import { transcriptDigest } from "./agents";
 import { cheapestModel, modelTiers } from "../shared/modelTiers";
 import { SIDE_SYSTEM, sideChatPrompt, type SideMessage, type SideSnapshot } from "../shared/sideChat";
@@ -100,6 +100,7 @@ async function askClaude(cwd: string, prompt: string, apiKey: string, key: Key, 
     prompt,
     options: {
       cwd,
+      pathToClaudeCodeExecutable: claudeBin(),
       model,
       maxTurns,
       allowedTools: READ_ONLY_TOOLS,
@@ -116,7 +117,7 @@ async function askClaude(cwd: string, prompt: string, apiKey: string, key: Key, 
 }
 
 async function askCodex(cwd: string, prompt: string, apiKey: string, key: Key, model: string) {
-  const codex = new Codex({ ...(apiKey ? { apiKey } : {}), env: envFor("OPENAI_API_KEY", key, apiKey, "OPENAI_API_KEY") });
+  const codex = new Codex({ ...(apiKey ? { apiKey } : {}), codexPathOverride: codexBin(), env: envFor("OPENAI_API_KEY", key, apiKey, "OPENAI_API_KEY") });
   const thread = codex.startThread({ model, workingDirectory: cwd, skipGitRepoCheck: true, sandboxMode: "read-only", networkAccessEnabled: false, approvalPolicy: "never" });
   const { events } = await thread.runStreamed(prompt);
   let text = "";

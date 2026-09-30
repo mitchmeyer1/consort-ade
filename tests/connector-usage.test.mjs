@@ -23,14 +23,14 @@ function load() {
   return mod.exports;
 }
 
-const login = (id, provider = 'claude') => ({ id, name: id, provider, phiAllowed: false, auth: 'login' });
+const login = (id, provider = 'claude') => ({ id, name: id, provider, auth: 'login' });
 const snapshot = (keyId, at, percent = 50) => ({ keyId, at, windows: [{ id: 'w', label: '5-hour', percent }] });
 
 test('api keys never spawn a probe and are reported as billed per token', async () => {
   const { createUsageReader } = load();
   let probed = 0;
   const reader = createUsageReader({ claude: async () => { probed++; }, codex: async () => { probed++; } });
-  const u = await reader.read({ id: 'phi', provider: 'claude', auth: 'key' });
+  const u = await reader.read({ id: 'billing', provider: 'claude', auth: 'key' });
   assert.equal(probed, 0);
   assert.match(u.unavailable, /API key/);
   assert.deepEqual(u.windows, []);

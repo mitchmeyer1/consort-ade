@@ -1,5 +1,7 @@
 :root {
   --bg: #0a0a0a; --bg-solid: #0a0a0a; --panel: #121110; --card: #161513; --popover: #1d1b19; --line: rgba(243,234,214,.14); --line2: rgba(243,234,214,.3);
+  /* a row-sized control tints on hover instead of taking the cream button fill, which would swallow its own text */
+  --hover: rgba(243,234,214,.1);
   --fg: #f3ead6; --dim: rgba(243,234,214,.55); --cream: #f3ead6; --ink: #0a0a0a; --err: #e0a08f; --ok: #cfe0b8; --blocked: #e07a6a; --warn: #f5a044;
   --display: "Newsreader", Georgia, "Times New Roman", serif;
   --body: "Avenir Next", "Helvetica Neue", sans-serif;
@@ -245,7 +247,6 @@ details.tool pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--lin
 .composer.over textarea { border-color: var(--cream); }
 .composer .attach { align-self: flex-end; padding: 8px 12px; }
 .topbar select { padding: 4px 8px; font-size: 12px; border-radius: 3px; }
-.badge.phi { border-color: var(--cream); color: var(--cream); }
 
 .row.dim { opacity: .5; }
 .archived-toggle { color: var(--dim); }
@@ -309,14 +310,12 @@ input.edit { padding: 1px 6px; font: inherit; width: 100%; min-width: 0; backgro
 .badges { display: flex; gap: 4px; flex-wrap: wrap; }
 .card .badges, .page > div > .badges { margin-top: 8px; }
 
-.phimode { border: 1px solid var(--line2); padding: 3px 10px; border-radius: 3px; font-size: 12px; letter-spacing: .04em; cursor: pointer; }
-.phimode.on { background: var(--cream); color: var(--ink); border-color: var(--cream); font-weight: 600; }
-.phimode input { accent-color: var(--ink); }
 .msg.system { align-self: center; color: var(--dim); font-size: 12px; border: 1px dashed var(--line2); padding: 5px 12px; max-width: 700px; text-align: center; }
 
 /* appearance: light = cream paper with near-black ink; accent roles swap */
 :root[data-theme="light"] {
   --bg: #f3ead6; --bg-solid: #f3ead6; --panel: #ece2cb; --card: #e7dcc3; --popover: #e3d7bd; --line: rgba(20,19,17,.14); --line2: rgba(20,19,17,.32);
+  --hover: rgba(20,19,17,.07);
   --fg: #141311; --dim: rgba(20,19,17,.58); --cream: #141311; --ink: #f3ead6; --err: #a33d2c; --ok: #3f6b2a; --blocked: #b8351f; --warn: #b8651a;
 }
 :root[data-bg="frost"]  { --bg: rgba(10,10,10,.72); --panel: rgba(18,17,16,.62); --card: rgba(22,21,19,.6); }
@@ -406,7 +405,7 @@ textarea.code { flex: 1; min-height: 60vh; font: 12px/1.55 var(--mono); white-sp
 /* keep the top bar on one line */
 .topbar { flex-wrap: nowrap; overflow: hidden; }
 .topbar input.name, .topbar .title { flex: 1 1 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.topbar .meta, .topbar label, .tabs button, .phimode { white-space: nowrap; }
+.topbar .meta, .topbar label, .tabs button { white-space: nowrap; }
 .topbar .meta { overflow: hidden; text-overflow: ellipsis; max-width: 180px; flex-shrink: 1; }
 .tabs { flex-shrink: 0; }
 
@@ -474,7 +473,6 @@ textarea.code { min-height: 40vh; }
 .ico.proj { width: 13px; height: 15px; margin-right: 7px; opacity: .9; }
 .ico.lyre { width: 9px; height: 9px; margin: 0 1px; vertical-align: -1px; }
 .card h4 .ico { width: 12px; height: 12px; margin-right: 6px; vertical-align: -2px; }
-.phimode .ico { width: 12px; height: 12px; margin: 0 4px 0 2px; vertical-align: -2px; }
 .perm .ico { margin-right: 6px; }
 /* scrollbars: no track, just a shaded thumb */
 ::-webkit-scrollbar { width: 9px; height: 9px; background: transparent; }
@@ -696,19 +694,12 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 
 .topbar select.modelpick { max-width: 190px; font-family: var(--mono); font-size: 11px; }
 
-/* light mode: the mark on a dark oval */
-
-
-
-:root[data-theme="light"] .markwrap .mark { color: #f3ead6; }
-.brand .markwrap { flex-shrink: 0; }
-
-/* mark sits in a mandorla (almond halo): fixed 5:7, pointed top and bottom; dark in light mode, invisible in dark */
-.markwrap { display: inline-grid; place-items: center; aspect-ratio: 4 / 5; flex-shrink: 0; }
-.markwrap .mark { display: block; width: 74%; height: 62%; }
-.brand .markwrap { width: 60px; }
-.empty .markwrap { width: 300px; margin: 0 auto 8px; }
-:root[data-theme="light"] .markwrap { background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 125'><path fill='%23141311' d='M50 0 C 104 26, 104 99, 50 125 C -4 99, -4 26, 50 0 Z'/></svg>") center / 100% 100% no-repeat; }
+/* the mark sits in a round plate: dark in light mode so it stays cream-on-black, invisible in dark mode */
+.markwrap { display: inline-grid; place-items: center; aspect-ratio: 1; border-radius: 50%; flex-shrink: 0; }
+.markwrap .mark { display: block; width: 70%; height: 70%; }
+.brand .markwrap { width: 64px; }
+.empty .markwrap { width: 260px; margin: 0 auto 8px; }
+:root[data-theme="light"] .markwrap { background: #141311; }
 :root[data-theme="light"] .markwrap .mark { color: #f3ead6; }
 
 /* attachments inside the new-chat dialog */
@@ -778,6 +769,7 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 .artifacts-list li + li { margin-top: 8px; }
 /* a file-browser row: icon · name with its path beneath · one muted date on the right · chevron */
 .artifact-entry { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto 10px; grid-template-rows: auto auto; column-gap: 10px; row-gap: 3px; align-items: center; width: 100%; text-align: left; padding: 10px 12px; }
+.artifact-entry:hover { background: var(--hover); color: var(--fg); border-color: var(--line2); }
 .artifact-entry .ico { grid-column: 1; grid-row: 1 / span 2; }
 .artifact-entry strong { grid-column: 2; grid-row: 1; font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .artifact-when { grid-column: 3; grid-row: 1; color: var(--dim); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -796,6 +788,7 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 /* Chat controls live with the message composer. */
 .composer-options { max-width: 860px; margin: 0 auto 7px; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 16px; color: var(--dim); font-size: 11px; }
 .composer-options label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; }
+.composer-options label .help { cursor: help; }
 .composer-options .left { display: flex; align-items: center; gap: 14px; margin-right: auto; min-width: 0; max-width: 100%; flex-wrap: wrap; }
 .composer-options .left .composer-working { margin-right: 0; }
 /* commit shortcut: quiet text button that turns into the countdown while armed */
@@ -853,6 +846,7 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 .root-branch-picker { position: relative; width: 100%; max-width: 480px; }
 .root-branch-label { display: block; color: var(--dim); font-size: 12px; margin-bottom: 6px; }
 .root-branch-trigger { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; text-align: left; font-family: var(--mono); font-size: 12px; }
+.root-branch-trigger:hover { background: var(--hover); color: var(--fg); border-color: var(--line2); }
 .root-branch-trigger span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .root-branch-trigger svg { flex-shrink: 0; }
 .root-branch-popover { position: absolute; top: calc(100% + 4px); left: 0; width: 100%; z-index: 30; padding: 8px; border: 1px solid var(--line2); border-radius: 8px; background: var(--popover); color: var(--fg); box-shadow: 0 12px 36px #0009; }
@@ -919,9 +913,10 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
    viewport instead of pushing the body to scroll, cutting its content off at the bottom */
 .settings-section { padding: 0; overflow: hidden; flex: none; }
 .settings-section-head { display: flex; align-items: center; min-height: 42px; cursor: pointer; }
-.settings-section-head:hover { background: var(--line); }
+.settings-section-head:hover { background: var(--hover); }
 .settings-section-head:hover .settings-section-toggle { color: var(--fg); }
 .settings-section-toggle { flex: 1; min-width: 0; display: flex; align-items: center; padding: 12px 14px; border: 0; background: none; color: var(--dim); font-size: 10px; font-weight: 600; letter-spacing: .28em; text-align: left; text-transform: uppercase; cursor: pointer; }
+.settings-section-toggle:hover { background: none; color: var(--fg); }
 .settings-section-toggle .ico { width: 12px; height: 12px; margin-right: 6px; }
 .settings-chevron { flex: none; padding: 0 14px 0 8px; font-size: 14px; color: var(--dim); }
 .settings-count { flex: none; min-width: 18px; padding: 1px 6px; border: 1px solid var(--line2); border-radius: 9px; font: 600 10px/1.4 var(--mono); text-align: center; color: var(--dim); letter-spacing: 0; }
@@ -951,6 +946,9 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 .extension-row small { color: var(--dim); white-space: nowrap; }
 .conn { padding: 12px 0; display: flex; flex-direction: column; gap: 10px; }
 .conn-head + .conn-sub { margin-top: -8px; }
+.cli-runtimes { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.cli-runtimes .tog { align-self: flex-start; margin-top: 4px; }
+.cli-runtimes .conn-sub > span.m { white-space: normal; }
 .conn + .conn { border-top: 1px solid var(--line); }
 .conn-head { display: flex; align-items: center; gap: 10px; }
 .conn-name { flex: 1; min-width: 0; font-weight: 500; font-size: 13.5px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

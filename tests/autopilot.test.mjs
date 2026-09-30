@@ -86,3 +86,10 @@ test('Autopilot overlay uses full display bounds, including negative origins', (
   });
   assert.deepEqual(autopilotOverlayGeometry({ x: -1920, y: -80, width: 1920, height: 1080 }).edges[0], { x: -1920, y: -80, width: 1920, height: 5 });
 });
+
+test('the agent is only told to suggest Autopilot once an OpenRouter key exists', async () => {
+  const { readFileSync } = await import('node:fs');
+  const agents = readFileSync(new URL('../src/main/agents.ts', import.meta.url), 'utf8');
+  assert.match(agents, /autopilotAvailable\(\) \? \[AUTOPILOT_SUGGESTION_PROMPT\] : \[\]/);
+  assert.match(agents, /getOpenRouterKey/);
+});

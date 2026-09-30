@@ -4,11 +4,13 @@
  * single review. The file is the source of truth for both the document and what was posted.
  */
 
+import { parseDeployProfile, type DeployProfile } from "./deployProfile.ts";
+
 export const SEVERITIES = ["critical", "high", "medium", "low"] as const;
 export type Severity = (typeof SEVERITIES)[number];
-export const CATEGORIES = ["logic", "redundant", "style", "tests", "comments"] as const;
+export const CATEGORIES = ["logic", "redundant", "style", "tests", "comments", "scaling"] as const;
 export type Category = (typeof CATEGORIES)[number];
-export const CATEGORY_LABELS: Record<Category, string> = { logic: "Logic", redundant: "Redundant", style: "Style", tests: "Tests", comments: "Comments" };
+export const CATEGORY_LABELS: Record<Category, string> = { logic: "Logic", redundant: "Redundant", style: "Style", tests: "Tests", comments: "Comments", scaling: "Scaling" };
 export const SEVERITY_LABELS: Record<Severity, string> = { critical: "Critical", high: "High", medium: "Medium", low: "Low" };
 
 /** pending: not decided · approved: queued for the next post · commented: on GitHub · ignored: Mitch passed · dropped: a re-investigation found it no longer holds */
@@ -88,6 +90,8 @@ export type Review = {
   wellBuilt: { what: string; why: string; ref?: string }[];
   orderOfWork: { step: string; why: string; refs?: string[] }[];
   ci?: { status: string; url?: string };
+  /** what the project runs on and the ceilings every Scaling finding is measured against */
+  deploy?: DeployProfile;
   method?: string;
   /** the GitHub reviews submitted from this file, newest last */
   submissions: Submission[];
@@ -176,6 +180,7 @@ export function parseReview(text: string): Review {
     wellBuilt: list(raw.wellBuilt, (g) => (g && typeof g.what === "string" ? { what: g.what, why: str(g.why), ref: str(g.ref) || undefined } : undefined)),
     orderOfWork: list(raw.orderOfWork, (o) => typeof o === "string" ? { step: o, why: "" } : o && typeof o.step === "string" ? { step: o.step, why: str(o.why), refs: list(o.refs, (r) => (typeof r === "string" ? r : undefined)) } : undefined),
     ci: raw.ci && typeof raw.ci === "object" ? { status: str(raw.ci.status), url: str(raw.ci.url) || undefined } : undefined,
+    deploy: parseDeployProfile(raw.deploy),
     method: str(raw.method) || undefined,
     submissions: list(raw.submissions, (x) => x && REVIEW_EVENTS.includes(x.event) && typeof x.url === "string"
       ? { at: str(x.at), event: x.event as ReviewEvent, url: x.url, body: str(x.body), inline: list(x.inline, (i) => (typeof i === "string" ? i : undefined)), ...(num(x.reviewId) !== undefined ? { reviewId: num(x.reviewId) } : {}), ...(x.drafted ? { drafted: true } : {}) }

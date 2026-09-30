@@ -4,9 +4,9 @@ import { pickReviewChat, reviewRunner } from '../src/shared/reviewRunner.ts';
 
 const user = (text) => ({ role: 'user', blocks: [{ type: 'text', text }] });
 const keys = [
-  { id: 'k-default', name: 'mitch.meyer claude', provider: 'claude', phiAllowed: false, auth: 'login' },
-  { id: 'k-chat', name: 'mitchell.meyer claude', provider: 'claude', phiAllowed: false, auth: 'login' },
-  { id: 'k-codex', name: 'Mitch Codex', provider: 'codex', phiAllowed: true, auth: 'login' },
+  { id: 'k-default', name: 'mitch.meyer claude', provider: 'claude', auth: 'login' },
+  { id: 'k-chat', name: 'mitchell.meyer claude', provider: 'claude', auth: 'login' },
+  { id: 'k-codex', name: 'Mitch Codex', provider: 'codex', auth: 'login' },
 ];
 const chat = (over) => ({ worktreeId: 'wt', name: 'PR #450 wnstck', keyId: 'k-chat', model: 'claude-fable-5-1', delegateModel: 'claude-opus-5', lastChattedAt: 10, messages: [user('Run the pr-writeup skill for PR 450')], ...over });
 const state = (chats, over = {}) => ({ keys, defaultKeyId: 'k-default', chats, models: { claude: ['claude-fable-5-1', 'claude-opus-5'] }, ...over });

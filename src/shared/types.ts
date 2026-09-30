@@ -1,3 +1,4 @@
+import type { DeployProfile } from "./deployProfile";
 export const PHASES = ["waiting", "planning", "executing", "validating", "complete"] as const;
 export type Phase = (typeof PHASES)[number];
 export const SIMPLE_PHASES: readonly Phase[] = ["waiting", "executing", "complete"];
@@ -5,8 +6,8 @@ export const phasesFor = (steps?: 3 | 5): readonly Phase[] => steps === 3 ? SIMP
 export type Provider = "claude" | "codex";
 /**
  * Seed lists only, for a machine that has never reached either provider. The live lists are
- * pulled on every start: Claude's from the CLI (main/claudeModels.ts), Codex's from its own
- * catalog (main/codexModels.ts), and the last good Claude list is kept in state.
+ * pulled on every start from the providers' own APIs and CLIs (main/modelDiscovery.ts), Codex's
+ * also from its on-disk catalog (main/codexModels.ts), and the last good lists are kept in state.
  */
 export const MODELS: Record<Provider, string[]> = {
   claude: ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
@@ -18,7 +19,7 @@ export const modelOptions = (state: { models?: Partial<Record<Provider, string[]
   state.models?.[provider]?.length ? state.models[provider]! : MODELS[provider];
 
 /** configDir: extra CLI logins keep their own credentials there (CLAUDE_CONFIG_DIR / CODEX_HOME); the built-in login uses the CLI default */
-export type ApiKey = { id: string; name: string; provider: Provider; phiAllowed: boolean; auth: "login" | "key"; configDir?: string; defaultModel?: string };
+export type ApiKey = { id: string; name: string; provider: Provider; auth: "login" | "key"; configDir?: string; defaultModel?: string };
 import type { Contributor } from "./contributors";
 import type { SideMessage } from "./sideChat";
 import type { FindingStatus, Review, ReviewEvent, ReviewSummary, VerdictReport } from "./review";
@@ -53,6 +54,8 @@ export type Project = {
   branch?: string;
   /** BUILD, START SERVER…: shown on every worktree of the project, run in the one you are in (see shared/quickActions.ts) */
   quickActions?: QuickAction[];
+  /** what this project deploys on, deduced by the first PR review and handed to the next (see shared/deployProfile.ts) */
+  deploy?: DeployProfile;
 };
 export type Worktree = {
   id: string; projectId: string; name: string; title: string; path: string; branch: string; archived: boolean; root?: boolean;
@@ -234,11 +237,9 @@ export type Api = {
   setChatKey(id: string, keyId: string): Promise<void>;
   switchAgent(id: string, keyId: string, model: string): Promise<void>;
   continueChat(id: string): Promise<void>;
-  setPhiMode(id: string, on: boolean): Promise<void>;
   stop(chatId: string): Promise<void>;
-  addKey(name: string, provider: Provider, key: string, phiAllowed: boolean, auth?: "login" | "key"): Promise<void>;
+  addKey(name: string, provider: Provider, key: string, auth?: "login" | "key"): Promise<void>;
   setDefaultKey(id: string): Promise<void>;
-  setKeyPhi(id: string, on: boolean): Promise<void>;
   renameKey(id: string, name: string): Promise<void>;
   removeKey(id: string): Promise<void>;
   setOpenRouterKey(key: string): Promise<void>;
@@ -272,6 +273,10 @@ export type Api = {
   installCodexSkill(keyId: string, source: string): Promise<InstalledExtension>;
   /** re-ask every connector which models it offers; the picker updates when they answer */
   refreshModels(): Promise<void>;
+  /** the Claude Code and Codex binaries in use: bundled or downloaded, and what the registry has (see shared/cliUpdates.ts) */
+  cliStatus(): Promise<import("./cliUpdates").CliStatus[]>;
+  /** fetch anything newer for either CLI and report the result */
+  updateClis(): Promise<import("./cliUpdates").CliStatus[]>;
   effectiveTheme(): Promise<"dark" | "light">;
   onTheme(cb: (t: "dark" | "light") => void): () => void;
   repoInfo(projectId: string): Promise<RepoInfo>;

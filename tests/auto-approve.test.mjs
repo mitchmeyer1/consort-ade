@@ -9,6 +9,9 @@ import * as skillSections from '../src/shared/skillSections.ts';
 import * as followups from '../src/shared/followups.ts';
 import * as instructions from '../src/shared/instructions.ts';
 import * as deliverables from '../src/shared/deliverables.ts';
+import * as autopilot from '../src/shared/autopilot.ts';
+import * as codexDiagnostics from '../src/shared/codexDiagnostics.ts';
+import * as cliUpdates from '../src/shared/cliUpdates.ts';
 const require = createRequire(import.meta.url);
 const compiled = ts.transpileModule(readFileSync(new URL('../src/main/agents.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -21,15 +24,18 @@ function fixture(autoApprove = false) {
   const calls = [], modes = [], asked = [];
   const releases = [];
   const store = {
-    data: { chats, keys: [{ id: 'personal', provider: 'claude', phiAllowed: false }], worktrees: [{ id: 'wt', path: '/nonexistent-test-worktree' }] },
+    data: { chats, keys: [{ id: 'personal', provider: 'claude' }], worktrees: [{ id: 'wt', path: '/nonexistent-test-worktree' }] },
     chat: id => chats.find(c => c.id === id), save() {}, getSecret: () => '',
   };
   const mocks = {
     './dockerLifecycle': { beginDockerRun: () => '', dockerRunEnvironment: () => ({}), finishDockerRun: async () => {} },
     './store': { store },
-    './auth': { loginEnv: () => ({}) },
+    './auth': { loginEnv: () => ({}), claudeBin: () => '/bundled/claude', codexBin: () => '/bundled/codex' },
+    './cliRuntime': { updateCli: async () => false },
+    '../shared/cliUpdates': cliUpdates,
     './agentEnvironment': { TESTING_PROMPT: '', agentEnvironment: (_, env) => env, isInstallCommand: cmd => cmd === 'pnpm install' },
     './agentBrowser': { startAgentBrowser: async () => ({ prompt: '', close: async () => {} }) },
+    './autopilotBridge': { startAutopilotBridge: async () => ({ prompt: '', close: async () => {} }) },
     '../shared/types': { PHASES: [] },
     '../shared/planProgress': planProgress,
     '../shared/featureProgress': featureProgress,
@@ -37,6 +43,8 @@ function fixture(autoApprove = false) {
     '../shared/followups': followups,
     '../shared/instructions': instructions,
     '../shared/deliverables': deliverables,
+    '../shared/autopilot': autopilot,
+    '../shared/codexDiagnostics': codexDiagnostics,
     '@openai/codex-sdk': { Codex: class {} },
     '@anthropic-ai/claude-agent-sdk': { query: args => {
       calls.push(args);

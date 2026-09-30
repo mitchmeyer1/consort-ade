@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { codexBin, loginEnv } from "./auth";
+import { claudeBin, codexBin, loginEnv } from "./auth";
 import { claudeUsageFrom, codexUsageFrom, type ConnectorUsage } from "../shared/usage";
 import type { ApiKey } from "../shared/types";
 
@@ -65,7 +65,7 @@ const probeDir = () => { const d = join(app.getPath("userData"), "usage-probe");
 export const probeClaude: Probe = async (key) => {
   const ac = new AbortController();
   async function* idle() { await new Promise<void>((r) => ac.signal.addEventListener("abort", () => r(), { once: true })); }
-  const q = query({ prompt: idle(), options: { cwd: probeDir(), abortController: ac, env: { ...envWithout("ANTHROPIC_API_KEY"), ...loginEnv(key) } } });
+  const q = query({ prompt: idle(), options: { cwd: probeDir(), pathToClaudeCodeExecutable: claudeBin(), abortController: ac, env: { ...envWithout("ANTHROPIC_API_KEY"), ...loginEnv(key) } } });
   try {
     const raw = await withTimeout(q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }), PROBE_TIMEOUT, "Claude usage");
     return claudeUsageFrom(key.id, raw as Parameters<typeof claudeUsageFrom>[1], Date.now());

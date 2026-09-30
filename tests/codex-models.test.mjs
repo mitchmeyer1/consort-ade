@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import ts from 'typescript';
+import * as sharedCodexModels from '../src/shared/codexModels.ts';
 const require = createRequire(import.meta.url);
 const compiled = ts.transpileModule(readFileSync(new URL('../src/main/codexModels.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -15,6 +16,7 @@ const FALLBACK = ['gpt-6-astra', 'gpt-5.5'];
 function load(home = '/nonexistent-home') {
   const mocks = {
     '../shared/types': { MODELS: { claude: ['claude-opus-5'], codex: FALLBACK } },
+    '../shared/codexModels': sharedCodexModels,
     'node:os': { homedir: () => home },
   };
   const mod = { exports: {} };

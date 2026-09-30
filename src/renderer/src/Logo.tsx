@@ -5,7 +5,7 @@ import React from "react";
 import mask from "./assets/muses-mask.png"; // magick: gray, threshold 50%, trim, resize 800, alpha copy
 
 const MASK = { WebkitMaskImage: `url(${mask})`, maskImage: `url(${mask})` } as React.CSSProperties;
-// the wrapper becomes a dark oval in light mode so the mark stays cream-on-black
+// the wrapper becomes a dark circle in light mode so the mark stays cream-on-black
 export const Mark = ({ className }: { className?: string }) => (
   <span className={"markwrap " + (className ?? "")}><span className="mark" style={MASK} aria-label="Consort" /></span>
 );
