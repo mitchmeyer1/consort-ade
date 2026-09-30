@@ -35,6 +35,13 @@ is built in `src/shared/shipPrompt.ts` from the feature's state and the command:
 The buttons on the stage bar and in the Ship drawer send these; Next chips under a reply clear the
 context then send the reply's own `Next:` command.
 
+Every message in a ship chat, typed or from a button, carries a short `/ship status` header
+(`src/main/agents.ts` › `runSend`): the stage line with the current stage marked, the step this turn is
+on, how many turns the chat has taken at that stage, and the markers. The full handler text rides only
+when the stage moved, the chat was continued after an interruption, or the session is fresh. In
+Implementing, the ticket breakdown is written to `issues/` as `Status: proposed` and moves the stage at
+once, so a repeat of the step confirms the breakdown instead of re-deriving it.
+
 ## How state moves
 
 The agent reports with markers Consort strips from the reply: `[ship-stage: <stage> | note]`,

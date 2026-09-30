@@ -131,9 +131,8 @@ export type Chat = {
   seatDir?: string;
   /** seats that hit a limit during the current turn, so an automatic switch never circles back */
   seatTried?: string[];
-  /** a /ship run: which feature and what it was asked to do */
-  /** a /ship run: what it was asked to do, and the stage whose handler the chat last received */
-  ship?: { action: string; stage?: string };
+  /** a /ship run: what it was asked to do, the stage whose handler the chat last received, and how many turns it has taken at that stage */
+  ship?: { action: string; stage?: string; turns?: number };
   /** /clear was run: the next send starts a fresh session without the transcript digest */
   cleared?: boolean;
   context?: ChatContext;

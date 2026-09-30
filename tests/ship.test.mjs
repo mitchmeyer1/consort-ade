@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyShipChange, clickupIdFrom, fillShipCommand, githubIssueFrom, isShipCommand, newShipFeature, parseShipCommand, parseShipMarkers, shipActions, shipBranch, shipChatName, shipFooter, shipSlug, stageLabel, stripShipMarkers, withBranchPrefix } from '../src/shared/ship.ts';
-import { shipHandler, shipPrompt } from '../src/shared/shipPrompt.ts';
+import { shipHandler, shipPrompt, shipStageLine, shipTurnHeader } from '../src/shared/shipPrompt.ts';
 
 const ticket = { source: 'github', id: '494', url: 'https://github.com/aligned/mono/issues/494', title: 'HRIS address propagation', repo: 'aligned/mono' };
 
@@ -105,4 +105,27 @@ test('ticket references are read from urls and bare ids', () => {
   assert.deepEqual(githubIssueFrom('https://github.com/aligned/mono/issues/494'), { repo: 'aligned/mono', number: 494 });
   assert.deepEqual(githubIssueFrom('#494'), { number: 494 });
   assert.equal(githubIssueFrom('abc'), undefined);
+});
+
+test('every ship turn carries the stage line with "you are here" and the step it is on; a repeat turn is told not to restart', () => {
+  const f = newShipFeature(ticket, 'hris-address', 1000);
+  assert.equal(shipStageLine(f), "[Grilling ← you are here] → Spec'd → Implementing → Ready to Test → Revising → In Review → Merged → Closed");
+  const spec = applyShipChange(f, { stage: "Spec'd", note: 'Grilled in 2 rounds.' }, 2000);
+  assert.equal(shipStageLine(spec), "Grilling ✓ → [Spec'd ← you are here] → Implementing → Ready to Test → Revising → In Review → Merged → Closed");
+  const review = applyShipChange(spec, { stage: 'In Review' }, 3000);
+  assert.match(shipStageLine(review), /Ready to Test ✓ → Revising → \[In Review ← you are here\]/);
+  const h = shipTurnHeader(spec, 3);
+  assert.match(h, /\/ship status/);
+  assert.match(h, /Feature: #494 "HRIS address propagation"/);
+  assert.match(h, /This turn's step: Implementing: tickets from SPEC.md/);
+  assert.match(h, /turn 3 of this chat at this stage: do not restart/);
+  assert.match(h, /Done so far: Grilling \(Started\.\); Spec'd \(Grilled in 2 rounds\.\)/);
+  assert.match(h, /Stage: Spec'd · Ticket: #494 · Next: \/ship …/);
+  assert.match(shipTurnHeader(f), /First turn at this stage/);
+  const p = shipPrompt({ feature: spec, form: { form: 'resume' }, worktree: '/w', branch: 'b', base: 'origin/main' });
+  assert.match(p, /Grilling ✓ → \[Spec'd ← you are here\]/);
+  // the breakdown moves the stage to Implementing and is written as proposed tickets, so a second Implement never re-derives it
+  assert.match(p, /\[ship-stage: Implementing \| Breakdown proposed: <n> tickets\.\]/);
+  assert.match(p, /\*\*Status:\*\* proposed/);
+  assert.match(p, /never re-derive it/);
 });

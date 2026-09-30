@@ -291,11 +291,14 @@ test('continuing a /ship chat re-attaches the stage prompt and the plan it was o
   runs[0].finish({ type: 'turn.completed', usage: {} });
   await resumed;
   await until(() => !chat.running);
-  // a plain new message on a live session at the same stage gets neither: the session already knows
+  // a plain new message on a live session at the same stage gets the short status header, not the full handler again
   chat.sessionId = 'live';
   await agents.send(chat.id, 'thanks');
   await until(() => runs.length === 2);
   assert.doesNotMatch(runs[1].prompt, /This chat is a \/ship run/);
+  assert.match(runs[1].prompt, /\/ship status/);
+  assert.match(runs[1].prompt, /\[Grilling ← you are here\] → Spec'd/);
+  assert.match(runs[1].prompt, /turn 2 of this chat at this stage/);
   runs[1].finish({ type: 'turn.completed', usage: {} });
   await until(() => !chat.running);
   // the stage moved (grilling wrote the spec): "continue" in the same chat gets the next stage's handler, once
@@ -309,6 +312,9 @@ test('continuing a /ship chat re-attaches the stage prompt and the plan it was o
   await agents.send(chat.id, 'and then?');
   await until(() => runs.length === 4);
   assert.doesNotMatch(runs[3].prompt, /build it, end at "built"/);
+  assert.match(runs[3].prompt, /Grilling ✓ → \[Spec'd ← you are here\]/);
+  assert.match(runs[3].prompt, /This turn's step: Implementing/);
+  assert.equal(chat.ship.turns, 2);
   runs[3].finish({ type: 'turn.completed', usage: {} });
   await until(() => !chat.running);
 });

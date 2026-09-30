@@ -24,7 +24,7 @@ import { startAutopilotBridge } from "./autopilotBridge";
 import { defaultSeat, pickSeat, readPool, sessionOnSeat } from "./seatPool";
 import { applyRateInfo, describeLimit, earliestReset, isCodexLimitText, isUsageLimitText, limitFromRateEvent, resetLabel, SEAT_CONTINUE_PROMPT, seatLoad, seatName, seatOf, type LimitHit } from "../shared/seatPool";
 import { applyShipChange, isSlashCommand, parseShipMarkers, stripShipMarkers, withAttachments, type ShipFeature } from "../shared/ship";
-import { shipPrompt } from "../shared/shipPrompt";
+import { shipPrompt, shipTurnHeader } from "../shared/shipPrompt";
 import { planReminder } from "../shared/processContext";
 import { CLEAR_DIVIDER, type SlashEntry } from "../shared/commands";
 import { contextWindowOf, promptTokens } from "../shared/context";
@@ -460,11 +460,20 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
   // with its rules and markers, and the plan it was partway through (the checklist and a review are handled above).
   // A plain message in a ship chat ("continue") gets the stage handler too whenever the stage moved since the chat
   // last saw one, so the pipeline carries on in the same chat; a turn that already is the stage prompt carries its stage.
+  // Every turn in a ship chat, plain or stage prompt, carries the short status header (the stage line with
+  // "you are here", this turn's step, how many turns the chat has taken at the stage), so no message loses the process.
   const shipStage = shipStageOf(chat);
-  if (opts.shipStage) chat.ship = { action: chat.ship?.action ?? "next", stage: opts.shipStage };
-  else if (!slash && shipStage && (opts.resume || (!chat.sessionId && chat.messages.length) || chat.ship?.stage !== shipStage)) {
-    text = `${text}\n\n${shipContext(chat)}`;
-    chat.ship = { action: chat.ship?.action ?? "chat", stage: shipStage };
+  const feature = shipStage ? store.data.worktrees.find((x) => x.id === chat.worktreeId)?.ship : undefined;
+  if (opts.shipStage) {
+    const turns = chat.ship?.stage === opts.shipStage ? (chat.ship?.turns ?? 1) + 1 : 1;
+    chat.ship = { action: chat.ship?.action ?? "next", stage: opts.shipStage, turns };
+    if (feature && turns > 1) text = `${text}\n\n${shipTurnHeader(feature, turns)}`;
+  } else if (!slash && shipStage && feature) {
+    const moved = chat.ship?.stage !== shipStage;
+    const turns = moved ? 1 : (chat.ship?.turns ?? 0) + 1;
+    if (opts.resume || (!chat.sessionId && chat.messages.length) || moved) text = `${text}\n\n${shipContext(chat)}`;
+    text = `${text}\n\n${shipTurnHeader(feature, turns)}`;
+    chat.ship = { action: chat.ship?.action ?? "chat", stage: shipStage, turns };
   }
   if (!slash && opts.resume && planReminder(chat.plan)) text = `${text}\n\n${planReminder(chat.plan)}`;
   if (!opts.silent) chat.messages.push({ id: randomUUID(), role: "user", blocks: [{ type: "text", text: shown }], ts: Date.now(), ...(staged.length ? { attachments: staged } : {}) });

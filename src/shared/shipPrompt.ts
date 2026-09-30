@@ -1,4 +1,4 @@
-import { SHIP_DIR, SHIP_STAGES, shipFooter, ticketRef, type ShipFeature, type ShipForm } from "./ship.ts";
+import { SHIP_DIR, SHIP_STAGES, shipFooter, stageIndex, ticketRef, type ShipFeature, type ShipForm } from "./ship.ts";
 
 /**
  * The prompt for one /ship turn: the rules every stage shares, the feature's state, and the
@@ -21,10 +21,45 @@ export type ShipPromptInput = {
   checks?: string[];
 };
 
-const STAGE_LINE = SHIP_STAGES.join(" → ");
+/** the stage list with the ones behind marked done and the current one marked: "Grilling ✓ → [Spec'd ← you are here] → Implementing → …" */
+export function shipStageLine(f: ShipFeature): string {
+  const seen = new Set(f.history.map((h) => h.stage));
+  return SHIP_STAGES.map((s) => s === f.stage ? `[${s} ← you are here]` : seen.has(s) || stageIndex(s) < stageIndex(f.stage) && s !== "Revising" ? `${s} ✓` : s).join(" → ");
+}
+
+const HANDLER_TITLE: Record<string, string> = {
+  grilling: "Grilling: interrogate the idea in rounds, then write SPEC.md",
+  implementing: "Implementing: tickets from SPEC.md, build them, push, draft PR",
+  test: "Test session: prove every story, write TEST-REPORT.md",
+  reentry: "Ready to Test: restate where it stands; the user approves or gives feedback",
+  approve: "Approve: put the PR up for review",
+  revising: "Revising: gather feedback, explain, apply what the user approves",
+  "pr-loop": "In Review: one round with the reviewer",
+  closeout: "Merged: close out",
+  pause: "Pause: write the handoff",
+  closed: "Closed: nothing runs",
+};
+
+/**
+ * The short block every plain message in a ship chat carries, so the agent never loses which process it is in,
+ * which step it is on, and what the step must produce. The full handler text rides only when the stage moved
+ * or the session is fresh; this header points back at it. `turns` is how many turns this chat has taken at
+ * the stage, so a repeat does not restart the handler from its first step.
+ */
+export function shipTurnHeader(f: ShipFeature, turns = 1): string {
+  const handler = shipHandler(f, { form: "resume" });
+  return `/ship status (read before answering; this chat is one run of Consort's /ship pipeline)
+- Feature: ${ticketRef(f.ticket)} "${f.ticket.title}"${f.paused ? " · PAUSED" : ""}
+- Stages: ${shipStageLine(f)}
+- This turn's step: ${HANDLER_TITLE[handler] ?? handler}. Its handler text is earlier in this chat; follow it.
+- ${turns > 1 ? `This is turn ${turns} of this chat at this stage: do not restart the handler from its first step or re-propose what the transcript already settled; continue from where the transcript stands.` : "First turn at this stage in this chat."}
+- Done so far: ${f.history.slice(-4).map((h) => `${h.stage}${h.note ? ` (${h.note})` : ""}`).join("; ") || "nothing"}
+- Report every move with the markers ([ship-stage: <stage> | <note>], [ship-next: /ship …], [ship-built], [ship-pr: <url>], [ship-spec: …], [ship-report: …]) and end with the footer line: ${shipFooter(f).replace(/Next: .*$/, "Next: /ship …")}`;
+}
+
 
 const COMMON = (i: ShipPromptInput) => `You are running one step of /ship, Consort's feature pipeline, for the feature below. A feature is in exactly one of these stages, and the stage decides what this turn does:
-${STAGE_LINE}
+${shipStageLine(i.feature)}
 
 Consort keeps the feature's state and mirrors the stage onto its ticket (a GitHub issue gets a ship:<stage> label and is closed when merged; a ClickUp task gets the status). You report what happened with markers, each on its own line anywhere in your reply; Consort applies them and strips them from what the user sees:
 - [ship-stage: <stage> | <one-line note>] when the feature moves to a stage. Stage names exactly as listed above.
@@ -81,12 +116,13 @@ const IMPLEMENTING = (i: ShipPromptInput) => `## This turn: build it, end at "bu
 
 Read ${SHIP_DIR}/SPEC.md. Read a ticket file when building it, repo convention docs when a ticket touches that area; never the whole set up front.
 
-1. Enter Implementing (once). If the stage is Spec'd: emit [ship-stage: Implementing | Tickets: <n>.] once the tickets exist.
-2. Tickets. If ${SHIP_DIR}/issues/ is empty, break SPEC.md into tracer-bullet tickets: each a narrow but complete vertical slice through every layer, demoable on its own, sized for one fresh context, with its blocking edges. Wide mechanical refactors go expand → migrate in batches → contract instead. Present the breakdown as a numbered list (title, blocked by, what it delivers) and ask whether the granularity and edges are right; end the turn with the footer and [phase:waiting] unless the user already approved a breakdown in this chat. Then write one file per ticket, ${SHIP_DIR}/issues/NN-<slug>.md, numbered in dependency order:
-   # NN: <title> / **What to build:** … / **Blocked by:** … / **Status:** ready-for-agent / - [ ] acceptance criteria.
-3. Implement, frontier by frontier, one ticket in flight in the main loop: set Status: in-progress, implement, run the repo's typecheck and tests, commit in the worktree, set Status: done. The ticket files plus the git log are the checkpoint a resumed session rebuilds from. Delegate a ticket to a background agent only when three or more ready tickets touch different packages, or a ticket is read-heavy or fully mechanical with a verify command written; brief it with pointers, and it commits to this branch.
-   If resuming: the tickets' Status lines plus \`git log --oneline -10\` give the frontier; read ${SHIP_DIR}/HANDOFF.md only if it exists.
-4. Built. When the last ticket is done and typecheck and tests are green: push the branch (\`git push -u origin ${i.branch}\`), open a draft PR against ${i.base.replace(/^origin\//, "")} with \`gh pr create --draft\` whose body summarises what was built and lists the user stories (mention the ticket: "Closes ${i.feature.ticket.source === "github" ? `#${i.feature.ticket.id}` : i.feature.ticket.url}" for GitHub), then emit [ship-built], [ship-pr: <url>] and [ship-next: /ship]. Print three lines: what was built, the branch and HEAD sha, and that the test session runs next in a fresh chat. Stop; do not run the test session in this chat.`;
+1. Where the build stands. If ${SHIP_DIR}/issues/ has files, their Status lines say it: every ticket "proposed" means the breakdown is waiting for the user's word, so ask once and briefly whether to go ahead or change it (never re-derive it); "ready-for-agent", "in-progress" and "done" plus \`git log --oneline -10\` give the frontier, so build (step 3). Read ${SHIP_DIR}/HANDOFF.md only if it exists.
+2. Tickets, only when ${SHIP_DIR}/issues/ is empty. Break SPEC.md into tracer-bullet tickets: each a narrow but complete vertical slice through every layer, demoable on its own, sized for one fresh context, with its blocking edges. Wide mechanical refactors go expand → migrate in batches → contract instead. Write one file per ticket now, ${SHIP_DIR}/issues/NN-<slug>.md, numbered in dependency order:
+   # NN: <title> / **What to build:** … / **Blocked by:** … / **Status:** proposed / - [ ] acceptance criteria.
+   Then present the breakdown as a numbered list (title, blocked by, what it delivers), ask whether the granularity and edges are right, emit [ship-stage: Implementing | Breakdown proposed: <n> tickets.] and [ship-next: /ship], and end the turn with the footer and [phase:waiting] unless the user already approved a breakdown in this chat.
+   On the user's go (in this chat): change what they asked, set every Status to ready-for-agent, then build. If the stage is still Spec'd, emit [ship-stage: Implementing | Tickets: <n>.].
+3. Implement, frontier by frontier, one ticket in flight in the main loop: set Status: in-progress, implement, run the repo's typecheck and tests, commit in the worktree, set Status: done. The ticket files plus the git log are the checkpoint a resumed session rebuilds from. Delegate a ticket to a background agent only when three or more ready tickets touch different packages, or a ticket is read-heavy or fully mechanical with a verify command written; brief it with pointers, and it commits to this branch. When a turn ends with tickets still open, say which are done and which are next, and emit [ship-next: /ship].
+4. Built. When the last ticket is done and typecheck and tests are green: push the branch (\`git push -u origin ${i.branch}\`), open a draft PR against ${i.base.replace(/^origin\//, "")} with \`gh pr create --draft\` whose body summarises what was built and lists the user stories (mention the ticket: "Closes ${i.feature.ticket.source === "github" ? `#${i.feature.ticket.id}` : i.feature.ticket.url}" for GitHub), then emit [ship-built], [ship-pr: <url>] and [ship-next: /ship]. Print three lines: what was built, the branch and HEAD sha, and that the test session runs next. Stop; do not run the test session in this turn.`;
 
 const TEST_SESSION = (i: ShipPromptInput) => `## This turn: the test session — prove every story, write the report, hand it to the user
 
