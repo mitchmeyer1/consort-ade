@@ -19,6 +19,7 @@ import { isWorkspace, repoDirs, reposForPr, slugify, workspaceForCheckout, works
 import * as ws from "./workspaces";
 import { discoverModels } from "./modelDiscovery";
 import { allCliStatus, updateAllClis } from "./cliRuntime";
+import { mirrorPin, readNotes, writeNotes } from "./notes";
 import { forgetCodexModels } from "./codexModels";
 import type { Chat, InstalledExtension, Project, RepoResult, RepoStatus, WorkspaceStatus, Worktree } from "../shared/types";
 import { askOnce, humanize, suggestTitle } from "./namer";
@@ -587,6 +588,14 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     try { return await ws.createPrs(targets, p.branch ?? "", draft, p.name); }
     finally { wsStatusCache.delete(projectId); for (const t of targets) { git.forgetRemoteStatus(t.path); repoCache.delete(t.projectId); git.forgetRepoInfo(t.repo); } }
   },
+  readNotes: (id: string) => readNotes(wt(id)),
+  writeNotes: (id: string, doc: import("../shared/notes").NotesDoc) => {
+    const w = wt(id);
+    const saved = writeNotes(w, doc);
+    mirrorPin(w, saved);
+    store.save();
+    return saved;
+  },
   worktreeStatus: (id: string) => {
     const w = store.data.worktrees.find((w) => w.id === id);
     if (!w || isScratch(w) || w.workspace) return null;
@@ -1078,6 +1087,8 @@ app.whenReady().then(() => {
   ensurePoolKeys(store.data);
   store.save();
   seats.start();
+  // a pinned note lives in the worktree's own file; the sidebar reads the mirror on the record, so refresh it from disk once
+  for (const w of store.data.worktrees) mirrorPin(w, readNotes(w));
   // the model pickers follow the providers, not a release of Consort: ask on every start
   handlers.refreshModels!().catch((error: unknown) => console.warn("model refresh failed", error));
   // so do the CLIs themselves: a release newer than the bundled one is fetched on start and daily (main/cliRuntime.ts)

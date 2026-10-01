@@ -5,6 +5,7 @@ import { PhaseStrip } from "./PhaseStrip";
 import { defaultConnector, selectedModel } from "../../shared/defaultConnector";
 import { byCapability, modelTiers, rankModel } from "../../shared/modelTiers";
 import { cliSummary, type CliStatus } from "../../shared/cliUpdates";
+import { addNote, editNote, emptyNotes, noteSummary, pinNote, removeNote, type NotesDoc } from "../../shared/notes";
 import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { lastPrompt } from "../../shared/lastPrompt";
 import { connectorAccess, formatAge, formatReset, modelBlock, usageTone, type ConnectorUsage } from "../../shared/usage";
@@ -51,7 +52,7 @@ import "@xterm/xterm/css/xterm.css";
 
 const ade = (window as any).ade as Api;
 const EMPTY: State = { projects: [], worktrees: [], chats: [], keys: [], appearance: { theme: "dark", background: "opaque" } };
-type Tab = "terminal" | "diff" | "editor" | "markdown" | "commit" | "artifacts" | "review" | "settings" | "ship";
+type Tab = "terminal" | "diff" | "editor" | "markdown" | "commit" | "artifacts" | "review" | "settings" | "ship" | "notes";
 type Sel = { type: "chat"; id: string } | { type: "worktree"; id: string; form?: boolean } | { type: "project"; id: string; form?: boolean };
 
 function useStatus(id?: string, revision = 0) {
@@ -424,8 +425,9 @@ export function App() {
             {worktree && !scratch && <button className={tab === "diff" ? "on" : ""} onClick={() => toggle("diff")}><Ico n="branch" /><span>Diff</span></button>}
             {worktree && <button className={tab === "editor" ? "on" : ""} onClick={() => toggle("editor")}><Ico n="pencil" /><span>Editor</span></button>}
             {worktree && !scratch && <button className={tab === "commit" ? "on" : ""} onClick={() => toggle("commit")}><Ico n="wheat" /><span>Commit</span></button>}
+            {worktree && <button className={tab === "notes" ? "on" : ""} aria-pressed={tab === "notes"} title={worktree.note ? `Pinned: ${noteSummary(worktree.note)}` : "Bullet notes kept in this worktree, outside git"} onClick={() => toggle("notes")}><Ico n="scroll" /><span>Notes</span></button>}
             {worktree && reviewFile && <button className={tab === "review" ? "on" : ""} title={`PR #${reviewFile.summary.pr} · ${reviewFile.summary.title}`} onClick={() => toggle("review")}><Ico n="laurel" /><span>Review</span></button>}
-            {chat && <button className={tab === "artifacts" ? "on" : ""} aria-pressed={tab === "artifacts"} onClick={() => toggle("artifacts")}><Ico n="scroll" /><span>Artifacts</span></button>}
+            {chat && <button className={tab === "artifacts" ? "on" : ""} aria-pressed={tab === "artifacts"} onClick={() => toggle("artifacts")}><Ico n="lyre" /><span>Artifacts</span></button>}
             <button className={tab === "settings" ? "on" : ""} onClick={() => toggle("settings")}><Ico n="gear" /><span>Settings</span></button>
           </div>
         </div>
@@ -757,6 +759,7 @@ function WorktreeNode({ wt, state, sel, running, failed, done, onSelect, collaps
         {/* two subtitle lines, aligned under the title text rather than the icon: the branch, then who owns it and where it stands */}
         <span className="meta">
           <small className="branch" title={st?.branch ?? wt.branch}>{st?.branch ?? wt.branch}</small>
+          {wt.note && <PinnedNote text={wt.note} />}
         </span>
         <span className="meta status">
           {!wt.root && <Contributor who={st?.author} />}
@@ -1743,7 +1746,7 @@ function AssistantMessage({ blocks, onOpen, worktreeId, live, onFollowup, onShip
         <div className="made" role="group" aria-label="Files from this response">
           {made.map((a) => (
             <button key={a.target} className="made-link" title={a.target} onClick={() => a.remote ? ade.openExternal(a.target) : onOpen(a.target)}>
-              <Ico n="scroll" />{a.label}<span className="made-chev" aria-hidden="true">{a.remote ? "↗" : "›"}</span>
+              <Ico n="lyre" />{a.label}<span className="made-chev" aria-hidden="true">{a.remote ? "↗" : "›"}</span>
             </button>
           ))}
         </div>
@@ -2481,7 +2484,7 @@ function Drawer({ onOpenChat, tab, state, chat, worktree, scope, ptys, width, fi
   return (
     <div className="drawer" style={{ width }}>
       <div className="dhead">
-        <span><Ico n={{ terminal: "terminal", diff: "branch", editor: "pencil", markdown: "scroll", commit: "wheat", artifacts: "scroll", review: "laurel", settings: "gear", ship: "laurel" }[tab]} className="big" /> {tab[0].toUpperCase() + tab.slice(1)}{scope && tab !== "settings" ? ` · ${scope.title}` : ""}</span>
+        <span><Ico n={{ terminal: "terminal", diff: "branch", editor: "pencil", markdown: "scroll", commit: "wheat", artifacts: "lyre", review: "laurel", settings: "gear", ship: "laurel", notes: "scroll" }[tab]} className="big" /> {tab[0].toUpperCase() + tab.slice(1)}{scope && tab !== "settings" ? ` · ${scope.title}` : ""}</span>
         <button className="icon" onClick={onClose}>×</button>
       </div>
       <div className="dbody" ref={body}>
@@ -2493,11 +2496,60 @@ function Drawer({ onOpenChat, tab, state, chat, worktree, scope, ptys, width, fi
           : tab === "editor" ? <Editor key={worktree.id + (file ?? "")} worktree={worktree} initial={file} memoryKey={memoryKey} onView={onView} />
           : tab === "markdown" ? <MarkdownView key={worktree.id + (file ?? "")} worktree={worktree} path={file} onEdit={onEdit} onNavigate={onView} />
           : tab === "commit" ? <CommitPane key={worktree.id} worktree={worktree} />
+          : tab === "notes" ? <NotesPanel key={worktree.id} wt={worktree} />
           : tab === "review" ? (reviewPath ? <MarkdownView key={worktree.id + reviewPath} worktree={worktree} path={reviewPath} onEdit={onEdit} onNavigate={onView} /> : <div className="card">No review file for this branch yet.</div>)
           : <Diff key={worktree.id} worktree={worktree} />}
       </div>
     </div>
   );
+}
+
+/** the pinned note beside the branch: an icon, the note on hover (see shared/notes.ts) */
+function PinnedNote({ text }: { text: string }) {
+  return <span className="note-pin" role="img" aria-label={`Pinned note: ${noteSummary(text)}`} onClick={(e) => e.stopPropagation()}>
+    <Ico n="scroll" className="solo" />
+    <span className="note-tip" role="tooltip">{text}</span>
+  </span>;
+}
+
+/**
+ * Bullet notes for a worktree, in .consort/notes.json of the checkout. Every change is written
+ * straight through; the one pinned note is what the sidebar shows.
+ */
+function NotesPanel({ wt }: { wt: Worktree }) {
+  const [doc, setDoc] = useState<NotesDoc>(emptyNotes());
+  const [draft, setDraft] = useState("");
+  const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => { ade.readNotes(wt.id).then(setDoc, (e) => setError((e as Error).message)); }, [wt.id]);
+  const save = (next: NotesDoc) => {
+    setDoc(next); // optimistic: the file is ours alone
+    ade.writeNotes(wt.id, next).then(setDoc, (e) => setError((e as Error).message));
+  };
+  const add = () => { if (!draft.trim()) return; save(addNote(doc, crypto.randomUUID(), draft, Date.now())); setDraft(""); };
+  const commitEdit = () => { if (editing) save(editNote(doc, editing.id, editing.text)); setEditing(null); };
+  return <div className="notes-panel">
+    {error && <div className="card" style={{ color: "var(--err)" }}>{error}</div>}
+    <div className="card">
+      {doc.notes.length === 0 && <div className="m">No notes yet. Each note is one bullet; pin one to show it beside the branch in the sidebar.</div>}
+      <ul className="notes">
+        {doc.notes.map((n) => <li key={n.id} className={n.pinned ? "pinned" : ""}>
+          <button className={"icon pin" + (n.pinned ? " on" : "")} aria-pressed={!!n.pinned} title={n.pinned ? "Unpin" : "Pin: show beside the branch in the sidebar"} onClick={() => save(pinNote(doc, n.id))}><Ico n="scroll" className="solo" /></button>
+          {editing?.id === n.id
+            ? <textarea autoFocus rows={2} value={editing.text} onChange={(e) => setEditing({ id: n.id, text: e.target.value })} onBlur={commitEdit}
+                onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); setEditing(null); } if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); commitEdit(); } }} />
+            : <span className="text" title="Click to edit" onClick={() => setEditing({ id: n.id, text: n.text })}>{n.text}</span>}
+          <button className="icon" title="Remove note" onClick={() => save(removeNote(doc, n.id))}>×</button>
+        </li>)}
+      </ul>
+      <div className="note-add">
+        <textarea rows={1} placeholder="Add a note… ↩ to add, ⇧↩ newline" value={draft} onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); add(); } }} />
+        <button className="primary" disabled={!draft.trim()} onClick={add}>Add</button>
+      </div>
+    </div>
+    <div className="m">Saved to {wt.path}/.consort/notes.json, kept out of git.</div>
+  </div>;
 }
 
 function ArtifactsView({ chat, onOpen }: { chat: Chat; onOpen: (path: string) => void }) {
@@ -2514,7 +2566,7 @@ function ArtifactsView({ chat, onOpen }: { chat: Chat; onOpen: (path: string) =>
     {!artifacts.length ? <div className="card">No artifacts yet. Files linked in assistant responses will appear here.</div>
       : <ul>{artifacts.map(({ label, target, linkedAt, updatedAt }) => <li key={target}>
         <button className="artifact-entry" title={target} onClick={() => open(target)} onContextMenu={(e) => { e.preventDefault(); open(target); }}>
-          <Ico n="scroll" />
+          <Ico n="lyre" />
           <strong>{label}</strong>
           {/* one date, the latest, as a file browser shows "modified"; the tooltip has the history */}
           <time className="artifact-when" dateTime={new Date(updatedAt).toISOString()}

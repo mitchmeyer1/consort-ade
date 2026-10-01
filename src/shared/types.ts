@@ -65,6 +65,8 @@ export type Worktree = {
   scratch?: true;
   /** the single chat scope of a workspace project: its path is the workspace folder */
   workspace?: true;
+  /** the pinned note's text, mirrored from the worktree's .consort/notes.json (see shared/notes.ts) */
+  note?: string;
   /** a /ship feature: this worktree is its branch, and the record carries its stage (see shared/ship.ts) */
   ship?: import("./ship").ShipFeature;
 };
@@ -232,6 +234,10 @@ export type Api = {
   renameWorktree(id: string, title: string): Promise<void>;
   autoTitle(id: string): Promise<void>;
   archiveWorktree(id: string, on: boolean): Promise<void>;
+  /** the worktree's bullet notes, from .consort/notes.json in the checkout (see shared/notes.ts) */
+  readNotes(id: string): Promise<import("./notes").NotesDoc>;
+  /** replace the notes file; the pinned note is mirrored onto the worktree record for the sidebar */
+  writeNotes(id: string, doc: import("./notes").NotesDoc): Promise<import("./notes").NotesDoc>;
   worktreeStatus(id: string): Promise<WorktreeStatus | null>;
   /** a multi-repo workspace from existing projects; resolves to the id of its one worktree */
   addWorkspace(name: string, branch: string, projectIds: string[]): Promise<string>;
