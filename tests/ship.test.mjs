@@ -184,3 +184,16 @@ test('approve hands the PR to the self-review and pr-loop works from its file, n
   const running = shipPrompt({ feature: inReview, form: { form: 'pr-loop' }, worktree: '/w', branch: 'b', base: 'origin/development', review: { running: true } });
   assert.match(running, /RUNNING now in another chat/);
 });
+
+test("the ticket is written into the worktree as TICKET.md so any message in a ship chat can read it, and every ship prompt says where", async () => {
+  const { TICKET_FILE, ticketMarkdown } = await import('../src/shared/ship.ts');
+  assert.equal(TICKET_FILE, '.consort/ship/TICKET.md');
+  const md = ticketMarkdown({ source: 'clickup', id: '17thtp0hvw7', url: 'https://app.clickup.com/t/17thtp0hvw7', title: 'Scope October Sprint Scope for APC Admin' }, { body: 'Build a sized list.\n\n- item', status: 'to do', at: Date.UTC(2026, 9, 1) });
+  assert.match(md, /^# Scope October Sprint Scope for APC Admin\n/);
+  assert.match(md, /- Source: ClickUp task 17thtp0hvw7\n- URL: https:\/\/app\.clickup\.com\/t\/17thtp0hvw7\n- Status in the tracker: to do\n- Fetched by Consort: 2026-10-01T00:00:00\.000Z/);
+  assert.match(md, /## Description\n\nBuild a sized list\.\n\n- item\n$/);
+  assert.match(ticketMarkdown(ticket, { body: '  ', at: 0 }), /GitHub issue #494 in aligned\/mono[\s\S]*_The ticket has no description\._/);
+  const f = newShipFeature(ticket, 'hris-address', 1000);
+  assert.match(shipTurnHeader(f, 2), /full text .* is in \.consort\/ship\/TICKET\.md, written by Consort; read it before answering/);
+  assert.match(shipPrompt({ feature: f, form: { form: 'resume' }, worktree: '/w', branch: 'b', base: 'origin/main' }), /TICKET\.md \(the ticket's text, written by Consort each turn/);
+});

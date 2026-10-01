@@ -1,4 +1,4 @@
-import { SHIP_DIR, SHIP_REVIEW_ROUNDS, SHIP_STAGES, shipFooter, shipStep, stageIndex, ticketRef, type ShipFeature, type ShipForm } from "./ship.ts";
+import { SHIP_DIR, SHIP_REVIEW_ROUNDS, SHIP_STAGES, TICKET_FILE, shipFooter, shipStep, stageIndex, ticketRef, type ShipFeature, type ShipForm } from "./ship.ts";
 import type { ReviewSummary } from "./review.ts";
 
 /**
@@ -79,6 +79,7 @@ export function shipTurnHeader(f: ShipFeature, turns = 1): string {
   const handler = shipHandler(f, { form: "resume" });
   return `/ship status (read before answering; this chat is one run of Consort's /ship pipeline)
 - Feature: ${ticketRef(f.ticket)} "${f.ticket.title}"${f.paused ? " · PAUSED" : ""}
+- The ticket's full text (description, status, link) is in ${TICKET_FILE}, written by Consort; read it before answering anything about what the task asks for. You have no tracker access of your own.
 - Stages: ${shipStageLine(f)} (stage ${stageIndex(f.stage) + 1} of ${SHIP_STAGES.length}${shipStep(f) ? `, ${shipStep(f)}` : ""})
 - This turn's step: ${HANDLER_TITLE[handler] ?? handler}. Its handler text is earlier in this chat; follow it.
 - ${turns > 1 ? `This is turn ${turns} of this chat at this stage: do not restart the handler from its first step or re-propose what the transcript already settled; continue from where the transcript stands.` : "First turn at this stage in this chat."}
@@ -103,7 +104,7 @@ Commands the user (and your [ship-next]) use inside this worktree, no ticket id 
 
 Rules that never bend:
 - Work in this worktree only: ${i.worktree}, branch ${i.branch}, cut from ${i.base}. The PR targets ${i.base.replace(/^origin\//, "")}. Never switch branches, never touch another checkout.
-- Feature artifacts live under ${SHIP_DIR}/ in this worktree: SPEC.md, GRILLING.md, issues/NN-slug.md, TEST-REPORT.md, HANDOFF.md, review/. They are never committed; never add ${SHIP_DIR} to git.
+- Feature artifacts live under ${SHIP_DIR}/ in this worktree: TICKET.md (the ticket's text, written by Consort each turn; read it rather than asking for the task), SPEC.md, GRILLING.md, issues/NN-slug.md, TEST-REPORT.md, HANDOFF.md, review/. They are never committed; never add ${SHIP_DIR} to git.
 - Merging a PR is the user's action. /ship never merges, never force-pushes, never amends a pushed commit.
 - Commit in the worktree as you go; a finished ticket is committed before the next one starts.
 - Never open PHI-suffixed files or member-level rows, never print .env values.

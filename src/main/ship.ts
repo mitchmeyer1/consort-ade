@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { SHIP_LABELS, stageLabel, type ShipFeature, type ShipStage, type ShipSync, type ShipTicket } from "../shared/ship.ts";
+import { SHIP_LABELS, stageLabel, TICKET_FILE, ticketMarkdown, type ShipFeature, type ShipStage, type ShipSync, type ShipTicket } from "../shared/ship.ts";
 
 const run = promisify(execFile);
 const gh = async (cwd: string, args: string[]) => (await run("gh", args, { cwd, timeout: 60_000, maxBuffer: 1 << 22 })).stdout;
@@ -118,13 +118,28 @@ const readSpec = (worktreePath: string, rel: string) => {
   return existsSync(p) ? readFileSync(p, "utf8").slice(0, 60_000) : undefined;
 };
 
-/** the ticket's body for grilling: the issue text, or the ClickUp description */
-export async function ticketBody(t: ShipTicket, deps: SyncDeps): Promise<string> {
+/** the ticket as the tracker holds it now: the issue text, or the ClickUp description and status; undefined when it cannot be read */
+export async function fetchTicket(t: ShipTicket, deps: SyncDeps): Promise<{ body: string; status?: string } | undefined> {
   try {
-    if (t.source === "github") return (await githubTicket(deps.repoPath, Number(t.id))).body;
-    if (deps.clickupKey) return (await clickupTicket(deps.clickupKey, t.id)).body;
+    if (t.source === "github") return { body: (await githubTicket(deps.repoPath, Number(t.id))).body };
+    if (deps.clickupKey) { const c = await clickupTicket(deps.clickupKey, t.id); return { body: c.body, status: c.status }; }
   } catch {}
-  return "";
+  return undefined;
+}
+
+/** the ticket's body for grilling: the issue text, or the ClickUp description */
+export const ticketBody = async (t: ShipTicket, deps: SyncDeps): Promise<string> => (await fetchTicket(t, deps))?.body ?? "";
+
+/**
+ * Write the ticket into the worktree for the chat to read (shared/ship.ts TICKET_FILE). A fetch
+ * that fails leaves the last good file in place; resolves to the body the file now holds.
+ */
+export function writeTicketFile(worktreePath: string, t: ShipTicket, fetched: { body: string; status?: string } | undefined, now = Date.now()): string | undefined {
+  const file = join(worktreePath, TICKET_FILE);
+  if (!fetched) return existsSync(file) ? readFileSync(file, "utf8") : undefined;
+  mkdirSync(join(worktreePath, TICKET_FILE, ".."), { recursive: true });
+  writeFileSync(file, ticketMarkdown(t, { ...fetched, at: now }));
+  return fetched.body;
 }
 
 /** keeps Consort's folder (uploads, screenshots, /ship artifacts) out of git for every worktree of the repo */

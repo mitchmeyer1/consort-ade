@@ -10,6 +10,12 @@
 export const SHIP_STAGES = ["Grilling", "Spec'd", "Implementing", "Ready to Test", "Revising", "In Review", "Merged", "Closed"] as const;
 export type ShipStage = (typeof SHIP_STAGES)[number];
 export const SHIP_DIR = ".consort/ship";
+/**
+ * The ticket as the agent reads it: Consort fetches the issue or ClickUp task (the chat has no
+ * ClickUp access of its own) and writes it here on ship start and on every /ship turn, so a plain
+ * question in a ship chat can read the task, not just the grilling prompt that inlines it.
+ */
+export const TICKET_FILE = `${SHIP_DIR}/TICKET.md`;
 export const SHIP_DONE: readonly ShipStage[] = ["Merged", "Closed"];
 
 export type ShipSource = "github" | "clickup";
@@ -278,4 +284,12 @@ export function githubIssueFrom(text: string): { repo?: string; number: number }
   if (url) return { repo: url[1], number: Number(url[2]) };
   const bare = /^#?(\d+)$/.exec(t);
   return bare ? { number: Number(bare[1]) } : undefined;
+}
+
+/** TICKET.md: title and link first, then the body as the tracker holds it, so a reader needs nothing else */
+export function ticketMarkdown(t: ShipTicket, fetched: { body: string; status?: string; at: number }): string {
+  const where = t.source === "github" ? `GitHub issue #${t.id}${t.repo ? ` in ${t.repo}` : ""}` : `ClickUp task ${t.id}`;
+  const meta = [`- Source: ${where}`, `- URL: ${t.url}`, fetched.status ? `- Status in the tracker: ${fetched.status}` : "", `- Fetched by Consort: ${new Date(fetched.at).toISOString()}`].filter(Boolean);
+  const body = fetched.body.trim() || "_The ticket has no description._";
+  return `# ${t.title}\n\n${meta.join("\n")}\n\n## Description\n\n${body}\n`;
 }

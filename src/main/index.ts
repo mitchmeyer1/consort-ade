@@ -270,7 +270,10 @@ async function runShipTurn(w: Worktree, form: ShipForm, typed: string, files: st
   const f = w.ship!;
   const p = project(w.projectId);
   const deps = { repoPath: p.path, clickupKey: clickUpKey() };
-  const ticketBody = f.stage === "Grilling" ? await shipApi.ticketBody(f.ticket, deps) : undefined;
+  // the ticket is written into the worktree every turn, so any message in the chat can read it; grilling also gets it inline
+  const fetched = await shipApi.fetchTicket(f.ticket, deps);
+  const onDisk = shipApi.writeTicketFile(w.path, f.ticket, fetched);
+  const ticketBody = f.stage === "Grilling" ? fetched?.body ?? onDisk : undefined;
   const review = f.review ? { running: !!store.data.chats.find((c) => c.id === f.review!.chatId)?.running, summary: (await findReview(w.path, f.review.pr))?.summary } : undefined;
   const prompt = shipPrompt({ feature: f, form, worktree: w.path, branch: w.branch, base: p.defaultBase, ticketBody, review });
   const action = shipActionOf(typed);
