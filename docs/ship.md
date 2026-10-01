@@ -27,8 +27,8 @@ is built in `src/shared/shipPrompt.ts` from the feature's state and the command:
 | Command | Does |
 |---|---|
 | `/ship` | the next step for the stage the feature is in |
-| `/ship approve` | tests are blessed: the draft PR goes up for review (In Review) |
-| `/ship pr-loop` | one round with the reviewer |
+| `/ship approve` | tests are blessed: the draft PR is marked ready and Consort's self-review starts (In Review) |
+| `/ship pr-loop` | work through one round of the self-review's findings, fix, push, ask for the next round |
 | `/ship "<feedback>"` | enter Revising with that feedback |
 | `/ship pause` | write a handoff a fresh session resumes from |
 
@@ -41,6 +41,18 @@ on, how many turns the chat has taken at that stage, and the markers. The full h
 when the stage moved, the chat was continued after an interruption, or the session is fresh. In
 Implementing, the ticket breakdown is written to `issues/` as `Status: proposed` and moves the stage at
 once, so a repeat of the step confirms the breakdown instead of re-deriving it.
+
+## The review step is Consort's own PR review
+
+In Review does not use an external bot. When a feature enters In Review with a PR (or the agent emits
+`[ship-review-round: N]` after pushing fixes), main starts the **pr-writeup** review in a new chat of the
+worktree named `Review PR #<n> · ship round N` on the ship connector's orchestrator/delegate tiers
+(`startShipReview` in `src/main/index.ts`). It writes `.consort/pr-review/pr-<n>.review.json`, which the
+review drawer renders with Comment on PR / Ignore / Fix locally per finding; in a ship worktree "Fix
+locally" goes to the ship chat. When the review chat finishes, main runs `/ship pr-loop` in the
+worktree's idle ship chat: the agent adjudicates every finding the user has not ignored, waits for the
+go, fixes, pushes, and asks for the next round. Three rounds at most (`SHIP_REVIEW_ROUNDS`). The feature
+records the latest review on `ship.review` and the Ship drawer links it under Documents.
 
 ## How state moves
 

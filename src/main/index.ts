@@ -48,7 +48,7 @@ import { homedir } from "node:os";
 import { configureSeats, ensurePoolKeys, isPoolId } from "./seatPool";
 import { poolUsage } from "../shared/seatPool";
 import * as shipApi from "./ship";
-import { newShipFeature, parseShipCommand, shipActionOf, shipBranch, shipChatName, shipFolder, shipIdeaName, shipSlug, syncRetryDelay, type ShipFeature, type ShipForm, type ShipTicket } from "../shared/ship";
+import { newShipFeature, parseShipCommand, prNumberFromUrl, shipActionOf, shipBranch, shipChatName, shipFolder, shipIdeaName, shipReviewRoundToStart, shipSlug, syncRetryDelay, type ShipFeature, type ShipForm, type ShipTicket } from "../shared/ship";
 import { shipPrompt } from "../shared/shipPrompt";
 
 // ADE_DATA_DIR isolates state for test instances
@@ -270,7 +270,8 @@ async function runShipTurn(w: Worktree, form: ShipForm, typed: string, files: st
   const p = project(w.projectId);
   const deps = { repoPath: p.path, clickupKey: clickUpKey() };
   const ticketBody = f.stage === "Grilling" ? await shipApi.ticketBody(f.ticket, deps) : undefined;
-  const prompt = shipPrompt({ feature: f, form, worktree: w.path, branch: w.branch, base: p.defaultBase, ticketBody });
+  const review = f.review ? { running: !!store.data.chats.find((c) => c.id === f.review!.chatId)?.running, summary: (await findReview(w.path, f.review.pr))?.summary } : undefined;
+  const prompt = shipPrompt({ feature: f, form, worktree: w.path, branch: w.branch, base: p.defaultBase, ticketBody, review });
   const action = shipActionOf(typed);
   const id: string = reuse ?? handlers.addChat!(w.id, keyId, { name: shipChatName(action, f.ticket), remember: false });
   const chat = store.chat(id);
@@ -308,7 +309,49 @@ function retryFailedTickets(source?: ShipTicket["source"]) {
   for (const w of store.data.worktrees)
     if (w.ship && w.ship.sync?.ok === false && (!source || w.ship.ticket.source === source)) void writeTicket(w.id, undefined, undefined, true);
 }
-agents.onShipChanged((worktreeId, before, _after, note) => { void writeTicket(worktreeId, note, before); });
+agents.onShipChanged((worktreeId, before, after, note) => {
+  void writeTicket(worktreeId, note, before);
+  const round = shipReviewRoundToStart(before, after);
+  if (round) void startShipReview(worktreeId, round).catch((e) => console.error("ship self-review failed to start", e));
+});
+/** the worktree's most recent idle ship chat, where the pipeline's next step runs; undefined when every ship chat is busy */
+const idleShipChat = (worktreeId: string) => store.data.chats.filter((c) => c.worktreeId === worktreeId && c.ship && !c.running).sort((a, b) => (b.lastChattedAt ?? 0) - (a.lastChattedAt ?? 0))[0];
+/**
+ * In Review runs Consort's own PR review (the pr-writeup skill) as the feature's reviewer: a review chat in
+ * the worktree writes .consort/pr-review/pr-<n>.review.json, the drawer shows it with Comment / Ignore / Fix
+ * locally per finding, and when the chat finishes the ship chat gets /ship pr-loop to work through it.
+ */
+async function startShipReview(worktreeId: string, round: number) {
+  const w = store.data.worktrees.find((x) => x.id === worktreeId);
+  if (!w?.ship) return;
+  const pr = prNumberFromUrl(w.ship.prs.at(-1) ?? "");
+  if (!pr) return;
+  if (w.ship.review?.round === round && store.data.chats.find((c) => c.id === w.ship!.review!.chatId)?.running) return;
+  const key = shipKey();
+  const tiers = modelTiers(key.provider, store.public().models?.[key.provider]);
+  const id: string = handlers.addChat!(w.id, key.id, { name: `Review PR #${pr} · ship round ${round}`, model: tiers.orchestrator, delegateModel: tiers.delegate, remember: false });
+  store.chat(id).autoApprove = store.data.shipAutoApprove ?? true;
+  w.ship.review = { chatId: id, pr, round, startedAt: Date.now() };
+  w.ship.reviewRound = round;
+  w.ship.history.push({ at: Date.now(), stage: w.ship.stage, note: `Self-review round ${round} started.` });
+  store.save();
+  await agents.send(id, handlers.skillPrompt!("pr-writeup", w.id, String(pr), tiers.delegate));
+}
+/** a finished self-review hands back to the pipeline: the ship chat runs /ship pr-loop over the findings */
+agents.onTurnDone((chatId) => {
+  const w = store.data.worktrees.find((x) => x.ship?.review?.chatId === chatId && !x.ship.review.doneAt);
+  if (!w?.ship?.review) return;
+  w.ship.review.doneAt = Date.now();
+  w.ship.next = "/ship pr-loop";
+  store.save();
+  void (async () => {
+    const summary = (await findReview(w.path, w.ship!.review!.pr))?.summary;
+    w.ship!.history.push({ at: Date.now(), stage: w.ship!.stage, note: summary ? `Self-review round ${w.ship!.review!.round} done: ${summary.total} finding(s).` : `Self-review round ${w.ship!.review!.round} ended without a review file.` });
+    store.save();
+    if (!summary || w.ship!.stage !== "In Review" || w.ship!.paused) return;
+    await runShipTurn(w, { form: "pr-loop" }, "/ship pr-loop", [], shipKey().id, idleShipChat(w.id)?.id);
+  })().catch((e) => console.error("ship pr-loop after self-review failed", e));
+});
 
 const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   getState: () => store.public(),
@@ -621,7 +664,8 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     const { review } = await readReview(path);
     const finding = review.findings.find((f) => f.id === findingId);
     if (!finding) throw new Error(`No finding ${findingId} in this review.`);
-    let chat = pickReviewChat(store.data.chats, id, review.pr);
+    let chat = store.data.worktrees.find((w) => w.id === id)?.ship ? idleShipChat(id) : undefined;
+    chat ??= pickReviewChat(store.data.chats, id, review.pr);
     if (!chat) {
       const key = defaultConnector(store.data);
       if (!key) throw new Error("Add a connector in Settings first.");

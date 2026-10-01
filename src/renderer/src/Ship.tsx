@@ -92,6 +92,7 @@ export function ShipPanel({ wt, chats, onOpenChat, onOpenFile }: { wt: Worktree;
       <div className="ship-docs">
         {f.spec ? <button className="linkish" onClick={() => onOpenFile(file(f.spec!))}>Spec</button> : <span className="m">No spec yet: it is written when grilling stops.</span>}
         {f.report && <button className="linkish" onClick={() => onOpenFile(file(f.report!))}>Test report{f.tests ? ` · ${f.tests.pass}/${f.tests.total}` : ""}</button>}
+        {f.review && <button className="linkish" title={f.review.doneAt ? "Consort's AI self-review of the PR" : "The self-review is still running"} onClick={() => onOpenFile(file(`.consort/pr-review/pr-${f.review!.pr}.review.json`))}>Self-review · round {f.review.round}{f.review.doneAt ? "" : " · running"}</button>}
         <button className="linkish" onClick={() => onOpenFile(file(".consort/ship"))}>Folder</button>
       </div>
       {!!f.prs.length && <><h3>Pull requests</h3><div className="ship-docs">{f.prs.map((pr) => <button key={pr} className="linkish" onClick={() => ade.openExternal(pr)}>{prLabel(pr)}</button>)}</div></>}

@@ -44,10 +44,31 @@ export type ShipFeature = {
   report?: string;
   tests?: { pass: number; total: number };
   feedbackFrom?: ShipFeedbackFrom;
+  /** self-review rounds started so far (Consort's own pr-writeup review of the PR; capped at SHIP_REVIEW_ROUNDS) */
   reviewRound?: number;
+  /** the latest self-review: the chat running it, the PR it reads, its round */
+  review?: ShipReview;
   /** the last write of the stage to the ticket */
   sync?: ShipSync;
 };
+export type ShipReview = { chatId: string; pr: number; round: number; startedAt: number; doneAt?: number };
+export const SHIP_REVIEW_ROUNDS = 3;
+
+/** "https://github.com/o/r/pull/525" → 525 */
+export const prNumberFromUrl = (url: string) => { const m = /\/pull\/(\d+)/.exec(url); return m ? Number(m[1]) : undefined; };
+
+/**
+ * Which self-review round Consort starts after a reply moved the feature, if any: round 1 on entering In
+ * Review with a PR, round N when the agent asked for it with [ship-review-round: N] after pushing fixes,
+ * never past the cap, never on a paused feature.
+ */
+export function shipReviewRoundToStart(before: ShipFeature, after: ShipFeature): number | undefined {
+  if (after.stage !== "In Review" || after.paused || !after.prs.length) return;
+  const was = before.reviewRound ?? 0;
+  const asked = after.reviewRound ?? 0;
+  const round = asked > was ? asked : before.stage !== "In Review" ? was + 1 : undefined;
+  return round !== undefined && round <= SHIP_REVIEW_ROUNDS ? round : undefined;
+}
 
 /** what a /ship command asks for */
 export type ShipForm = { form: "list" | "new" | "resume" | "feedback" | "approve" | "pr-loop" | "pause"; ref?: string; idea?: string; feedback?: string };
@@ -227,7 +248,7 @@ export function shipStep(f: ShipFeature): string | undefined {
 export function shipBusyLabel(f: ShipFeature): string {
   const step = shipStep(f);
   if (step) return step === "building" ? "Building…" : "Test session running…";
-  return f.stage === "Grilling" ? "Grilling…" : f.stage === "In Review" ? "Review round…" : f.stage === "Revising" ? "Revising…" : "Running…";
+  return f.stage === "Grilling" ? "Grilling…" : f.stage === "In Review" ? (f.review && !f.review.doneAt ? `Self-review round ${f.review.round}…` : "Review round…") : f.stage === "Revising" ? "Revising…" : "Running…";
 }
 
 /** the chat name for a /ship run: "ship · #494 · approve" */

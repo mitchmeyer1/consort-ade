@@ -1,4 +1,5 @@
-import { SHIP_DIR, SHIP_STAGES, shipFooter, shipStep, stageIndex, ticketRef, type ShipFeature, type ShipForm } from "./ship.ts";
+import { SHIP_DIR, SHIP_REVIEW_ROUNDS, SHIP_STAGES, shipFooter, shipStep, stageIndex, ticketRef, type ShipFeature, type ShipForm } from "./ship.ts";
+import type { ReviewSummary } from "./review.ts";
 
 /**
  * The prompt for one /ship turn: the rules every stage shares, the feature's state, and the
@@ -19,7 +20,19 @@ export type ShipPromptInput = {
   ticketBody?: string;
   /** the repo's test and typecheck commands when Consort knows them */
   checks?: string[];
+  /** Consort's self-review of the PR: whether its chat is still running, and the review file's counts once written */
+  review?: { running: boolean; summary?: ReviewSummary };
 };
+
+const REVIEW_FILE = (f: ShipFeature) => `.consort/pr-review/pr-${f.review?.pr ?? "<n>"}.review.json`;
+/** one line on the self-review for the state block */
+function reviewLine(i: ShipPromptInput): string {
+  const r = i.feature.review;
+  if (!r) return "none yet";
+  const s = i.review?.summary;
+  const counts = s ? ` · ${s.total} finding(s): ${s.pending} undecided, ${s.queued} approved to post, ${s.commented} on the PR, ${s.ignored} ignored, ${s.fixing} being fixed` : "";
+  return `round ${r.round} of ${SHIP_REVIEW_ROUNDS} ${i.review?.running ? "RUNNING now in another chat (wait for it)" : r.doneAt ? "done" : "started"} · file ${REVIEW_FILE(i.feature)}${counts}`;
+}
 
 /** the stage list with the ones behind marked done and the current one marked: "Grilling ✓ → [Spec'd ← you are here] → Implementing → …" */
 export function shipStageLine(f: ShipFeature): string {
@@ -32,9 +45,9 @@ const HANDLER_TITLE: Record<string, string> = {
   implementing: "Implementing: tickets from SPEC.md, build them, push, draft PR",
   test: "Test session: prove every story, write TEST-REPORT.md",
   reentry: "Ready to Test: restate where it stands; the user approves or gives feedback",
-  approve: "Approve: put the PR up for review",
+  approve: "Approve: mark the PR ready; Consort's self-review starts",
   revising: "Revising: gather feedback, explain, apply what the user approves",
-  "pr-loop": "In Review: one round with the reviewer",
+  "pr-loop": "In Review: work through Consort's self-review findings, fix, push, next round",
   closeout: "Merged: close out",
   pause: "Pause: write the handoff",
   closed: "Closed: nothing runs",
@@ -83,7 +96,8 @@ Consort keeps the feature's state and mirrors the stage onto its ticket (a GitHu
 - [ship-pr: <url>] when a pull request exists for this branch.
 - [ship-next: /ship …] the command that should run next; Consort shows it as a button. Use the short forms below.
 - [ship-spec: ${SHIP_DIR}/SPEC.md] when the spec is written. [ship-report: ${SHIP_DIR}/TEST-REPORT.md | <pass>/<total>] when the test report is written.
-- [ship-pause] when a handoff is written; [ship-resume] when resumed. [ship-feedback: user|bot|teammate] when entering Revising. [ship-review-round: N] after triggering a review round.
+- [ship-pause] when a handoff is written; [ship-resume] when resumed. [ship-feedback: user|bot|teammate] when entering Revising.
+- [ship-review-round: N] to ask Consort for self-review round N of the PR after fixes are pushed (Consort runs its own pr-writeup review in a separate chat and writes ${SHIP_DIR.replace("ship", "pr-review")}/pr-<n>.review.json; cap ${SHIP_REVIEW_ROUNDS} rounds). Round 1 starts by itself when the feature enters In Review.
 
 Commands the user (and your [ship-next]) use inside this worktree, no ticket id needed: /ship (next step), /ship approve, /ship pr-loop, /ship "<feedback>", /ship pause.
 
@@ -102,6 +116,7 @@ Feature state now:
 - Stage: ${i.feature.stage}${i.feature.paused ? " (paused)" : ""} · built: ${i.feature.built ? "yes" : "no"} · review round: ${i.feature.reviewRound ?? 0}${i.feature.feedbackFrom ? ` · feedback from: ${i.feature.feedbackFrom}` : ""}
 - PRs: ${i.feature.prs.length ? i.feature.prs.join(", ") : "none"}
 - Spec: ${i.feature.spec ?? "not written"} · Report: ${i.feature.report ?? "none"}${i.feature.tests ? ` (${i.feature.tests.pass}/${i.feature.tests.total} stories pass)` : ""}
+- Self-review: ${reviewLine(i)}
 - Next step on record: ${i.feature.next ?? "/ship"}
 - History: ${i.feature.history.slice(-6).map((h) => `${new Date(h.at).toISOString().slice(0, 10)} ${h.stage}${h.note ? `: ${h.note}` : ""}`).join("; ") || "none"}
 ${i.checks?.length ? `- Checks this repo runs: ${i.checks.join(" · ")}` : ""}`;
@@ -154,28 +169,30 @@ const REENTRY = (i: ShipPromptInput) => `## This turn: Ready to Test — restate
 
 Nothing runs. Read ${SHIP_DIR}/TEST-REPORT.md and print its summary block, the report path as a link, the PR link${i.feature.prs.length ? ` (${i.feature.prs[0]})` : ""}, and the two commands: /ship approve, /ship "<feedback>". Emit [ship-next: /ship approve]. Footer.`;
 
-const APPROVE = (i: ShipPromptInput) => `## This turn: approve — the tests are blessed, put the PR up for review
+const APPROVE = (i: ShipPromptInput) => `## This turn: approve — the tests are blessed, put the PR up and hand it to Consort's self-review
 
 1. Confirm the branch is pushed and the draft PR exists${i.feature.prs.length ? ` (${i.feature.prs[0]})` : " (create one with gh pr create --draft against " + i.base.replace(/^origin\//, "") + " if it does not)"}. Update the PR body from ${SHIP_DIR}/TEST-REPORT.md: what was built, the verified stories table, follow-ups.
-2. \`gh pr ready <url>\`. If the repo's automated reviewer is triggered by a comment (for example "/ai-review"), post it and emit [ship-review-round: 1].
-3. Emit [ship-pr: <url>], [ship-stage: In Review | PR ready for review.] and [ship-next: /ship pr-loop]. Print the PR link and the footer.`;
+2. \`gh pr ready <url>\`. Do not trigger any reviewer and do not review the PR yourself: the moment the stage moves, Consort starts its own AI self-review (the pr-writeup review) of this PR in a separate chat, and the next step reads its findings.
+3. Emit [ship-pr: <url>], [ship-stage: In Review | PR ready; self-review round 1 starts.] and [ship-next: /ship pr-loop]. Print the PR link, one line saying the self-review is starting and that /ship pr-loop runs when it is done, and the footer.`;
 
 const REVISING = (i: ShipPromptInput, from: "user" | "bot" | "teammate", feedback?: string) => `## This turn: Revising — gather, explain, then apply what the user approves
 
 Feedback came from: ${from}.${feedback ? `\nThe user's feedback:\n"""\n${feedback}\n"""` : ""}
 
-Motion 1, no code changes yet. Collect every item: the feedback above; comments on the ticket newer than the last stage change; unresolved PR review threads for each PR (\`gh api graphql\` on reviewThreads, keeping isResolved false). If the stage is not yet Revising emit [ship-stage: Revising | <n> item(s) gathered.] and [ship-feedback: ${from}]. Then, numbered, for each item: what was asked, what it would change, your recommendation (accept, dismiss with reason, or modify). End with the footer and [phase:waiting]. The user rules per item.
+Motion 1, no code changes yet. Collect every item: the feedback above; comments on the ticket newer than the last stage change; unresolved PR review threads for each PR (\`gh api graphql\` on reviewThreads, keeping isResolved false); findings in ${REVIEW_FILE(i.feature)} that are not ignored, when a self-review has run. If the stage is not yet Revising emit [ship-stage: Revising | <n> item(s) gathered.] and [ship-feedback: ${from}]. Then, numbered, for each item: what was asked, what it would change, your recommendation (accept, dismiss with reason, or modify). End with the footer and [phase:waiting]. The user rules per item.
 
 Motion 2, once the user has ruled (in this chat): apply the approved items in the worktree; typecheck and test; commit and push as stacked commits. Re-verify the stories the items touched and append a "## Round N" section to ${SHIP_DIR}/TEST-REPORT.md (emit [ship-report: ${SHIP_DIR}/TEST-REPORT.md | <pass>/<total>]). For PR threads: reply on each with what was done or why not, and resolve the ones addressed; never re-request review or merge on the user's behalf. Comment on the ticket with what changed and what was dismissed.
-Return: feedback from the user → [ship-stage: Ready to Test | <what changed>] and [ship-next: /ship approve]; from a bot or teammate → [ship-stage: In Review | <what changed>] and [ship-next: /ship pr-loop]. Footer.`;
+Return: feedback from the user → [ship-stage: Ready to Test | <what changed>] and [ship-next: /ship approve]; from a bot or teammate → [ship-stage: In Review | <what changed>] and [ship-next: /ship pr-loop] (Consort starts a fresh self-review round of the new head). Footer.`;
 
-const PR_LOOP = (i: ShipPromptInput) => `## This turn: In Review — one round with the reviewer
+const PR_LOOP = (i: ShipPromptInput) => `## This turn: In Review — work through one round of Consort's self-review of the PR
+
+The reviewer is Consort's own pr-writeup review, run by Consort in a separate chat of this worktree; it writes ${REVIEW_FILE(i.feature)} (schema: findings[] with id, kind, severity, category, title, file, line, problem, fix, comment, status). The user rules on findings in Consort's review drawer: status "ignored" is the user's decision, skip it; "approved" or "commented" means the user wants it on the PR; "fixing" means it was handed to a chat to fix (maybe this one); "pending" is undecided. Never edit that file and never post review comments yourself.
 
 1. For each PR${i.feature.prs.length ? ` (${i.feature.prs.join(", ")})` : ""}: \`gh pr view <url> --json state,mergedAt,isDraft,reviewDecision\`. Merged → follow the closeout below instead. Closed unmerged → say so and stop.
-2. Read the review: the newest automated review summary, open bot threads, teammate threads, and CI status (\`gh pr checks\`). Save the digest to ${SHIP_DIR}/review/round-${(i.feature.reviewRound ?? 0) + 1}.md. Zero open findings and green CI → go to 5.
-3. Adjudicate each bot finding against the code before writing to the user: confirmed (fix it), refuted (say why, register it where the repo's reviewer reads exceptions if it has such a file), incomplete (fix the true half, list the rest as a follow-up in the PR body). Present one numbered batch: finding, verdict, one-line evidence, planned action. Teammate threads go in a separate short list marked "yours to answer" with a proposed reply. End with the footer and [phase:waiting] for the user's go, unless the user already gave it in this chat.
-4. On go: fix as stacked commits, typecheck and test, push. Reply on every thread you acted on and resolve the ones now addressed; a teammate thread the user has not ruled on stays open. If the reviewer is re-triggered by a comment, post it and emit [ship-review-round: ${(i.feature.reviewRound ?? 0) + 1}]. Cap: 3 rounds; at the cap fix but do not re-trigger. Emit [ship-next: /ship pr-loop] and stop; the review lands later.
-5. Nothing left: say what remains open (follow-ups, teammate threads) and that merging is the user's. Emit [ship-next: /ship] (the next /ship confirms the merge). Footer.
+2. Where the self-review stands (state block above). Running → say so, emit [ship-next: /ship pr-loop] and stop; Consort runs this step again when it finishes. No round started and none running → emit [ship-review-round: ${(i.feature.reviewRound ?? 0) + 1}] and stop. Done → read the file, plus teammate PR threads (\`gh api graphql\` reviewThreads with isResolved false) and CI (\`gh pr checks\`). Save a digest to ${SHIP_DIR}/review/round-${i.feature.review?.round ?? (i.feature.reviewRound ?? 0) + 1}.md.
+3. Adjudicate each finding that is not ignored against the code before writing to the user: confirmed (fix it), refuted (say why), incomplete (fix the true half, list the rest as a follow-up in the PR body). Present one numbered batch: finding id and title, verdict, one-line evidence, planned action. Teammate threads go in a separate short list marked "yours to answer" with a proposed reply. End with the footer and [phase:waiting] for the user's go, unless the user already gave it in this chat.
+4. On go: fix as stacked commits, typecheck and test, push. Reply on every PR thread you acted on and resolve the ones now addressed; a teammate thread the user has not ruled on stays open. Then, if this was round ${SHIP_REVIEW_ROUNDS} or you changed nothing, emit [ship-next: /ship pr-loop] and stop; otherwise emit [ship-review-round: ${(i.feature.review?.round ?? i.feature.reviewRound ?? 0) + 1}] and [ship-next: /ship pr-loop] and stop: Consort reviews the new head and runs this step again.
+5. Nothing left (every finding ignored, refuted, fixed or on the PR; CI green): say what remains open (follow-ups, teammate threads) and that merging is the user's. Emit [ship-next: /ship] (the next /ship confirms the merge). Footer.
 
 ## Closeout, when the PR is merged
 1. Confirm with \`gh pr view <url> --json mergedAt,mergeCommit\`. Emit [ship-stage: Merged | Merged <sha> into <base>.]; Consort closes the ticket.

@@ -321,7 +321,8 @@ function shipContext(chat: Chat): string {
   if (!w?.ship) return "";
   const p = (store.data.projects ?? []).find((x) => x.id === w.projectId);
   if (!p) return "";
-  return `This chat is a /ship run. The pipeline's state and the handler for its current stage follow; report progress with the markers exactly as described, so the stage bar moves.\n\n${shipPrompt({ feature: w.ship, form: { form: "resume" }, worktree: w.path, branch: w.branch, base: p.defaultBase })}`;
+  const review = w.ship.review ? { running: !!store.data.chats.find((c) => c.id === w.ship!.review!.chatId)?.running } : undefined;
+  return `This chat is a /ship run. The pipeline's state and the handler for its current stage follow; report progress with the markers exactly as described, so the stage bar moves.\n\n${shipPrompt({ feature: w.ship, form: { form: "resume" }, worktree: w.path, branch: w.branch, base: p.defaultBase, review })}`;
 }
 
 // Keep provider diagnostics when the SDK subsequently throws a generic process-exit error.
@@ -562,8 +563,13 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
     store.save();
     if (hit && !ac.signal.aborted) void recoverFromLimit(chatId, hit);
     else void flushQueued(chatId);
+    if (done) turnDone(chatId);
   }
 }
+
+/** called when a turn ends cleanly (no error, not stopped, no limit hit); main uses it to chain /ship steps */
+let turnDone: (chatId: string) => void = () => {};
+export const onTurnDone = (fn: typeof turnDone) => { turnDone = fn; };
 
 /** called when a reply moved a /ship feature; main writes the stage to the ticket */
 let shipChanged: (worktreeId: string, before: ShipFeature, after: ShipFeature, note?: string) => void = () => {};

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyShipChange, clickupIdFrom, fillShipCommand, githubIssueFrom, isShipCommand, newShipFeature, parseShipCommand, parseShipMarkers, shipActions, shipBranch, shipBusyLabel, shipStep, shipChatName, shipFooter, shipSlug, stageLabel, stripShipMarkers, withBranchPrefix } from '../src/shared/ship.ts';
+import { applyShipChange, clickupIdFrom, fillShipCommand, githubIssueFrom, isShipCommand, newShipFeature, parseShipCommand, parseShipMarkers, shipActions, shipBranch, shipBusyLabel, shipReviewRoundToStart, shipStep, prNumberFromUrl, shipChatName, shipFooter, shipSlug, stageLabel, stripShipMarkers, withBranchPrefix } from '../src/shared/ship.ts';
 import { shipHandler, shipPrompt, shipStageLine, shipStatusSummary, shipTurnHeader } from '../src/shared/shipPrompt.ts';
 
 const ticket = { source: 'github', id: '494', url: 'https://github.com/aligned/mono/issues/494', title: 'HRIS address propagation', repo: 'aligned/mono' };
@@ -146,4 +146,41 @@ test('Implementing has two steps, building then the test session; the bar and th
   assert.match(s, /Test session: prove every story/);
   assert.match(s, /Branch pushed and built: yes/);
   assert.match(shipTurnHeader(built), /stage 3 of 8, test session/);
+});
+
+test("In Review is Consort's own PR review: round 1 starts on entry, later rounds on the agent's marker, three at most", () => {
+  const f = newShipFeature(ticket, 'hris-address', 1000);
+  const ready = { ...f, stage: 'Ready to Test', prs: ['https://github.com/aligned/mono/pull/525'] };
+  const review = applyShipChange(ready, { stage: 'In Review' }, 2000);
+  assert.equal(shipReviewRoundToStart(ready, review), 1);
+  assert.equal(shipReviewRoundToStart(ready, { ...review, prs: [] }), undefined, 'no PR, nothing to review');
+  assert.equal(shipReviewRoundToStart(ready, { ...review, paused: true }), undefined);
+  const r1 = { ...review, reviewRound: 1 };
+  assert.equal(shipReviewRoundToStart(r1, applyShipChange(r1, { next: '/ship pr-loop' }, 3000)), undefined, 'a plain pr-loop turn starts nothing');
+  assert.equal(shipReviewRoundToStart(r1, applyShipChange(r1, { reviewRound: 2 }, 3000)), 2);
+  const r3 = { ...review, reviewRound: 3 };
+  assert.equal(shipReviewRoundToStart(r3, applyShipChange(r3, { reviewRound: 4 }, 3000)), undefined, 'capped');
+  const revising = { ...r1, stage: 'Revising' };
+  assert.equal(shipReviewRoundToStart(revising, applyShipChange(revising, { stage: 'In Review' }, 4000)), 2, 're-entering review after fixes reviews the new head');
+  assert.equal(prNumberFromUrl('https://github.com/aligned/mono/pull/525'), 525);
+  assert.equal(prNumberFromUrl('https://github.com/aligned/mono/issues/525'), undefined);
+  assert.equal(shipBusyLabel({ ...review, review: { chatId: 'c', pr: 525, round: 1, startedAt: 1 } }), 'Self-review round 1…');
+});
+
+test('approve hands the PR to the self-review and pr-loop works from its file, never an outside bot', () => {
+  const f = { ...newShipFeature(ticket, 'hris-address', 1000), stage: 'Ready to Test', prs: ['https://github.com/aligned/mono/pull/525'] };
+  const approve = shipPrompt({ feature: f, form: { form: 'approve' }, worktree: '/w', branch: 'b', base: 'origin/development' });
+  assert.match(approve, /Consort starts its own AI self-review/);
+  assert.match(approve, /Do not trigger any reviewer/);
+  assert.doesNotMatch(approve, /ai-review/);
+  const inReview = { ...f, stage: 'In Review', reviewRound: 1, review: { chatId: 'c', pr: 525, round: 1, startedAt: 1, doneAt: 2 } };
+  const summary = { pr: 525, title: 't', url: 'u', reviewedAt: 'x', total: 6, pending: 3, queued: 1, commented: 0, ignored: 2, fixing: 0, submitted: 0 };
+  const loop = shipPrompt({ feature: inReview, form: { form: 'pr-loop' }, worktree: '/w', branch: 'b', base: 'origin/development', review: { running: false, summary } });
+  assert.match(loop, /\.consort\/pr-review\/pr-525\.review\.json/);
+  assert.match(loop, /Self-review: round 1 of 3 done .* 6 finding\(s\): 3 undecided, 1 approved to post, 0 on the PR, 2 ignored/);
+  assert.match(loop, /status "ignored" is the user's decision, skip it/);
+  assert.match(loop, /Never edit that file/);
+  assert.match(loop, /\[ship-review-round: 2\]/);
+  const running = shipPrompt({ feature: inReview, form: { form: 'pr-loop' }, worktree: '/w', branch: 'b', base: 'origin/development', review: { running: true } });
+  assert.match(running, /RUNNING now in another chat/);
 });
