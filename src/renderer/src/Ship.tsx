@@ -1,6 +1,7 @@
 import React, { useState } from "react";
-import { SHIP_STAGES, clickupIdFrom, fillShipCommand, shipActions, shipBusyLabel, shipDone, shipStep, stageIndex, ticketRef, type ShipAction, type ShipFeature } from "../../shared/ship";
+import { SHIP_BLURB, SHIP_STAGES, clickupIdFrom, fillShipCommand, prNumberFromUrl, shipActions, shipTarget, type ShipSource, shipBusyLabel, shipDone, shipStep, stageIndex, ticketRef, type ShipAction, type ShipFeature } from "../../shared/ship";
 import { formatAge } from "../../shared/usage";
+import { INVESTIGATE_BLURB } from "../../shared/investigate";
 import type { Api, Chat, State, Worktree } from "../../shared/types";
 
 const ade = (window as any).ade as Api;
@@ -104,22 +105,73 @@ export function ShipPanel({ wt, chats, onOpenChat, onOpenFile }: { wt: Worktree;
   );
 }
 
-/** the project page's box for shipping a ClickUp task by id or link; shown once a ClickUp key is saved */
-export function ShipClickUpBox({ projectId, onOpenChat }: { projectId: string; onOpenChat: (id: string) => void }) {
+/**
+ * A card of the project page's Start chapter that begins from a ticket: pick the tracker, paste an
+ * id or link, go. Ship and Investigate share it; what `start` does with the ticket is theirs.
+ */
+export function TicketStartCard({ title, blurb, action, busyLabel, hint, clickUpConfigured, start, onOpenChat }: {
+  title: string; blurb: string; action: string; busyLabel: string; hint: string; clickUpConfigured: boolean;
+  start: (target: NonNullable<ReturnType<typeof shipTarget>>) => Promise<string>; onOpenChat: (id: string) => void;
+}) {
+  const [source, setSource] = useState<ShipSource>(clickUpConfigured ? "clickup" : "github");
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
-  const id = clickupIdFrom(text);
+  const target = shipTarget(source, text);
   const go = async () => {
-    if (!id || busy) return;
+    if (!target || busy) return;
     setBusy(true);
-    try { onOpenChat(await ade.shipStart(projectId, { source: "clickup", id })); setText(""); }
+    try { onOpenChat(await start(target)); setText(""); }
     catch (e) { alert((e as Error).message); }
     finally { setBusy(false); }
   };
   return (
-    <div className="ship-clickup">
-      <input value={text} placeholder="ClickUp task id or link" aria-label="ClickUp task id or link" onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void go(); }} />
-      <button className="primary" disabled={!id || busy} title="Create the feature worktree from this task and start grilling" onClick={() => void go()}>{busy ? "Starting…" : "Ship ClickUp task"}</button>
+    <div className="card start-card">
+      <h3>{title}</h3>
+      <p>{blurb}</p>
+      <div className="start-fields">
+        <select value={source} aria-label="Ticket source" onChange={(e) => { setSource(e.target.value as ShipSource); setText(""); }}>
+          <option value="github">GitHub issue</option>
+          <option value="clickup" disabled={!clickUpConfigured}>{clickUpConfigured ? "ClickUp task" : "ClickUp task (add a key in Settings › Ship)"}</option>
+        </select>
+        <input value={text} placeholder={source === "github" ? "Issue number or link" : "Task id or link"} aria-label={`${source === "github" ? "GitHub issue number" : "ClickUp task id"} or link`} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void go(); }} />
+      </div>
+      <div className="start-actions">
+        <button className="primary" disabled={!target || busy} title={hint} onClick={() => void go()}>{busy ? busyLabel : action}</button>
+      </div>
+    </div>
+  );
+}
+
+/** the Start chapter's Ship card */
+export const ShipBox = ({ projectId, clickUpConfigured, onOpenChat }: { projectId: string; clickUpConfigured: boolean; onOpenChat: (id: string) => void }) =>
+  <TicketStartCard title="Ship" blurb={SHIP_BLURB} action="Ship" busyLabel="Starting…" hint="Create the feature worktree from this ticket and start grilling" clickUpConfigured={clickUpConfigured} start={(t) => ade.shipStart(projectId, t)} onOpenChat={onOpenChat} />;
+
+/** the Start chapter's Investigate card: read-only, in the root checkout (shared/investigate.ts) */
+export const InvestigateBox = ({ projectId, clickUpConfigured, onOpenChat }: { projectId: string; clickUpConfigured: boolean; onOpenChat: (id: string) => void }) =>
+  <TicketStartCard title="Investigate" blurb={INVESTIGATE_BLURB} action="Investigate" busyLabel="Reading…" hint="Read the ticket, its comments and links, and the code, then brief you; nothing is built or changed" clickUpConfigured={clickUpConfigured} start={(t) => ade.investigateStart(projectId, t)} onOpenChat={onOpenChat} />;
+
+/** the Start chapter's PR review card: a PR number or link, then the connector and model picker the PR lists use */
+export function PrReviewBox({ onPick }: { onPick: (number: number) => Promise<void> }) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const number = prNumberFromUrl(text) ?? (/^#?(\d+)$/.test(text.trim()) ? Number(text.trim().replace("#", "")) : undefined);
+  const go = async () => {
+    if (!number || busy) return;
+    setBusy(true);
+    try { await onPick(number); setText(""); }
+    catch (e) { alert((e as Error).message); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="card start-card">
+      <h3>PR review</h3>
+      <p>An AI review of a pull request: Consort opens a worktree on the PR's branch, reads every changed file, verifies each finding, and writes a review you approve finding by finding before anything is posted to GitHub.</p>
+      <div className="start-fields">
+        <input value={text} placeholder="PR number or link" aria-label="GitHub PR number or link" onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void go(); }} />
+      </div>
+      <div className="start-actions">
+        <button className="primary" disabled={!number || busy} title="Pick the connector and model, then review" onClick={() => void go()}>{busy ? "Loading…" : "Review"}</button>
+      </div>
     </div>
   );
 }

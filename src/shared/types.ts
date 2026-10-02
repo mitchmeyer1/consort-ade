@@ -284,6 +284,10 @@ export type Api = {
   refreshSeats(): Promise<void>;
   /** start a /ship feature on a project: from a GitHub issue, a ClickUp task, or an idea (which becomes an issue); returns the first chat's id */
   shipStart(projectId: string, from: { source: "github"; number: number } | { source: "clickup"; id: string } | { idea: string }, files?: string[]): Promise<string>;
+  /** one PR by number, for the Start chapter's PR review field */
+  prLookup(projectId: string, number: number): Promise<RepoInfo["prs"][number]>;
+  /** read a ticket and what it links to into a dossier, then open a brief-writing chat in the root checkout (see shared/investigate.ts) */
+  investigateStart(projectId: string, from: { source: "github"; number: number } | { source: "clickup"; id: string }): Promise<string>;
   /** a /ship command typed in a chat: runs the stage in that chat's worktree, or starts a feature; returns the chat that ran it */
   shipCommand(chatId: string, text: string, files?: string[]): Promise<string>;
   /** run a /ship command for a feature worktree in a fresh chat there (the progress bar's buttons); returns the chat id */

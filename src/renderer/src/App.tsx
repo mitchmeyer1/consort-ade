@@ -21,7 +21,7 @@ import { historyStep, promptHistory, type HistoryNav } from "../../shared/prompt
 import { isScratch, scratchChats } from "../../shared/scratch";
 import { fillNextCommand, parseNextCommands, type NextCommand } from "../../shared/shipNext";
 import { isShipCommand } from "../../shared/ship";
-import { ShipBar, ShipClickUpBox, ShipPanel, shipOfIssue } from "./Ship";
+import { InvestigateBox, PrReviewBox, ShipBar, ShipBox, ShipPanel, shipOfIssue } from "./Ship";
 import { commandQuery, completeCommand, filterCommands, isClearCommand, type SlashEntry } from "../../shared/commands";
 import { contextPercent, contextTone } from "../../shared/context";
 import { foldLabel, groupBlocks, mergeAssistantRuns, showToolCalls, type ToolBlock } from "../../shared/toolFold";
@@ -307,6 +307,17 @@ export function App() {
   const [rightW, setRightW] = useState(() => +(localStorage.getItem("rightW") ?? 460));
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("leftCollapsed") === "1");
   useEffect(() => { localStorage.setItem("leftW", String(leftW)); localStorage.setItem("rightW", String(rightW)); localStorage.setItem("leftCollapsed", collapsed ? "1" : "0"); }, [leftW, rightW, collapsed]);
+  // ⌘S shows and hides the sidebar, like the button in the topbar. The file editor claims ⌘S for saving and
+  // marks the event handled first, so a save never also moves the sidebar.
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== "s" || e.defaultPrevented) return;
+      e.preventDefault();
+      setCollapsed((c) => !c);
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, []);
   const drag = (side: "left" | "right") => (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX, start = side === "left" ? leftW : rightW;
@@ -407,7 +418,7 @@ export function App() {
       {!collapsed && <div className="resizer left" style={{ left: leftW - 3 }} onMouseDown={drag("left")} />}
       <div className="main">
         <div className={"topbar" + (collapsed ? " collapsed" : "") + (chat ? " haschat" : "")}>
-          <button className="icon panel" title={collapsed ? "Show sidebar" : "Hide sidebar"} onClick={() => setCollapsed((c) => !c)}><PanelIcon /></button>
+          <button className="icon panel" title={collapsed ? "Show sidebar (⌘S)" : "Hide sidebar (⌘S)"} onClick={() => setCollapsed((c) => !c)}><PanelIcon /></button>
           {chat ? (
             <div className="chat-heading">
               <input className="name" aria-label="Chat name" title={chat.name} defaultValue={chat.name} key={chat.id} onBlur={(e) => ade.renameChat(chat.id, e.target.value)} />
@@ -968,15 +979,30 @@ function ProjectPage({ project: p, state, openForm, onRunAction, onSelect }: { p
           {info.repo.isPrivate ? " · private" : ""} · pushed {ago(info.repo.pushedAt)}{info.repo.description ? ` — ${info.repo.description}` : ""}
         </div>}
       </div>
-      <div className="actions" style={{ alignItems: "center" }}>
-        <button className="primary" onClick={() => setForm({})}><Ico n="branch" /> New worktree</button>
-        <span className="m" style={{ marginLeft: 8 }}>Default base branch</span>
-        <input className="inline" defaultValue={p.defaultBase} key={p.defaultBase} onBlur={(e) => e.target.value !== p.defaultBase && ade.setProjectBase(p.id, e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} title="Base ref new worktrees branch from" />
-        {info?.repo?.defaultBranch && p.defaultBase !== `origin/${info.repo.defaultBranch}` && (
-          <button className="icon" title={`GitHub default is ${info.repo.defaultBranch}`} onClick={() => ade.setProjectBase(p.id, `origin/${info.repo!.defaultBranch}`)}>use origin/{info.repo.defaultBranch}</button>
-        )}
-      </div>
+
+      <section className="start-chapter">
+        <h2><Ico n="branch" />New worktree</h2>
+        <p className="sect-note">Four ways to start: a branch of your own, a ticket shipped end to end, a review of someone's PR, or a read-only look at a ticket before deciding anything.</p>
+        <div className="start-grid">
+          <div className="card start-card">
+            <h3>New worktree</h3>
+            <p>A branch checked out in its own folder, with its own chats and terminals, cut from the base branch below.</p>
+            <div className="start-fields">
+              <input className="mono" defaultValue={p.defaultBase} key={p.defaultBase} aria-label="Default base branch" onBlur={(e) => e.target.value !== p.defaultBase && ade.setProjectBase(p.id, e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} title="Base ref new worktrees branch from" />
+            </div>
+            <div className="start-actions">
+              {info?.repo?.defaultBranch && p.defaultBase !== `origin/${info.repo.defaultBranch}` && (
+                <button className="icon" title={`GitHub default is ${info.repo.defaultBranch}`} onClick={() => ade.setProjectBase(p.id, `origin/${info.repo!.defaultBranch}`)}>use origin/{info.repo.defaultBranch}</button>
+              )}
+              <button className="primary" onClick={() => setForm({})}>New worktree</button>
+            </div>
+          </div>
+          <ShipBox projectId={p.id} clickUpConfigured={!!state.clickUpConfigured} onOpenChat={(id) => onSelect({ type: "chat", id })} />
+          <PrReviewBox onPick={async (number) => { setReviewing(info?.prs.find((x) => x.number === number) ?? await ade.prLookup(p.id, number)); }} />
+          <InvestigateBox projectId={p.id} clickUpConfigured={!!state.clickUpConfigured} onOpenChat={(id) => onSelect({ type: "chat", id })} />
+        </div>
+      </section>
       {reviewing && <ReviewDialog pr={reviewing} state={state} onClose={() => setReviewing(null)} onStart={(keyId, model) => review(reviewing, keyId, model)} />}
       {form && <NewWorktreeDialog p={p} branchPreset={form.branch} onClose={() => setForm(false)} onRoot={(id) => onSelect({ type: "worktree", id })} />}
 
@@ -1015,11 +1041,6 @@ function ProjectPage({ project: p, state, openForm, onRunAction, onSelect }: { p
         <div className="card list">{others.map((pr) => <PrRow key={pr.number} pr={pr} />)}</div>
       )}
 
-      {state.clickUpConfigured && <>
-        <h2>Ship a ClickUp task</h2>
-        <p className="sect-note">Paste a task id or link. Consort makes the feature worktree, grills the task into a spec, and moves the task's status with each stage.</p>
-        <ShipClickUpBox projectId={p.id} onOpenChat={(id) => onSelect({ type: "chat", id })} />
-      </>}
       <h2>Open issues {info && <span className="m">({info.issues.length}{info.issues.length >= 50 ? "+" : ""})</span>}
         {info && info.issues.length > ISSUE_ROWS && <button className="icon" onClick={() => setAllIssues((x) => !x)}>{allIssues ? `show ${ISSUE_ROWS}` : `show all ${info.issues.length}`}</button>}
       </h2>

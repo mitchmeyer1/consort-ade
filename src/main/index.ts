@@ -49,7 +49,9 @@ import { homedir } from "node:os";
 import { configureSeats, ensurePoolKeys, isPoolId } from "./seatPool";
 import { poolUsage } from "../shared/seatPool";
 import * as shipApi from "./ship";
-import { newShipFeature, parseShipCommand, prNumberFromUrl, shipActionOf, shipBranch, shipChatName, shipFolder, shipIdeaName, shipReviewRoundToStart, shipSlug, syncRetryDelay, type ShipFeature, type ShipForm, type ShipTicket } from "../shared/ship";
+import { buildDossier, writeDossier } from "./investigate";
+import { investigationChatName, investigatePrompt } from "../shared/investigate";
+import { newShipFeature, parseShipCommand, prNumberFromUrl, shipActionOf, shipBranch, shipChatName, shipFolder, shipIdeaName, shipReviewRoundToStart, shipSlug, syncRetryDelay, ticketRef, type ShipFeature, type ShipForm, type ShipTicket } from "../shared/ship";
 import { shipPrompt } from "../shared/shipPrompt";
 
 // ADE_DATA_DIR isolates state for test instances
@@ -705,6 +707,24 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   setShipAutoApprove: (on: boolean) => { store.data.shipAutoApprove = on; store.save(); },
   setClickUpKey: (key: string) => { store.setClickUpKey(key); if (key.trim()) retryFailedTickets("clickup"); },
   setBranchPrefix: (prefix: string) => { store.data.branchPrefix = prefix.trim().replace(/^\/+|\/+$/g, ""); store.save(); },
+  prLookup: (projectId: string, number: number) => git.prDetail(project(projectId).path, number),
+  // Investigate: read a ticket, its comments and what it links to into a dossier in the project's root
+  // checkout, and open a chat there that reports the situation, progress, to-dos and open questions.
+  // Read-only: no branch, nothing written to the tracker (shared/investigate.ts).
+  investigateStart: async (projectId: string, from: { source: "github"; number: number } | { source: "clickup"; id: string }) => {
+    const p = project(projectId);
+    if (!p) throw new Error("Project no longer exists.");
+    const root = store.data.worktrees.find((w) => w.projectId === projectId && w.root);
+    if (!root) throw new Error("The project has no root checkout to investigate in.");
+    const key = shipKey();
+    const dossier = await buildDossier(from, { repoPath: p.path, clickupKey: clickUpKey() });
+    const dossierPath = writeDossier(root.path, dossier);
+    await shipApi.excludeConsortDir(root.path).catch(() => {});
+    const id: string = handlers.addChat!(root.id, key.id, { name: investigationChatName(dossier.ticket), remember: false });
+    const prompt = investigatePrompt({ ticket: dossier.ticket, dossierPath, projectName: p.name, worktreePath: root.path, unreadable: dossier.unreadable });
+    await agents.send(id, prompt, [], { display: `Investigate ${ticketRef(dossier.ticket)} · ${dossier.ticket.title}` });
+    return id;
+  },
   // /ship: a feature is a worktree. Resolve the ticket (or open one from the idea), cut the branch from the
   // project's base like any new worktree, record the feature on it, and open its first chat at Grilling.
   shipStart: async (projectId: string, from: { source: "github"; number: number } | { source: "clickup"; id: string } | { idea: string }, files: string[] = []) => {

@@ -336,6 +336,16 @@ async function cached<T>(key: string, ttl: number, fetch: () => Promise<T>): Pro
 }
 
 /** owner/name of the GitHub repo, or undefined when gh cannot say */
+/** one pull request by number, in the shape the project page lists them (for the Start chapter's PR review field) */
+export async function prDetail(cwd: string, n: number): Promise<RepoInfo["prs"][number]> {
+  const [p, me] = await Promise.all([
+    gh(cwd, ["pr", "view", String(n), "--json", "number,title,author,headRefName,isDraft,reviewDecision,updatedAt,url,reviewRequests,reviews,comments,commits"]),
+    whoAmI(cwd),
+  ]);
+  if (!p) throw new Error(`Couldn't load PR #${n} from GitHub. Is gh signed in?`);
+  return { number: p.number, title: p.title, author: p.author?.login ?? "", branch: p.headRefName, draft: !!p.isDraft, review: p.reviewDecision ?? "", updatedAt: p.updatedAt, url: p.url, ...whoseTurn(p, me) };
+}
+
 export const repoName = (cwd: string): Promise<string | undefined> =>
   gh(cwd, ["repo", "view", "--json", "nameWithOwner"]).then((j) => j?.nameWithOwner || undefined);
 

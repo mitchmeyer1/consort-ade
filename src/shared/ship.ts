@@ -293,3 +293,13 @@ export function ticketMarkdown(t: ShipTicket, fetched: { body: string; status?: 
   const body = fetched.body.trim() || "_The ticket has no description._";
   return `# ${t.title}\n\n${meta.join("\n")}\n\n## Description\n\n${body}\n`;
 }
+
+/** the project page's one-line answer to "what is Ship" */
+export const SHIP_BLURB = "Ship takes one ticket from idea to merged PR: it cuts a feature worktree, grills the ticket into a spec, builds and tests it, opens the PR and runs a review, moving the ticket's status at each stage.";
+
+/** what the Ship box starts from: a GitHub issue number or link, or a ClickUp task id or link */
+export const shipTarget = (source: ShipSource, text: string): { source: "github"; number: number } | { source: "clickup"; id: string } | undefined => {
+  if (source === "github") { const issue = githubIssueFrom(text); return issue ? { source: "github", number: issue.number } : undefined; }
+  const id = clickupIdFrom(text);
+  return id ? { source: "clickup", id } : undefined;
+};

@@ -1247,8 +1247,20 @@ button.rv-chip:hover { background: var(--card); color: var(--fg); border-color: 
 .ship-docs .linkish { padding: 3px 8px; }
 .ship-history { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
 .ship-sync-error { color: var(--warn); }
-.ship-clickup { display: flex; gap: 8px; align-items: center; margin-bottom: 18px; }
-.ship-clickup input { flex: 1; }
+/* the project page's Start chapter: four ways to begin, one card each, all built the same:
+   a display title, a description, one line of fields, the action at the bottom right */
+.start-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.start-card { display: flex; flex-direction: column; gap: 10px; padding: 16px 18px 14px; }
+.start-card h3 { margin: 0; font-family: var(--display); font-weight: 600; font-size: 18px; line-height: 1.2; color: var(--fg); }
+.start-card p { margin: 0; flex: 1; color: var(--dim); font-size: 12.5px; line-height: 1.5; }
+.start-card .start-fields { display: flex; gap: 8px; }
+.start-card .start-fields select, .start-card .start-fields input { height: 34px; padding: 0 10px; font-size: 12.5px; border-radius: 6px; box-sizing: border-box; }
+.start-card .start-fields select { flex: 0 0 140px; min-width: 0; }
+.start-card .start-fields input { flex: 1; min-width: 0; }
+.start-card .start-fields input.mono { font-family: var(--mono); font-size: 12px; }
+.start-card .start-actions { display: flex; justify-content: flex-end; align-items: center; gap: 10px; }
+.start-card .start-actions .primary { height: 34px; min-width: 128px; padding: 0 16px; border-radius: 6px; font-size: 13px; white-space: nowrap; }
+.start-card .start-actions .icon { margin-right: auto; color: var(--dim); font-size: 11.5px; }
 .ship-opt { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); margin: 4px 0 6px; }
 
 /* notes: a worktree's bullets (shared/notes.ts), and the pinned one beside the branch */

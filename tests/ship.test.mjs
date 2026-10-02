@@ -197,3 +197,12 @@ test("the ticket is written into the worktree as TICKET.md so any message in a s
   assert.match(shipTurnHeader(f, 2), /full text .* is in \.consort\/ship\/TICKET\.md, written by Consort; read it before answering/);
   assert.match(shipPrompt({ feature: f, form: { form: 'resume' }, worktree: '/w', branch: 'b', base: 'origin/main' }), /TICKET\.md \(the ticket's text, written by Consort each turn/);
 });
+
+test('the Ship box resolves a ticket from either tracker by id or link, and nothing from noise', async () => {
+  const { shipTarget, SHIP_BLURB } = await import('../src/shared/ship.ts');
+  assert.deepEqual(shipTarget('github', '#494'), { source: 'github', number: 494 });
+  assert.deepEqual(shipTarget('github', 'https://github.com/aligned/mono/issues/494'), { source: 'github', number: 494 });
+  assert.deepEqual(shipTarget('clickup', 'https://app.clickup.com/t/17thtp0hvw7'), { source: 'clickup', id: '17thtp0hvw7' });
+  assert.equal(shipTarget('github', 'https://app.clickup.com/t/17thtp0hvw7'), undefined);
+  assert.match(SHIP_BLURB, /idea to merged PR/);
+});
