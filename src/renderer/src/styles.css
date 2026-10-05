@@ -1165,6 +1165,21 @@ button.rv-chip:hover { background: var(--card); color: var(--fg); border-color: 
 .toast.info .toast-mark { color: var(--cream); }
 
 /* seat pool: the sidebar strip pinned to the bottom, one row per seat, one small bar per window */
+/* the sidebar's foot: Usage, then Scratchpad, one sticky block */
+.sidebar-dock { position: sticky; bottom: -12px; margin: 18px -10px -12px; padding: 4px 10px 10px; background: var(--panel-solid); border-top: 1px solid var(--line); z-index: 1; }
+.sidebar-dock .seats { position: static; margin: 0; padding: 0; background: none; border-top: none; }
+.scratchpad { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--line); }
+.scratch-body { display: flex; flex-direction: column; gap: 6px; padding: 2px 0 0; }
+.scratch-tabs { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; padding: 0 2px; }
+.scratch-tabs::-webkit-scrollbar { display: none; }
+.scratch-tab { display: inline-flex; align-items: center; gap: 4px; flex: none; max-width: 160px; padding: 3px 8px; border-radius: 6px 6px 0 0; border: 1px solid var(--line); border-bottom-color: transparent; font-size: 11px; color: var(--dim); cursor: pointer; }
+.scratch-tab:hover { color: var(--fg); }
+.scratch-tab.on { color: var(--fg); background: var(--bg); border-color: var(--line2); border-bottom-color: var(--bg); }
+.scratch-tab .scratch-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scratch-tab input { width: 110px; padding: 0 4px; font-size: 11px; border-radius: 3px; height: 18px; }
+.scratch-tab .scratch-close { padding: 0 2px; line-height: 1; font-size: 13px; color: var(--dim); }
+.scratch-tab .scratch-close:hover { color: var(--fg); }
+.scratch-text { width: 100%; box-sizing: border-box; min-height: 120px; max-height: 40vh; resize: vertical; font: 12px/1.5 var(--body); border-radius: 0 6px 6px 6px; margin-top: -7px; }
 .seats { position: sticky; bottom: -12px; margin: 18px -10px -12px; padding: 4px 10px 10px; background: var(--panel-solid); border-top: 1px solid var(--line); z-index: 1; }
 .seats.wide { position: static; margin: 10px 0 0; padding: 8px 0 0; background: none; }
 .seats-head { padding: 6px 8px 4px; gap: 6px; }

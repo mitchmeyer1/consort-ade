@@ -204,6 +204,8 @@ export type State = {
   showToolCalls?: boolean;
   /** every branch Consort generates starts with this: "mm" gives mm/hris-address-494 */
   branchPrefix?: string;
+  /** the sidebar's Scratchpad tabs, not tied to any project (see shared/scratchpad.ts) */
+  scratchpad?: import("./scratchpad").Scratchpad;
 };
 export type PermissionRequest = { id: string; chatId: string; tool: string; input: unknown };
 export type { ConnectorUsage, UsageWindow } from "./usage";
@@ -296,6 +298,8 @@ export type Api = {
   setShipAutoApprove(on: boolean): Promise<void>;
   setClickUpKey(key: string): Promise<void>;
   setBranchPrefix(prefix: string): Promise<void>;
+  /** replace the Scratchpad: tabs, their text and the open one */
+  setScratchpad(pad: import("./scratchpad").Scratchpad): Promise<void>;
   stop(chatId: string): Promise<void>;
   addKey(name: string, provider: Provider, key: string, auth?: "login" | "key"): Promise<void>;
   setDefaultKey(id: string): Promise<void>;

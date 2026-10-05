@@ -50,6 +50,7 @@ import { configureSeats, ensurePoolKeys, isPoolId } from "./seatPool";
 import { poolUsage } from "../shared/seatPool";
 import * as shipApi from "./ship";
 import { buildDossier, writeDossier } from "./investigate";
+import { normalizeScratchpad } from "../shared/scratchpad";
 import { investigationChatName, investigatePrompt } from "../shared/investigate";
 import { newShipFeature, parseShipCommand, prNumberFromUrl, shipActionOf, shipBranch, shipChatName, shipFolder, shipIdeaName, shipReviewRoundToStart, shipSlug, syncRetryDelay, ticketRef, type ShipFeature, type ShipForm, type ShipTicket } from "../shared/ship";
 import { shipPrompt } from "../shared/shipPrompt";
@@ -707,6 +708,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
   setShipAutoApprove: (on: boolean) => { store.data.shipAutoApprove = on; store.save(); },
   setClickUpKey: (key: string) => { store.setClickUpKey(key); if (key.trim()) retryFailedTickets("clickup"); },
   setBranchPrefix: (prefix: string) => { store.data.branchPrefix = prefix.trim().replace(/^\/+|\/+$/g, ""); store.save(); },
+  setScratchpad: (pad: import("../shared/scratchpad").Scratchpad) => { store.data.scratchpad = normalizeScratchpad(pad); store.save(); },
   prLookup: (projectId: string, number: number) => git.prDetail(project(projectId).path, number),
   // Investigate: read a ticket, its comments and what it links to into a dossier in the project's root
   // checkout, and open a chat there that reports the situation, progress, to-dos and open questions.

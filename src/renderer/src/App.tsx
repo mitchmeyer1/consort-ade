@@ -41,6 +41,7 @@ import { quickActionParameters, resolveQuickAction } from "../../shared/quickAct
 import { isReviewFile } from "../../shared/review";
 import { ReviewView } from "./ReviewView";
 import { PoolSettings, SeatsStrip } from "./Seats";
+import { ScratchpadStrip } from "./Scratchpad";
 import { planStages } from "../../shared/planProgress";
 import { featureStages } from "../../shared/featureProgress";
 import type { Stage } from "../../shared/types";
@@ -520,7 +521,10 @@ function Sidebar({ state, sel, running, failed, done, onSelect, onCollapse }: { 
           : <div className="row hint" onClick={() => !needKey() && setNewChat(true)}><small>Chat or work without a repo.</small></div>}
       </div>
       {newChat && <NewChatForm scratch state={state} onClose={() => setNewChat(false)} onDone={(id) => { setNewChat(false); onSelect({ type: "chat", id }); }} />}
-      <SeatsStrip state={state} />
+      <div className="sidebar-dock">
+        <SeatsStrip state={state} />
+        <ScratchpadStrip state={state} />
+      </div>
     </div>
   );
 }
