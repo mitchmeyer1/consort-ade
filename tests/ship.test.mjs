@@ -136,7 +136,7 @@ test('Implementing has two steps, building then the test session; the bar and th
   assert.equal(shipBusyLabel(f), 'Building…');
   const built = { ...f, built: true };
   assert.equal(shipStep(built), 'test session');
-  assert.equal(shipBusyLabel(built), 'Test session running…');
+  assert.equal(shipBusyLabel(built), 'Testing…');
   assert.equal(shipStep({ ...built, report: '.consort/ship/TEST-REPORT.md' }), undefined);
   assert.equal(shipStep(newShipFeature(ticket, 'x', 1)), undefined);
   assert.equal(shipBusyLabel(newShipFeature(ticket, 'x', 1)), 'Grilling…');
@@ -164,13 +164,13 @@ test("In Review is Consort's own PR review: round 1 starts on entry, later round
   assert.equal(shipReviewRoundToStart(revising, applyShipChange(revising, { stage: 'In Review' }, 4000)), 2, 're-entering review after fixes reviews the new head');
   assert.equal(prNumberFromUrl('https://github.com/aligned/mono/pull/525'), 525);
   assert.equal(prNumberFromUrl('https://github.com/aligned/mono/issues/525'), undefined);
-  assert.equal(shipBusyLabel({ ...review, review: { chatId: 'c', pr: 525, round: 1, startedAt: 1 } }), 'Self-review round 1…');
+  assert.equal(shipBusyLabel({ ...review, review: { chatId: 'c', pr: 525, round: 1, startedAt: 1 } }), 'Reviewing (round 1)…');
 });
 
 test('approve hands the PR to the self-review and pr-loop works from its file, never an outside bot', () => {
   const f = { ...newShipFeature(ticket, 'hris-address', 1000), stage: 'Ready to Test', prs: ['https://github.com/aligned/mono/pull/525'] };
   const approve = shipPrompt({ feature: f, form: { form: 'approve' }, worktree: '/w', branch: 'b', base: 'origin/development' });
-  assert.match(approve, /Consort starts its own AI self-review/);
+  assert.match(approve, /Consort queues its own AI self-review .* as the next turn of this very chat/);
   assert.match(approve, /Do not trigger any reviewer/);
   assert.doesNotMatch(approve, /ai-review/);
   const inReview = { ...f, stage: 'In Review', reviewRound: 1, review: { chatId: 'c', pr: 525, round: 1, startedAt: 1, doneAt: 2 } };
@@ -182,7 +182,7 @@ test('approve hands the PR to the self-review and pr-loop works from its file, n
   assert.match(loop, /Never edit that file/);
   assert.match(loop, /\[ship-review-round: 2\]/);
   const running = shipPrompt({ feature: inReview, form: { form: 'pr-loop' }, worktree: '/w', branch: 'b', base: 'origin/development', review: { running: true } });
-  assert.match(running, /RUNNING now in another chat/);
+  assert.match(running, /RUNNING now in this worktree/);
 });
 
 test("the ticket is written into the worktree as TICKET.md so any message in a ship chat can read it, and every ship prompt says where", async () => {
@@ -205,4 +205,77 @@ test('the Ship box resolves a ticket from either tracker by id or link, and noth
   assert.deepEqual(shipTarget('clickup', 'https://app.clickup.com/t/17thtp0hvw7'), { source: 'clickup', id: '17thtp0hvw7' });
   assert.equal(shipTarget('github', 'https://app.clickup.com/t/17thtp0hvw7'), undefined);
   assert.match(SHIP_BLURB, /idea to merged PR/);
+});
+
+test("the TICKET box reads the tracker's own completion: ClickUp status types, a GitHub issue's task list, the ticket row first", async () => {
+  const { clickupStatusDone, githubTaskList, ticketStages } = await import('../src/shared/ship.ts');
+  assert.equal(clickupStatusDone({ status: 'Weird Name', type: 'closed' }), true);
+  assert.equal(clickupStatusDone({ status: 'done', type: 'custom' }), true);
+  assert.equal(clickupStatusDone({ status: 'in progress', type: 'custom' }), false);
+  assert.equal(clickupStatusDone(undefined), false);
+  const subs = githubTaskList('Intro\n- [ ] write the migration\n- [x] add the index\n  * [X] nested done\n1. [ ] numbered\n- plain bullet\n', 'https://github.com/o/r/issues/1');
+  assert.deepEqual(subs.map((s) => [s.title, s.done, s.status]), [['write the migration', false, 'open'], ['add the index', true, 'done'], ['nested done', true, 'done'], ['numbered', false, 'open']]);
+  assert.equal(subs[0].url, 'https://github.com/o/r/issues/1');
+  const unread = ticketStages(ticket, undefined);
+  assert.deepEqual(unread, [{ id: 'ticket', label: 'HRIS address propagation', state: 'pending', detail: 'not read yet' }]);
+  const rows = ticketStages(ticket, { title: 'HRIS address propagation (renamed)', status: 'in progress', done: false, at: 1, subtasks: [{ id: 's1', title: 'Backfill', status: 'complete', done: true }, { id: 's2', title: 'Sync job', status: 'to do', done: false }] });
+  assert.deepEqual(rows.map((r) => [r.label, r.state, r.detail]), [['HRIS address propagation (renamed)', 'pending', 'in progress'], ['Backfill', 'done', 'complete'], ['Sync job', 'pending', 'to do']]);
+  assert.equal(ticketStages(ticket, { title: 't', status: 'closed', done: true, at: 1, subtasks: [] })[0].state, 'done');
+});
+
+test('the SHIP card lists the stages the feature passes through with a line each, detours only when taken', async () => {
+  const { shipPanelStages, SHIP_STAGE_INFO, SHIP_STAGES } = await import('../src/shared/ship.ts');
+  for (const s of SHIP_STAGES) assert.ok(SHIP_STAGE_INFO[s].blurb.length > 20, s);
+  const f = newShipFeature(ticket, 'hris-address', 1000);
+  const fresh = shipPanelStages(f);
+  assert.deepEqual(fresh.map((r) => [r.id, r.state]), [['Grilling', 'active'], ["Spec'd", 'pending'], ['Implementing', 'pending'], ['Ready to Test', 'pending'], ['In Review', 'pending'], ['Merged', 'pending']], 'no Revising, no Closed until taken');
+  assert.equal(fresh[0].detail, SHIP_STAGE_INFO.Grilling.blurb);
+  const building = applyShipChange(applyShipChange(f, { stage: "Spec'd" }, 2000), { stage: 'Implementing' }, 3000);
+  assert.deepEqual(shipPanelStages(building).map((r) => [r.label, r.state]).slice(0, 3), [['Grilling', 'done'], ["Spec'd", 'done'], ['Implementing · building', 'active']]);
+  const revising = applyShipChange(applyShipChange(building, { stage: 'Ready to Test' }, 4000), { stage: 'Revising' }, 5000);
+  assert.deepEqual(shipPanelStages(revising).map((r) => r.id), ['Grilling', "Spec'd", 'Implementing', 'Ready to Test', 'Revising', 'In Review', 'Merged']);
+  const merged = applyShipChange(applyShipChange(revising, { stage: 'In Review' }, 6000), { stage: 'Merged' }, 7000);
+  assert.ok(shipPanelStages(merged).every((r) => r.state === 'done'));
+  const closed = applyShipChange(building, { stage: 'Closed' }, 9000);
+  const ids = shipPanelStages(closed).map((r) => r.id);
+  assert.ok(ids.includes('Closed') && !ids.includes('Merged'));
+});
+
+test('Redo rewinds a finished stage: the command parses, only finished stages qualify, and downstream state is forgotten', async () => {
+  const { canRedoStage, redoShipChange, stageNamed } = await import('../src/shared/ship.ts');
+  const { shipHandler } = await import('../src/shared/shipPrompt.ts');
+  assert.deepEqual(parseShipCommand('/ship redo Ready to Test'), { form: 'redo', stage: 'Ready to Test' });
+  assert.deepEqual(parseShipCommand('/ship redo ready-to-test'), { form: 'redo', stage: 'Ready to Test' });
+  assert.deepEqual(parseShipCommand('/ship 494 redo grilling'), { form: 'redo', stage: 'Grilling', ref: '494' });
+  assert.deepEqual(parseShipCommand('/ship redo'), { form: 'redo' });
+  assert.equal(stageNamed("spec'd"), "Spec'd");
+  let f = newShipFeature(ticket, 'hris-address', 1000);
+  f = applyShipChange(f, { stage: "Spec'd", spec: '.consort/ship/SPEC.md' }, 2000);
+  f = applyShipChange(f, { stage: 'Implementing' }, 3000);
+  f = applyShipChange(f, { built: true, prs: ['https://github.com/o/r/pull/9'] }, 3500);
+  f = applyShipChange(f, { stage: 'Ready to Test', report: '.consort/ship/TEST-REPORT.md', tests: { pass: 4, total: 4 } }, 4000);
+  f = applyShipChange(f, { stage: 'In Review', reviewRound: 1 }, 5000);
+  f = { ...f, review: { chatId: 'c', pr: 9, round: 1, startedAt: 5000, doneAt: 6000 } };
+  assert.equal(canRedoStage(f, 'Grilling'), true);
+  assert.equal(canRedoStage(f, 'Ready to Test'), true);
+  assert.equal(canRedoStage(f, 'In Review'), false, 'the current stage is not finished');
+  assert.equal(canRedoStage(f, 'Merged'), false);
+  const tests = redoShipChange(f, 'Ready to Test', 7000);
+  assert.equal(tests.stage, 'Implementing');
+  assert.equal(tests.built, true, 'the branch is still built; only the test session reruns');
+  assert.equal(tests.report, undefined);
+  assert.equal(tests.review, undefined);
+  assert.deepEqual(tests.prs, f.prs, 'the PR stays');
+  assert.match(tests.history.at(-1).note, /Redo requested: Ready to Test/);
+  assert.equal(shipHandler(tests, { form: 'redo', stage: 'Ready to Test' }), 'test');
+  const grill = redoShipChange(f, 'Grilling', 7000);
+  assert.equal(grill.stage, 'Grilling');
+  assert.equal(grill.spec, undefined);
+  assert.equal(grill.built, undefined);
+  assert.equal(shipHandler(grill, { form: 'redo', stage: 'Grilling' }), 'grilling');
+  const build = redoShipChange(f, 'Implementing', 7000);
+  assert.equal(build.built, undefined);
+  assert.equal(shipHandler(build, { form: 'redo', stage: 'Implementing' }), 'implementing');
+  assert.match(shipPrompt({ feature: tests, form: { form: 'redo', stage: 'Ready to Test' }, worktree: '/w', branch: 'b', base: 'origin/main' }), /## Redo: Ready to Test[\s\S]*do the stage again properly/);
+  assert.equal(canRedoStage(applyShipChange(f, { stage: 'Merged' }, 8000), 'Grilling'), false, 'nothing to redo once merged');
 });

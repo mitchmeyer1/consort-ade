@@ -3,8 +3,8 @@
 A feature goes from a ticket to a merged PR through fixed stages:
 Grilling → Spec'd → Implementing → Ready to Test → Revising → In Review → Merged → Closed.
 
-The stage machine is Peter's (`peter-ship` in aligned-marketplace/claude-plugins). Consort keeps the
-state instead of a `state.json` and a CLI, the ticket is a GitHub issue or a ClickUp task, and the code
+The stage machine comes from an earlier Claude Code skill. Consort keeps the state instead of a
+`state.json` and a CLI, the ticket is a GitHub issue or a ClickUp task, and the code
 lives in a worktree Consort made.
 
 ## Starting a feature
@@ -82,5 +82,5 @@ HANDOFF.md, review/), excluded from git through the repo's `info/exclude`.
 
 - `/ship new` on a ClickUp list (ship an existing task by id instead).
 - Multi-repo features (workspaces).
-- Peter's story-test scripts and `standup.sh`; the test session runs the repo's own suite and verifies
-  stories by hand, writing TEST-REPORT.md.
+- Separate story-test scripts; the test session runs the repo's own suite and verifies stories by
+  hand, writing TEST-REPORT.md.

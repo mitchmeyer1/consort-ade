@@ -9,7 +9,7 @@ effort: high
 
 # PR writeup
 
-A document Mitch reads *before* reviewing, that leaves him able to review. Two halves:
+A document the reviewer reads *before* reviewing, that leaves them able to review. Two halves:
 **how the feature is used** (Flows) and **what is wrong with it** (verified findings).
 
 Two files in this directory, each with one job:
@@ -21,7 +21,7 @@ Two files in this directory, each with one job:
 The deliverable is **data, not a page**: `.consort/pr-review/pr-<n>.review.json`. Consort
 renders it as the writeup, with a *Comment on PR* / *Ignore* decision on every finding and one
 button that posts the approved comments to GitHub as a single review. Never post to GitHub
-yourself; that step is Mitch's.
+yourself; that step is the reviewer's.
 
 **Review broadly; write briefly.** Brevity limits the final prose, never the investigation or
 number of supported findings. Budget per item: ≤60 words a finding, ≤50 a flow, one short
@@ -92,7 +92,7 @@ gh pr checks <n> --repo <owner>/<name>
 
 **No PR body, no review.** If `gh` is missing, `git fetch origin
 refs/pull/<n>/head:refs/remotes/origin/pr/<n>` gets the code but not the description —
-stop and ask Mitch to paste it. The body says what is out of scope and what the follow-up
+stop and ask the reviewer to paste it. The body says what is out of scope and what the follow-up
 covers; without it you invent the author's intent and then find fault with the invention.
 
 **Then check it earns a review.** Give a verdict in chat and stop if the diff is under ~50
@@ -294,7 +294,7 @@ that exact line.
       "file": "packages/core/src/services/x.service.ts", "line": 565,
       "problem": "1–2 plain sentences, then the ref", "exampleFlow": "real values, one breath",
       "fix": "the smallest one", "ignoreIf": "the assumption under which it's fine",
-      "comment": "x.service.ts:565 — one sentence in Mitch's voice, ready to post",
+      "comment": "x.service.ts:565 — one sentence in the reviewer's voice, ready to post",
       "status": "pending" },
     { "id": "T1", "kind": "item", "category": "tests",
       "title": "what has no test or is wrong", "file": "tests/standard/x.test.ts", "line": 3,
@@ -337,15 +337,15 @@ Rules for the file:
   code-specific finding, open with the exact `file:line`. Model:
   `sigma-md.service.ts:214 — Nothing tests retry429MaxWaitMs — add a test that a retry-after:
   600 with a small cap resolves fast, so a unit slip here doesn't hang the mapping save.` Do
-  not leave a blank field for Mitch to write.
+  not leave a blank field for the reviewer to write.
 - **file** and **line** are required when a finding belongs to a changed line, and they must be
   verified at the review SHA. When there is genuinely no applicable code location, omit both and
   write the comment as a general PR comment; Consort will put it in the review body instead of
   inventing a location.
-- **status** is always `"pending"` when you write the file. Mitch sets the rest; if you are
+- **status** is always `"pending"` when you write the file. the reviewer sets the rest; if you are
   re-running a review whose file already exists, read it first and carry forward every
   finding's `status`, `comment` edits, `posted`, `head` and `investigation` records where the
-  finding is the same. Consort fills `head` and `investigation` itself when Mitch re-checks a
+  finding is the same. Consort fills `head` and `investigation` itself when the reviewer re-checks a
   finding against newer commits; never write them fresh.
 - Order flows money/data-writing first, reads last; defects by severity; items in `file` order.
 - **deploy** carries the profile from Phase 0.5 on every review, cached or freshly deduced, with
@@ -366,7 +366,7 @@ After saving the review file, print a short operational summary in chat, even wi
 Put the same in the file's `appendix`. End the response with the clickable link on its own
 line: `[PR <n> review](<absolute-worktree-path>/.consort/pr-review/pr-<n>.review.json)`. Use
 the real saved path; if the file could not be written, say so instead of printing a broken
-link. Then stop — approving, ignoring and posting the comments is Mitch's step in Consort.
+link. Then stop — approving, ignoring and posting the comments is the reviewer's step in Consort.
 
 ## Voice — plain English, not code narration
 

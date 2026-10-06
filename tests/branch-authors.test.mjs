@@ -16,7 +16,7 @@ async function commit(cwd, author, msg) {
   execFileSync('git', ['commit', '-q', '-m', msg], { cwd, env: { ...process.env, ...as(author), GIT_CONFIG_GLOBAL: '/dev/null' }, stdio: 'ignore' });
 }
 
-/** a remote whose default branch is an old feature branch, a long-lived development branch by Peter, and Mitch's branch cut from development */
+/** a remote whose default branch is an old feature branch, a long-lived development branch by Ada, and Grace's branch cut from development */
 async function fixture(t) {
   const dir = await mkdtemp(join(tmpdir(), 'consort-authors-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -24,13 +24,13 @@ async function fixture(t) {
   git(dir, 'init', '-q', '--bare', origin);
   git(dir, 'init', '-q', '-b', 'main', repo);
   git(repo, 'config', 'commit.gpgsign', 'false');
-  await commit(repo, 'Peter Monaco', 'initial');
+  await commit(repo, 'Ada Lovelace', 'initial');
   git(repo, 'branch', 'posthog-integration');          // the stale "default branch" GitHub reports
   git(repo, 'checkout', '-q', '-b', 'development');
-  for (let i = 0; i < 5; i++) await commit(repo, 'Peter Monaco', `dev ${i}`);
+  for (let i = 0; i < 5; i++) await commit(repo, 'Ada Lovelace', `dev ${i}`);
   git(repo, 'checkout', '-q', '-b', 'mm/ghissue-265');
-  await commit(repo, 'Mitch Meyer', 'fix the issue');
-  await commit(repo, 'Mitch Meyer', 'and a test');
+  await commit(repo, 'Grace Hopper', 'fix the issue');
+  await commit(repo, 'Grace Hopper', 'and a test');
   git(repo, 'remote', 'add', 'origin', origin);
   git(repo, 'push', '-q', 'origin', 'main', 'posthog-integration', 'development', 'mm/ghissue-265');
   return { repo };
@@ -39,9 +39,9 @@ async function fixture(t) {
 test('a branch is credited only with its own commits, even when the project base is wrong', async (t) => {
   const { repo } = await fixture(t);
   const commits = await branchAuthors(repo, 'origin/posthog-integration');
-  assert.deepEqual([...new Set(commits.map((c) => c.name))], ['Mitch Meyer']);
+  assert.deepEqual([...new Set(commits.map((c) => c.name))], ['Grace Hopper']);
   assert.equal(commits.length, 2);
-  assert.equal(topContributor(commits).name, 'Mitch Meyer');
+  assert.equal(topContributor(commits).name, 'Grace Hopper');
 });
 
 test('a branch already merged into another remote branch has nothing of its own to credit', async (t) => {
@@ -57,6 +57,6 @@ test('with no remote branches to compare against, the base ref decides', async (
   const { repo } = await fixture(t);
   git(repo, 'remote', 'remove', 'origin');
   const commits = await branchAuthors(repo, 'development');
-  assert.deepEqual(commits.map((c) => c.name), ['Mitch Meyer', 'Mitch Meyer']);
+  assert.deepEqual(commits.map((c) => c.name), ['Grace Hopper', 'Grace Hopper']);
   assert.equal((await branchAuthors(repo, 'main')).length, 7);
 });

@@ -15,7 +15,7 @@ export const Lockup = () => (
     <Mark />
     <div>
       <div className="word">Consort</div>
-      <div className="sub">An Agentic Workspace</div>
+      <div className="sub">Branch &amp; worktree ADE</div>
     </div>
   </div>
 );

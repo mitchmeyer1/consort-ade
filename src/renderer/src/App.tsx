@@ -20,8 +20,8 @@ import { parseFollowups, type Followup } from "../../shared/followups";
 import { historyStep, promptHistory, type HistoryNav } from "../../shared/promptHistory";
 import { isScratch, scratchChats } from "../../shared/scratch";
 import { fillNextCommand, parseNextCommands, type NextCommand } from "../../shared/shipNext";
-import { isShipCommand } from "../../shared/ship";
-import { InvestigateBox, PrReviewBox, ShipBar, ShipBox, ShipPanel, shipOfIssue } from "./Ship";
+import { isShipCommand, ticketStages } from "../../shared/ship";
+import { InvestigateBox, PrReviewBox, ShipBar, ShipBox, ShipCard, ShipPanel, shipOfIssue } from "./Ship";
 import { commandQuery, completeCommand, filterCommands, isClearCommand, type SlashEntry } from "../../shared/commands";
 import { contextPercent, contextTone } from "../../shared/context";
 import { foldLabel, groupBlocks, mergeAssistantRuns, showToolCalls, type ToolBlock } from "../../shared/toolFold";
@@ -342,7 +342,9 @@ export function App() {
   const chat = sel?.type === "chat" ? state.chats.find((c) => c.id === sel.id) : undefined;
   const worktree = state.worktrees.find((w) => w.id === (chat ? chat.worktreeId : sel?.type === "worktree" ? sel.id : undefined));
   // the branch's finished review, if one exists: it earns a top-bar tab and a card at the foot of the review chat
-  const reviewFile = useReviewFile(worktree?.id, chat ? prNumberOf(chat.name) : undefined, chat?.running, chat?.messages.length);
+  // the PR under review: named in a stand-alone review chat's title, carried on the feature for a /ship chat
+  const reviewPr = chat ? prNumberOf(chat.name) ?? worktree?.ship?.review?.pr : undefined;
+  const reviewFile = useReviewFile(worktree?.id, reviewPr, chat?.running, chat?.messages.length, worktree?.ship?.review?.doneAt);
   const project = sel?.type === "project" ? state.projects.find((p) => p.id === sel.id) : undefined;
   const wtProject = worktree && state.projects.find((p) => p.id === worktree.projectId);
   const scratch = isScratch(worktree);
@@ -458,7 +460,7 @@ export function App() {
             <div>
               <Mark />
               <div className="word">Consort</div>
-              <div className="sub">AGENTIC DEVELOPMENT ENVIRONMENT</div>
+              <div className="sub">BRANCH &amp; WORKTREE AGENTIC DEVELOPMENT ENVIRONMENT</div>
               <div className="est">Arbor Operis et Ramorum Progression ● New York</div>
               <div className="ornament rose" />
               <div className="empty-actions">
@@ -466,7 +468,7 @@ export function App() {
                 {!state.projects.length && <button onClick={() => void addFirstProject()}>Add projects</button>}
               </div>
             </div>
-            <div className="tagline">Agents to work on your code within feature branch worktrees. Multiple chats per worktree. Multiple worktrees per project.</div>
+            <div className="tagline">Every piece of work gets its own branch in its own worktree, and agents work there, never in your main checkout. Many chats per worktree, many worktrees per project, and the whole path from ticket to merged PR in one place.</div>
           </div>
         )}
       </div>
@@ -2068,8 +2070,8 @@ function AgentPicker({ chat, keys, models }: { chat: Chat; keys: State["keys"]; 
 }
 
 /* The foot of a review chat: the finished file, or the fact that none was saved and a way to get it. */
-function ReviewFooter({ chat, review, onOpen }: { chat: Chat; review: ReviewFile | null; onOpen: () => void }) {
-  const pr = prNumberOf(chat.name);
+/** the "Review ready" card under a chat that reviewed a PR; `nudge` lets a stand-alone review chat be asked for a missing file (a /ship chat is steered by the pipeline instead) */
+function ReviewFooter({ chat, review, pr, nudge = true, onOpen }: { chat: Chat; review: ReviewFile | null; pr?: number; nudge?: boolean; onOpen: () => void }) {
   if (review) {
     const s = review.summary;
     const parts = [`${s.total} finding${s.total === 1 ? "" : "s"}`];
@@ -2088,7 +2090,7 @@ function ReviewFooter({ chat, review, onOpen }: { chat: Chat; review: ReviewFile
   }
   // the run is over and left no file: the transcript may hold a verdict, but nothing Consort can act on
   const ran = chat.messages.some((m) => m.blocks.some((b) => b.type === "tool"));
-  if (chat.running || chat.phase === "waiting" || chat.interrupted || chat.error || !ran) return null;
+  if (!nudge || chat.running || chat.phase === "waiting" || chat.interrupted || chat.error || !ran) return null;
   const file = `.consort/pr-review/pr-${pr ?? "<number>"}.review.json`;
   // the run lost the skill's tail when it was resumed; send the schema and link rule back with the request
   const ask = () => {
@@ -2108,12 +2110,20 @@ function ReviewFooter({ chat, review, onOpen }: { chat: Chat; review: ReviewFile
 /* Where the work actually is: a review's known phases, or the steps the agent laid out itself. */
 /** the plan card on the left, or, with `side="right"`, the feature checklist the task belongs to */
 function ProgressPanel({ title, stages, icon = "laurel", side }: { title: string; stages: Stage[]; icon?: string; side?: "right" }) {
+  return (
+    <div className={"review-progress" + (side === "right" ? " right" : "")}>
+      <RpCard title={title} stages={stages} icon={icon} />
+    </div>
+  );
+}
+
+/** one progress card: a titled list of stages with their marks; the PLAN, REVIEW, feature and TICKET boxes are all this */
+function RpCard({ title, stages, icon = "laurel", count, href }: { title: string; stages: Stage[]; icon?: string; count?: string; href?: string }) {
   const finished = stages.filter((s) => s.state === "done").length;
   const mark = (state: Stage["state"]) => state === "done" ? "✓" : state === "active" ? <span className="spin" /> : state === "skipped" ? "–" : "·";
   return (
-    <div className={"review-progress" + (side === "right" ? " right" : "")}>
-      <div className="rp-card">
-        <div className="rp-head" title={title}><Ico n={icon} /><span className="rp-title">{title}</span><span className="rp-count">{finished}/{stages.length}</span></div>
+      <div className={"rp-card" + (href ? " linked" : "")} role={href ? "link" : undefined} title={href} onClick={href ? () => ade.openExternal(href) : undefined}>
+        <div className="rp-head" title={title}><Ico n={icon} /><span className="rp-title">{title}</span><span className="rp-count">{count ?? `${finished}/${stages.length}`}</span></div>
         {stages.map((s) => (
           <div key={s.id} className={`rp-stage ${s.state}`} title={s.state === "skipped" ? `${s.label} — not run` : undefined}>
             <span className="rp-mark" aria-hidden="true">{mark(s.state)}</span>
@@ -2128,8 +2138,19 @@ function ProgressPanel({ title, stages, icon = "laurel", side }: { title: string
           </div>
         ))}
       </div>
-    </div>
   );
+}
+
+/**
+ * The TICKET box under PLAN in a /ship chat: the ticket's title and tracker status, then every
+ * sub-task with its status, as Consort last read them (ShipFeature.snapshot). Display only.
+ */
+function TicketCard({ wt }: { wt: Worktree }) {
+  const f = wt.ship!;
+  const stages = ticketStages(f.ticket, f.snapshot) as Stage[];
+  const subs = f.snapshot?.subtasks ?? [];
+  const count = subs.length ? `${subs.filter((s) => s.done).length}/${subs.length}` : f.snapshot?.status ?? "…";
+  return <RpCard title="Ticket" icon="candle" stages={stages} count={count} href={f.ticket.url} />;
 }
 
 /* A second, read-only agent you can ask about a long job while it runs. */
@@ -2340,10 +2361,15 @@ function ChatPane({ chat, worktree, chats, onOpenChat, keys, models, showTools, 
     <div className={"chatpane" + (over ? " over" : "")} onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setOver(false); }} onDrop={onDrop} onPaste={onPaste}>
       {over && <div className="dropveil">Drop to attach</div>}
       <PhaseStrip phase={chat.phase} steps={chat.phaseSteps} onSelect={(phase) => ade.setPhase(chat.id, phase)} />
-      {worktree?.ship && <ShipBar wt={worktree} chats={chats} compact chatId={chat.id} onOpenChat={onOpenChat} />}
       <div className="messages" ref={messagesEl} onScroll={onMessagesScroll}>
-        {stages && <ProgressPanel title={review ? "Review" : "Plan"} stages={stages} />}
-        {feature && chat.feature && <ProgressPanel title={chat.feature.title} icon="wreath" side="right" stages={feature} />}
+        {(stages || worktree?.ship) && <div className="review-progress"><div className="rp-stack">
+          {stages && <RpCard title={review ? "Review" : "Plan"} stages={stages} />}
+          {worktree?.ship && <TicketCard wt={worktree} />}
+        </div></div>}
+        {(worktree?.ship || (feature && chat.feature)) && <div className="review-progress right"><div className="rp-stack">
+          {worktree?.ship && <ShipCard wt={worktree} chats={chats} chatId={chat.id} onOpenChat={onOpenChat} />}
+          {feature && chat.feature && <RpCard title={chat.feature.title} icon="wreath" stages={feature} />}
+        </div></div>}
         {recall && !recallHidden && <div className="chat-recall"><button type="button" title="Your last message. Click to scroll to it." onClick={() => { const all = messagesEl.current?.querySelectorAll<HTMLElement>(".msg.user"); all?.[all.length - 1]?.scrollIntoView({ block: "center" }); }}><span className="m">You</span>{recall}</button></div>}
         <div className="column">
         {(showTools ? chat.messages.filter((m) => m.blocks.length) : mergeAssistantRuns(chat.messages.filter((m) => m.blocks.length))).map((m, i, all) =>
@@ -2361,7 +2387,7 @@ function ChatPane({ chat, worktree, chats, onOpenChat, keys, models, showTools, 
             <button className="primary" onClick={() => answer(p.id, true)}>Allow</button> <button onClick={() => answer(p.id, false)}>Deny</button>
           </div>
         ))}
-        {isReviewChat(chat) && <ReviewFooter chat={chat} review={reviewFile} onOpen={onOpenReview} />}
+        {(isReviewChat(chat) || (worktree?.ship?.review && reviewFile)) && <ReviewFooter chat={chat} review={reviewFile} pr={prNumberOf(chat.name) ?? worktree?.ship?.review?.pr} nudge={!worktree?.ship} onOpen={onOpenReview} />}
         <div ref={bottom} />
         </div>
       </div>

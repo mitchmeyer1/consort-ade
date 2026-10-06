@@ -11,13 +11,36 @@ type Tool = { name: string; input: string; output?: string; ok?: boolean };
 const AGENT_TOOLS = ["task", "agent"];
 const text = (t: Tool) => `${t.input}\n${t.output ?? ""}`;
 
-/** Review chats are started from the pr-writeup skill, whose prompt carries its name */
+/** the label a /ship self-review turn is shown as (main/index.ts reviewTurnLabel); the prompt behind it is the pr-writeup skill */
+export const SHIP_REVIEW_TURN = /^Self-review round \d+ · PR #\d+$/;
+const textOf = (m: Chat["messages"][number]) => m.blocks.map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
+const startsReview = (m: Chat["messages"][number]) => m.role === "user" && (/pr-writeup/i.test(textOf(m)) || SHIP_REVIEW_TURN.test(textOf(m)));
+
+/**
+ * Review chats are started from the pr-writeup skill, whose prompt carries its name, or are a /ship chat
+ * whose latest turn is the self-review. A ship chat that has moved on to other turns is not a review chat
+ * any more: its PLAN comes back.
+ */
 export function isReviewChat(chat: Pick<Chat, "messages">) {
-  return chat.messages.some((m) => m.role === "user" && m.blocks.some((b) => b.type === "text" && /pr-writeup/i.test(b.text)));
+  return reviewMessages(chat) !== null;
+}
+
+/** the part of the transcript the review's progress is read from: everything for a stand-alone review chat, the latest self-review turn for a ship chat */
+function reviewMessages(chat: Pick<Chat, "messages">): Chat["messages"] | null {
+  const ms = chat.messages;
+  let start = -1;
+  for (let i = ms.length - 1; i >= 0; i--) if (startsReview(ms[i])) { start = i; break; }
+  if (start < 0) return null;
+  if (SHIP_REVIEW_TURN.test(textOf(ms[start]))) {
+    // a later user message means the ship chat has moved on from the review
+    for (let i = start + 1; i < ms.length; i++) if (ms[i].role === "user") return null;
+    return ms.slice(start);
+  }
+  return ms;
 }
 
 const tools = (chat: Pick<Chat, "messages">): Tool[] =>
-  chat.messages.flatMap((m) => m.blocks).filter((b): b is Extract<typeof b, { type: "tool" }> => b.type === "tool")
+  (reviewMessages(chat) ?? chat.messages).flatMap((m) => m.blocks).filter((b): b is Extract<typeof b, { type: "tool" }> => b.type === "tool")
     .map((b) => ({ name: b.name, input: b.input, output: b.output, ok: b.ok }));
 
 /** the PR's changed-file count, straight from the listing the review takes its scope from */

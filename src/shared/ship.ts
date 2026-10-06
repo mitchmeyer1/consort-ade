@@ -10,6 +10,18 @@
 export const SHIP_STAGES = ["Grilling", "Spec'd", "Implementing", "Ready to Test", "Revising", "In Review", "Merged", "Closed"] as const;
 export type ShipStage = (typeof SHIP_STAGES)[number];
 export const SHIP_DIR = ".consort/ship";
+
+/** one line per stage, for the SHIP card: what happens there and who acts */
+export const SHIP_STAGE_INFO: Record<ShipStage, { blurb: string }> = {
+  Grilling: { blurb: "Consort interviews you about the idea in rounds, then writes the spec." },
+  "Spec'd": { blurb: "The spec is on the ticket. Next it is broken into tickets and built." },
+  Implementing: { blurb: "Each ticket is built, committed and pushed; a draft PR opens; then every story is tested." },
+  "Ready to Test": { blurb: "The test report maps every story to its proof. You read it and approve, or give feedback." },
+  Revising: { blurb: "Your feedback is applied and the touched stories are re-verified." },
+  "In Review": { blurb: "The PR is marked ready. Consort reviews it and fixes what is real, up to three rounds." },
+  Merged: { blurb: "You merged the PR on GitHub. The ticket is closed." },
+  Closed: { blurb: "Set aside without merging. The ticket says why." },
+};
 /**
  * The ticket as the agent reads it: Consort fetches the issue or ClickUp task (the chat has no
  * ClickUp access of its own) and writes it here on ship start and on every /ship turn, so a plain
@@ -56,7 +68,12 @@ export type ShipFeature = {
   review?: ShipReview;
   /** the last write of the stage to the ticket */
   sync?: ShipSync;
+  /** what the tracker said about the ticket and its sub-tasks the last time Consort read it (see TicketSnapshot) */
+  snapshot?: TicketSnapshot;
 };
+/** one sub-task of the ticket: a ClickUp subtask, or a task-list line in a GitHub issue body */
+export type TicketSubtask = { id: string; title: string; status?: string; done: boolean; url?: string };
+export type TicketSnapshot = { title: string; status?: string; done: boolean; subtasks: TicketSubtask[]; at: number };
 export type ShipReview = { chatId: string; pr: number; round: number; startedAt: number; doneAt?: number };
 export const SHIP_REVIEW_ROUNDS = 3;
 
@@ -77,8 +94,10 @@ export function shipReviewRoundToStart(before: ShipFeature, after: ShipFeature):
 }
 
 /** what a /ship command asks for */
-export type ShipForm = { form: "list" | "new" | "resume" | "feedback" | "approve" | "pr-loop" | "pause"; ref?: string; idea?: string; feedback?: string };
-const RESERVED = new Set(["approve", "pr-loop", "pause", "new"]);
+export type ShipForm = { form: "list" | "new" | "resume" | "feedback" | "approve" | "pr-loop" | "pause" | "redo"; ref?: string; idea?: string; feedback?: string; stage?: ShipStage };
+const RESERVED = new Set(["approve", "pr-loop", "pause", "new", "redo"]);
+/** "ready to test", "ready-to-test", "Ready To Test" → the stage */
+export const stageNamed = (text: string): ShipStage | undefined => { const key = text.trim().toLowerCase().replace(/[^a-z]/g, ""); return SHIP_STAGES.find((s) => s.toLowerCase().replace(/[^a-z]/g, "") === key); };
 
 export const isShipCommand = (text: string) => /^\/ship(\s|$)/i.test(text.trim());
 export const isSlashCommand = (text: string) => /^\/[a-z][\w:-]*(?:\s|$)/i.test(text.trim());
@@ -97,6 +116,7 @@ export function parseShipCommand(text: string): ShipForm | undefined {
   const word = first.toLowerCase();
   if (word === "new") { const idea = rest.slice(first.length).trim(); return idea ? { form: "new", idea } : { form: "new" }; }
   if (word === "pause") return { form: "pause", ...(tail[0] ? { ref: tail[0] } : {}) };
+  if (word === "redo") { const stage = stageNamed(tail.join(" ")); return stage ? { form: "redo", stage } : { form: "redo" }; }
   const quoted = /^"([\s\S]*)"$/.exec(rest) ?? /^"([\s\S]*)"$/.exec(rest.slice(first.length).trim());
   if (quoted && rest.startsWith('"')) return { form: "feedback", feedback: quoted[1] };
   const ref = RESERVED.has(word) ? undefined : first;
@@ -105,6 +125,7 @@ export function parseShipCommand(text: string): ShipForm | undefined {
   if (verb === "approve") return { form: "approve", ...(ref ? { ref } : {}) };
   if (verb === "pr-loop") return { form: "pr-loop", ...(ref ? { ref } : {}) };
   if (verb === "pause") return { form: "pause", ...(ref ? { ref } : {}) };
+  if (verb === "redo") { const stage = stageNamed(verbRest.slice(4)); return { form: "redo", ...(stage ? { stage } : {}), ...(ref ? { ref } : {}) }; }
   const fb = /^"([\s\S]*)"$/.exec(verbRest);
   if (fb) return { form: "feedback", feedback: fb[1], ...(ref ? { ref } : {}) };
   if (verbRest && !ref) return { form: "resume" };
@@ -226,15 +247,18 @@ export type ShipAction = { id: string; label: string; command: string; title?: s
 /** the buttons a feature gets at its stage; `ask` actions need text from the user, substituted for {text} */
 export function shipActions(f: ShipFeature): ShipAction[] {
   if (shipDone(f)) return [];
-  if (f.paused) return [{ id: "resume", label: "Resume", command: "/ship", primary: true }];
+  if (f.paused) return [{ id: "resume", label: "Resume", command: "/ship", title: "Pick the feature up from its handoff", primary: true }];
   const out: ShipAction[] = [];
   const next = f.next && isShipCommand(f.next) ? f.next.replace(/\s*\([^)]*\)\s*$/, "").trim() : "/ship";
-  const label = f.stage === "Grilling" ? "Continue grilling" : f.stage === "Spec'd" ? "Implement" : f.stage === "Implementing" && f.built ? "Run the test session" : f.stage === "Implementing" ? "Continue building" : f.stage === "In Review" ? "Review round" : "Run next step";
-  out.push({ id: "next", label, command: next, title: f.next, primary: true });
-  if (f.stage === "Ready to Test") out.push({ id: "approve", label: "Approve", command: "/ship approve", title: "Tests pass: mark the PR ready for review" });
-  if (f.stage === "In Review" && next !== "/ship pr-loop") out.push({ id: "pr-loop", label: "PR loop", command: "/ship pr-loop", title: "Answer review threads and CI" });
-  if (["Implementing", "Ready to Test", "Revising", "In Review"].includes(f.stage)) out.push({ id: "feedback", label: "Feedback…", command: '/ship "{text}"', ask: "Feedback for this feature" });
-  out.push({ id: "pause", label: "Pause", command: "/ship pause", title: "Write a handoff so a fresh session can resume cold" });
+  const label = f.stage === "Grilling" ? "Continue grilling" : f.stage === "Spec'd" ? "Start building" : f.stage === "Implementing" && f.built ? "Run the tests" : f.stage === "Implementing" ? "Continue building"
+    : f.stage === "Ready to Test" ? "Show the report" : f.stage === "Revising" ? "Continue revising" : f.stage === "In Review" ? "Work the review" : "Next step";
+  const title = f.stage === "Grilling" ? "Another round of questions, or the spec if the idea is settled" : f.stage === "Spec'd" ? "Break the spec into tickets and build them" : f.stage === "Implementing" && f.built ? "Verify every story against the code and write the report" : f.stage === "Implementing" ? "Build the next ticket"
+    : f.stage === "Ready to Test" ? "Read the test report and the PR" : f.stage === "Revising" ? "Apply the feedback and re-verify" : f.stage === "In Review" ? "Read the review findings, fix what is real, answer the threads" : f.next;
+  out.push({ id: "next", label, command: next, title, primary: true });
+  if (f.stage === "Ready to Test") out.push({ id: "approve", label: "Approve", command: "/ship approve", title: "The report holds up: mark the PR ready and start Consort's review" });
+  if (f.stage === "In Review" && next !== "/ship pr-loop") out.push({ id: "pr-loop", label: "Address review", command: "/ship pr-loop", title: "Work through the review findings, PR threads and CI" });
+  if (["Implementing", "Ready to Test", "Revising", "In Review"].includes(f.stage)) out.push({ id: "feedback", label: "Give feedback…", command: '/ship "{text}"', ask: "What should change?" });
+  out.push({ id: "pause", label: "Pause", command: "/ship pause", title: "Write a handoff so the feature can be picked up cold later" });
   return out;
 }
 
@@ -253,8 +277,28 @@ export function shipStep(f: ShipFeature): string | undefined {
 /** what a running ship chat is doing, for the bar's button while it works: the same words as the step */
 export function shipBusyLabel(f: ShipFeature): string {
   const step = shipStep(f);
-  if (step) return step === "building" ? "Building…" : "Test session running…";
-  return f.stage === "Grilling" ? "Grilling…" : f.stage === "In Review" ? (f.review && !f.review.doneAt ? `Self-review round ${f.review.round}…` : "Review round…") : f.stage === "Revising" ? "Revising…" : "Running…";
+  if (step) return step === "building" ? "Building…" : "Testing…";
+  return f.stage === "Grilling" ? "Grilling…" : f.stage === "In Review" ? (f.review && !f.review.doneAt ? `Reviewing (round ${f.review.round})…` : "Working the review…") : f.stage === "Revising" ? "Revising…" : "Working…";
+}
+
+/**
+ * The SHIP card's rows: every stage the feature passes through, with the ones behind done, the current one
+ * active, and the detours (Revising, Closed) shown only when the feature actually took them.
+ */
+export function shipPanelStages(f: ShipFeature): { id: string; label: string; state: "done" | "active" | "pending" | "skipped"; detail: string }[] {
+  const at = stageIndex(f.stage);
+  const seen = new Set(f.history.map((h) => h.stage));
+  const rows: { id: string; label: string; state: "done" | "active" | "pending" | "skipped"; detail: string }[] = [];
+  for (const s of SHIP_STAGES) {
+    const i = stageIndex(s);
+    if (s === "Closed" && f.stage !== "Closed") continue;
+    if (s === "Revising" && f.stage !== "Revising" && !seen.has("Revising")) continue;
+    if (s === "Merged" && f.stage === "Closed") continue;
+    const state = s === f.stage ? (shipDone(f) ? "done" : "active") : i < at || seen.has(s) ? "done" : "pending";
+    const step = s === f.stage ? shipStep(f) : undefined;
+    rows.push({ id: s, label: step ? `${s} · ${step}` : s, state, detail: SHIP_STAGE_INFO[s].blurb });
+  }
+  return rows;
 }
 
 /** the chat name for a /ship run: "ship · #494 · approve" */
@@ -303,3 +347,50 @@ export const shipTarget = (source: ShipSource, text: string): { source: "github"
   const id = clickupIdFrom(text);
   return id ? { source: "clickup", id } : undefined;
 };
+
+/** ClickUp marks a status as "closed" or "done" by type; the names vary per list */
+export const clickupStatusDone = (status: { status?: unknown; type?: unknown } | undefined) =>
+  !!status && (status.type === "closed" || status.type === "done" || /^(done|complete|completed|closed|merged|shipped)$/i.test(String(status.status ?? "")));
+
+/** a GitHub issue body's task list, "- [ ] text" and "- [x] text", as sub-tasks */
+export function githubTaskList(body: string, issueUrl: string): TicketSubtask[] {
+  const out: TicketSubtask[] = [];
+  for (const m of body.matchAll(/^[ \t]*(?:[-*+]|\d+[.)])\s+\[([ xX])\]\s+(.+?)\s*$/gm)) {
+    const done = m[1] !== " ";
+    out.push({ id: `task-${out.length + 1}`, title: m[2].replace(/\s+/g, " ").slice(0, 200), status: done ? "done" : "open", done, url: issueUrl });
+  }
+  return out;
+}
+
+/** the TICKET panel's rows (renderer Stage shape): the ticket itself, then each sub-task with its status */
+export function ticketStages(t: ShipTicket, s: TicketSnapshot | undefined): { id: string; label: string; state: "done" | "pending"; detail?: string }[] {
+  // an open ticket is "pending", not "active": the spinner would read as something running here
+  const head = { id: "ticket", label: s?.title ?? t.title, state: (s?.done ? "done" : "pending") as "done" | "pending", detail: s?.status ?? (s ? undefined : "not read yet") };
+  const subs = (s?.subtasks ?? []).map((x) => ({ id: x.id, label: x.title, state: (x.done ? "done" : "pending") as "done" | "pending", detail: x.status }));
+  return [head, ...subs];
+}
+
+/** the stages the SHIP card offers Redo on: finished ones, while the feature is still going */
+export const canRedoStage = (f: ShipFeature, stage: ShipStage) =>
+  !shipDone(f) && stage !== "Merged" && stage !== "Closed" && shipPanelStages(f).some((r) => r.id === stage && r.state === "done");
+
+/**
+ * Rewind a feature so a stage runs again. What that stage produced is forgotten on the record (the
+ * files stay on disk for the agent to read and replace); everything downstream is forgotten too.
+ * Redoing Ready to Test means re-running the test session, so the feature goes back to
+ * Implementing with the branch marked built.
+ */
+export function redoShipChange(f: ShipFeature, stage: ShipStage, now: number): ShipFeature {
+  const note = `Redo requested: ${stage}.`;
+  const back = (to: ShipStage, patch: Partial<ShipFeature>): ShipFeature =>
+    ({ ...f, ...patch, stage: to, paused: undefined, next: "/ship", review: undefined, report: undefined, tests: undefined, feedbackFrom: undefined, history: [...f.history, { at: now, stage: to, note }] });
+  switch (stage) {
+    case "Grilling": return back("Grilling", { spec: undefined, built: undefined });
+    case "Spec'd": return back("Spec'd", { built: undefined });
+    case "Implementing": return back("Implementing", { built: undefined });
+    case "Ready to Test": return back("Implementing", { built: true });
+    case "Revising": return back("Revising", {});
+    case "In Review": return back("In Review", {});
+    default: return f;
+  }
+}

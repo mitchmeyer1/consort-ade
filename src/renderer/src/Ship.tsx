@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { SHIP_BLURB, SHIP_STAGES, clickupIdFrom, fillShipCommand, prNumberFromUrl, shipActions, shipTarget, type ShipSource, shipBusyLabel, shipDone, shipStep, stageIndex, ticketRef, type ShipAction, type ShipFeature } from "../../shared/ship";
+import { SHIP_BLURB, SHIP_STAGES, canRedoStage, clickupIdFrom, fillShipCommand, prNumberFromUrl, shipActions, shipPanelStages, shipTarget, type ShipSource, type ShipStage, shipBusyLabel, shipDone, shipStep, stageIndex, ticketRef, type ShipAction, type ShipFeature } from "../../shared/ship";
 import { formatAge } from "../../shared/usage";
 import { INVESTIGATE_BLURB } from "../../shared/investigate";
 import type { Api, Chat, State, Worktree } from "../../shared/types";
@@ -67,6 +67,49 @@ export function ShipBar({ wt, chats, compact, chatId, onOpenChat }: { wt: Worktr
         <textarea autoFocus rows={3} value={r.text} placeholder={r.ask.ask} aria-label={r.ask.ask} onChange={(e) => r.setText(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Escape") r.setAsk(undefined); if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); r.send(); } }} />
         <div className="extension-actions"><button className="primary" disabled={!r.text.trim() || r.busy} onClick={r.send}>Send</button><button onClick={() => r.setAsk(undefined)}>Cancel</button></div>
+      </div>}
+    </div>
+  );
+}
+
+/**
+ * The SHIP card at the right of a ship chat (the chat's PLAN and TICKET cards sit at the left): the stages
+ * with what each one does, where the feature is, and the next step as a button. This replaces the bar the
+ * chat used to show; the worktree page keeps the full bar.
+ */
+export function ShipCard({ wt, chats, chatId, onOpenChat }: { wt: Worktree; chats: Chat[]; chatId: string; onOpenChat: (id: string) => void }) {
+  const f = wt.ship!;
+  const rows = shipPanelStages(f);
+  const running = chats.some((c) => c.running && c.worktreeId === wt.id);
+  const actions = shipActions(f);
+  const primary = actions.find((a) => a.primary);
+  const r = useShipRun(wt, onOpenChat, chatId);
+  const finished = rows.filter((x) => x.state === "done").length;
+  const mark = (state: string) => state === "done" ? "✓" : state === "active" ? (running ? <span className="spin" /> : "▸") : "·";
+  return (
+    <div className={"rp-card ship-card" + (f.paused ? " paused" : "")}>
+      <div className="rp-head" title={`${f.ticket.title} · stage ${stageIndex(f.stage) + 1} of ${SHIP_STAGES.length}`}><i className="ico ico-laurel" aria-hidden /><span className="rp-title">Ship{f.paused ? " · paused" : ""}</span><span className="rp-count">{finished}/{rows.length}</span></div>
+      {rows.map((s) => (
+        // the current stage explains itself; the others explain on hover, so the card stays short
+        <div key={s.id} className={`rp-stage ${s.state}`} title={s.state === "active" ? undefined : s.detail}>
+          <span className="rp-mark" aria-hidden="true">{mark(s.state)}</span>
+          <span className="rp-label">{s.label}{s.state === "active" && <small className="rp-desc">{s.detail}</small>}</span>
+          {canRedoStage(f, s.id as ShipStage) && !running && <button className="icon rp-redo" title={`Do ${s.id} again: the feature goes back to it and everything after it is redone`} disabled={r.busy}
+            onClick={() => { if (confirm(`Redo ${s.id}?\n\nThe feature goes back to ${s.id}; the stages after it run again.`)) r.click({ id: "redo", label: "Redo", command: `/ship redo ${s.id}` }); }}>Redo</button>}
+        </div>
+      ))}
+      {(f.prs.length > 0 || f.tests) && <div className="rp-links">
+        {f.prs.map((pr) => <span key={pr} className="badge pr" role="link" title={pr} onClick={() => ade.openExternal(pr)}>{prLabel(pr)}</span>)}
+        {f.tests && <span className="badge ci" title={f.report}>{f.tests.pass}/{f.tests.total} stories</span>}
+      </div>}
+      {!shipDone(f) && !r.ask && <div className="rp-actions">
+        {primary && <button className="primary" disabled={r.busy || running} title={running ? "A chat of this feature is working on this stage" : primary.title ?? primary.command} onClick={() => r.click(primary)}>{r.busy ? "Starting…" : running ? shipBusyLabel(f) : primary.label}</button>}
+        <span className="rp-secondary">{actions.filter((a) => !a.primary).map((a) => <button key={a.id} className="icon" disabled={r.busy || running} title={a.title ?? a.command} onClick={() => r.click(a)}>{a.label}</button>)}</span>
+      </div>}
+      {r.ask && <div className="rp-ask">
+        <textarea autoFocus rows={3} value={r.text} placeholder={r.ask.ask} aria-label={r.ask.ask} onChange={(e) => r.setText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Escape") r.setAsk(undefined); if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); r.send(); } }} />
+        <div className="rp-actions"><button className="primary" disabled={!r.text.trim() || r.busy} onClick={r.send}>Send</button><button className="icon" onClick={() => r.setAsk(undefined)}>Cancel</button></div>
       </div>}
     </div>
   );

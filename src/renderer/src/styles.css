@@ -597,6 +597,36 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 .review-ready.missing .ico { opacity: .5; }
 .review-progress { position: sticky; top: 8px; z-index: 3; align-self: flex-start; height: 0; margin-left: 18px; display: flex; align-items: flex-start; pointer-events: none; }
 .rp-card { pointer-events: auto; width: 190px; transition: width .2s ease; padding: 9px 11px 10px; border: 1px solid var(--line2); border-radius: 10px; background: var(--card-solid); box-shadow: 0 6px 18px var(--shadow); }
+.rp-stack { display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+.rp-stack .rp-card { pointer-events: auto; }
+.rp-card.linked { cursor: pointer; }
+.rp-card.linked:hover { border-color: var(--line2); background: color-mix(in srgb, var(--card-solid) 80%, var(--line)); }
+.ship-card { width: 230px; }
+.ship-card.paused { opacity: .8; }
+.rp-stage .rp-redo { display: none; margin-left: auto; flex: none; align-self: flex-start; padding: 0 5px; font-size: 10px; line-height: 16px; color: var(--dim); border: 1px solid var(--line2); border-radius: 4px; }
+.rp-stage:hover .rp-redo { display: inline-block; }
+.rp-stage .rp-redo:hover { color: var(--fg); background: none; }
+.rp-desc { display: block; font-family: var(--body) !important; font-size: 10.5px !important; line-height: 1.35; color: var(--dim); }
+.rp-stage.pending .rp-desc { opacity: .7; }
+.rp-links { display: flex; flex-wrap: wrap; gap: 4px; padding-top: 9px; }
+.rp-actions { display: flex; flex-direction: column; gap: 6px; padding-top: 9px; margin-top: 9px; border-top: 1px solid var(--line); }
+.rp-actions .primary { width: 100%; height: 30px; border-radius: 6px; font-size: 12px; }
+.rp-secondary { display: flex; flex-wrap: wrap; gap: 2px 8px; }
+.rp-secondary .icon { font-size: 11px; color: var(--dim); padding: 0; }
+.rp-secondary .icon:hover { color: var(--fg); background: none; }
+.rp-ask { display: flex; flex-direction: column; gap: 6px; padding-top: 9px; }
+.rp-ask textarea { width: 100%; box-sizing: border-box; font-size: 12px; }
+/* a narrow window cannot fit the side cards beside an 860px column: each folds to its head and opens on hover */
+@container (max-width: 1360px) {
+  .review-progress .rp-card:not(:hover):not(:focus-within) > :not(.rp-head) { display: none !important; }
+  .review-progress .rp-card:not(:hover):not(:focus-within) .rp-head { padding-bottom: 0; border-bottom: none; }
+  .review-progress .rp-card { width: 150px; }
+  .review-progress .rp-card:hover, .review-progress .rp-card:focus-within { width: 230px; }
+  /* the folded heads still take 150px a side: keep the text clear of them */
+  .main .messages .column { padding: 0 178px; }
+}
+/* narrower still: the phase strip and the top bar carry the state; the cards would only cover the words */
+@container (max-width: 900px) { .review-progress { display: none; } .main .messages .column { padding: 0 28px; } }
 .rp-head { display: flex; align-items: center; gap: 6px; font-size: 9.5px; letter-spacing: .2em; text-transform: uppercase; color: var(--dim); padding-bottom: 7px; border-bottom: 1px solid var(--line); }
 .rp-head .ico { width: 12px; height: 12px; margin: 0; opacity: .85; }
 .rp-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1264,7 +1294,9 @@ button.rv-chip:hover { background: var(--card); color: var(--fg); border-color: 
 .ship-sync-error { color: var(--warn); }
 /* the project page's Start chapter: four ways to begin, one card each, all built the same:
    a display title, a description, one line of fields, the action at the bottom right */
-.start-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.start-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+@container (max-width: 1400px) { .start-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@container (max-width: 720px) { .start-grid { grid-template-columns: minmax(0, 1fr); } }
 .start-card { display: flex; flex-direction: column; gap: 10px; padding: 16px 18px 14px; }
 .start-card h3 { margin: 0; font-family: var(--display); font-weight: 600; font-size: 18px; line-height: 1.2; color: var(--fg); }
 .start-card p { margin: 0; flex: 1; color: var(--dim); font-size: 12.5px; line-height: 1.5; }

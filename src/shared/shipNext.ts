@@ -22,5 +22,5 @@ export function parseNextCommands(text: string): NextCommand[] {
 }
 
 const quote = (s: string) => `"${s.trim().replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-/** the feedback placeholder replaced by Peter's text, quoted as the skill expects */
+/** the feedback placeholder replaced by the user's text, quoted as the skill expects */
 export const fillNextCommand = (command: string, text: string) => command.replace(FEEDBACK, quote(text));

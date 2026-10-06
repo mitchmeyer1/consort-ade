@@ -1,3 +1,6 @@
 node_modules
 out
 dist
+.consort/
+.claude/
+.DS_Store

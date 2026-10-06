@@ -2,6 +2,37 @@
   "name": "ade",
   "version": "0.1.0",
   "private": true,
+  "description": "Consort \u2014 a branch- and worktree-oriented agentic development environment. Every task gets its own git worktree; Claude Code and Codex agents work there, with PR review, ticket-to-merge shipping, notes and terminals in one desktop app.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mitchmeyer1/consort-ade.git"
+  },
+  "homepage": "https://github.com/mitchmeyer1/consort-ade#readme",
+  "bugs": {
+    "url": "https://github.com/mitchmeyer1/consort-ade/issues"
+  },
+  "keywords": [
+    "agentic-development-environment",
+    "ade",
+    "git-worktree",
+    "worktrees",
+    "claude-code",
+    "codex",
+    "ai-agents",
+    "coding-agent",
+    "electron",
+    "developer-tools",
+    "pull-request-review",
+    "github",
+    "clickup",
+    "typescript",
+    "react"
+  ],
+  "engines": {
+    "node": ">=22.12",
+    "pnpm": ">=9"
+  },
   "main": "./out/main/index.js",
   "type": "module",
   "scripts": {
@@ -44,6 +75,5 @@
       "esbuild"
     ]
   },
-  "productName": "Consort",
-  "description": "Consort ADE — agentic development environment"
+  "productName": "Consort"
 }

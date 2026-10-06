@@ -11,7 +11,7 @@ test('a GitHub noreply address carries the login', () => {
 });
 
 test('an ordinary address has no login in it', () => {
-  for (const email of ['mitch@alignedmarketplace.com', 'me@users.noreply.example.com', '']) assert.equal(githubLogin(email), undefined);
+  for (const email of ['someone@example.com', 'me@users.noreply.example.com', '']) assert.equal(githubLogin(email), undefined);
 });
 
 test('the author with the most commits wins', () => {

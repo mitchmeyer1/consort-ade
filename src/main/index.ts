@@ -52,7 +52,7 @@ import * as shipApi from "./ship";
 import { buildDossier, writeDossier } from "./investigate";
 import { normalizeScratchpad } from "../shared/scratchpad";
 import { investigationChatName, investigatePrompt } from "../shared/investigate";
-import { newShipFeature, parseShipCommand, prNumberFromUrl, shipActionOf, shipBranch, shipChatName, shipFolder, shipIdeaName, shipReviewRoundToStart, shipSlug, syncRetryDelay, ticketRef, type ShipFeature, type ShipForm, type ShipTicket } from "../shared/ship";
+import { canRedoStage, newShipFeature, parseShipCommand, prNumberFromUrl, redoShipChange, shipActionOf, shipBranch, shipChatName, shipFolder, shipIdeaName, shipReviewRoundToStart, shipSlug, syncRetryDelay, ticketRef, type ShipFeature, type ShipForm, type ShipTicket } from "../shared/ship";
 import { shipPrompt } from "../shared/shipPrompt";
 
 // ADE_DATA_DIR isolates state for test instances
@@ -272,12 +272,21 @@ const shipKey = () => {
 async function runShipTurn(w: Worktree, form: ShipForm, typed: string, files: string[], keyId: string, reuse?: string): Promise<string> {
   const f = w.ship!;
   const p = project(w.projectId);
+  // the review step with its review cut off: finish the review first; its end runs pr-loop by itself
+  if (form.form === "pr-loop" && f.review && reviewStalled(w)) {
+    const id = await startShipReview(w.id, f.review.round, reuse, true);
+    if (id) return id;
+  }
   const deps = { repoPath: p.path, clickupKey: clickUpKey() };
   // the ticket is written into the worktree every turn, so any message in the chat can read it; grilling also gets it inline
   const fetched = await shipApi.fetchTicket(f.ticket, deps);
+  if (fetched) { f.snapshot = fetched.snapshot; store.save(); }
   const onDisk = shipApi.writeTicketFile(w.path, f.ticket, fetched);
   const ticketBody = f.stage === "Grilling" ? fetched?.body ?? onDisk : undefined;
-  const review = f.review ? { running: !!store.data.chats.find((c) => c.id === f.review!.chatId)?.running, summary: (await findReview(w.path, f.review.pr))?.summary } : undefined;
+  // "running": the review turn is going, or still queued, somewhere other than the chat this turn runs in
+  const reviewChat = f.review && store.data.chats.find((c) => c.id === f.review!.chatId);
+  const reviewQueued = !!reviewChat && !f.review!.doneAt && !!reviewChat.queuedMessages?.some((m) => m.display === reviewTurnLabel(f.review!.round, f.review!.pr));
+  const review = f.review ? { running: !f.review.doneAt && !!reviewChat && (reviewQueued || (reviewChat.running && reviewChat.id !== reuse)), summary: (await findReview(w.path, f.review.pr))?.summary } : undefined;
   const prompt = shipPrompt({ feature: f, form, worktree: w.path, branch: w.branch, base: p.defaultBase, ticketBody, review });
   const action = shipActionOf(typed);
   const id: string = reuse ?? handlers.addChat!(w.id, keyId, { name: shipChatName(action, f.ticket), remember: false });
@@ -304,6 +313,9 @@ async function writeTicket(worktreeId: string, note: string | undefined, before?
   const sync = await shipApi.syncTicket(w.ship, note, { repoPath: p.path, clickupKey: clickUpKey() }, w.path);
   const tries = sync.ok ? 0 : (w.ship.sync?.ok === false ? w.ship.sync.tries ?? 1 : 0) + 1;
   w.ship.sync = { ...sync, ...(tries ? { tries } : {}) };
+  // the write moved the status, so the TICKET panel re-reads it
+  const fetched = await shipApi.fetchTicket(w.ship.ticket, { repoPath: p.path, clickupKey: clickUpKey() }).catch(() => undefined);
+  if (fetched && w.ship) w.ship.snapshot = fetched.snapshot;
   store.save();
   if (!sync.ok) scheduleTicketRetry(worktreeId, tries);
 }
@@ -316,38 +328,73 @@ function retryFailedTickets(source?: ShipTicket["source"]) {
   for (const w of store.data.worktrees)
     if (w.ship && w.ship.sync?.ok === false && (!source || w.ship.ticket.source === source)) void writeTicket(w.id, undefined, undefined, true);
 }
-agents.onShipChanged((worktreeId, before, after, note) => {
+agents.onShipChanged((worktreeId, before, after, note, chatId) => {
   void writeTicket(worktreeId, note, before);
   const round = shipReviewRoundToStart(before, after);
-  if (round) void startShipReview(worktreeId, round).catch((e) => console.error("ship self-review failed to start", e));
+  if (round) void startShipReview(worktreeId, round, chatId).catch((e) => console.error("ship self-review failed to start", e));
 });
+/** the user-visible label of a self-review turn; also how a finished turn is recognised as the review (see onTurnDone) */
+const reviewTurnLabel = (round: number, pr: number) => `Self-review round ${round} · PR #${pr}`;
+/**
+ * A self-review that was started but is neither running, queued nor finished: its chat was stopped,
+ * killed with the app, or deleted before it wrote the review file. Consort restarts it rather than
+ * leaving the feature waiting on a turn that will never end.
+ */
+function reviewStalled(w: Worktree): boolean {
+  const r = w.ship?.review;
+  if (!r || r.doneAt) return false;
+  const chat = store.data.chats.find((c) => c.id === r.chatId);
+  if (!chat) return true;
+  const label = reviewTurnLabel(r.round, r.pr);
+  return !chat.running && !chat.queuedMessages?.some((m) => m.display === label);
+}
 /** the worktree's most recent idle ship chat, where the pipeline's next step runs; undefined when every ship chat is busy */
 const idleShipChat = (worktreeId: string) => store.data.chats.filter((c) => c.worktreeId === worktreeId && c.ship && !c.running).sort((a, b) => (b.lastChattedAt ?? 0) - (a.lastChattedAt ?? 0))[0];
 /**
- * In Review runs Consort's own PR review (the pr-writeup skill) as the feature's reviewer: a review chat in
- * the worktree writes .consort/pr-review/pr-<n>.review.json, the drawer shows it with Comment / Ignore / Fix
- * locally per finding, and when the chat finishes the ship chat gets /ship pr-loop to work through it.
+ * In Review runs Consort's own PR review (the pr-writeup skill) as the feature's reviewer, in the ship chat
+ * that moved the feature there, so the review and the fixes share one transcript. The review is queued
+ * behind that chat's current turn, writes .consort/pr-review/pr-<n>.review.json, the drawer shows it with
+ * Comment / Ignore / Fix per finding, and when the review turn finishes the same chat gets /ship pr-loop.
+ * A new chat is opened only when the moving chat is gone and no ship chat of the worktree is idle.
  */
-async function startShipReview(worktreeId: string, round: number) {
+async function startShipReview(worktreeId: string, round: number, fromChatId?: string, restart = false): Promise<string | undefined> {
   const w = store.data.worktrees.find((x) => x.id === worktreeId);
   if (!w?.ship) return;
   const pr = prNumberFromUrl(w.ship.prs.at(-1) ?? "");
   if (!pr) return;
-  if (w.ship.review?.round === round && store.data.chats.find((c) => c.id === w.ship!.review!.chatId)?.running) return;
+  if (w.ship.review?.round === round && !w.ship.review.doneAt && !restart) return w.ship.review.chatId; // already started or queued
   const key = shipKey();
   const tiers = modelTiers(key.provider, store.public().models?.[key.provider]);
-  const id: string = handlers.addChat!(w.id, key.id, { name: `Review PR #${pr} · ship round ${round}`, model: tiers.orchestrator, delegateModel: tiers.delegate, remember: false });
-  store.chat(id).autoApprove = store.data.shipAutoApprove ?? true;
+  const origin = store.data.chats.find((c) => c.id === fromChatId && c.worktreeId === w.id) ?? idleShipChat(w.id);
+  const id: string = origin?.id ?? handlers.addChat!(w.id, key.id, { name: `Review PR #${pr} · ship round ${round}`, model: tiers.orchestrator, delegateModel: tiers.delegate, remember: false });
+  const chat = store.chat(id);
+  chat.autoApprove = store.data.shipAutoApprove ?? true;
+  // the review's agents run a tier below the chat's own model, as a stand-alone review would
+  chat.delegateModel ??= modelTiers(key.provider, store.public().models?.[key.provider]).delegate;
   w.ship.review = { chatId: id, pr, round, startedAt: Date.now() };
   w.ship.reviewRound = round;
-  w.ship.history.push({ at: Date.now(), stage: w.ship.stage, note: `Self-review round ${round} started.` });
+  w.ship.history.push({ at: Date.now(), stage: w.ship.stage, note: restart ? `Self-review round ${round} restarted after an interruption.` : `Self-review round ${round} started.` });
   store.save();
-  await agents.send(id, handlers.skillPrompt!("pr-writeup", w.id, String(pr), tiers.delegate));
+  // the skill resumes from the agent reports already under .consort/pr-review/agents/, so a restart finishes rather than repeats
+  const resume = restart ? "\n\nThis review was interrupted before it wrote its review file. Resume it: read .consort/pr-review/agents/ first, dispatch only the groups with no report, then verify and write the file." : "";
+  await agents.send(id, handlers.skillPrompt!("pr-writeup", w.id, String(pr), chat.delegateModel) + resume, [], { display: reviewTurnLabel(round, pr) });
+  return id;
 }
-/** a finished self-review hands back to the pipeline: the ship chat runs /ship pr-loop over the findings */
+/** every feature whose self-review stalled gets it restarted in its ship chat: at launch, and when the review step is asked for */
+function restartStalledReviews() {
+  for (const w of store.data.worktrees)
+    if (w.ship?.review && reviewStalled(w)) void startShipReview(w.id, w.ship.review.round, undefined, true).catch((e) => console.error("ship self-review restart failed", e));
+}
+/** a finished self-review hands back to the pipeline: the same chat runs /ship pr-loop over the findings */
 agents.onTurnDone((chatId) => {
   const w = store.data.worktrees.find((x) => x.ship?.review?.chatId === chatId && !x.ship.review.doneAt);
   if (!w?.ship?.review) return;
+  // the review shares its chat with the turn that approved; only the turn that was the review counts as its end
+  const chat = store.data.chats.find((c) => c.id === chatId);
+  const label = reviewTurnLabel(w.ship.review.round, w.ship.review.pr);
+  const lastUser = [...(chat?.messages ?? [])].reverse().find((m) => m.role === "user");
+  const lastText = lastUser?.blocks.map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
+  if (lastText !== label || chat?.queuedMessages?.some((m) => m.display === label)) return;
   w.ship.review.doneAt = Date.now();
   w.ship.next = "/ship pr-loop";
   store.save();
@@ -446,8 +493,8 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     if (store.data.projects.some((p) => p.path === path)) return;
     const id = randomUUID();
     if (!(await git.isRepo(path))) {
-      // a plain folder is a home: one scratch scope at its path. The /ship scope already sits on
-      // ~/command-center, so the home adopts it rather than opening a second scope on the same folder.
+      // a plain folder is a home: one scratch scope at its path. A /ship scope may already sit on that
+      // folder, so the home adopts it rather than opening a second scope on the same folder.
       const project: Project = { id, name: basename(path), path, defaultBase: "", kind: "home" };
       store.data.projects.push(project);
       const existing = store.data.worktrees.find((w) => isScratch(w) && !w.projectId && w.path === path);
@@ -770,6 +817,19 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     const idle = (c: Chat | undefined) => !!c && c.worktreeId === w.id && !c.running;
     const current = store.data.chats.find((c) => c.id === chatId);
     const reuse = idle(current) ? current : store.data.chats.filter((c) => idle(c) && c.ship).sort((a, b) => (b.lastChattedAt ?? 0) - (a.lastChattedAt ?? 0))[0];
+    // Redo: rewind the record to the stage (shared/ship.ts redoShipChange), tell the ticket, then run the stage again
+    if (form.form === "redo") {
+      if (!form.stage) throw new Error("Say which stage to redo: /ship redo <stage>.");
+      if (!canRedoStage(w.ship, form.stage)) throw new Error(`${form.stage} is not a finished stage of this feature.`);
+      const before = w.ship;
+      w.ship = redoShipChange(w.ship, form.stage, Date.now());
+      store.save();
+      void writeTicket(w.id, `Redo requested: ${form.stage}.`, before);
+      if (form.stage === "In Review") {
+        const id = await startShipReview(w.id, Math.max(1, w.ship.reviewRound ?? 1), reuse?.id, true);
+        if (id) return id;
+      }
+    }
     return runShipTurn(w, form, command, [], reuse?.keyId ?? shipKey().id, reuse?.id);
   },
   // typed in a chat: the stage runs there when the chat is idle, else in a fresh chat of the same worktree
@@ -1077,7 +1137,7 @@ Runtime rules for this review: dispatch review agents with \`run_in_background: 
     }
     const tier = delegateModel ? `You are the orchestrator, running on this session's strongest model. Dispatch every delegated agent on \`${delegateModel}\` by passing that model on the agent call; the runtime already defaults delegated agents to it. Your tokens go to scope, grouping, short assignments, verification decisions and the final prose — not to reading the diff yourself. Escalate a single agent back to your own model only when a specific verification has already failed at the delegate tier, and say why in the summary.\n\n` : "";
     return `${progress}${tier}Run the following skill${args ? ` with argument: ${args}` : " for the current branch"} in ${worktreePath}. Its sibling files live in ${dir}.
-The Artifact tool is not available here. The deliverable is the review file: write it to .consort/pr-review/pr-<n>.review.json in the worktree, in the schema the skill gives. Consort renders that file and lets Mitch approve or ignore each finding and post the approved ones to GitHub, so do not post comments yourself. Print the operational review summary in chat, then end with a clickable Markdown link to the saved review file using its absolute path.
+The Artifact tool is not available here. The deliverable is the review file: write it to .consort/pr-review/pr-<n>.review.json in the worktree, in the schema the skill gives. Consort renders that file and lets the user approve or ignore each finding and post the approved ones to GitHub, so do not post comments yourself. Print the operational review summary in chat, then end with a clickable Markdown link to the saved review file using its absolute path.
 
 ${skill}${deploy}${rubric}`;
   },
@@ -1112,6 +1172,8 @@ app.whenReady().then(() => {
   ensurePoolKeys(store.data);
   store.save();
   seats.start();
+  // a self-review the last run never finished (the app quit, the chat was stopped or deleted) is picked up again
+  setTimeout(restartStalledReviews, 5_000);
   // a pinned note lives in the worktree's own file; the sidebar reads the mirror on the record, so refresh it from disk once
   for (const w of store.data.worktrees) mirrorPin(w, readNotes(w));
   // the model pickers follow the providers, not a release of Consort: ask on every start

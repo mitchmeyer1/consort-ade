@@ -119,7 +119,7 @@ test('chat artifacts list the most recently linked file first', async () => {
 
 test('a code span that is one path is a link, spaces and all; other spans are scanned like prose', async () => {
   const { artifactLinks, codeSpanArtifact } = await import('../src/shared/artifacts.ts');
-  const spaced = '/Users/mitch/Library/Application Support/ade/workspaces/hris/hris-address-plan.html';
+  const spaced = '/Users/someone/Library/Application Support/ade/workspaces/hris/hris-address-plan.html';
   assert.equal(codeSpanArtifact(spaced), spaced);
   assert.equal(codeSpanArtifact('roster-flow-old-new.html'), 'roster-flow-old-new.html');
   assert.equal(codeSpanArtifact('src/app.ts:42'), 'src/app.ts:42');

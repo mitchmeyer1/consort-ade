@@ -571,8 +571,8 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
 let turnDone: (chatId: string) => void = () => {};
 export const onTurnDone = (fn: typeof turnDone) => { turnDone = fn; };
 
-/** called when a reply moved a /ship feature; main writes the stage to the ticket */
-let shipChanged: (worktreeId: string, before: ShipFeature, after: ShipFeature, note?: string) => void = () => {};
+/** called when a reply moved a /ship feature; main writes the stage to the ticket. `chatId` is the chat whose reply moved it. */
+let shipChanged: (worktreeId: string, before: ShipFeature, after: ShipFeature, note?: string, chatId?: string) => void = () => {};
 export const onShipChanged = (fn: typeof shipChanged) => { shipChanged = fn; };
 
 class Transcript {
@@ -646,7 +646,7 @@ class Transcript {
       const shipChange = parseShipMarkers(b.text);
       if (shipChange) {
         const w = store.data.worktrees.find((x) => x.id === this.chat.worktreeId);
-        if (w?.ship) { const before = w.ship; w.ship = applyShipChange(w.ship, shipChange, Date.now()); shipChanged(w.id, before, w.ship, shipChange.note); }
+        if (w?.ship) { const before = w.ship; w.ship = applyShipChange(w.ship, shipChange, Date.now()); shipChanged(w.id, before, w.ship, shipChange.note, this.chat.id); }
       }
       b.text = stripShipMarkers(b.text);
       b.text = b.text.replace(PROGRESS_MARKER, "").replace(PLAN_MARKER, "").replace(STEP_MARKER, "")

@@ -4,7 +4,7 @@ import type { ReviewSummary } from "./review.ts";
 /**
  * The prompt for one /ship turn: the rules every stage shares, the feature's state, and the
  * handler for the stage the feature is in (or the form the command asked for). Adapted from
- * Peter's peter-ship plugin: the stage machine is his; the state lives in Consort instead of a
+ * an earlier Claude Code skill: the stage machine is the same; the state lives in Consort instead of a
  * state.json and a CLI, the ticket is a GitHub issue or a ClickUp task, and the code lives in
  * the worktree the chat already runs in.
  */
@@ -31,7 +31,7 @@ function reviewLine(i: ShipPromptInput): string {
   if (!r) return "none yet";
   const s = i.review?.summary;
   const counts = s ? ` · ${s.total} finding(s): ${s.pending} undecided, ${s.queued} approved to post, ${s.commented} on the PR, ${s.ignored} ignored, ${s.fixing} being fixed` : "";
-  return `round ${r.round} of ${SHIP_REVIEW_ROUNDS} ${i.review?.running ? "RUNNING now in another chat (wait for it)" : r.doneAt ? "done" : "started"} · file ${REVIEW_FILE(i.feature)}${counts}`;
+  return `round ${r.round} of ${SHIP_REVIEW_ROUNDS} ${i.review?.running ? "RUNNING now in this worktree (wait for it)" : r.doneAt ? "done" : "started but not finished; Consort restarts it before this step runs again"} · file ${REVIEW_FILE(i.feature)}${counts}`;
 }
 
 /** the stage list with the ones behind marked done and the current one marked: "Grilling ✓ → [Spec'd ← you are here] → Implementing → …" */
@@ -98,7 +98,7 @@ Consort keeps the feature's state and mirrors the stage onto its ticket (a GitHu
 - [ship-next: /ship …] the command that should run next; Consort shows it as a button. Use the short forms below.
 - [ship-spec: ${SHIP_DIR}/SPEC.md] when the spec is written. [ship-report: ${SHIP_DIR}/TEST-REPORT.md | <pass>/<total>] when the test report is written.
 - [ship-pause] when a handoff is written; [ship-resume] when resumed. [ship-feedback: user|bot|teammate] when entering Revising.
-- [ship-review-round: N] to ask Consort for self-review round N of the PR after fixes are pushed (Consort runs its own pr-writeup review in a separate chat and writes ${SHIP_DIR.replace("ship", "pr-review")}/pr-<n>.review.json; cap ${SHIP_REVIEW_ROUNDS} rounds). Round 1 starts by itself when the feature enters In Review.
+- [ship-review-round: N] to ask Consort for self-review round N of the PR after fixes are pushed (Consort runs its own pr-writeup review as the next turn of this chat and writes ${SHIP_DIR.replace("ship", "pr-review")}/pr-<n>.review.json; cap ${SHIP_REVIEW_ROUNDS} rounds). Round 1 starts by itself when the feature enters In Review.
 
 Commands the user (and your [ship-next]) use inside this worktree, no ticket id needed: /ship (next step), /ship approve, /ship pr-loop, /ship "<feedback>", /ship pause.
 
@@ -173,7 +173,7 @@ Nothing runs. Read ${SHIP_DIR}/TEST-REPORT.md and print its summary block, the r
 const APPROVE = (i: ShipPromptInput) => `## This turn: approve — the tests are blessed, put the PR up and hand it to Consort's self-review
 
 1. Confirm the branch is pushed and the draft PR exists${i.feature.prs.length ? ` (${i.feature.prs[0]})` : " (create one with gh pr create --draft against " + i.base.replace(/^origin\//, "") + " if it does not)"}. Update the PR body from ${SHIP_DIR}/TEST-REPORT.md: what was built, the verified stories table, follow-ups.
-2. \`gh pr ready <url>\`. Do not trigger any reviewer and do not review the PR yourself: the moment the stage moves, Consort starts its own AI self-review (the pr-writeup review) of this PR in a separate chat, and the next step reads its findings.
+2. \`gh pr ready <url>\`. Do not trigger any reviewer and do not review the PR yourself: the moment the stage moves, Consort queues its own AI self-review (the pr-writeup review) of this PR as the next turn of this very chat, and the step after that reads its findings. End your turn promptly so it can start.
 3. Emit [ship-pr: <url>], [ship-stage: In Review | PR ready; self-review round 1 starts.] and [ship-next: /ship pr-loop]. Print the PR link, one line saying the self-review is starting and that /ship pr-loop runs when it is done, and the footer.`;
 
 const REVISING = (i: ShipPromptInput, from: "user" | "bot" | "teammate", feedback?: string) => `## This turn: Revising — gather, explain, then apply what the user approves
@@ -187,7 +187,7 @@ Return: feedback from the user → [ship-stage: Ready to Test | <what changed>] 
 
 const PR_LOOP = (i: ShipPromptInput) => `## This turn: In Review — work through one round of Consort's self-review of the PR
 
-The reviewer is Consort's own pr-writeup review, run by Consort in a separate chat of this worktree; it writes ${REVIEW_FILE(i.feature)} (schema: findings[] with id, kind, severity, category, title, file, line, problem, fix, comment, status). The user rules on findings in Consort's review drawer: status "ignored" is the user's decision, skip it; "approved" or "commented" means the user wants it on the PR; "fixing" means it was handed to a chat to fix (maybe this one); "pending" is undecided. Never edit that file and never post review comments yourself.
+The reviewer is Consort's own pr-writeup review, run by Consort as an earlier turn of this chat (or of another ship chat of this worktree); it writes ${REVIEW_FILE(i.feature)} (schema: findings[] with id, kind, severity, category, title, file, line, problem, fix, comment, status). The user rules on findings in Consort's review drawer: status "ignored" is the user's decision, skip it; "approved" or "commented" means the user wants it on the PR; "fixing" means it was handed to a chat to fix (maybe this one); "pending" is undecided. Never edit that file and never post review comments yourself.
 
 1. For each PR${i.feature.prs.length ? ` (${i.feature.prs.join(", ")})` : ""}: \`gh pr view <url> --json state,mergedAt,isDraft,reviewDecision\`. Merged → follow the closeout below instead. Closed unmerged → say so and stop.
 2. Where the self-review stands (state block above). Running → say so, emit [ship-next: /ship pr-loop] and stop; Consort runs this step again when it finishes. No round started and none running → emit [ship-review-round: ${(i.feature.reviewRound ?? 0) + 1}] and stop. Done → read the file, plus teammate PR threads (\`gh api graphql\` reviewThreads with isResolved false) and CI (\`gh pr checks\`). Save a digest to ${SHIP_DIR}/review/round-${i.feature.review?.round ?? (i.feature.reviewRound ?? 0) + 1}.md.
@@ -221,6 +221,11 @@ const CLOSED = () => `## This feature is closed
 Say so, point at the PRs and the report, and stop. Footer: Stage: Closed · Ticket: … · Next: none - feature closed`;
 
 /** which handler this turn runs, from the stage and what the command asked for */
+/** the user pressed Redo on a finished stage: Consort has already rewound the feature; the handler below runs the stage again */
+const REDO = (stage: string) => `## Redo: ${stage}
+
+The user asked for the ${stage} stage to be done again. Consort has rewound the feature to it; the earlier output of this stage is still on disk under ${SHIP_DIR}/ so you can read it, but do the stage again properly rather than confirming what is there, and say in one line what changed from last time.${stage === "Spec'd" || stage === "Implementing" ? ` For the ticket breakdown: move the old ${SHIP_DIR}/issues/ aside to ${SHIP_DIR}/issues.previous/ and derive the tickets afresh from SPEC.md; a ticket whose work is already committed on the branch is written with Status: done.` : ""}${stage === "Grilling" ? " Treat SPEC.md as a draft to improve, not as settled." : ""}`;
+
 export function shipHandler(f: ShipFeature, form: ShipForm): string {
   if (form.form === "pause") return "pause";
   if (f.stage === "Closed") return "closed";
@@ -250,5 +255,6 @@ export function shipPrompt(i: ShipPromptInput): string {
     : handler === "closeout" ? CLOSEOUT(i)
     : REENTRY(i);
   const paused = i.feature.paused && handler !== "pause" && handler !== "closed" ? RESUME_PAUSED(i) : "";
-  return `${COMMON(i)}\n\n${paused}${body}`;
+  const redo = i.form.form === "redo" && i.form.stage ? `${REDO(i.form.stage)}\n\n` : "";
+  return `${COMMON(i)}\n\n${paused}${redo}${body}`;
 }

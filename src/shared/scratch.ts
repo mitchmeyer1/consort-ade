@@ -9,7 +9,7 @@ import type { Chat, Project, State, Worktree } from "./types";
 export const isScratch = (wt: Worktree | undefined): boolean => !!wt?.scratch;
 
 /**
- * A home project is a plain folder the user starts work from (Peter's ~/command-center) that is
+ * A home project is a plain folder the user starts work from (a notes or scripts folder, say) that is
  * not a git repo. It gets one scratch scope at its own path, so chats there run like repoless
  * chats and can move into any sibling repo, and its chats list under the project, not under CHATS.
  */

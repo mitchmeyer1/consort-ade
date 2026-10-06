@@ -137,3 +137,16 @@ test('a review that has not started yet is all pending, not skipped', () => {
   queued.phase = 'complete';
   assert.ok(Object.values(byId(reviewProgress(queued))).every((s) => s.state === 'pending'));
 });
+
+test("a /ship chat is a review chat while its latest turn is the self-review, and its progress reads that turn alone", () => {
+  const label = user('Self-review round 1 · PR #556');
+  const shipTurns = [user('/ship approve'), assistant(tool('Bash', 'gh pr ready https://github.com/o/r/pull/556', 'ok', true))];
+  const reviewing = { messages: [...shipTurns, label, assistant(tool('Bash', 'gh pr view 556', 'x', true))], running: true, phase: 'executing' };
+  assert.equal(isReviewChat(reviewing), true);
+  const stages = byId(reviewProgress(reviewing));
+  assert.equal(stages.scope.state, 'active', 'the review turn has begun scoping');
+  const movedOn = { messages: [...reviewing.messages, user('/ship pr-loop'), assistant(tool('Bash', 'gh pr checks 556', 'ok', true))], running: false, phase: 'complete' };
+  assert.equal(isReviewChat(movedOn), false, 'a later ship turn hands the panel back to PLAN');
+  assert.equal(reviewProgress(movedOn), null);
+  assert.equal(isReviewChat({ messages: shipTurns }), false);
+});

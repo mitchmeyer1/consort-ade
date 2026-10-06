@@ -34,8 +34,8 @@ test('duplicates collapse, the list is capped, and prose without suggestions is 
 });
 
 test('Codex file citations render as file links that keep the sheet and range', () => {
-  const raw = 'path="/Users/mitch/Downloads/StarBlocker Test/Plan.xlsx" purpose="source" artifact_kind="workbook" sheet="Defect Log" range="A4:P13"';
-  assert.equal(citationLink(raw), '[Plan.xlsx · Defect Log A4:P13](</Users/mitch/Downloads/StarBlocker Test/Plan.xlsx>)');
+  const raw = 'path="/Users/someone/Downloads/Project Test/Plan.xlsx" purpose="source" artifact_kind="workbook" sheet="Defect Log" range="A4:P13"';
+  assert.equal(citationLink(raw), '[Plan.xlsx · Defect Log A4:P13](</Users/someone/Downloads/Project Test/Plan.xlsx>)');
   assert.equal(citationLink('purpose="source"'), '');
   const { text } = parseFollowups('Criteria came from the :codex-file-citation{path="/tmp/a.xlsx" sheet="Log"} rows.');
   assert.equal(text, 'Criteria came from the [a.xlsx · Log](</tmp/a.xlsx>) rows.');

@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { SHIP_LABELS, stageLabel, TICKET_FILE, ticketMarkdown, type ShipFeature, type ShipStage, type ShipSync, type ShipTicket } from "../shared/ship.ts";
+import { clickupStatusDone, githubTaskList, SHIP_LABELS, stageLabel, TICKET_FILE, ticketMarkdown, type ShipFeature, type ShipStage, type ShipSync, type ShipTicket, type TicketSnapshot } from "../shared/ship.ts";
 
 const run = promisify(execFile);
 const gh = async (cwd: string, args: string[]) => (await run("gh", args, { cwd, timeout: 60_000, maxBuffer: 1 << 22 })).stdout;
@@ -118,11 +118,28 @@ const readSpec = (worktreePath: string, rel: string) => {
   return existsSync(p) ? readFileSync(p, "utf8").slice(0, 60_000) : undefined;
 };
 
-/** the ticket as the tracker holds it now: the issue text, or the ClickUp description and status; undefined when it cannot be read */
-export async function fetchTicket(t: ShipTicket, deps: SyncDeps): Promise<{ body: string; status?: string } | undefined> {
+/**
+ * The ticket as the tracker holds it now: body and status, plus the snapshot the TICKET panel shows
+ * (title, whether it is done, and its sub-tasks: ClickUp subtasks, or a GitHub issue's task list).
+ * Undefined when it cannot be read.
+ */
+export async function fetchTicket(t: ShipTicket, deps: SyncDeps, now = Date.now()): Promise<{ body: string; status?: string; snapshot: TicketSnapshot } | undefined> {
   try {
-    if (t.source === "github") return { body: (await githubTicket(deps.repoPath, Number(t.id))).body };
-    if (deps.clickupKey) { const c = await clickupTicket(deps.clickupKey, t.id); return { body: c.body, status: c.status }; }
+    if (t.source === "github") {
+      const j = JSON.parse(await gh(deps.repoPath, ["issue", "view", t.id, "--json", "number,title,url,body,state"]));
+      const body: string = j.body ?? "";
+      const status = typeof j.state === "string" ? j.state.toLowerCase() : undefined;
+      return { body, status, snapshot: { title: j.title ?? t.title, status, done: status === "closed", subtasks: githubTaskList(body, j.url ?? t.url), at: now } };
+    }
+    if (!deps.clickupKey) return undefined;
+    const task = await clickup(deps.clickupKey, `/task/${encodeURIComponent(t.id)}?include_subtasks=true`);
+    const subtasks = ((task.subtasks ?? []) as any[]).map((s) => ({
+      id: String(s.id), title: String(s.name ?? s.id), status: s.status?.status, done: clickupStatusDone(s.status), url: s.url ?? `https://app.clickup.com/t/${s.id}`,
+    }));
+    return {
+      body: task.markdown_description ?? task.description ?? "", status: task.status?.status,
+      snapshot: { title: task.name ?? t.title, status: task.status?.status, done: clickupStatusDone(task.status), subtasks, at: now },
+    };
   } catch {}
   return undefined;
 }
