@@ -373,7 +373,7 @@ async function startShipReview(worktreeId: string, round: number, fromChatId?: s
   chat.delegateModel ??= modelTiers(key.provider, store.public().models?.[key.provider]).delegate;
   w.ship.review = { chatId: id, pr, round, startedAt: Date.now() };
   w.ship.reviewRound = round;
-  w.ship.history.push({ at: Date.now(), stage: w.ship.stage, note: restart ? `Self-review round ${round} restarted after an interruption.` : `Self-review round ${round} started.` });
+  w.ship.history.push({ at: Date.now(), stage: w.ship.stage, note: restart ? `Review round ${round} restarted on PR #${pr} after an interruption.` : `Review round ${round} started on PR #${pr}.` });
   store.save();
   // the skill resumes from the agent reports already under .consort/pr-review/agents/, so a restart finishes rather than repeats
   const resume = restart ? "\n\nThis review was interrupted before it wrote its review file. Resume it: read .consort/pr-review/agents/ first, dispatch only the groups with no report, then verify and write the file." : "";
@@ -400,7 +400,7 @@ agents.onTurnDone((chatId) => {
   store.save();
   void (async () => {
     const summary = (await findReview(w.path, w.ship!.review!.pr))?.summary;
-    w.ship!.history.push({ at: Date.now(), stage: w.ship!.stage, note: summary ? `Self-review round ${w.ship!.review!.round} done: ${summary.total} finding(s).` : `Self-review round ${w.ship!.review!.round} ended without a review file.` });
+    w.ship!.history.push({ at: Date.now(), stage: w.ship!.stage, note: summary ? `Review round ${w.ship!.review!.round}: ${summary.total} finding${summary.total === 1 ? "" : "s"}. Next: fix findings and CI.` : `Review round ${w.ship!.review!.round} stopped before finishing; it will restart.` });
     store.save();
     if (!summary || w.ship!.stage !== "In Review" || w.ship!.paused) return;
     await runShipTurn(w, { form: "pr-loop" }, "/ship pr-loop", [], shipKey().id, idleShipChat(w.id)?.id);
@@ -1209,7 +1209,7 @@ app.whenReady().then(() => {
   };
   const permissionNotifications = new PermissionNotifications(() => store.data.chats, agents.answerPermission, openChat, (chat, request) => {
     if (!notifier.inApp()) return false;
-    notifier.show({ title: `Permission needed: ${request.tool}`, body: `${chat.name} · click to review it in chat`, open: { chat: chat.id }, kind: "info" });
+    notifier.show({ title: `Permission needed: ${request.tool}`, body: `${chat.name} · click to allow or deny`, open: { chat: chat.id }, kind: "info" });
     return true;
   });
   reminders = new Reminders(() => store.data.chats, openChat, () => store.save(), isViewing, (chat) => {
@@ -1235,8 +1235,8 @@ app.whenReady().then(() => {
       if (!changed || c.permissions?.length || key === "idle" || isViewing(c.id)) continue;
       const status = chatStatus(c);
       notifier.show({
-        title: status === "attention" ? "Chat needs your attention" : status === "complete" ? "Chat complete" : "Chat started working",
-        body: `${c.name} · ${c.error ? "the chat hit an error" : status === "attention" ? "waiting for your response" : status === "complete" ? "ready to review" : "running"}`,
+        title: c.error ? "Chat failed" : status === "attention" ? "Chat needs you" : status === "complete" ? "Chat finished" : "Chat running",
+        body: `${c.name}${c.error ? ` · ${c.error.split("\n")[0]}` : status === "attention" ? " · waiting for your reply" : status === "complete" ? " · ready to read" : ""}`,
         open: { chat: c.id },
         kind: c.error ? "error" : status === "complete" ? "success" : "info",
       });

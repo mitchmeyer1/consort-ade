@@ -13,7 +13,7 @@ import { clickupIdFrom, githubIssueFrom, ticketRef, type ShipTicket } from "./sh
 export const INVESTIGATIONS_DIR = ".consort/investigations";
 
 /** the project page's one-line answer to "what is Investigate" */
-export const INVESTIGATE_BLURB = "Investigate reads a ticket before anyone builds it: the task or issue, its comments, the tasks, issues and PRs it links to, and the code it touches, then briefs you on the situation, the progress so far, the remaining to-dos and the questions nobody has answered. It asks you for anything it cannot read.";
+export const INVESTIGATE_BLURB = "Read a ticket before building it. Consort gathers the ticket, its comments, linked items and the code, then briefs you: situation, progress, to-dos, open questions. Nothing is changed.";
 
 export type DossierComment = { author: string; at: string; text: string };
 export type LinkedItem = {

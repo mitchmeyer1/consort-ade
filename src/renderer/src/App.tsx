@@ -4,7 +4,7 @@ import { canRestore, scrollKey, scrollMemory } from "../../shared/scrollMemory";
 import { PhaseStrip } from "./PhaseStrip";
 import { defaultConnector, selectedModel } from "../../shared/defaultConnector";
 import { byCapability, modelTiers, rankModel } from "../../shared/modelTiers";
-import { cliSummary, type CliStatus } from "../../shared/cliUpdates";
+import { cliSummary, isNewer, type CliStatus } from "../../shared/cliUpdates";
 import { addNote, editNote, emptyNotes, noteSummary, pinNote, removeNote, type NotesDoc } from "../../shared/notes";
 import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { lastPrompt } from "../../shared/lastPrompt";
@@ -139,7 +139,7 @@ const Contributor = ({ who }: { who?: WorktreeStatus["author"] }) => !who ? null
  * out they disappear together and CI carries on alone. Better to say so than to look broken.
  */
 const LimitBadge = ({ until }: { until?: number }) => !until ? null : (
-  <span className="badge limited" title={`GitHub's API budget for this account is spent, so the PR and issue chips have no data to show. CI still works because it uses a separate budget. Trying again at ${new Date(until).toLocaleTimeString()}.`}>gh limited</span>
+  <span className="badge limited" title={`GitHub API rate limit hit; PR and issue chips return at ${new Date(until).toLocaleTimeString()}. CI is unaffected.`}>gh limited</span>
 );
 
 export const Badges = ({ st, pr = true }: { st: WorktreeStatus | null; pr?: boolean }) =>
@@ -466,9 +466,10 @@ export function App() {
               <div className="empty-actions">
                 {!hasConnectedAgent && <button className="primary" onClick={() => setTab("settings")}>Connect agents</button>}
                 {!state.projects.length && <button onClick={() => void addFirstProject()}>Add projects</button>}
+                {state.projects.length > 0 && hasConnectedAgent && <div className="m">Pick a project or worktree in the sidebar.</div>}
               </div>
             </div>
-            <div className="tagline">Every piece of work gets its own branch in its own worktree, and agents work there, never in your main checkout. Many chats per worktree, many worktrees per project, and the whole path from ticket to merged PR in one place.</div>
+            <div className="tagline">Each piece of work gets its own branch and worktree. Agents work there, never in your main checkout.</div>
           </div>
         )}
       </div>
@@ -572,11 +573,11 @@ function NewWorktreeDialog({ p, onClose, branchPreset, onRoot }: { p: Project; o
       <button onClick={onClose}>Cancel</button>
       <button className="primary" disabled={(!workAtRoot && !name) || busy} onClick={submit}>{busy ? "Opening…" : workAtRoot ? "Open Root" : "Create"}</button>
     </>}>
-      <label className="root-option"><input type="checkbox" checked={workAtRoot} disabled={busy} onChange={(e) => setWorkAtRoot(e.target.checked)} /> Work out of root</label>
+      <label className="root-option"><input type="checkbox" checked={workAtRoot} disabled={busy} onChange={(e) => setWorkAtRoot(e.target.checked)} /> Use the main checkout instead (no new branch or folder)</label>
       {workAtRoot ? <p>Open Root at {p.path}. Chats will work directly in this folder on its current checkout. No branch or worktree will be created.</p> : <>
       <Field label="Name" info={`Folder name under ${p.name}-wt/`}><input value={name} onChange={(e) => setName(e.target.value)} autoFocus placeholder="feature-name" /></Field>
       <Field label="Branch" optional info="Created from the base ref if it doesn't exist; an existing local or remote branch is checked out as-is"><input placeholder={name || "defaults to name"} value={branch} onChange={(e) => setBranch(e.target.value)} /></Field>
-      <Field label="Base ref" info="Change the project default on its page"><input value={base} onChange={(e) => setBase(e.target.value)} /></Field>
+      <Field label="Base branch" info="Default set on the project page"><input value={base} onChange={(e) => setBase(e.target.value)} /></Field>
       </>}
     </Dialog>
   );
@@ -772,7 +773,7 @@ function WorktreeNode({ wt, state, sel, running, failed, done, onSelect, collaps
     <div>
       <div className={"row worktree" + (active ? " active" : "") + (wt.archived ? " dim" : "")} onClick={() => { onSelect({ type: "worktree", id: wt.id }); if (done.has(wt.id)) void ade.ptySeenScope(wt.id); }}>
         <span className="slot"><Ico n="thorn" className="wt" /></span>
-        <span className="grow">{wt.root ? "Root" : <Editable value={wt.title} onSave={(t) => ade.renameWorktree(wt.id, t)} />}<Dots id={wt.id} running={running} failed={failed} done={done} /></span>
+        <span className="grow">{wt.root ? <span title="The repository's own checkout, not a worktree">Root</span> : <Editable value={wt.title} onSave={(t) => ade.renameWorktree(wt.id, t)} />}<Dots id={wt.id} running={running} failed={failed} done={done} /></span>
         {/* two subtitle lines, aligned under the title text rather than the icon: the branch, then who owns it and where it stands */}
         <span className="meta">
           <small className="branch" title={st?.branch ?? wt.branch}>{st?.branch ?? wt.branch}</small>
@@ -832,7 +833,7 @@ function ReviewDialog({ pr, state, onClose, onStart }: { pr: RepoInfo["prs"][num
     </>}>
       <p className="m">{pr.title}</p>
       <div className="two">
-        <Field label="Connector">
+        <Field label="Agent">
           <select value={keyId} onChange={(e) => setKeyId(e.target.value)}>
             {state.keys.map((k) => <option key={k.id} value={k.id}>{k.provider}: {k.name}</option>)}
           </select>
@@ -890,7 +891,7 @@ function ProjectPage({ project: p, state, openForm, onRunAction, onSelect }: { p
   // Review = ensure a worktree for the PR branch, then start a pr-writeup chat in it on the chosen connector and model
   const review = async (pr: RepoInfo["prs"][number], keyId: string, model: string) => {
     const key = state.keys.find((k) => k.id === keyId);
-    if (!key) return alert("Add a connector first (Settings)");
+    if (!key) return alert("Connect an agent first (Settings)");
     setReviewing(null);
     setBusyPr(pr.number);
     try {
@@ -915,7 +916,7 @@ function ProjectPage({ project: p, state, openForm, onRunAction, onSelect }: { p
   // Branch and solve = ensure a worktree on issue/<n>, then open a chat that pitches a plan (no code yet)
   const solve = async (issue: IssueInfo) => {
     const key = defaultConnector(state);
-    if (!key) return alert("Add a connector first (Settings)");
+    if (!key) return alert("Connect an agent first (Settings)");
     setBusyIssue(issue.number);
     try {
       const branch = issueBranch(issue.number, state.branchPrefix);
@@ -954,7 +955,7 @@ function ProjectPage({ project: p, state, openForm, onRunAction, onSelect }: { p
           </div>
         </span>
         {linked && <span className="badge issue open" role="link" title={`Open worktree ${linked.title}`} onClick={() => onSelect({ type: "worktree", id: linked.id })}><Ico n="candle" /> {linked.branch}</span>}
-        {shipped ? <span className="badge ship" role="link" title={`/ship · ${shipped.branch}`} onClick={() => onSelect({ type: "worktree", id: shipped.id })}><Ico n="laurel" /> {shipped.ship!.stage}</span>
+        {shipped ? <span className="badge ship" role="link" title={`/ship · ${shipped.branch}`} onClick={() => onSelect({ type: "worktree", id: shipped.id })}><Ico n="laurel" /> Ship · {shipped.ship!.stage}</span>
           : <button disabled={busyIssue === issue.number} title="Ship it: a feature worktree and a chat that grills the idea into a spec, then builds, tests and reviews it" onClick={() => shipIssue(issue)}>{busyIssue === issue.number ? "…" : "Ship"}</button>}
         <button disabled={busyIssue === issue.number} title={linked ? `Start a new planning chat in ${linked.branch}` : `Create a worktree on ${issueBranch(issue.number, state.branchPrefix)} and plan the fix`} onClick={() => solve(issue)}>{busyIssue === issue.number ? "…" : linked ? "Solve" : "Branch and solve"}</button>
       </div>
@@ -968,8 +969,8 @@ function ProjectPage({ project: p, state, openForm, onRunAction, onSelect }: { p
         <div className="m">{pr.author} · {pr.branch} · {ago(pr.updatedAt)}{pr.draft ? " · draft" : ""}{pr.review ? ` · ${pr.review.toLowerCase().replace("_", " ")}` : ""}{pr.mine ? ` · ${pr.role}` : ""}</div>
       </span>
       <TurnBadge pr={pr} />
-      {localBranches.has(pr.branch) ? <span className="badge">local</span> : <button onClick={() => setForm({ branch: pr.branch })}>open as worktree</button>}
-      <button disabled={busyPr === pr.number} onClick={() => state.keys.length ? setReviewing(pr) : alert("Add a connector first (Settings)")}>{busyPr === pr.number ? "…" : "Review"}</button>
+      {localBranches.has(pr.branch) ? <span className="badge">local</span> : <button onClick={() => setForm({ branch: pr.branch })}>Open as worktree</button>}
+      <button disabled={busyPr === pr.number} onClick={() => state.keys.length ? setReviewing(pr) : alert("Connect an agent first (Settings)")}>{busyPr === pr.number ? "…" : "Review"}</button>
     </div>
   );
   const mine = info?.prs.filter((pr) => pr.mine) ?? [];
@@ -987,8 +988,7 @@ function ProjectPage({ project: p, state, openForm, onRunAction, onSelect }: { p
       </div>
 
       <section className="start-chapter">
-        <h2><Ico n="branch" />New worktree</h2>
-        <p className="sect-note">Four ways to start: a branch of your own, a ticket shipped end to end, a review of someone's PR, or a read-only look at a ticket before deciding anything.</p>
+        <h2><Ico n="branch" />Start</h2>
         <div className="start-grid">
           <div className="card start-card">
             <h3>New worktree</h3>
@@ -1030,8 +1030,7 @@ function ProjectPage({ project: p, state, openForm, onRunAction, onSelect }: { p
         <button className="primary" disabled={checkoutBusy || !!root?.dirty} onClick={doCheckout}>{checkoutBusy ? "Pushing and checking out…" : "Push and checkout at root"}</button>
       </>}>
         <p>Commit changes in this worktree, push {checkout.branch} to origin, then switch {p.path} to that branch and pull. This worktree will be left detached at its pushed commit.</p>
-        <Field label="Commit message" optional info="If this worktree has changes, a message is required. All tracked and untracked changes, except ignored files, will be committed first."><input value={commitMessage} disabled={checkoutBusy} onChange={(e) => setCommitMessage(e.target.value)} placeholder="Leave blank if already committed" /></Field>
-        <p>Any uncommitted tracked and untracked files (except ignored files) will be included. A commit message is required when there are changes.</p>
+        <Field label="Commit message" optional info="Required if the worktree has uncommitted changes; everything except ignored files is committed."><input value={commitMessage} disabled={checkoutBusy} onChange={(e) => setCommitMessage(e.target.value)} placeholder="Leave blank if already committed" /></Field>
         {root?.dirty && <p role="alert">The root has uncommitted changes. Commit or stash them first.</p>}
         {checkoutError && <p role="alert">{checkoutError}</p>}
       </Dialog>}
@@ -1127,7 +1126,7 @@ function WorkspacePage({ project: p, wt, state, openForm, onSelect, onRunAction 
   const [prGen, setPrGen] = useState<{ busy: boolean; note?: string }>({ busy: false });
   const [form, setForm] = useState(openForm);
   useEffect(() => { if (openForm) setForm(true); }, [openForm]);
-  const needKey = () => (state.keys.length ? false : (alert("Add a connector first (Settings)"), true));
+  const needKey = () => (state.keys.length ? false : (alert("Connect an agent first (Settings)"), true));
   const dirty = reposToCommit(st);
   const prRepos = reposForPr(st);
   const sum = workspaceSummary(st);
@@ -1385,6 +1384,7 @@ function WorktreePage({ wt, state, openForm, onSelect, onRunAction }: { wt: Work
   const [committing, setCommitting] = useState(false);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [gitOp, setGitOp] = useState<"pull" | "push">();
   const [gitError, setGitError] = useState("");
   const [gitResult, setGitResult] = useState<React.ReactNode>("");
   // the Create PR dialog; null while closed. Opened with a title from the last commit.
@@ -1436,7 +1436,7 @@ function WorktreePage({ wt, state, openForm, onSelect, onRunAction }: { wt: Work
   useEffect(() => { if (openForm) setForm(true); }, [openForm]);
   const chats = recentChats(state.chats.filter((c) => c.worktreeId === wt.id));
   const siblings = recentWorktrees(state.worktrees.filter((w) => w.projectId === wt.projectId && w.id !== wt.id && !w.archived), state.chats);
-  const needKey = () => (state.keys.length ? false : (alert("Add a connector first (Settings)"), true));
+  const needKey = () => (state.keys.length ? false : (alert("Connect an agent first (Settings)"), true));
   const prWriteup = async () => {
     if (needKey()) return;
     const k = defaultConnector(state);
@@ -1461,7 +1461,7 @@ function WorktreePage({ wt, state, openForm, onSelect, onRunAction }: { wt: Work
       </div>
       <div className="actions">
         <button className="primary" onClick={() => !needKey() && setForm((f) => !f)}><Ico n="quill" /> New chat</button>
-        <button onClick={prWriteup}><Ico n="scroll" /> PR write-up</button>
+        <button onClick={prWriteup} title="AI review of this branch's PR, in a new chat"><Ico n="laurel" /> Review PR</button>
         {canCreatePr(st) && (
           <button className="create-pr" disabled={busy || !!prBlockedBy(st) || chats.some((c) => c.running)}
             title={prBlockedBy(st) ?? `Push ${st.branch} and open a pull request against ${prBaseBranch(st.base)}`}
@@ -1471,8 +1471,8 @@ function WorktreePage({ wt, state, openForm, onSelect, onRunAction }: { wt: Work
       {st && <GitCard st={st} />}
       <div className="actions">
         <button disabled={busy || !st?.dirty || chats.some((c) => c.running)} onClick={() => { setCommitting(true); setGitError(""); }}>Commit…</button>
-        <button disabled={busy || !st || st.branch === "(detached)" || chats.some((c) => c.running)} onClick={() => runGit("pull")}>{busy ? "Working…" : `Pull from origin/${st?.branch ?? wt.branch}`}</button>
-        <button disabled={busy || !st || chats.some((c) => c.running)} onClick={() => runGit("push")}>{busy ? "Working…" : `Push to origin/${st?.branch ?? wt.branch}`}</button>
+        <button disabled={busy || !st || st.branch === "(detached)" || chats.some((c) => c.running)} onClick={async () => { setGitOp("pull"); try { await runGit("pull"); } finally { setGitOp(undefined); } }}>{gitOp === "pull" ? "Pulling…" : `Pull from origin/${st?.branch ?? wt.branch}`}</button>
+        <button disabled={busy || !st || chats.some((c) => c.running)} onClick={async () => { setGitOp("push"); try { await runGit("push"); } finally { setGitOp(undefined); } }}>{gitOp === "push" ? "Pushing…" : `Push to origin/${st?.branch ?? wt.branch}`}</button>
       </div>
       {chats.some((c) => c.running) && <div className="m">Commit, pull, and push are available when this worktree's chats finish.</div>}
       {!committing && !prDraft && gitError && <div className="error">{gitError}</div>}
@@ -1576,7 +1576,7 @@ function QuickActions({ project, wt, manage = false, onRun }: { project: Project
           </div>
         </details>}
       </div>)}
-      {manage && <button className="quick-action-new" onClick={() => { setError(""); setAdding(true); }}><span aria-hidden="true">＋</span>New Action</button>}
+      {manage && <button className="quick-action-new" onClick={() => { setError(""); setAdding(true); }}><span aria-hidden="true">＋</span>New action</button>}
     </div>
     {adding && <Dialog title="New quick action" onClose={() => { if (!busy) setAdding(false); }} footer={<>
       <button disabled={busy} onClick={() => setAdding(false)}>Cancel</button>
@@ -2101,7 +2101,7 @@ function ReviewFooter({ chat, review, pr, nudge = true, onOpen }: { chat: Chat; 
   return (
     <div className="review-ready missing">
       <Ico n="laurel" className="big" />
-      <div className="grow"><b>No review file was saved</b><small>A review ends in a file Consort can act on. This run stopped before writing one.</small></div>
+      <div className="grow"><b>No review file was saved</b><small>The run ended before writing it.</small></div>
       <button onClick={ask}>Write the review file</button>
     </div>
   );
@@ -2173,7 +2173,7 @@ function SideChatPane({ chat }: { chat: Chat }) {
         {messages.length > 0 && <button className="icon" title="Clear these questions" onClick={() => ade.clearSide(chat.id).catch(() => {})}>clear</button>}
       </div>
       <div className="sidechat-log">
-        {!messages.length && <div className="m">Ask about this job while it works — “how far along is this?”, “what is it doing now?”, “has anything failed?”. It reads the transcript, the notes and the files the job has written, and can’t change anything or interrupt it.</div>}
+        {!messages.length && <div className="m">Ask what this job is doing or how far along it is. Read-only: it can’t change or interrupt the work.</div>}
         {messages.map((m) => <div key={m.id} className={`sidechat-msg ${m.role}`}>{m.text}</div>)}
         {chat.sideBusy && <div className="sidechat-msg assistant busy"><span className="spin" />reading the job…</div>}
         <div ref={bottom} />
@@ -2191,8 +2191,8 @@ function SideChatPane({ chat }: { chat: Chat }) {
 }
 
 // what the two composer switches do, on the label's help cursor
-const AUTOPILOT_HELP = "Lets this chat see your screen and click, type and switch between visible macOS apps to finish a task in another app. The Jev navigator drives it through your OpenRouter key. Off by default; turn it on for one task and off again after.";
-const AUTO_APPROVE_HELP = "Runs every tool call without asking: shell commands, file edits, git, installs. Off by default, so the chat asks before each action that needs permission. Turn on for long unattended work you trust.";
+const AUTOPILOT_HELP = "Let this chat see your screen and control other macOS apps (via your OpenRouter key). Turn on for one task.";
+const AUTO_APPROVE_HELP = "Run every tool call without asking. For unattended work you trust.";
 
 function ChatPane({ chat, worktree, chats, onOpenChat, keys, models, showTools, perms, ptys, answer, reviewFile, onOpenReview, onOpenMd, openRouterConfigured }: { chat: Chat; worktree?: Worktree; chats: Chat[]; onOpenChat: (id: string) => void; keys: State["keys"]; models: State["models"]; showTools: boolean; perms: PermissionRequest[]; ptys: PtyState[]; answer: (id: string, ok: boolean) => void; reviewFile: ReviewFile | null; onOpenReview: () => void; onOpenMd: (p: string) => void; openRouterConfigured?: boolean }) {
   // the chat's own terminal is on screen whenever the chat is, so a finished command there is seen at once
@@ -2319,8 +2319,8 @@ function ChatPane({ chat, worktree, chats, onOpenChat, keys, models, showTools, 
     jump();
   };
   const placeholder = commit
-    ? commit.typed ? "commit message · ↩ to commit and push · esc to cancel" : `start typing commit or ai will decide ${commit.count}…`
-    : chat.running ? "Working… (you can queue a message)" : "Reply…";
+    ? commit.typed ? "Commit message · ↩ commits and pushes · esc cancels" : `Type a commit message, or wait ${commit.count}s for the AI to write one`
+    : perms.length ? "Waiting for you to allow or deny above" : chat.running ? "Queue a message…" : "Reply…";
   const addFiles = (paths: string[]) => setFiles((f) => [...new Set([...f, ...paths])]);
   const onDrop = async (e: React.DragEvent) => { e.preventDefault(); setOver(false); addFiles(await filesFromTransfer(e.dataTransfer)); };
   const onPaste = async (e: React.ClipboardEvent) => { if ([...e.clipboardData.items].some((i) => i.kind === "file")) { e.preventDefault(); addFiles(await filesFromTransfer(e.clipboardData)); } };
@@ -2383,7 +2383,7 @@ function ChatPane({ chat, worktree, chats, onOpenChat, keys, models, showTools, 
         {perms.map((p) => (
           <div key={p.id} className="perm">
             <b><Ico n="celtic" className="big" />Allow {p.tool}?</b>
-            <pre>{JSON.stringify(p.input, null, 2)}</pre>
+            <pre>{toolInputText(JSON.stringify(p.input))}</pre>
             <button className="primary" onClick={() => answer(p.id, true)}>Allow</button> <button onClick={() => answer(p.id, false)}>Deny</button>
           </div>
         ))}
@@ -2399,7 +2399,7 @@ function ChatPane({ chat, worktree, chats, onOpenChat, keys, models, showTools, 
             <span>Last run failed: <span className="err">{chat.error}</span></span><span className="error-details-link">View details</span>
           </button> : <span>This chat was interrupted when the app closed.</span>}
           <button className="primary" onClick={() => ade.continueChat(chat.id).catch((e) => alert(e.message))}>Continue where it left off</button>
-          {canSeat && <button title="Resume this same session on the seat with the most headroom" onClick={() => ade.switchSeat(chat.id).catch((e) => alert(e.message))}>{chatKey?.pool ? "Switch login & continue" : `Continue on Any ${chat.provider === "claude" ? "Claude" : "Codex"}`}</button>}
+          {canSeat && <button title="Continue on the login with the most quota left" onClick={() => ade.switchSeat(chat.id).catch((e) => alert(e.message))}>Continue on another login</button>}
         </div>
       )}
       {errorDetails !== undefined && <Dialog title="Run error details" onClose={() => setErrorDetails(undefined)} footer={<>
@@ -2417,7 +2417,7 @@ function ChatPane({ chat, worktree, chats, onOpenChat, keys, models, showTools, 
       )}
       <div className="composer-wrap">
         {!!chat.queuedMessages?.length && <div className="message-queue" aria-label="Queued messages">
-          <div className="queue-heading"><span>{chat.queuedMessages.length} queued{chat.queuePaused ? " · paused" : " · runs after the current task"}</span>
+          <div className="queue-heading"><span>{chat.queuedMessages.length} queued{chat.queuePaused ? " · paused" : chat.running ? " · sends when this turn ends" : " · waiting"}</span>
             {!chat.running && <button onClick={() => ade.resumeQueue(chat.id).catch((e) => alert(e.message))}>Resume queue</button>}
           </div>
           {chat.queuedMessages.map((message, index) => <div className="queued-message" key={message.id}>
@@ -2429,13 +2429,13 @@ function ChatPane({ chat, worktree, chats, onOpenChat, keys, models, showTools, 
         <div className="composer-options">
           <span className="left">
             {!isScratch(worktree) && <button className={"commitbtn" + (commit ? " armed" : "")} title="Stage everything, commit, and push. Type a message or let the AI write one." disabled={code || chat.running || !!commit} onClick={armCommit}><Ico n="wheat" />{commit && !commit.typed ? `commit ${commit.count}` : "commit"}</button>}
-            <button className="commitbtn" disabled={!worktree} aria-pressed={code} title={code ? "Return to AI chat" : "Run commands in this worktree"} onClick={() => setMode(code ? "chat" : "code")}><Ico n={code ? "quill" : "terminal"} />{code ? "CHAT" : "TERMINAL"}</button>
-            <button className="commitbtn" disabled={!worktree} aria-pressed={side} title={side ? "Return to AI chat" : "Ask a read-only agent about this job — it won't interrupt the work"} onClick={() => setMode(side ? "chat" : "side")}><Ico n={side ? "quill" : "candle"} />{side ? "CHAT" : "SIDECHAT"}</button>
+            <button className="commitbtn" disabled={!worktree} aria-pressed={code} title={code ? "Back to the chat" : "Run commands in this worktree"} onClick={() => setMode(code ? "chat" : "code")}><Ico n="terminal" />TERMINAL</button>
+            <button className="commitbtn" disabled={!worktree} aria-pressed={side} title={side ? "Back to the chat" : "Ask a read-only agent about this job"} onClick={() => setMode(side ? "chat" : "side")}><Ico n="candle" />SIDECHAT</button>
             {chat.running && <button className="commitbtn stopbtn" title="Stop this chat" onClick={() => ade.stop(chat.id)}><span className="stop-square" aria-hidden="true" />Stop</button>}
             {chatStatus(chat) === "running" && <div className="composer-working" role="status"><span className="working-circle" aria-hidden="true" />Working…</div>}
           </span>
           {openRouterConfigured && <label><input type="checkbox" checked={!!chat.autopilot} onChange={(e) => ade.setAutopilot(chat.id, e.target.checked).catch((e) => alert(e.message))} /> <span className="help" title={AUTOPILOT_HELP}>Autopilot</span></label>}
-          <button className="commitbtn logsbtn" aria-pressed={showTools} title={`${showTools ? "All: every tool call as its own row." : "Brief: runs of tool calls fold into one line that grows as calls come in; failed calls stay visible."} Click to switch. ${chat.showToolCalls === undefined ? "Following Settings › Appearance." : "This chat's own choice."}`} onClick={() => ade.setChatToolCalls(chat.id, !showTools).catch((e) => alert(e.message))}>Logs: {showTools ? "All" : "Brief"}</button>
+          <button className="commitbtn logsbtn" aria-pressed={showTools} title={showTools ? "Every tool call shown. Click to fold them." : "Tool calls folded. Click to show each one."} onClick={() => ade.setChatToolCalls(chat.id, !showTools).catch((e) => alert(e.message))}>Logs: {showTools ? "All" : "Brief"}</button>
           <label><input type="checkbox" checked={chat.autoApprove} onChange={(e) => ade.setAutoApprove(chat.id, e.target.checked).catch((e) => alert(e.message))} /> <span className="help" title={AUTO_APPROVE_HELP}>Auto-approve</span></label>
         </div>
         {side && worktree && <SideChatPane chat={chat} />}
@@ -2535,7 +2535,7 @@ function Drawer({ onOpenChat, tab, state, chat, worktree, scope, ptys, width, fi
   return (
     <div className="drawer" style={{ width }}>
       <div className="dhead">
-        <span><Ico n={{ terminal: "terminal", diff: "branch", editor: "pencil", markdown: "scroll", commit: "wheat", artifacts: "lyre", review: "laurel", settings: "gear", ship: "laurel", notes: "scroll" }[tab]} className="big" /> {tab[0].toUpperCase() + tab.slice(1)}{scope && tab !== "settings" ? ` · ${scope.title}` : ""}</span>
+        <span><Ico n={{ terminal: "terminal", diff: "branch", editor: "pencil", markdown: "scroll", commit: "wheat", artifacts: "lyre", review: "laurel", settings: "gear", ship: "laurel", notes: "scroll" }[tab]} className="big" /> {{ terminal: "Terminal", diff: "Diff", editor: "Edit", markdown: "Preview", commit: "Commit", artifacts: "Artifacts", review: "Review", settings: "Settings", ship: "Ship", notes: "Notes" }[tab]}{scope && tab !== "settings" ? ` · ${scope.title}` : ""}</span>
         <button className="icon" onClick={onClose}>×</button>
       </div>
       <div className="dbody" ref={body}>
@@ -2794,12 +2794,12 @@ function Editor({ worktree, initial, memoryKey, onView }: { worktree: Worktree; 
     <div className="card editor">
       <div className="ebar">
         <input value={q || path} placeholder="find a file…" onChange={(e) => setQ(e.target.value)} onFocus={(e) => e.target.select()} />
-        <button title="Refresh all workspace files" disabled={loading} onClick={() => setRefresh((n) => n + 1)}>Refresh</button>
+        <button title="Refresh file list" disabled={loading} onClick={() => setRefresh((n) => n + 1)}>Refresh</button>
         {path.endsWith(".md") && <button onClick={() => onView(path)}>View</button>}
         <button className="primary" disabled={!path || !dirty} onClick={save}>{dirty ? "Save ⌘S" : "Saved"}</button>
       </div>
       {hits.length > 0 && <div className="hits">{hits.map((f) => <div key={f} className="hit" onMouseDown={() => open(f)}>{f}</div>)}</div>}
-      {loading && <div className="m">Loading workspace files…</div>}
+      {loading && <div className="m">Listing files…</div>}
       {listError && <div className="error">Could not list files: {listError}</div>}
       {!q && <FileTree files={files} current={path} onOpen={open} />}
       {path && (
@@ -2961,7 +2961,7 @@ function CliRuntimes() {
       <span>{cliSummary(s)}</span>
       {s.note && <span className="m" title={s.note}>· {s.note}</span>}
     </div>)}
-    <button className="tog" disabled={busy} onClick={update}>{busy ? "Checking…" : "Check for CLI updates"}</button>
+    <button className="tog" disabled={busy} onClick={update}>{busy ? "Updating…" : status.some((s) => s.latest && isNewer(s.latest, s.npmVersion)) ? "Download update" : "Check for updates"}</button>
   </div>;
 }
 
@@ -2988,7 +2988,7 @@ function Connector({ k, isDefault, status, usage, now, onSignIn, onRename, onRef
       </div>
       <div className="conn-sub">
         <span className={`dot ${dot}`} aria-hidden />
-        <span>{k.provider === "claude" ? "Claude" : "Codex"} · {pool ? "any login · picks the one with headroom" : login ? "terminal login" : "API key"}</span>
+        <span>{k.provider === "claude" ? "Claude" : "Codex"} · {pool ? "all logins, auto-picked" : login ? "CLI login" : "API key"}</span>
         {signedOut ? <span className="conn-bad">not signed in</span> : identity ? <span className="conn-who" title={identity}>{identity}</span> : login && !status ? <span>checking…</span> : null}
       </div>
       <Meters usage={usage} signedOut={!!signedOut && !pool} now={now} />
@@ -3098,7 +3098,7 @@ function ExtensionsCard({ state }: { state: State }) {
       <button className={kind === "codex" ? "on" : ""} onClick={() => setKind("codex")}>Codex skill</button>
     </div>
     {!keys.length ? <div className="conn-note">Add a {kind === "claude" ? "Claude Code terminal-login" : "Codex"} connector first.</div> : <>
-      <Field label="Connector"><select value={selected} onChange={(e) => setKeyId(e.target.value)}>{keys.map((k) => <option key={k.id} value={k.id}>{k.name}</option>)}</select></Field>
+      <Field label="Agent"><select value={selected} onChange={(e) => setKeyId(e.target.value)}>{keys.map((k) => <option key={k.id} value={k.id}>{k.name}</option>)}</select></Field>
       {kind === "claude" ? <>
         <Field label="Marketplace" optional><input value={marketplace} placeholder="aligned-marketplace/claude-plugins" onChange={(e) => setMarketplace(e.target.value)} /></Field>
         <Field label="Plugin"><input value={plugin} placeholder="dan-hex-practices" onChange={(e) => setPlugin(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void install(); }} /></Field>
@@ -3189,12 +3189,11 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
         {!state.keys.length && <div className="conn-note">No connectors yet.</div>}
         <CliRuntimes />
       </SettingsSection>
-      <SettingsSection icon="butterfly" title="OpenRouter navigator" count={state.openRouterConfigured ? 1 : 0} initialOpen={false}>
-        <div className="conn-note">Adding an OpenRouter key turns on Autopilot: an Autopilot switch appears in every chat, and a chat with it on can see your screen and click, type and switch between visible macOS apps to finish a task in another app. The Jev navigator model does that driving, billed to this key. Without a key the switch is not shown and nothing can control your desktop.</div>
-        <div className="conn-note">The key is used only for that. It is encrypted in the macOS Keychain and is never used as a chat connector.</div>
+      <SettingsSection icon="butterfly" title="Autopilot (OpenRouter)" initialOpen={false}>
+        <div className="conn-note">An OpenRouter key turns on Autopilot: a switch in every chat that lets it see your screen and drive other macOS apps. Billed to this key; never used for chat.</div>
         <div className="conn-sub" style={{ marginBottom: 10 }}>
           <span className={`dot ${state.openRouterConfigured ? "ok" : ""}`} aria-hidden />
-          <span>{state.openRouterConfigured ? "Jev navigator configured" : "Jev navigator not configured"}</span>
+          <span>{state.openRouterConfigured ? "Autopilot available" : "Autopilot off (no key)"}</span>
         </div>
         <Field label={state.openRouterConfigured ? "Replace key" : "API key"} info="Stored encrypted; the saved value is never shown again.">
           <input type="password" autoComplete="off" placeholder="sk-or-v1-…" value={openRouterKey} onChange={(e) => setOpenRouterKey(e.target.value)}
@@ -3205,8 +3204,8 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
           {state.openRouterConfigured && <button disabled={savingOpenRouter} onClick={() => confirm("Remove the OpenRouter key?") && void saveOpenRouter(true)}>Remove</button>}
         </div>
       </SettingsSection>
-      <SettingsSection icon="laurel" title="Ship" count={(state.clickUpConfigured ? 1 : 0) + (state.branchPrefix ? 1 : 0)} initialOpen={false}>
-        <div className="conn-note">/ship takes a feature from a GitHub issue or a ClickUp task to a merged PR: a worktree per feature, grilling into a spec, tickets, build, test report, review. GitHub issues need nothing here beyond gh. A ClickUp key lets the project page ship a task by id and moves the task's status with each stage.</div>
+      <SettingsSection icon="laurel" title="Ship" initialOpen={false}>
+        <div className="conn-note">/ship takes a GitHub issue or ClickUp task to a merged PR in its own worktree. GitHub needs only gh. A ClickUp key lets you ship by task id and keeps the task's status in step.</div>
         <Field label="Branch prefix" info="Every branch Consort generates starts with it: mm gives mm/hris-address-494 and mm/issue/12.">
           <input value={prefix} placeholder="mm" autoComplete="off" onChange={(e) => setPrefix(e.target.value)} onBlur={() => ade.setBranchPrefix(prefix).catch((e) => alert(e.message))} onKeyDown={(e) => { if (e.key === "Enter") ade.setBranchPrefix(prefix).catch((err) => alert(err.message)); }} />
         </Field>
@@ -3236,7 +3235,7 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
         </div>
         <div className="krow">
           <span className="grow" title="Off folds consecutive tool calls into one line per run; failed and running calls always show. A chat can override this from its composer.">Show tool calls</span>
-          <label className="switch"><input type="checkbox" checked={!!state.showToolCalls} onChange={(e) => ade.setShowToolCalls(e.target.checked).catch((err) => alert(err.message))} /> {state.showToolCalls ? "every call as a row" : "folded"}</label>
+          <label className="switch"><input type="checkbox" checked={!!state.showToolCalls} onChange={(e) => ade.setShowToolCalls(e.target.checked).catch((err) => alert(err.message))} /> {state.showToolCalls ? "every call" : "one line per run"}</label>
         </div>
         <div className="krow">
           <span className="grow">Background</span>
@@ -3276,7 +3275,7 @@ function Settings({ state, onSignIn }: { state: State; onSignIn: (keyId: string)
           </div>
           <Field label="Label" optional><input placeholder={auth === "login" ? `e.g. ${provider} work account` : "e.g. claude billing key"} value={name} onChange={(e) => setName(e.target.value)} autoFocus /></Field>
           <div className="m">{auth === "login"
-            ? "Adds another CLI login for this provider with its own credentials, so you can sign in to a second account (say, work and personal) and pick one per chat. The original login keeps the CLI's default sign-in. After adding it, press Sign in to run the login in a terminal tab."
+            ? "A second CLI login with its own credentials (say, work and personal); pick one per chat. After adding, press Sign in to log in from a terminal tab."
             : "Adds a separate API key, billed per token. It has no plan limits, so no usage meters."}</div>
           {auth === "key" && (
             <Field label="Key" info="Encrypted at rest via macOS keychain.">

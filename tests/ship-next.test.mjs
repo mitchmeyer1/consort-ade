@@ -4,14 +4,14 @@ import { fillNextCommand, parseNextCommands } from '../src/shared/shipNext.ts';
 
 test('the last footer yields one chip per /ship command, remarks dropped', () => {
   const text = `Built.\n\nStage: Implementing · Ticket: 17thtp0hyfq · Next: /ship 17thtp0hyfq (the test session, fresh chat)\n`;
-  assert.deepEqual(parseNextCommands(text), [{ command: '/ship 17thtp0hyfq', label: '/ship 17thtp0hyfq', needsFeedback: false }]);
+  assert.deepEqual(parseNextCommands(text), [{ command: '/ship 17thtp0hyfq', label: 'Next step', needsFeedback: false }]);
 });
 
 test('several commands joined by "or", in backticks, become separate chips; a feedback placeholder is flagged', () => {
   const text = 'earlier footer\nStage: Grilling · Ticket: local:x · Next: /ship x\n\nDone.\n\n`Stage: Ready to Test · Ticket: 17thtp0hyfq · Next: /ship 17thtp0hyfq approve or /ship 17thtp0hyfq "<feedback>" (back to Revising)`';
   assert.deepEqual(parseNextCommands(text), [
-    { command: '/ship 17thtp0hyfq approve', label: '/ship 17thtp0hyfq approve', needsFeedback: false },
-    { command: '/ship 17thtp0hyfq "<feedback>"', label: '/ship 17thtp0hyfq "<feedback>"', needsFeedback: true },
+    { command: '/ship 17thtp0hyfq approve', label: 'Approve', needsFeedback: false },
+    { command: '/ship 17thtp0hyfq "<feedback>"', label: 'Give feedback…', needsFeedback: true },
   ]);
 });
 

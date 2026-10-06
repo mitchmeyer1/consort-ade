@@ -88,6 +88,6 @@ One chat scope over several checkouts, with a Commit… button that commits ever
 
 ## Known rough edges
 
-- Fixtures in this document and the README are rendered from the built CSS, not from the running app.
+- Screenshots in this document and the README are rendered from the app's CSS, not captured from a running build.
 - Autopilot (desktop control) needs an OpenRouter key and macOS accessibility permission; it is off until both exist.
 - ClickUp features (Ship from a task, ticket status, Investigate) need the API key in Settings › Ship.

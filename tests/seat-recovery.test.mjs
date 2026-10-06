@@ -121,7 +121,7 @@ test('a limit on every seat stops with when the first one reopens, without loopi
   await settle(2);
   await settle(2);
   assert.equal(calls.length, 2, 'a then b, then nowhere left');
-  assert.match(chat.error, /b hit its 5-hour limit .*no other seat has headroom/);
+  assert.match(chat.error, /b hit its 5-hour limit .*no other login has headroom/);
   assert.equal(chat.seatTried, undefined);
   assert.equal(chat.queuePaused, true);
 });
@@ -145,7 +145,7 @@ test('switching seats moves the chat onto the pool, keeps its session and contin
   assert.equal(calls[0].options.resume, 's1');
   assert.equal(calls[0].options.env.CLAUDE_CONFIG_DIR, '/s/.claude-b');
   assert.equal(chat.error, undefined);
-  assert.ok(notes().some((n) => n === 'Moved to seat b from default.'), notes().join('\n'));
+  assert.ok(notes().some((n) => n === 'Moved to the b login from default.'), notes().join('\n'));
 });
 
 test('a seat that can\'t see the session starts fresh with the transcript', async () => {

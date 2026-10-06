@@ -61,7 +61,7 @@ export function ReviewView({ worktree, path }: { worktree: Worktree; path: strin
       if (announce || announced.current !== key) {
         announced.current = key;
         if (d.drifted.length) toasts.notify("success", `${d.drifted.length} finding${d.drifted.length === 1 ? "" : "s"} touch files changed on the PR since the review — consider re-investigating`);
-        else if (announce) toasts.notify("success", "No finding's file has changed on the PR since it was checked");
+        else if (announce) toasts.notify("success", "No new commits touch any finding");
       }
     } catch (e) {
       if (announce) toasts.notify("error", "Couldn't check the PR for new commits", (e as Error).message);
@@ -310,7 +310,7 @@ function FinishPanel({ review, inline: initialInline, openedAt, decision, busy, 
         <span className="m">{decided ? `Every finding decided · ${counts.approved} queued · ${counts.commented} posted · ${counts.ignored} ignored${counts.fixing ? ` · ${counts.fixing} fixing locally` : ""}${counts.dropped ? ` · ${counts.dropped} dropped` : ""}` : `${counts.pending} finding${counts.pending === 1 ? "" : "s"} still undecided`}{decision ? ` · GitHub: ${decision}` : ""}</span>
         <button className="icon" title="Close" onClick={onClose}>×</button>
       </div>
-      <textarea className="rv-finish-body" value={body} rows={4} spellCheck={false} placeholder="Leave blank and AI will fill out" onChange={(e) => setBody(e.target.value)} />
+      <textarea className="rv-finish-body" value={body} rows={4} spellCheck={false} placeholder="Optional summary; left blank, the reviewer writes one" onChange={(e) => setBody(e.target.value)} />
       <div className="rv-finish-events">
         {REVIEW_EVENTS.map((ev) => <label key={ev} className={"rv-event" + (event === ev ? " on" : "")}>
           <input type="radio" name="rv-event" checked={event === ev} onChange={() => setEvent(ev)} />
@@ -395,7 +395,7 @@ function FindingCard({ f, review, drifted, liveHead, investigating, onDecide, on
       </div>
       <div className="rv-refline">
         <span className="rv-ref">{f.file ? `${f.file}${f.line ? `:${f.line}` : ""}` : "General PR comment"}</span>
-        <span className="rv-checked" title={`This finding was last verified against commit ${checkedAt}`}>checked at {short(checkedAt) || "?"}</span>
+        <span className="rv-checked" title={`Verified against commit ${checkedAt}`}>verified on {short(checkedAt) || "?"}</span>
         {f.file && drifted && <span className="rv-drift" title="The PR has changed this file since the finding was checked">file changed on PR since</span>}
         {f.fixRequest && <a href="#" className="rv-fixing" title="A chat in this worktree was asked to make this change" onClick={(e) => { e.preventDefault(); onOpenChat(f.fixRequest!.chatId); }}>fix requested{f.fixRequest.at ? ` ${when(f.fixRequest.at)}` : ""} · open chat ↗</a>}
       </div>

@@ -21,11 +21,10 @@ const windowTitle = (label: string, w: SeatWindow, now: number) => `${label}: ${
 
 /** one login's meters: 5-hour, weekly and per-model windows, its star when it is the provider's pick */
 function SeatRow({ seat, best, running, now }: { seat: Seat; best: boolean; running: number; now: number }) {
-  const read = seat.at ? ` · read ${formatAge(seat.at, now)}` : "";
-  const title = [seat.email ?? seat.dir, `${seat.live ? "live" : `stale${seat.note ? ` (${seat.note})` : ""}`}${read}`, seat.blocked ? `At its limit${seat.note ? `: ${seat.note}` : ""}` : "", best ? `Where new ${providerName(seat.provider)} chats go` : ""].filter(Boolean).join("\n");
+  const title = [seat.email ?? seat.dir, seat.live && seat.at ? `usage read ${formatAge(seat.at, now)}` : `usage not read${seat.note ? ` (${seat.note})` : ""}`, seat.blocked ? `At its limit${seat.note ? `: ${seat.note}` : ""}` : "", best ? `New ${providerName(seat.provider)} chats start here` : ""].filter(Boolean).join("\n");
   return (
     <div className={"seat" + (best ? " best" : "") + (seat.blocked ? " blocked" : "") + (seat.live ? "" : " stale")} title={title}>
-      <span className="seat-name">{seat.name}{best && <span className="seat-best" aria-label="best seat">★</span>}{running > 0 && <span className="seat-count" title={`${running} chat${running === 1 ? "" : "s"} running on this seat`}>{running}</span>}</span>
+      <span className="seat-name">{seat.name}{best && <span className="seat-best" aria-label="new chats start here">★</span>}{running > 0 && <span className="seat-count" title={`${running} chat${running === 1 ? "" : "s"} running on this login`}>{running}</span>}</span>
       <span className="seat-bars">
         {windowsOf(seat).map(([short, label, w]) => (
           <span key={short} className={`seat-bar ${usageTone(w.pct)}`} title={windowTitle(label, w, now)} role="meter" aria-label={`${seat.name} ${label}`} aria-valuenow={w.pct} aria-valuemin={0} aria-valuemax={100}>
@@ -70,7 +69,7 @@ export function SeatsStrip({ state }: { state: State }) {
     <div className="seats">
       <div className="sect seats-head">
         <button className="seats-toggle" aria-expanded={open} onClick={() => setOpen((v) => !v)}>Usage {open ? "▾" : "▸"}</button>
-        <span className="seats-age" title={picks ? `Best seats now: ${picks}` : ""}>{busy ? "reading…" : pool?.at ? formatAge(pool.at, now) : ""}{!open && picks ? ` · ${picks}` : ""}</span>
+        <span className="seats-age" title={picks ? `New chats start on: ${picks}` : ""}>{busy ? "reading…" : pool?.at ? formatAge(pool.at, now) : ""}{!open && picks ? ` · ${picks}` : ""}</span>
         <button className="icon" title="Re-read every login's usage now" aria-label="Refresh usage" disabled={busy} onClick={() => void refresh()}>↻</button>
       </div>
       {open && <SeatRows state={state} now={now} />}
@@ -83,7 +82,7 @@ export function PoolSettings({ state, provider }: { state: State; provider: Prov
   const now = useNow();
   return (
     <div className="pool-settings">
-      <div className="conn-note">Runs each chat on whichever {providerName(provider)} login has the most headroom for its model. A chat keeps its login so its prompt cache stays warm; when that login hits a usage limit the chat moves to the next one and carries on, in the same session when the login can see it, else with a transcript handoff. Add logins under AI connectors to widen the pool.</div>
+      <div className="conn-note">Each chat runs on the {providerName(provider)} login with the most headroom and stays there; if that login hits its limit the chat moves to another and continues. Add logins under AI connectors to widen the pool.</div>
       <div className="seats wide"><SeatRows state={state} now={now} provider={provider} /></div>
     </div>
   );

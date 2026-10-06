@@ -139,7 +139,7 @@ function contextHandoff(chat: Chat, cwd: string) {
   const path = archiveContext(cwd, JSON.stringify(chat.messages), "json");
   chat.sessionId = undefined;
   chat.sessionKeyId = undefined;
-  chat.messages.push({ id: randomUUID(), role: "system", blocks: [{ type: "text", text: "Context size limit reached. Continuing in a fresh session with a compact handoff; full history is preserved." }], ts: Date.now() });
+  chat.messages.push({ id: randomUUID(), role: "system", blocks: [{ type: "text", text: "Context full. Starting a fresh session with a summary; the full transcript is saved." }], ts: Date.now() });
   store.save();
   return `Continue the same task after a context-size failure. Check current files and completed tool actions before doing work again. Full prior transcript: ${path}; search/read only needed portions, never the whole archive. The following is a truncated handoff, not a complete summary:\n\n${transcriptDigest(chat, 24000)}`;
 }
@@ -150,7 +150,7 @@ export const modelPinsSession = (provider: Chat["provider"]) => provider === "co
 export async function switchAgent(chatId: string, keyId: string, model: string) {
   const chat = store.chat(chatId);
   const key = store.data.keys.find((k) => k.id === keyId);
-  if (!key) throw new Error("unknown connector");
+  if (!key) throw new Error("Connector not found.");
   const providerChanged = key.provider !== chat.provider;
   const connectorChanged = keyId !== chat.keyId;
   const modelChanged = model !== chat.model;
@@ -174,7 +174,7 @@ export async function switchAgent(chatId: string, keyId: string, model: string) 
   if (!handover) { store.save(); return; }
   chat.messages.push({ id: randomUUID(), role: "system", blocks: [{ type: "text", text: providerChanged
     ? `Handed the conversation to ${key.provider} · ${model} (${key.name}).`
-    : `Switched to ${model}. ${key.provider === "codex" ? "Codex" : "This provider"} can't resume a session on another model, so this continues in a fresh one with a context handoff.` }], ts: Date.now() });
+    : `Switched to ${model} in a fresh session with a summary of this chat.` }], ts: Date.now() });
   store.save();
   const who = providerChanged ? "another AI agent" : "an earlier model";
   const prompt = `You are taking over an in-progress conversation from ${who} working in this same repository/worktree. The earlier session can't be resumed, so this is a fresh one. Transcript so far:\n\n${digest}\n\nPick up where it left off: in one or two sentences say what you understand the task and current status to be, then continue the work. If the last step was a question to the user, ask it again briefly and emit [phase:waiting].`;
@@ -215,7 +215,7 @@ async function recoverFromLimit(chatId: string, hit: LimitHit) {
   const next = pick && !pick.blocked ? pick.dir : undefined;
   if (!next || tried.includes(next)) {
     const reset = earliestReset(pool, chat.provider);
-    recordRunError(chat, `${seatName(pool, from)} hit its ${limitLabel(hit)}, and no other seat has headroom${reset ? `; the first one frees up ${resetLabel(reset)}` : ""}.${why} Pick a seat from the seat menu to force one, or continue after the reset.`);
+    recordRunError(chat, `${seatName(pool, from)} hit its ${limitLabel(hit)}, and no other login has headroom${reset ? `; the first one frees up ${resetLabel(reset)}` : ""}.${why} Pick a login from the agent menu to force one, or continue after the reset.`);
     chat.seatTried = undefined;
     store.save();
     return;
@@ -244,9 +244,9 @@ export async function switchSeat(chatId: string, dir?: string) {
   if (!target) {
     const fresh = await readPool({ force: true });
     const pick = pickSeat(fresh, chat.provider, { exclude: current ? [current] : [], model: chat.model });
-    if (!pick) throw new Error("There is no other seat to move to.");
+    if (!pick) throw new Error("No other login to move to.");
     const reset = earliestReset(fresh, chat.provider);
-    if (pick.blocked) throw new Error(`Every other seat is at its limit${reset ? `; the first frees up ${resetLabel(reset)}` : ""}.`);
+    if (pick.blocked) throw new Error(`Every other login is at its limit${reset ? `; the first frees up ${resetLabel(reset)}` : ""}.`);
     target = pick.dir;
   }
   chat.keyId = pool.id;
@@ -255,7 +255,7 @@ export async function switchSeat(chatId: string, dir?: string) {
   // the session comes along when the target seat can see its transcript
   if (chat.sessionId && sessionOnSeat(target, chat.sessionId, chat.provider)) chat.sessionKeyId = pool.id;
   else { chat.sessionId = undefined; chat.sessionKeyId = undefined; }
-  note(chat, `Moved to seat ${seatName(store.data.seatPool, target)}${current ? ` from ${seatName(store.data.seatPool, current)}` : ""}.`);
+  note(chat, `Moved to the ${seatName(store.data.seatPool, target)} login${current ? ` from ${seatName(store.data.seatPool, current)}` : ""}.`);
   const resume = wasRunning || !!chat.error || !!chat.interrupted;
   chat.queuePaused = false;
   store.save();
@@ -422,12 +422,12 @@ export async function send(chatId: string, text: string, files: string[] = [], o
 
 async function runSend(chatId: string, text: string, files: string[] = [], opts: { silent?: boolean; queuedId?: string; display?: string; resume?: boolean; shipStage?: string } = {}) {
   const chat = store.chat(chatId);
-  if (chat.running) throw new Error("chat is busy");
+  if (chat.running) throw new Error("The chat is still running; stop it first.");
   const pooled = isPool(chat);
   let lost = false;
   if (pooled) {
     await ensureSeat(chat);
-    if (chat.running) throw new Error("chat is busy");
+    if (chat.running) throw new Error("The chat is still running; stop it first.");
     if (chat.sessionId && !sessionOnSeat(chat.seatDir!, chat.sessionId)) { chat.sessionId = undefined; chat.sessionKeyId = undefined; lost = true; }
   }
   const cwd = store.data.worktrees.find((w) => w.id === chat.worktreeId)!.path;
@@ -526,7 +526,7 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
       if (!need || attempt || ac.signal.aborted) break;
       const updated = await updateCli(chat.provider, need).catch(() => false);
       if (!updated || ac.signal.aborted) break;
-      chat.messages.push({ id: randomUUID(), role: "system", blocks: [{ type: "text", text: `${need.reason} ${CLI_NAMES[chat.provider]} was updated; retrying.` }], ts: Date.now() });
+      chat.messages.push({ id: randomUUID(), role: "system", blocks: [{ type: "text", text: `Updated ${CLI_NAMES[chat.provider]} for ${chat.model}; retrying.` }], ts: Date.now() });
       chat.error = undefined;
       ui.newMessage();
       store.save();
@@ -544,7 +544,7 @@ async function runSend(chatId: string, text: string, files: string[] = [], opts:
     await autopilot?.close().catch(() => {});
     await browser?.close().catch(() => {});
     await finishDockerRun(chatId).catch(() => {
-      chat.messages.push({ id: randomUUID(), role: "system", blocks: [{ type: "text", text: "Docker cleanup could not finish. Consort will retry automatically when Docker is available." }], ts: Date.now() });
+      chat.messages.push({ id: randomUUID(), role: "system", blocks: [{ type: "text", text: "Docker container left running; Consort will remove it when Docker is back. The chat is unaffected." }], ts: Date.now() });
     });
     running.delete(chatId);
     chat.running = false;

@@ -41,5 +41,5 @@ test('the investigation prompt is read-only, points at the dossier and the code,
   for (const s of BRIEF_SECTIONS) assert.match(p, new RegExp(`\\*\\*${s}\\*\\*`));
   assert.doesNotMatch(investigatePrompt({ ticket, dossierPath: '/d', projectName: 'x', worktreePath: '/root', unreadable: [] }), /Consort could not read \d+ link/);
   assert.equal(investigationChatName(ticket), 'investigate · 17thtp0hvw7 · Scope October Sprint Scope for APC Admin');
-  assert.match(INVESTIGATE_BLURB, /before anyone builds it/);
+  assert.match(INVESTIGATE_BLURB, /before building it/);
 });

@@ -70,6 +70,6 @@ test('the latest release is read from the packument for this machine, with its t
 test('the settings line says what runs, where it came from, and whether the registry has more', () => {
   assert.equal(cliSummary({ provider: 'claude', version: '2.1.273', source: 'bundled', npmVersion: '0.3.273', bundled: '2.1.273' }), 'Claude Code 2.1.273 (bundled)');
   assert.equal(cliSummary({ provider: 'claude', version: '2.1.273', source: 'bundled', npmVersion: '0.3.273', bundled: '2.1.273', latest: '0.3.281' }), 'Claude Code 2.1.273 (bundled) · update available');
-  assert.equal(cliSummary({ provider: 'codex', version: '0.160.0', source: 'downloaded', npmVersion: '0.160.0', bundled: '0.159.0', latest: '0.160.0' }), 'Codex 0.160.0 (downloaded; bundled 0.159.0)');
+  assert.equal(cliSummary({ provider: 'codex', version: '0.160.0', source: 'downloaded', npmVersion: '0.160.0', bundled: '0.159.0', latest: '0.160.0' }), 'Codex 0.160.0 (downloaded)');
   assert.equal(cliSummary({ provider: 'codex', source: 'missing' }), 'Codex not found');
 });

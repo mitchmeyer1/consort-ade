@@ -79,7 +79,7 @@ test('a turn refused for the CLI version downloads the newer CLI and runs again 
   assert.equal(chat.error, undefined);
   assert.equal(chat.phase, 'complete');
   const note = chat.messages.find((m) => m.role === 'system');
-  assert.match(note.blocks[0].text, /Claude Code 2\.1\.273 is too old for this model; 2\.1\.280 or newer is required\. Claude Code was updated; retrying\./);
+  assert.equal(note.blocks[0].text, 'Updated Claude Code for claude-fable-5-1; retrying.');
 });
 
 test('when nothing newer can be fetched the error stands and nothing is retried', async () => {

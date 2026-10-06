@@ -204,7 +204,7 @@ test('the Ship box resolves a ticket from either tracker by id or link, and noth
   assert.deepEqual(shipTarget('github', 'https://github.com/aligned/mono/issues/494'), { source: 'github', number: 494 });
   assert.deepEqual(shipTarget('clickup', 'https://app.clickup.com/t/17thtp0hvw7'), { source: 'clickup', id: '17thtp0hvw7' });
   assert.equal(shipTarget('github', 'https://app.clickup.com/t/17thtp0hvw7'), undefined);
-  assert.match(SHIP_BLURB, /idea to merged PR/);
+  assert.match(SHIP_BLURB, /start to finish/);
 });
 
 test("the TICKET box reads the tracker's own completion: ClickUp status types, a GitHub issue's task list, the ticket row first", async () => {

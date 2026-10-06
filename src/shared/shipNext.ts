@@ -16,7 +16,10 @@ export function parseNextCommands(text: string): NextCommand[] {
   for (const part of tail.replace(/`/g, "").split(/\s+or\s+/i)) {
     const command = part.replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim().replace(/[.,;]+$/, "");
     if (!/^\/ship(\s|$)/.test(command) || out.some((o) => o.command === command)) continue;
-    out.push({ command, label: command, needsFeedback: FEEDBACK.test(command) });
+    // chips read as actions, the way the SHIP card's buttons do, not as raw commands
+    const verb = command.replace(/^\/ship\s*/, "").replace(/^[A-Za-z0-9#-]+\s+(?=\S)/, "").trim();
+    const label = /^approve$/i.test(verb) ? "Approve" : /^pr-loop$/i.test(verb) ? "Fix findings and CI" : /^pause$/i.test(verb) ? "Pause" : FEEDBACK.test(command) ? "Give feedback…" : /^(?:[A-Za-z0-9#-]+)?$/.test(verb) ? "Next step" : command;
+    out.push({ command, label, needsFeedback: FEEDBACK.test(command) });
   }
   return out;
 }

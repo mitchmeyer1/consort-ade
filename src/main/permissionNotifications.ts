@@ -26,7 +26,7 @@ export class PermissionNotifications {
       const notification = new Notification({
         title: `Permission needed: ${request.tool}`,
         subtitle: chat.name,
-        body: "Allow or block this request. Click the notification to review the details in chat.",
+        body: "Click to allow or deny in the chat.",
         actions: process.platform === "darwin" || process.platform === "win32"
           ? [{ type: "button", text: "Allow" }, { type: "button", text: "Block" }] : [],
         timeoutType: "never",

@@ -866,7 +866,7 @@ button.signin { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 .composer-options .commitbtn .ico { width: 12px; height: 12px; margin: 0; opacity: .8; }
 .composer-options .commitbtn:hover { color: var(--ink); background: var(--cream); border-color: var(--cream); }
 .composer-options .commitbtn.logsbtn { text-transform: none; letter-spacing: .02em; }
-.composer-options .commitbtn.logsbtn[aria-pressed="true"] { color: var(--fg); border-color: var(--line2); }
+.composer-options .commitbtn[aria-pressed="true"] { color: var(--fg); border-color: var(--line2); }
 .composer-options .commitbtn.armed { color: var(--cream); border-color: var(--cream); background: none; opacity: 1; font-variant-numeric: tabular-nums; }
 /* stop: a filled square, the usual transport glyph, sized like the sprite icons beside it */
 .composer-options .stopbtn .stop-square { width: 9px; height: 9px; flex: 0 0 9px; background: currentColor; border-radius: 1px; }

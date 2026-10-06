@@ -251,12 +251,12 @@ export function shipActions(f: ShipFeature): ShipAction[] {
   const out: ShipAction[] = [];
   const next = f.next && isShipCommand(f.next) ? f.next.replace(/\s*\([^)]*\)\s*$/, "").trim() : "/ship";
   const label = f.stage === "Grilling" ? "Continue grilling" : f.stage === "Spec'd" ? "Start building" : f.stage === "Implementing" && f.built ? "Run the tests" : f.stage === "Implementing" ? "Continue building"
-    : f.stage === "Ready to Test" ? "Show the report" : f.stage === "Revising" ? "Continue revising" : f.stage === "In Review" ? "Work the review" : "Next step";
+    : f.stage === "Ready to Test" ? "Show the report" : f.stage === "Revising" ? "Continue revising" : f.stage === "In Review" ? "Continue review" : "Next step";
   const title = f.stage === "Grilling" ? "Another round of questions, or the spec if the idea is settled" : f.stage === "Spec'd" ? "Break the spec into tickets and build them" : f.stage === "Implementing" && f.built ? "Verify every story against the code and write the report" : f.stage === "Implementing" ? "Build the next ticket"
-    : f.stage === "Ready to Test" ? "Read the test report and the PR" : f.stage === "Revising" ? "Apply the feedback and re-verify" : f.stage === "In Review" ? "Read the review findings, fix what is real, answer the threads" : f.next;
+    : f.stage === "Ready to Test" ? "Read the test report and the PR" : f.stage === "Revising" ? "Apply the feedback and re-verify" : f.stage === "In Review" ? "Pick up the review where it left off: findings, PR threads, CI" : f.next;
   out.push({ id: "next", label, command: next, title, primary: true });
   if (f.stage === "Ready to Test") out.push({ id: "approve", label: "Approve", command: "/ship approve", title: "The report holds up: mark the PR ready and start Consort's review" });
-  if (f.stage === "In Review" && next !== "/ship pr-loop") out.push({ id: "pr-loop", label: "Address review", command: "/ship pr-loop", title: "Work through the review findings, PR threads and CI" });
+  if (f.stage === "In Review" && next !== "/ship pr-loop") out.push({ id: "pr-loop", label: "Fix findings and CI", command: "/ship pr-loop", title: "Work through the review findings, PR threads and CI" });
   if (["Implementing", "Ready to Test", "Revising", "In Review"].includes(f.stage)) out.push({ id: "feedback", label: "Give feedback…", command: '/ship "{text}"', ask: "What should change?" });
   out.push({ id: "pause", label: "Pause", command: "/ship pause", title: "Write a handoff so the feature can be picked up cold later" });
   return out;
@@ -339,7 +339,7 @@ export function ticketMarkdown(t: ShipTicket, fetched: { body: string; status?: 
 }
 
 /** the project page's one-line answer to "what is Ship" */
-export const SHIP_BLURB = "Ship takes one ticket from idea to merged PR: it cuts a feature worktree, grills the ticket into a spec, builds and tests it, opens the PR and runs a review, moving the ticket's status at each stage.";
+export const SHIP_BLURB = "One ticket, start to finish: a feature worktree, a spec from a grilling interview, build, tests, PR and review. The ticket's status moves with each stage.";
 
 /** what the Ship box starts from: a GitHub issue number or link, or a ClickUp task id or link */
 export const shipTarget = (source: ShipSource, text: string): { source: "github"; number: number } | { source: "clickup"; id: string } | undefined => {

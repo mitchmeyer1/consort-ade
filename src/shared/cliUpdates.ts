@@ -117,4 +117,4 @@ export type CliStatus = {
 };
 
 export const cliSummary = (s: CliStatus) =>
-  `${CLI_NAMES[s.provider]} ${s.version ?? "not found"}${s.source === "downloaded" ? ` (downloaded; bundled ${s.bundled ?? "?"})` : s.source === "bundled" ? " (bundled)" : ""}${s.latest && isNewer(s.latest, s.npmVersion) ? " · update available" : ""}`;
+  `${CLI_NAMES[s.provider]} ${s.version ?? "not found"}${s.source === "downloaded" ? " (downloaded)" : s.source === "bundled" ? " (bundled)" : ""}${s.latest && isNewer(s.latest, s.npmVersion) ? " · update available" : ""}`;

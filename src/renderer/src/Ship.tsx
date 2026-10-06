@@ -30,7 +30,8 @@ function useShipRun(wt: Worktree, onOpenChat: (id: string) => void, chatId?: str
 export function ShipBar({ wt, chats, compact, chatId, onOpenChat }: { wt: Worktree; chats: Chat[]; compact?: boolean; chatId?: string; onOpenChat: (id: string) => void }) {
   const f = wt.ship!;
   const at = stageIndex(f.stage);
-  const running = chats.some((c) => c.running && c.worktreeId === wt.id);
+  const live = chats.find((c) => c.running && c.worktreeId === wt.id);
+  const running = !!live;
   const actions = shipActions(f);
   const r = useShipRun(wt, onOpenChat, chatId);
   const primary = actions.find((a) => a.primary);
@@ -38,8 +39,8 @@ export function ShipBar({ wt, chats, compact, chatId, onOpenChat }: { wt: Worktr
   const side = <>
     <span className="badge issue" role="link" title={f.ticket.title} onClick={() => ade.openExternal(f.ticket.url)}>{ticketRef(f.ticket)}</span>
     {f.prs.map((pr) => <span key={pr} className="badge pr" role="link" title={pr} onClick={() => ade.openExternal(pr)}>{prLabel(pr)}</span>)}
-    {f.tests && <span className="badge ci" title={f.report}>{f.tests.pass}/{f.tests.total} stories</span>}
-    {running && <span className="badge ci pending">running</span>}
+    {f.tests && <span className="badge ci" title="User stories verified in the test report (Ship › Test report)">{f.tests.pass}/{f.tests.total} stories pass</span>}
+    {live && <span className="badge ci pending" role="link" title={live.name} onClick={() => onOpenChat(live.id)}>running · {live.name}</span>}
     <span className="grow" />
     {!shipDone(f) && !r.ask && primary && <button className="primary" disabled={r.busy || running} title={running ? "A chat of this feature is working on this stage" : primary.title ?? primary.command} onClick={() => r.click(primary)}>{r.busy ? "Starting…" : running ? shipBusyLabel(f) : primary.label}</button>}
     {!shipDone(f) && !r.ask && !compact && actions.filter((a) => !a.primary).map((a) => <button key={a.id} disabled={r.busy || running} title={a.title ?? a.command} onClick={() => r.click(a)}>{a.label}</button>)}
@@ -94,13 +95,13 @@ export function ShipCard({ wt, chats, chatId, onOpenChat }: { wt: Worktree; chat
         <div key={s.id} className={`rp-stage ${s.state}`} title={s.state === "active" ? undefined : s.detail}>
           <span className="rp-mark" aria-hidden="true">{mark(s.state)}</span>
           <span className="rp-label">{s.label}{s.state === "active" && <small className="rp-desc">{s.detail}</small>}</span>
-          {canRedoStage(f, s.id as ShipStage) && !running && <button className="icon rp-redo" title={`Do ${s.id} again: the feature goes back to it and everything after it is redone`} disabled={r.busy}
-            onClick={() => { if (confirm(`Redo ${s.id}?\n\nThe feature goes back to ${s.id}; the stages after it run again.`)) r.click({ id: "redo", label: "Redo", command: `/ship redo ${s.id}` }); }}>Redo</button>}
+          {canRedoStage(f, s.id as ShipStage) && !running && <button className="icon rp-redo" title={`Redo ${s.id} and every stage after it`} disabled={r.busy}
+            onClick={() => { if (confirm(`Redo ${s.id}? Later stages run again.`)) r.click({ id: "redo", label: "Redo", command: `/ship redo ${s.id}` }); }}>Redo</button>}
         </div>
       ))}
       {(f.prs.length > 0 || f.tests) && <div className="rp-links">
         {f.prs.map((pr) => <span key={pr} className="badge pr" role="link" title={pr} onClick={() => ade.openExternal(pr)}>{prLabel(pr)}</span>)}
-        {f.tests && <span className="badge ci" title={f.report}>{f.tests.pass}/{f.tests.total} stories</span>}
+        {f.tests && <span className="badge ci" title="User stories verified in the test report (Ship › Test report)">{f.tests.pass}/{f.tests.total} stories pass</span>}
       </div>}
       {!shipDone(f) && !r.ask && <div className="rp-actions">
         {primary && <button className="primary" disabled={r.busy || running} title={running ? "A chat of this feature is working on this stage" : primary.title ?? primary.command} onClick={() => r.click(primary)}>{r.busy ? "Starting…" : running ? shipBusyLabel(f) : primary.label}</button>}
@@ -208,7 +209,7 @@ export function PrReviewBox({ onPick }: { onPick: (number: number) => Promise<vo
   return (
     <div className="card start-card">
       <h3>PR review</h3>
-      <p>An AI review of a pull request: Consort opens a worktree on the PR's branch, reads every changed file, verifies each finding, and writes a review you approve finding by finding before anything is posted to GitHub.</p>
+      <p>Consort opens a worktree on the PR branch, reads the diff, checks each finding and drafts a review. You approve findings one by one before anything is posted.</p>
       <div className="start-fields">
         <input value={text} placeholder="PR number or link" aria-label="GitHub PR number or link" onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void go(); }} />
       </div>
