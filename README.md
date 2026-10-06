@@ -18,6 +18,10 @@ Chats, terminals, diffs, commits, PR review and ticket-to-merge shipping, in one
 
 ---
 
+![Consort: projects and worktrees in the sidebar, an agent working in a chat with its plan, and the worktree's terminal running the tests](docs/screenshots/hero.png)
+
+*Three projects in the sidebar, each with its root checkout and feature worktrees. The agent is building a CSV export in its own worktree, with its plan at the left and the test run in the terminal drawer. The sidebar dots and phase strip say what is running and when it is your turn.*
+
 ## Why worktrees
 
 An agent that edits your working copy competes with you for the same files, branch and build. Consort gives every piece of work its own `git worktree` in its own folder: the agent builds there, you keep working at the repository root, and a worktree becomes a PR, gets checked out at root, or is thrown away. Many chats per worktree, many worktrees per project.
@@ -49,7 +53,7 @@ An agent that edits your working copy competes with you for the same files, bran
 - Terminals per worktree with saved quick actions. A file editor and a diff view. Commit and push with a generated message. Notes per worktree with one pinned beside the branch. A scratchpad that survives restarts.
 - Everything Consort writes into your repo lands under `.consort/` and is kept out of git.
 
-## Screenshots
+## More screens
 
 Project page: four ways to start.
 
