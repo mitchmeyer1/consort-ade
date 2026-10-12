@@ -6,6 +6,7 @@ import { codexModels } from "./codexModels";
 import { MODELS } from "../shared/types";
 import { ensureRootWorktree } from "./rootWorktree";
 import { migrateQuickActions } from "../shared/quickActions";
+import { migrateLegacyShip } from "../shared/legacyShip";
 import { recoverBenignCodexFailure } from "../shared/codexDiagnostics";
 import type { State, Chat, Appearance, Provider } from "../shared/types";
 
@@ -88,6 +89,8 @@ export class Store {
     for (const w of this.data.worktrees) { w.title ??= w.name; w.archived ??= false; }
     // quick actions used to live on each worktree; they belong to the project
     migrateQuickActions(this.data.projects, this.data.worktrees);
+    // the first /ship board's chats hid behind a flag the rebuilt /ship reads differently
+    migrateLegacyShip(this.data.worktrees, this.data.chats);
   }
 
   public(): State {
