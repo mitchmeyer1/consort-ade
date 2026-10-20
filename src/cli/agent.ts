@@ -38,7 +38,7 @@ export const binaryFor = (provider: Provider): string => {
 export type TurnOptions = { cwd: string; prompt: string; model: string; account: Account; resume?: string; maxTurns?: number; onText?: (t: string) => void; /** the task's own ports and Docker names, on top of the process env */ env?: Record<string, string> };
 export type Turn = { text: string; sessionId?: string; error?: string; limit?: LimitHit };
 
-const envFor = (account: Account, extra: Record<string, string> = {}): Record<string, string | undefined> => {
+export const envFor = (account: Account, extra: Record<string, string> = {}): Record<string, string | undefined> => {
   const env: Record<string, string | undefined> = { ...process.env, ...extra };
   delete env.ANTHROPIC_API_KEY; delete env.OPENAI_API_KEY;
   if (account.auth === "key" && account.apiKey) env[account.provider === "claude" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"] = account.apiKey;

@@ -10,6 +10,7 @@ import { newTask, workTask } from "./pipeline";
 import { Slack } from "./slack";
 import { sourceFor } from "./sources";
 import { renderView, viewLoop } from "./view";
+import { readAllUsage } from "./usage";
 import { createAccount, runSetup, scannerName, setupDone } from "./setup";
 import { applyBundle, buildBundle } from "./transfer";
 import { cleanupEnvironment } from "./environment";
@@ -60,7 +61,7 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   scanners list | scanners remove <id> | scanners enable|disable <id> | scanners scan <id>   (scan: dry run)
                                                                           a scanner watches one place for tickets and hands each match to a worker agent
   run                                                                     the daemon: scan, claim, dispatch, watch
-  view [--once] [--width N]                                              live table of agents, what they are doing, and progress
+  view [--once] [--width N] [--no-usage]                                  live table of agents, what they are doing, and each account's plan usage
   work <taskId>                                                           one worker (the daemon runs this)
   tasks list | tasks release <taskId> | tasks logs <taskId>
   cli status | cli update                                                 the Claude Code and Codex binaries
@@ -171,7 +172,7 @@ async function main(argv: string[]) {
     }
 
     case "run": return daemon();
-    case "view": { if (a.once) { console.log(renderView(Date.now(), Number(str(a, "width") ?? 0) || undefined)); return; } return viewLoop(); }
+    case "view": { if (a.once) { const usage = a["no-usage"] ? undefined : await readAllUsage(s.accounts); console.log(renderView(Date.now(), Number(str(a, "width") ?? 0) || undefined, usage)); return; } return viewLoop(); }
     case "accounts unblock": { const acc = s.accounts.find((x) => x.id === rest[0]) ?? fail("no such account"); acc!.blockedUntil = undefined; acc!.blockedWhy = undefined; saveState(s); console.log(`${acc!.name} unblocked.`); return; }
     case "work": { const id = sub ?? fail("task id required"); await workTask(id!); return; }
 

@@ -216,3 +216,17 @@ test('a saved secret is shown back masked, never in full', async () => {
   assert.equal(masked('short'), '••••');
   assert.ok(!masked('pk_12345678_ABCDEFGHIJKL').includes('12345678_ABCD'));
 });
+
+test('an account row shows 5-hour, weekly and per-model meters as short bars coloured by how full they are', async () => {
+  const { usageBars, usageBarText } = await import('../src/shared/headless.ts');
+  const bars = usageBars([
+    { id: 'five_hour', label: '5-hour', percent: 24, resetsAt: 5 },
+    { id: 'seven_day', label: 'Weekly', percent: 83 },
+    { id: 'model:Fable', label: 'Weekly · Fable', percent: 97, model: 'Fable' },
+    { id: 'model:Opus 4', label: 'Weekly · Opus 4', percent: 10, model: 'Opus 4', locked: true },
+  ]);
+  assert.deepEqual(bars.map((b) => [b.short, b.percent, b.tone]), [['5h', 24, 'ok'], ['wk', 83, 'high'], ['fable', 97, 'full'], ['opus', 10, 'full']]);
+  assert.equal(usageBarText(bars[0]), '5h ▰▰▱▱▱▱▱▱▱▱  24');
+  assert.equal(usageBarText(bars[2], 4, (s, tone) => `<${tone}>${s}`), 'fable <full>▰▰▰▰  97');
+  assert.deepEqual(usageBars([{ id: 'primary', label: '5-hour', percent: 0 }, { id: 'secondary', label: 'Weekly', percent: 0 }]).map((b) => b.short), ['5h', 'wk'], 'Codex names its windows the same way');
+});

@@ -122,7 +122,7 @@ Nothing asks for permission: Claude Code runs with permissions bypassed and Code
 consort-cli view
 ```
 
-A live table: ticket, title, stage, status, the account in use, how long it has run, and what the worker is doing right now. Finished tasks stay for two hours, then drop off. Below it, the accounts (and any blocks) and the scanners with their next scan. `q` quits.
+A live table: ticket, title, stage, status, the account in use, how long it has run, and what the worker is doing right now. Finished tasks stay for two hours, then drop off. Below it, the accounts, each with its plan meters as bars (5-hour, weekly, and one per model family, like the desktop's Usage panel; amber from 80%, red from 95%), when the 5-hour window resets, and any block; then the scanners with their next scan. Usage is read once a minute by asking each login's own CLI, with no model call; API-key accounts have no meters. `--once` prints one frame (`--no-usage` skips the read). `q` quits.
 
 ## Limits of this cut
 

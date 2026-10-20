@@ -359,3 +359,22 @@ Before any feature work, work out what it takes to run this repository locally a
 5. Report in a few lines: the services, the ports, what seeds exist, and anything the repo needs that this machine lacks (name the missing tool; do not install system packages).
 
 If the repository is a library or has no runnable app, say so in ENV.md and write up.sh/down.sh that only prepare what the tests need.`;
+
+/** the meters an account row shows: 5-hour, weekly, then one per model family, as short labels */
+export type UsageBar = { short: string; label: string; percent: number; resetsAt?: number; tone: "ok" | "high" | "full" };
+export function usageBars(windows: { id: string; label: string; percent: number; resetsAt?: number; model?: string; locked?: true }[]): UsageBar[] {
+  const tone = (p: number, locked?: true): UsageBar["tone"] => (locked || p >= 95 ? "full" : p >= 80 ? "high" : "ok");
+  const pick = (f: (w: (typeof windows)[number]) => boolean) => windows.find(f);
+  const five = pick((w) => !w.model && /^5-hour/i.test(w.label));
+  const week = pick((w) => !w.model && /^weekly$/i.test(w.label.trim()));
+  const out: UsageBar[] = [];
+  if (five) out.push({ short: "5h", label: five.label, percent: five.percent, resetsAt: five.resetsAt, tone: tone(five.percent) });
+  if (week) out.push({ short: "wk", label: week.label, percent: week.percent, resetsAt: week.resetsAt, tone: tone(week.percent) });
+  for (const w of windows.filter((w) => w.model)) out.push({ short: w.model!.toLowerCase().split(/\s+/)[0], label: w.label, percent: w.percent, resetsAt: w.resetsAt, tone: tone(w.percent, w.locked) });
+  return out;
+}
+/** "5h ▰▰▰▱▱▱▱▱▱▱ 24" — one meter as text; `paint` colours by tone */
+export const usageBarText = (b: UsageBar, width = 10, paint: (s: string, tone: UsageBar["tone"]) => string = (s) => s): string => {
+  const filled = Math.round(Math.min(100, Math.max(0, b.percent)) / 100 * width);
+  return `${b.short} ${paint("▰".repeat(filled) + "▱".repeat(width - filled), b.tone)} ${String(b.percent).padStart(3)}`;
+};

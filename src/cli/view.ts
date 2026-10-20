@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { ago, FINISHED, visibleTasks } from "../shared/headless.ts";
+import { ago, FINISHED, usageBars, usageBarText, visibleTasks } from "../shared/headless.ts";
+import type { ConnectorUsage } from "../shared/usage.ts";
+import { readAllUsage } from "./usage";
 import { resetLabel } from "../shared/seatPool.ts";
 import { loadState, LOG_DIR, type Task } from "./state";
 
@@ -25,7 +27,7 @@ const lastLogLine = (task: Task): string => {
   return (lines[lines.length - 1] ?? "").replace(/^\S+ \[[^\]]*\] /, "");
 };
 
-export function renderView(now = Date.now(), width = process.stdout.columns || 140): string {
+export function renderView(now = Date.now(), width = process.stdout.columns || 140, usage?: Map<string, ConnectorUsage>): string {
   const s = loadState();
   const tasks = visibleTasks(s.tasks, now).sort((a, b) => (FINISHED.includes(a.status) ? 1 : 0) - (FINISHED.includes(b.status) ? 1 : 0) || b.updatedAt - a.updatedAt);
   const accountName = (id?: string) => s.accounts.find((a) => a.id === id)?.name ?? "";
@@ -47,12 +49,21 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
     lines.push([cell(pad(t.ticket.id, cols.ticket), mint), cell(pad(t.ticket.title, cols.title), cream), cell(pad(t.feature.stage, cols.stage), (x) => x), cell(pad(t.status, cols.status), (x) => color(x, t.status)), cell(pad(acct, cols.account), dim), cell(pad(t.portBase ? `${t.portBase}-${t.portBase + 99}` : "", cols.ports), dim), cell(pad(age, cols.age), dim), cell(pad(activity, activityW), (x) => x)].join("  "));
   }
   lines.push("");
-  lines.push(cream(bold("Accounts")));
+  const readAt = usage ? Math.max(0, ...[...usage.values()].map((u) => u.at)) : 0;
+  lines.push(`${cream(bold("Accounts"))} ${dim(usage ? (readAt ? `· usage read ${ago(now - readAt)} ago` : "· reading usage…") : "· usage: consort-cli view reads it once a minute")}`);
   if (!s.accounts.length) lines.push(dim("  none: consort-cli accounts add --provider claude --name work"));
+  const paint = (t: string, tone: "ok" | "high" | "full") => (tone === "full" ? red(t) : tone === "high" ? amber(t) : mint(t));
   for (const a of s.accounts) {
     const blocked = a.blockedUntil && a.blockedUntil > now;
     const inUse = s.tasks.filter((t) => !FINISHED.includes(t.status) && Object.values(t.accountIds).includes(a.id)).length;
-    lines.push(`  ${pad(a.provider, 7)} ${pad(a.name, 20)} ${blocked ? amber(`blocked until ${resetLabel(a.blockedUntil, now)}${a.blockedWhy ? ` · ${a.blockedWhy.slice(0, 50)}` : ""}`) : green("available")}${inUse ? dim(`  · ${inUse} task${inUse === 1 ? "" : "s"}`) : ""}`);
+    const state = blocked ? amber(`blocked until ${resetLabel(a.blockedUntil, now)}${a.blockedWhy ? ` · ${a.blockedWhy.slice(0, 50)}` : ""}`) : green("available");
+    lines.push(`  ${pad(a.provider, 7)} ${pad(a.name, 20)} ${state}${inUse ? dim(`  · ${inUse} task${inUse === 1 ? "" : "s"}`) : ""}`);
+    const u = usage?.get(a.id);
+    if (!u) continue;
+    if (u.unavailable || !u.windows.length) { lines.push(dim(`          ${u.unavailable ?? "no meters"}`)); continue; }
+    const bars = usageBars(u.windows);
+    const soonest = bars.map((b) => b.resetsAt).filter((t): t is number => !!t).sort((x, y) => x - y)[0];
+    lines.push(`          ${bars.map((b) => usageBarText(b, 10, paint)).join("   ")}${u.blocked ? red(`   ${u.blocked}`) : ""}${soonest ? dim(`   5h resets ${resetLabel(bars.find((b) => b.short === "5h")?.resetsAt ?? soonest, now)}`) : ""}${u.plan ? dim(`   ${u.plan}`) : ""}`);
   }
   lines.push("");
   lines.push(cream(bold("Scanners")));
@@ -64,16 +75,21 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   return lines.join("\n");
 }
 
-export async function viewLoop(intervalMs = 2_000): Promise<void> {
+export async function viewLoop(intervalMs = 2_000, usageEveryMs = 60_000): Promise<void> {
   const out = process.stdout;
-  const draw = () => { out.write(`\x1b[2J\x1b[H${renderView()}\n`); };
+  let usage: Map<string, ConnectorUsage> | undefined = new Map();
+  const draw = () => { out.write(`\x1b[2J\x1b[H${renderView(Date.now(), undefined, usage)}\n`); };
+  let reading = false;
+  const readUsage = async () => { if (reading) return; reading = true; try { usage = await readAllUsage(loadState().accounts); } finally { reading = false; } draw(); };
   draw();
+  void readUsage();
   const timer = setInterval(draw, intervalMs);
+  const usageTimer = setInterval(() => void readUsage(), usageEveryMs);
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);
     process.stdin.resume();
     process.stdin.setEncoding("utf8");
-    process.stdin.on("data", (k: string) => { if (k === "q" || k === "\u0003") { clearInterval(timer); process.stdin.setRawMode(false); out.write("\n"); process.exit(0); } });
+    process.stdin.on("data", (k: string) => { if (k === "q" || k === "\u0003") { clearInterval(timer); clearInterval(usageTimer); process.stdin.setRawMode(false); out.write("\n"); process.exit(0); } });
   }
   await new Promise(() => {});
 }
