@@ -18,10 +18,9 @@ import { DEFAULT_STATUSES, loadState, LOGINS_DIR, newId, saveState, STATE_FILE, 
  * command checks for.
  */
 
+import { bad, banner, dim, head, mint, ok } from "./theme";
+
 const run = promisify(execFile);
-const ok = (s: string) => `\x1b[32m✓\x1b[0m ${s}`;
-const bad = (s: string) => `\x1b[31m✗\x1b[0m ${s}`;
-const head = (s: string) => `\n\x1b[1m${s}\x1b[0m`;
 
 import { chooseFrom, clickupListIdFrom, slackUserIdFrom } from "../shared/headless.ts";
 export { chooseFrom, clickupListIdFrom, slackUserIdFrom };
@@ -32,7 +31,7 @@ type Ask = (q: string, opts?: { secret?: boolean; default?: string }) => Promise
 function prompter(): { ask: Ask; close: () => void } {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   const ask: Ask = async (q, opts = {}) => {
-    const label = `${q}${opts.default ? ` [${opts.default}]` : ""}: `;
+    const label = `${mint("›")} ${q}${opts.default ? dim(` [${opts.default}]`) : ""}${mint(":")} `;
     if (opts.secret && process.stdin.isTTY) {
       // keystrokes are not echoed: readline writes the prompt, we swallow the input's echo
       process.stdout.write(label);
@@ -123,7 +122,7 @@ export function createAccount(s: CliState, provider: Account["provider"], name: 
 export async function runSetup(): Promise<void> {
   const { ask, close } = prompter();
   try {
-    console.log("\x1b[1mconsort-cli setup\x1b[0m\nThis gets a machine ready to pick up tickets and ship them unattended. Each step saves as it goes; rerun `consort-cli setup` any time to change something.");
+    console.log(banner("setup", [dim("Gets this machine ready to pick up tickets"), dim("and ship them unattended. Each step saves"), dim("as it goes; rerun setup any time.")]));
     const toolsFine = await checkTools();
     if (!toolsFine && !(await yes(ask, "Some tools are missing. Continue anyway?", false))) return;
 

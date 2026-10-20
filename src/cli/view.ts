@@ -12,11 +12,11 @@ import { loadState, LOG_DIR, type Task } from "./state";
  * their next scan. `q` quits.
  */
 
+import { amber, blue, bold, cream, dim, glyph, green, mint, red } from "./theme";
+
 const pad = (s: string, n: number) => (s.length > n ? `${s.slice(0, Math.max(0, n - 1))}…` : s).padEnd(n);
-const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
-const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
-const color = (s: string, c: number) => `\x1b[${c}m${s}\x1b[0m`;
-const statusColor: Record<string, number> = { working: 36, waiting: 33, monitoring: 34, ready: 32, done: 32, failed: 31, released: 90 };
+const statusColor: Record<string, (s: string) => string> = { working: mint, waiting: amber, monitoring: blue, ready: green, done: green, failed: red, released: dim };
+const color = (s: string, status: string) => (statusColor[status] ?? ((x: string) => x))(s);
 
 const lastLogLine = (task: Task): string => {
   const f = join(LOG_DIR, `${task.id}.log`);
@@ -33,7 +33,8 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   const fixed = Object.values(cols).reduce((a, b) => a + b, 0) + 7 * 2;
   const activityW = Math.max(20, width - fixed);
   const lines: string[] = [];
-  lines.push(bold(`consort-cli · ${new Date(now).toLocaleTimeString()} · ${tasks.filter((t) => !FINISHED.includes(t.status)).length} active · q to quit`));
+  const active = tasks.filter((t) => !FINISHED.includes(t.status)).length;
+  lines.push(`${glyph()} ${cream(bold("Consort"))} ${mint("consort-cli")} ${dim(`· ${new Date(now).toLocaleTimeString()} ·`)} ${mint(`${active} active`)} ${dim("· q to quit")}`);
   lines.push("");
   lines.push(dim([pad("TICKET", cols.ticket), pad("TITLE", cols.title), pad("STAGE", cols.stage), pad("STATUS", cols.status), pad("ACCOUNT", cols.account), pad("AGE", cols.age), "ACTIVITY"].join("  ")));
   if (!tasks.length) lines.push(dim("  nothing in flight; the daemon claims tickets as jobs come due"));
@@ -41,23 +42,24 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
     const acct = accountName(t.accountIds.claude ?? t.accountIds.codex);
     const activity = t.activity || t.note || lastLogLine(t) || "";
     const age = FINISHED.includes(t.status) ? `done ${ago(now - (t.finishedAt ?? t.updatedAt))}` : ago(now - t.startedAt);
-    const row = [pad(t.ticket.id, cols.ticket), pad(t.ticket.title, cols.title), pad(t.feature.stage, cols.stage), pad(t.status, cols.status), pad(acct, cols.account), pad(age, cols.age), pad(activity, activityW)].join("  ");
-    lines.push(FINISHED.includes(t.status) ? dim(row) : color(row, statusColor[t.status] ?? 0));
+    const finished = FINISHED.includes(t.status);
+    const cell = (s: string, f: (x: string) => string) => (finished ? dim(s) : f(s));
+    lines.push([cell(pad(t.ticket.id, cols.ticket), mint), cell(pad(t.ticket.title, cols.title), cream), cell(pad(t.feature.stage, cols.stage), (x) => x), cell(pad(t.status, cols.status), (x) => color(x, t.status)), cell(pad(acct, cols.account), dim), cell(pad(age, cols.age), dim), cell(pad(activity, activityW), (x) => x)].join("  "));
   }
   lines.push("");
-  lines.push(bold("Accounts"));
+  lines.push(cream(bold("Accounts")));
   if (!s.accounts.length) lines.push(dim("  none: consort-cli accounts add --provider claude --name work"));
   for (const a of s.accounts) {
     const blocked = a.blockedUntil && a.blockedUntil > now;
     const inUse = s.tasks.filter((t) => !FINISHED.includes(t.status) && Object.values(t.accountIds).includes(a.id)).length;
-    lines.push(`  ${pad(a.provider, 7)} ${pad(a.name, 20)} ${blocked ? color(`blocked until ${resetLabel(a.blockedUntil, now)}${a.blockedWhy ? ` · ${a.blockedWhy.slice(0, 50)}` : ""}`, 33) : color("available", 32)}${inUse ? dim(`  · ${inUse} task${inUse === 1 ? "" : "s"}`) : ""}`);
+    lines.push(`  ${pad(a.provider, 7)} ${pad(a.name, 20)} ${blocked ? amber(`blocked until ${resetLabel(a.blockedUntil, now)}${a.blockedWhy ? ` · ${a.blockedWhy.slice(0, 50)}` : ""}`) : green("available")}${inUse ? dim(`  · ${inUse} task${inUse === 1 ? "" : "s"}`) : ""}`);
   }
   lines.push("");
-  lines.push(bold("Jobs"));
+  lines.push(cream(bold("Jobs")));
   if (!s.jobs.length) lines.push(dim("  none: consort-cli jobs add …"));
   for (const j of s.jobs) {
     const next = j.lastScanAt ? Math.max(0, j.lastScanAt + j.everyMinutes * 60_000 - now) : 0;
-    lines.push(`  ${pad(j.name, 20)} ${pad(`${j.source}${j.listId ? `:${j.listId}` : ""}`, 22)} ${j.enabled ? `next scan in ${ago(next)}` : dim("off")}  ${dim(j.repo)}`);
+    lines.push(`  ${pad(j.name, 20)} ${pad(`${j.source}${j.listId ? `:${j.listId}` : ""}`, 22)} ${j.enabled ? mint(`next scan in ${ago(next)}`) : dim("off")}  ${dim(j.repo)}`);
   }
   return lines.join("\n");
 }

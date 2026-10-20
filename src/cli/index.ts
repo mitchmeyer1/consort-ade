@@ -11,6 +11,7 @@ import { Slack } from "./slack";
 import { sourceFor } from "./sources";
 import { renderView, viewLoop } from "./view";
 import { createAccount, runSetup, setupDone } from "./setup";
+import { banner, cream, dim, mint, ok, bad } from "./theme";
 import { FINISHED } from "../shared/headless.ts";
 import { DEFAULT_STATUSES, host, loadState, LOG_DIR, newId, saveState, type Job, type Task } from "./state";
 
@@ -40,9 +41,9 @@ const list = (a: Args, k: string): string[] => { const v = a[k]; const items = t
 const need = (a: Args, k: string): string => { const v = str(a, k); if (!v) fail(`--${k} is required`); return v!; };
 const fail = (msg: string): never => { console.error(`consort-cli: ${msg}`); process.exit(2); };
 
-const HELP = `consort-cli — Consort's ship pipeline, headless
+const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, reviewed PRs out, questions on Slack.")])}
 
-  setup                                                                   the walk-through: tools, sources, accounts, Slack, permissions
+  ${mint("setup")}                                                                   the walk-through: tools, sources, accounts, Slack, permissions
   accounts add --provider claude|codex --name <label> [--api-key <key>]   add an AI account (a CLI login unless --api-key)
   accounts list | accounts remove <id>
   slack set --bot-token xoxb-… --user <U…> [--channel <C…>]            where questions and progress go (DM by default)
@@ -71,7 +72,7 @@ async function main(argv: string[]) {
   const open = ["help", "--help", "-h", "setup", "status", "cli status", "cli update"];
   if (!open.includes(key) && !setupDone(s)) fail("not set up yet. Run `consort-cli setup` first; it checks the tools, adds your issue sources, AI accounts and Slack, and tests each one.");
   switch (key) {
-    case "help": case "--help": case "-h": console.log(HELP); return;
+    case "help": case "--help": case "-h": console.log(HELP.replace(/^(  )([a-z]+(?: [a-z-]+)?)/gm, (_m, sp, cmd) => `${sp}${mint(cmd)}`)); return;
     case "setup": await runSetup(); return;
 
     case "accounts add": {
@@ -150,7 +151,9 @@ async function main(argv: string[]) {
     case "cli update": { for (const p of ["claude", "codex"] as const) { const changed = await updateCli(p, undefined, runtimeDeps).catch((e) => { console.log(`${p}: ${e.message}`); return false; }); console.log(`${p}: ${changed ? "updated" : "unchanged"}`); } return; }
 
     case "status": {
-      console.log(`host ${host()} · ${setupDone(s) ? `set up ${new Date(s.setupCompletedAt!).toLocaleDateString()}` : "NOT SET UP: run consort-cli setup"} · ${s.accounts.length} account(s) · slack ${s.slack ? "set" : "not set"} · clickup key ${s.clickupKey ? "set" : "not set"} · ${s.jobs.filter((j) => j.enabled).length}/${s.jobs.length} job(s) on`);
+      console.log(`${cream("Consort")} ${mint("consort-cli")} ${dim("on")} ${host()}`);
+      console.log(setupDone(s) ? ok(`set up ${new Date(s.setupCompletedAt!).toLocaleDateString()}`) : bad("not set up: run consort-cli setup"));
+      console.log(`  ${s.accounts.length} account(s) · slack ${s.slack ? mint("set") : dim("not set")} · clickup key ${s.clickupKey ? mint("set") : dim("not set")} · ${s.jobs.filter((j) => j.enabled).length}/${s.jobs.length} job(s) on`);
       for (const t of s.tasks.filter((t) => !["done", "released"].includes(t.status))) console.log(`  ${t.status.padEnd(10)} ${t.ticket.id} ${t.feature.stage}${t.note ? ` · ${t.note}` : ""}${t.pid && alive(t.pid) ? ` (pid ${t.pid})` : ""}`);
       return;
     }
@@ -164,7 +167,7 @@ const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catc
 async function daemon() {
   const self = fileURLToPath(import.meta.url);
   mkdirSync(LOG_DIR, { recursive: true });
-  console.log(`consort-cli daemon on ${host()} · state ${LOG_DIR}/.. · ctrl-c to stop`);
+  console.log(banner("daemon", [dim(`on ${host()}`), dim(`logs in ${LOG_DIR}`), dim("ctrl-c to stop")]));
   const spawnWorker = (t: Task) => {
     const out = openSync(join(LOG_DIR, `${t.id}.log`), "a");
     const child = spawn(process.execPath, [self, "work", t.id], { stdio: ["ignore", out, out], env: process.env });
