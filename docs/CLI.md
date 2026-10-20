@@ -88,9 +88,22 @@ Every stage move is posted to the Slack thread and as a comment on the ticket; t
 | `cli status` / `cli update` | the Claude Code and Codex binaries |
 | `status` | one line per live task |
 
+## Accounts and usage limits
+
+Add as many accounts per provider as you have (`accounts add` once per login or key). A task sticks to one account per provider; when that account hits a usage limit the worker blocks it until the provider's reset time (or an hour when it does not say), says so in the Slack thread, and continues on the least recently used account of the same provider, starting a fresh session (the stage handlers pick up from the files on disk). With every account of a provider out, the worker waits for the first to free up. `accounts list` shows blocks; `accounts unblock <id>` clears one by hand.
+
+Nothing asks for permission: Claude Code runs with permissions bypassed and Codex with approvals off and full access on the box, so run consort-cli on a machine you dedicate to it. Both agents may search and read the web for research.
+
+## Watching it
+
+```bash
+consort-cli view
+```
+
+A live table: ticket, title, stage, status, the account in use, how long it has run, and what the worker is doing right now. Finished tasks stay for two hours, then drop off. Below it, the accounts (and any blocks) and the jobs with their next scan. `q` quits.
+
 ## Limits of this cut
 
-- One builder account per provider is used (the first added); other accounts of the same provider are not yet rotated on usage limits.
 - Model lists are the seed lists; pass `--review-models` to name others.
 - Slack is polled, not pushed, so an answer is seen within about 20 seconds.
 - A ticket released with `tasks release` keeps its claim comment on the tracker; delete it there if another box should take it.

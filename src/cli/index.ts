@@ -9,6 +9,8 @@ import { accountStatus, loginInteractive, runtimeDeps } from "./agent";
 import { newTask, workTask } from "./pipeline";
 import { Slack } from "./slack";
 import { sourceFor } from "./sources";
+import { renderView, viewLoop } from "./view";
+import { FINISHED } from "../shared/headless.ts";
 import { DEFAULT_STATUSES, host, loadState, LOG_DIR, LOGINS_DIR, newId, saveState, type Account, type Job, type Task } from "./state";
 
 /**
@@ -52,6 +54,7 @@ const HELP = `consort-cli — Consort's ship pipeline, headless
   jobs add --name <n> --source github --repo <path> --base main [--tag ai-handle] …
   jobs list | jobs remove <id> | jobs enable <id> | jobs disable <id> | jobs scan <id>   (scan: dry run)
   run                                                                     the daemon: scan, claim, dispatch, watch
+  view [--once] [--width N]                                              live table of agents, what they are doing, and progress
   work <taskId>                                                           one worker (the daemon runs this)
   tasks list | tasks release <taskId> | tasks logs <taskId>
   cli status | cli update                                                 the Claude Code and Codex binaries
@@ -79,7 +82,7 @@ async function main(argv: string[]) {
     }
     case "accounts list": {
       if (!s.accounts.length) { console.log("No accounts. Add one with: consort-cli accounts add --provider claude --name work"); return; }
-      for (const acc of s.accounts) console.log(`${acc.id}  ${acc.provider.padEnd(6)}  ${acc.name.padEnd(20)}  ${await accountStatus(acc)}`);
+      for (const acc of s.accounts) console.log(`${acc.id}  ${acc.provider.padEnd(6)}  ${acc.name.padEnd(20)}  ${await accountStatus(acc)}${acc.blockedUntil && acc.blockedUntil > Date.now() ? `  · blocked until ${new Date(acc.blockedUntil).toLocaleTimeString()}` : ""}`);
       return;
     }
     case "accounts remove": { const id = rest[0] ?? fail("account id required"); s.accounts = s.accounts.filter((x) => x.id !== id); saveState(s); console.log("Removed."); return; }
@@ -127,6 +130,8 @@ async function main(argv: string[]) {
     }
 
     case "run": return daemon();
+    case "view": { if (a.once) { console.log(renderView(Date.now(), Number(str(a, "width") ?? 0) || undefined)); return; } return viewLoop(); }
+    case "accounts unblock": { const acc = s.accounts.find((x) => x.id === rest[0]) ?? fail("no such account"); acc!.blockedUntil = undefined; acc!.blockedWhy = undefined; saveState(s); console.log(`${acc!.name} unblocked.`); return; }
     case "work": { const id = sub ?? fail("task id required"); await workTask(id!); return; }
 
     case "tasks list": { for (const t of s.tasks) console.log(`${t.id}  ${t.status.padEnd(10)}  ${t.ticket.id.padEnd(12)}  ${t.feature.stage.padEnd(14)}  ${t.branch}  ${t.note ?? ""}`); if (!s.tasks.length) console.log("No tasks."); return; }
@@ -169,6 +174,9 @@ async function daemon() {
   };
   for (;;) {
     const s = loadState();
+    // finished tasks fall out of the state file after a week; the dashboard stops showing them after two hours
+    const keep = s.tasks.filter((t) => !FINISHED.includes(t.status) || Date.now() - (t.finishedAt ?? t.updatedAt) < 7 * 24 * 3_600_000);
+    if (keep.length !== s.tasks.length) { s.tasks = keep; saveState(s); }
     // workers that should be running but are not: the daemon restarted, or the box did
     for (const t of s.tasks) if (["working", "waiting", "monitoring"].includes(t.status) && !(t.pid && alive(t.pid))) spawnWorker(t);
     for (const job of s.jobs.filter((j) => j.enabled)) {

@@ -28,6 +28,8 @@ Consort is running this feature unattended on a server. There is no user in the 
 - Where a handler tells you to ask the user for a go-ahead, confirmation, or to "present and wait", proceed instead, noting what you would have asked.
 - Never argue with a human reviewer on the PR. Apply what is clearly right; where you disagree or the request conflicts with the ticket, say so neutrally in one reply on the thread and raise it with ${"`"}[ask-user: …]${"`"}. The owner decides.
 - Never merge. Never force-push. Never amend a pushed commit.
+- Research is allowed and expected: search and read the web (WebSearch and WebFetch, or Codex's web search) for library docs, APIs, error messages and prior art whenever the repo does not answer. Cite what you relied on in the spec or the PR body.
+- Nothing will ever ask you for permission here; every tool call runs. Act with that care: no destructive git, no secrets in commits, no changes outside this worktree.
 - Keep replies short and factual: what you did, what changed, what is next. The owner reads them as Slack messages.`;
 
 /** the Grilling handler when there is no one to interview */
@@ -170,3 +172,38 @@ export const slackLines = {
   ready: (url: string) => `*Ready to merge.* Approved, no open threads, CI green: ${url}\nI will not merge; that is yours.`,
   stuck: (why: string) => `I am stuck: ${why}. Reply here with what to do, or release the ticket with \`consort-cli tasks release\`.`,
 };
+
+/**
+ * The account pool. A task sticks to one account per provider until that account hits a usage
+ * limit; then it moves to the least recently used account of the same provider that is not
+ * blocked, and its session starts over (the stage handlers are resumable from disk). Blocks
+ * expire when the provider says the window resets, or after an hour when it does not say.
+ */
+export type PoolAccount = { id: string; provider: Provider; blockedUntil?: number; lastUsedAt?: number };
+export function pickAccount<A extends PoolAccount>(accounts: A[], provider: Provider, now: number, prefer?: string, exclude: string[] = []): A | undefined {
+  const usable = accounts.filter((a) => a.provider === provider && !exclude.includes(a.id) && !(a.blockedUntil && a.blockedUntil > now));
+  const sticky = prefer ? usable.find((a) => a.id === prefer) : undefined;
+  if (sticky) return sticky;
+  return usable.sort((a, b) => (a.lastUsedAt ?? 0) - (b.lastUsedAt ?? 0))[0];
+}
+/** when the soonest blocked account of the provider frees up, for "every account is out" */
+export const earliestUnblock = (accounts: PoolAccount[], provider: Provider, now: number) => {
+  const times = accounts.filter((a) => a.provider === provider && a.blockedUntil && a.blockedUntil > now).map((a) => a.blockedUntil!);
+  return times.length ? Math.min(...times) : undefined;
+};
+export const DEFAULT_BLOCK_MS = 60 * 60_000;
+
+/** the dashboard keeps finished tasks on screen for a while, then drops them */
+export const VIEW_RETENTION_MS = 2 * 60 * 60_000;
+export const FINISHED: readonly string[] = ["ready", "done", "failed", "released"];
+export function visibleTasks<T extends { status: string; finishedAt?: number; updatedAt: number }>(tasks: T[], now: number, retention = VIEW_RETENTION_MS): T[] {
+  return tasks.filter((t) => !FINISHED.includes(t.status) || now - (t.finishedAt ?? t.updatedAt) < retention);
+}
+/** "3m", "2h 05m", "1d 4h" */
+export function ago(ms: number): string {
+  const m = Math.max(0, Math.round(ms / 60_000));
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${String(m % 60).padStart(2, "0")}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}

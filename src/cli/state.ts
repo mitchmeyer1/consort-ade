@@ -20,7 +20,11 @@ export const LOGINS_DIR = join(HOME, "logins");
 export const WORK_DIR = join(HOME, "worktrees");
 export const host = () => process.env.CONSORT_CLI_HOST ?? hostname();
 
-export type Account = { id: string; name: string; provider: Provider; auth: "login" | "key"; configDir?: string; apiKey?: string; createdAt: number };
+export type Account = {
+  id: string; name: string; provider: Provider; auth: "login" | "key"; configDir?: string; apiKey?: string; createdAt: number;
+  /** set when the account hit a usage limit; the pool skips it until then (shared/headless.ts pickAccount) */
+  blockedUntil?: number; blockedWhy?: string; lastUsedAt?: number;
+};
 export type SlackConfig = { botToken: string; userId: string; channel?: string };
 export type StatusNames = { progress: string; review: string; done: string };
 export type Job = {
@@ -58,8 +62,10 @@ export type Task = {
   /** review thread ids already answered */
   threadsSeen: string[];
   pid?: number;
-  startedAt: number; updatedAt: number; lastPrCheckAt?: number;
+  startedAt: number; updatedAt: number; lastPrCheckAt?: number; finishedAt?: number;
   note?: string;
+  /** one line on what the worker is doing right now, for `consort-cli view` */
+  activity?: string;
 };
 export type CliState = { version: 1; accounts: Account[]; slack?: SlackConfig; clickupKey?: string; branchPrefix?: string; jobs: Job[]; tasks: Task[] };
 
@@ -92,3 +98,18 @@ export function updateTask(id: string, patch: Partial<Task> | ((t: Task) => Part
 export const newId = (prefix: string) => `${prefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
 export const DEFAULT_STATUSES: StatusNames = { progress: "in progress", review: "in review", done: "complete" };
+
+/** block an account after a usage limit; `until` from the provider when it said, else an hour */
+export function blockAccount(id: string, until: number | undefined, why: string) {
+  const s = loadState();
+  const a = s.accounts.find((x) => x.id === id);
+  if (!a) return;
+  a.blockedUntil = until && until > Date.now() ? until : Date.now() + 60 * 60_000;
+  a.blockedWhy = why.slice(0, 200);
+  saveState(s);
+}
+export function touchAccount(id: string) {
+  const s = loadState();
+  const a = s.accounts.find((x) => x.id === id);
+  if (a) { a.lastUsedAt = Date.now(); saveState(s); }
+}

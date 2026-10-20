@@ -90,3 +90,38 @@ test("the owner's reply is their first message in the thread after the question,
   assert.equal(replyAfter(msgs, '100.5', 'UOWNER'), 'yes, include archived');
   assert.equal(replyAfter(msgs, '101.9', 'UOWNER'), undefined);
 });
+
+test('the account pool: sticky while usable, least recently used otherwise, blocked ones skipped, and when every one is out the earliest unblock is known', async () => {
+  const { pickAccount, earliestUnblock } = await import('../src/shared/headless.ts');
+  const now = 1_000_000;
+  const accounts = [
+    { id: 'a', provider: 'claude', lastUsedAt: 900 },
+    { id: 'b', provider: 'claude', lastUsedAt: 100 },
+    { id: 'c', provider: 'claude', blockedUntil: now + 5000, lastUsedAt: 0 },
+    { id: 'd', provider: 'codex', lastUsedAt: 0 },
+  ];
+  assert.equal(pickAccount(accounts, 'claude', now, 'a').id, 'a', 'sticky');
+  assert.equal(pickAccount(accounts, 'claude', now, 'c').id, 'b', 'sticky but blocked → least recently used');
+  assert.equal(pickAccount(accounts, 'claude', now).id, 'b');
+  assert.equal(pickAccount(accounts, 'claude', now, undefined, ['b']).id, 'a');
+  assert.equal(pickAccount(accounts, 'codex', now).id, 'd');
+  assert.equal(pickAccount([{ id: 'x', provider: 'claude', blockedUntil: now + 1 }], 'claude', now), undefined);
+  assert.equal(pickAccount(accounts, 'claude', now + 6000, 'c').id, 'c', 'a block expires');
+  assert.equal(earliestUnblock(accounts, 'claude', now), now + 5000);
+  assert.equal(earliestUnblock(accounts, 'codex', now), undefined);
+});
+
+test('the dashboard keeps finished tasks for two hours, then drops them; running ones always show', async () => {
+  const { visibleTasks, ago } = await import('../src/shared/headless.ts');
+  const h = 3_600_000, now = 10 * h;
+  const tasks = [
+    { id: 'live', status: 'working', updatedAt: now - 9 * h },
+    { id: 'fresh', status: 'ready', finishedAt: now - 1 * h, updatedAt: now - 1 * h },
+    { id: 'old', status: 'done', finishedAt: now - 3 * h, updatedAt: now - 3 * h },
+    { id: 'legacy', status: 'failed', updatedAt: now - 2.5 * h },
+  ];
+  assert.deepEqual(visibleTasks(tasks, now).map((t) => t.id), ['live', 'fresh']);
+  assert.equal(ago(5 * 60_000), '5m');
+  assert.equal(ago(2 * h + 5 * 60_000), '2h 05m');
+  assert.equal(ago(28 * h), '1d 4h');
+});

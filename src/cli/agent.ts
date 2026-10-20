@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { cliBinary, type Deps as RuntimeDeps } from "../main/cliRuntime";
 import type { Provider } from "../shared/types";
 import { HOME, type Account } from "./state";
+import { isCodexLimitText, isUsageLimitText, limitFromRateEvent, type LimitHit } from "../shared/seatPool.ts";
 
 /**
  * One agent turn, headless: Claude Code through the agent SDK, Codex through its SDK, each on the
@@ -35,7 +36,7 @@ export const binaryFor = (provider: Provider): string => {
 };
 
 export type TurnOptions = { cwd: string; prompt: string; model: string; account: Account; resume?: string; maxTurns?: number; onText?: (t: string) => void };
-export type Turn = { text: string; sessionId?: string; error?: string };
+export type Turn = { text: string; sessionId?: string; error?: string; limit?: LimitHit };
 
 const envFor = (account: Account): Record<string, string | undefined> => {
   const env: Record<string, string | undefined> = { ...process.env };
@@ -54,6 +55,8 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
   const chunks: string[] = [];
   let sessionId = o.resume;
   let error: string | undefined;
+  let limitText: string | undefined;
+  let rejected: LimitHit | undefined;
   const q = query({
     prompt: o.prompt,
     options: {
@@ -63,30 +66,47 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
       ...(o.maxTurns ? { maxTurns: o.maxTurns } : {}),
     },
   });
+  const flat = (content: unknown) => Array.isArray(content) ? content.map((b: any) => (b?.type === "text" ? b.text : "")).join("") : typeof content === "string" ? content : "";
   for await (const m of q as AsyncIterable<any>) {
     if (m.type === "system" && m.subtype === "init") sessionId = m.session_id;
-    else if (m.type === "assistant") for (const b of m.message?.content ?? []) if (b.type === "text" && b.text) { chunks.push(b.text); o.onText?.(b.text); }
-    else if (m.type === "result" && m.subtype !== "success") error = (m.errors ?? []).join("\n") || m.subtype;
+    else if (m.type === "rate_limit_event") rejected = limitFromRateEvent(m.rate_limit_info) ?? rejected;
+    else if (m.type === "assistant") {
+      const said = flat(m.message?.content);
+      if ((m.error === "rate_limit" || m.error === "billing_error") && isUsageLimitText(said)) limitText = said;
+      else for (const b of m.message?.content ?? []) if (b.type === "text" && b.text) { chunks.push(b.text); o.onText?.(b.text); }
+    } else if (m.type === "result") {
+      // a usage limit ends the turn as a "success" flagged is_error, with the limit notice as its result
+      const said = [m.result, ...(m.errors ?? [])].find(isUsageLimitText);
+      if (said) limitText = said;
+      else if (m.subtype !== "success") error = (m.errors ?? []).join("\n") || m.subtype;
+    }
   }
-  return { text: chunks.join("\n"), sessionId, error };
+  const limit = limitText || rejected ? { text: limitText ?? "usage limit", window: rejected?.window, resetsAt: rejected?.resetsAt } : undefined;
+  return { text: chunks.join("\n"), sessionId, error, limit };
 }
 
 async function runCodex(o: TurnOptions): Promise<Turn> {
   const { Codex } = await import("@openai/codex-sdk");
   const codex = new Codex({ ...(o.account.auth === "key" && o.account.apiKey ? { apiKey: o.account.apiKey } : {}), codexPathOverride: binaryFor("codex"), env: envFor(o.account) as Record<string, string> });
-  const opts = { model: o.model, workingDirectory: o.cwd, skipGitRepoCheck: true, sandboxMode: "workspace-write" as const, networkAccessEnabled: true, approvalPolicy: "never" as const };
+  // unattended: no approvals, full access on this box, and the web for research
+  const opts = { model: o.model, workingDirectory: o.cwd, skipGitRepoCheck: true, sandboxMode: "danger-full-access" as const, networkAccessEnabled: true, approvalPolicy: "never" as const, webSearchEnabled: true, webSearchMode: "live" as const };
   const thread = o.resume ? codex.resumeThread(o.resume, opts) : codex.startThread(opts);
   const texts: string[] = [];
   let sessionId = o.resume;
   let error: string | undefined;
-  const { events } = await thread.runStreamed(o.prompt);
-  for await (const ev of events as AsyncIterable<any>) {
-    if (ev.type === "thread.started") sessionId = ev.thread_id;
-    else if (ev.type === "item.completed" && ev.item?.type === "agent_message" && ev.item.text) { texts.push(ev.item.text); o.onText?.(ev.item.text); }
-    else if (ev.type === "turn.failed") error = ev.error?.message ?? "turn failed";
-    else if (ev.type === "error") error = ev.message ?? "error";
-  }
-  return { text: texts.join("\n"), sessionId, error };
+  let limit: LimitHit | undefined;
+  const fail = (message: string) => { if (isCodexLimitText(message)) limit = { text: message }; else error = message; };
+  try {
+    const { events } = await thread.runStreamed(o.prompt);
+    for await (const ev of events as AsyncIterable<any>) {
+      if (ev.type === "thread.started") sessionId = ev.thread_id;
+      else if (ev.type === "item.completed" && ev.item?.type === "agent_message" && ev.item.text) { texts.push(ev.item.text); o.onText?.(ev.item.text); }
+      else if (ev.type === "item.completed" && ev.item?.type === "error" && ev.item.message) fail(String(ev.item.message));
+      else if (ev.type === "turn.failed") fail(ev.error?.message ?? "turn failed");
+      else if (ev.type === "error") fail(ev.message ?? "error");
+    }
+  } catch (e) { fail(String((e as Error).message ?? e)); }
+  return { text: texts.join("\n"), sessionId, error, limit };
 }
 
 /** a one-line "is this account usable" check: version of the binary and whether the login dir has credentials */
