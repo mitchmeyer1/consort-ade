@@ -60,13 +60,23 @@ const yes = async (ask: Ask, q: string, dflt = true) => /^y/i.test(await ask(`${
 const keep = async (ask: Ask, what: string, value: string, dflt = true) => { console.log(`${dim("Saved")} ${what}: ${value}`); return yes(ask, "Keep it?", dflt); };
 
 /** before each credential: what it is for, where to get it, and what it lets consort-cli do */
-const why = (title: string, lines: { for: string; where: string; can: string; not?: string }) => {
+const why = (title: string, lines: { for: string; where: string; needs?: string[]; can: string; not?: string }) => {
   console.log(`\n${mint(title)}`);
   console.log(`  ${dim("Used for")}   ${lines.for}`);
   console.log(`  ${dim("Where")}      ${lines.where}`);
+  if (lines.needs) { console.log(`  ${dim("It needs")}   ${lines.needs[0]}`); for (const l of lines.needs.slice(1)) console.log(`             ${l}`); }
   console.log(`  ${dim("It can")}     ${lines.can}`);
   if (lines.not) console.log(`  ${dim("It cannot")}  ${lines.not}`);
 };
+
+/** the Slack bot token scopes consort-cli calls, one line each: what the scope is for, so a missing one is obvious */
+const SLACK_SCOPES: readonly [scope: string, reason: string][] = [
+  ["chat:write", "post progress and questions as the bot"],
+  ["im:write", "open the DM with you"],
+  ["im:history", "read your replies in the DM thread; without it the bot can post but never hear you"],
+  ["channels:history", "only if you point it at a public channel instead of the DM (groups:history for a private one)"],
+];
+const slackScopeLines = () => SLACK_SCOPES.map(([scope, reason]) => `${scope.padEnd(17)} ${reason}`);
 
 async function checkTools(): Promise<boolean> {
   console.log(head("1. Tools on this machine"));
@@ -281,7 +291,12 @@ export async function runSetup(): Promise<void> {
     console.log(head("4. Slack, where it asks you things"));
     why("Slack bot token", {
       for: "the only way consort-cli talks to you: one DM thread per ticket with progress, the few questions it cannot decide, and the ready-to-merge ping. You answer in the thread.",
-      where: "a Slack app with a bot user, yours or an existing one: api.slack.com/apps → your app → OAuth & Permissions → Bot User OAuth Token (starts xoxb-). A user token (xoxp-) or a webhook URL will not do. Scopes: chat:write, im:write, im:history (channels:history if you point it at a channel). Add a missing scope, reinstall the app, copy the token again.",
+      where: "a Slack app with a bot user, yours or an existing one: api.slack.com/apps → your app → OAuth & Permissions → Bot User OAuth Token (starts xoxb-). A user token (xoxp-) or a webhook URL will not do.",
+      needs: [
+        "these Bot Token Scopes on that same page (Scopes → Bot Token Scopes → Add an OAuth Scope):",
+        ...slackScopeLines(),
+        "After adding one, click \"reinstall your app\" in the yellow banner at the top (or Install App in the left menu → Reinstall to Workspace → Allow), then copy the token again: the old token keeps the old scopes.",
+      ],
       can: "post to the DM with you (or one channel you name) and read replies in those threads.",
       not: "read any other conversation, or post anywhere else.",
     });
@@ -296,7 +311,13 @@ export async function runSetup(): Promise<void> {
       const who = await new Slack(s.slack).test().catch(() => undefined);
       slackOk = await keep(ask, "Slack", `bot token ${masked(s.slack.botToken)} ${who ? ok(`works (bot "${who.bot}" in ${who.team})`) : bad("does not work any more")}, your member id ${s.slack.userId}`, !!who);
     }
+    let scopeTrouble = false;
     while (!slackOk) {
+      if (scopeTrouble) {
+        console.log(`  ${dim("Reminder")}   the bot token needs these scopes; add the missing one, reinstall the app, and paste the new token:`);
+        for (const l of slackScopeLines()) console.log(`             ${l}`);
+        scopeTrouble = false;
+      }
       const botToken = await ask("Bot User OAuth Token (xoxb-…)", { secret: true });
       if (!/^xoxb-/.test(botToken)) console.log(bad(`that is not a bot token (it should start with xoxb-${botToken.startsWith("xoxp-") ? "; xoxp- is a user token" : ""})`));
       const userId = slackUserIdFrom(await ask("Your Slack member id (U…)", { default: s.slack?.userId }));
@@ -313,10 +334,10 @@ export async function runSetup(): Promise<void> {
         const canRead = await (slack as any).api("conversations.replies", { channel, ts, limit: 1 }).then(() => true, (e: Error) => { console.log(bad(`${e.message} — the bot needs the im:history scope to read your replies`)); return false; });
         if (canRead) console.log(ok(`replies readable (im:history)`));
         if (!(await yes(ask, "Did the message arrive in your Slack DMs?"))) { console.log(bad("check the app is installed to this workspace and the member id is yours")); continue; }
-        if (!canRead) { console.log(bad("without im:history it can post but never hear you; add the scope and rerun")); continue; }
+        if (!canRead) { console.log(bad("without im:history it can post but never hear you; add the scope, reinstall the app, and paste the new token")); scopeTrouble = true; continue; }
         s = loadState(); s.slack = { botToken, userId, channel }; saveState(s);
         break;
-      } catch (e) { console.log(bad(`Slack said: ${(e as Error).message}`)); }
+      } catch (e) { console.log(bad(`Slack said: ${(e as Error).message}`)); scopeTrouble = /scope/i.test((e as Error).message); }
     }
 
     // ── permissions on the box ──────────────────────────────────────────────────────────────

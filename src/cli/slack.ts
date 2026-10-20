@@ -7,8 +7,9 @@ import type { SlackConfig } from "./state";
  * owner answers in the thread. No socket mode, no events API: the worker polls the thread for
  * a reply, which is enough for questions that wait minutes or hours.
  *
- * Scopes the bot token needs: chat:write, im:write, channels:history or im:history (to read
- * replies), users:read is not needed.
+ * Scopes the bot token needs: chat:write (post), im:write (open the DM), im:history (read replies in
+ * the DM; channels:history or groups:history instead when pointed at a channel). Nothing else: no
+ * users:read, files:write or incoming-webhook. The list the setup wizard shows is SLACK_SCOPES in setup.ts.
  */
 export class Slack {
   private cfg: SlackConfig;

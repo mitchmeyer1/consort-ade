@@ -35,7 +35,7 @@ consort-cli accounts add --provider codex --name work
 consort-cli accounts add --provider claude --name billing --api-key sk-ant-…
 consort-cli accounts list
 
-# 3. Slack: a bot token with chat:write, im:write and im:history, and your user id
+# 3. Slack: a bot token (xoxb-…) with chat:write, im:write and im:history (channels:history if you use --channel); reinstall the app after adding a scope. And your member id.
 consort-cli slack set --bot-token xoxb-… --user U0123ABC
 consort-cli slack test                      # posts a hello into your DM
 
