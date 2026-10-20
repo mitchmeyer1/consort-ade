@@ -11,7 +11,7 @@ import * as sharedCli from '../src/shared/cliUpdates.ts';
 const require = createRequire(import.meta.url);
 const compiled = ts.transpileModule(readFileSync(new URL('../src/main/cliRuntime.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-}).outputText;
+}).outputText.replace(/import\.meta\.url/g, '"file:///tests/cli-runtime"'); // the module is ESM in the app; this harness evaluates CommonJS
 
 /** a fresh module each time: its caches (registry checks, versions, in-flight updates) start empty */
 function load() {

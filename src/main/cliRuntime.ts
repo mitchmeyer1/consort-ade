@@ -1,5 +1,5 @@
-import { app } from "electron";
 import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
 import { chmodSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -36,9 +36,11 @@ export type Deps = {
 /** the release in use from a download, as current.json records it */
 type Current = { npmVersion: string; cliVersion?: string; binary: string; at: number };
 
-const BUNDLED: Record<Provider, { pkg: string; binary: string }> = {
-  claude: { pkg: "@anthropic-ai/claude-agent-sdk-darwin-arm64", binary: "claude" },
-  codex: { pkg: "@openai/codex-darwin-arm64", binary: "vendor/aarch64-apple-darwin/bin/codex" },
+/** the platform package each SDK installs as an optional dependency, and the binary inside it (same layout as the registry tarball) */
+const bundledPackage = (provider: Provider, platform: NodeJS.Platform, arch: NodeJS.Architecture) => {
+  const slug = `${platform}-${arch}`;
+  const binary = registryTarget(provider, platform, arch).binary.replace(/^package\//, "");
+  return provider === "claude" ? { pkg: `@anthropic-ai/claude-agent-sdk-${slug}`, binary } : { pkg: `@openai/codex-${slug}`, binary };
 };
 
 const dirOf = (deps: Deps, provider: Provider) => join(deps.root(), provider);
@@ -52,8 +54,10 @@ export function installedCli(provider: Provider, deps: Deps = defaults): Current
 }
 
 export function bundledCli(provider: Provider, deps: Deps = defaults): { npmVersion?: string; binary?: string } {
-  const dir = join(deps.appPath(), "node_modules", BUNDLED[provider].pkg);
-  const binary = join(dir, BUNDLED[provider].binary);
+  let bundled: { pkg: string; binary: string };
+  try { bundled = bundledPackage(provider, deps.platform, deps.arch); } catch { return {}; }
+  const dir = join(deps.appPath(), "node_modules", bundled.pkg);
+  const binary = join(dir, bundled.binary);
   let npmVersion: string | undefined;
   try { npmVersion = String(JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).version); } catch {}
   return { npmVersion, binary: existsSync(binary) ? binary : undefined };
@@ -175,9 +179,11 @@ export async function updateAllClis(deps: Deps = defaults): Promise<boolean> {
   return results.some(Boolean);
 }
 
+// the Electron app is the default host; consort-cli passes its own deps and never touches these
+const electronApp = () => (createRequire(import.meta.url)("electron") as typeof import("electron")).app;
 const defaults: Deps = {
-  root: () => join(app.getPath("userData"), "cli"),
-  appPath: () => app.getAppPath(),
+  root: () => join(electronApp().getPath("userData"), "cli"),
+  appPath: () => electronApp().getAppPath(),
   fetch: (...args) => fetch(...args),
   exec: (cmd, args) => run(cmd, args, { timeout: TIMEOUT, maxBuffer: 1 << 20 }).then((r) => r.stdout),
   platform: process.platform,

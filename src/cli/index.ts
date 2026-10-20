@@ -1,0 +1,205 @@
+#!/usr/bin/env node
+import { spawn } from "node:child_process";
+import { createWriteStream, existsSync, mkdirSync, openSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { claimedByOther, matchesFilters, type ReviewPick, type SourceFilters } from "../shared/headless.ts";
+import { cliStatus, updateCli } from "../main/cliRuntime";
+import { accountStatus, loginInteractive, runtimeDeps } from "./agent";
+import { newTask, workTask } from "./pipeline";
+import { Slack } from "./slack";
+import { sourceFor } from "./sources";
+import { DEFAULT_STATUSES, host, loadState, LOG_DIR, LOGINS_DIR, newId, saveState, type Account, type Job, type Task } from "./state";
+
+/**
+ * consort-cli: Consort's pipeline without the window. Add AI accounts, point it at Slack, add a
+ * job that watches a ClickUp list or a repo's issues, and `consort-cli run` keeps a daemon
+ * going: every N minutes it scans, claims what matches, and hands each ticket to a worker
+ * process that ships it (src/cli/pipeline.ts) and asks the owner over Slack when it must.
+ */
+
+type Args = { _: string[]; [k: string]: string | string[] | boolean };
+function parseArgs(argv: string[]): Args {
+  const out: Args = { _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith("--")) {
+      const [k, inline] = a.slice(2).split(/=(.*)/s);
+      const v = inline ?? (argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[++i] : "true");
+      const prev = out[k];
+      out[k] = prev === undefined ? (v === "true" ? true : v) : Array.isArray(prev) ? [...prev, v] : [String(prev), v];
+    } else out._.push(a);
+  }
+  return out;
+}
+const str = (a: Args, k: string): string | undefined => { const v = a[k]; return typeof v === "string" ? v : Array.isArray(v) ? v[v.length - 1] : undefined; };
+const list = (a: Args, k: string): string[] => { const v = a[k]; const items = typeof v === "string" ? [v] : Array.isArray(v) ? v : []; return items.flatMap((s) => s.split(",")).map((s) => s.trim()).filter(Boolean); };
+const need = (a: Args, k: string): string => { const v = str(a, k); if (!v) fail(`--${k} is required`); return v!; };
+const fail = (msg: string): never => { console.error(`consort-cli: ${msg}`); process.exit(2); };
+
+const HELP = `consort-cli — Consort's ship pipeline, headless
+
+  accounts add --provider claude|codex --name <label> [--api-key <key>]   add an AI account (a CLI login unless --api-key)
+  accounts list | accounts remove <id>
+  slack set --bot-token xoxb-… --user <U…> [--channel <C…>]            where questions and progress go (DM by default)
+  slack test
+  clickup set-key <key>
+  prefix set <branch-prefix>                                             e.g. "bot" → bot/<slug>-<id>
+  jobs add --name <n> --source clickup --list <id> --repo <path> --base main [--tag ai-handle] [--status "to do"]
+           [--name-includes <s>] [--name-excludes <s>] [--assignee <who>] [--every 15] [--max-parallel 2]
+           [--status-progress "in progress"] [--status-review "in review"] [--status-done complete]
+           [--review-models claude:claude-fable-5-1,codex:gpt-6-astra,claude:claude-opus-5]
+  jobs add --name <n> --source github --repo <path> --base main [--tag ai-handle] …
+  jobs list | jobs remove <id> | jobs enable <id> | jobs disable <id> | jobs scan <id>   (scan: dry run)
+  run                                                                     the daemon: scan, claim, dispatch, watch
+  work <taskId>                                                           one worker (the daemon runs this)
+  tasks list | tasks release <taskId> | tasks logs <taskId>
+  cli status | cli update                                                 the Claude Code and Codex binaries
+  status`;
+
+async function main(argv: string[]) {
+  const a = parseArgs(argv);
+  const [cmd, sub, ...rest] = a._;
+  const s = loadState();
+  switch (`${cmd ?? "help"} ${sub ?? ""}`.trim()) {
+    case "help": case "--help": case "-h": console.log(HELP); return;
+
+    case "accounts add": {
+      const provider = need(a, "provider") as "claude" | "codex";
+      if (provider !== "claude" && provider !== "codex") fail("--provider must be claude or codex");
+      const apiKey = str(a, "api-key");
+      const id = newId(provider);
+      const account: Account = { id, name: str(a, "name") ?? `${provider} ${s.accounts.filter((x) => x.provider === provider).length + 1}`, provider, auth: apiKey ? "key" : "login", createdAt: Date.now(), ...(apiKey ? { apiKey } : { configDir: join(LOGINS_DIR, id) }) };
+      if (account.configDir) mkdirSync(account.configDir, { recursive: true, mode: 0o700 });
+      s.accounts.push(account); saveState(s);
+      console.log(`Added ${account.name} (${id}).`);
+      if (!apiKey) { console.log(`Signing in; this runs the ${provider === "claude" ? "Claude Code" : "Codex"} login in your terminal.`); await loginInteractive(account); }
+      console.log(await accountStatus(account));
+      return;
+    }
+    case "accounts list": {
+      if (!s.accounts.length) { console.log("No accounts. Add one with: consort-cli accounts add --provider claude --name work"); return; }
+      for (const acc of s.accounts) console.log(`${acc.id}  ${acc.provider.padEnd(6)}  ${acc.name.padEnd(20)}  ${await accountStatus(acc)}`);
+      return;
+    }
+    case "accounts remove": { const id = rest[0] ?? fail("account id required"); s.accounts = s.accounts.filter((x) => x.id !== id); saveState(s); console.log("Removed."); return; }
+
+    case "slack set": { s.slack = { botToken: need(a, "bot-token"), userId: need(a, "user"), channel: str(a, "channel") }; saveState(s); console.log("Slack saved. Test it with: consort-cli slack test"); return; }
+    case "slack test": {
+      if (!s.slack) fail("no Slack configured");
+      const slack = new Slack(s.slack!);
+      const who = await slack.test();
+      const ts = await slack.post(`consort-cli on ${host()} can reach you. Replies in threads here answer its questions.`);
+      s.slack = { ...s.slack!, channel: await slack.channel() }; saveState(s);
+      console.log(`OK: bot ${who.bot} in ${who.team}; posted ${ts} to ${s.slack.channel}`);
+      return;
+    }
+    case "clickup set-key": { s.clickupKey = rest[0] ?? fail("key required"); saveState(s); console.log("ClickUp key saved."); return; }
+    case "prefix set": { s.branchPrefix = (rest[0] ?? "").replace(/^\/+|\/+$/g, ""); saveState(s); console.log(`Branch prefix: ${s.branchPrefix || "(none)"}`); return; }
+
+    case "jobs add": {
+      const source = need(a, "source") as Job["source"];
+      if (source !== "clickup" && source !== "github") fail("--source must be clickup or github");
+      const repo = resolve(need(a, "repo"));
+      if (!existsSync(join(repo, ".git"))) fail(`${repo} is not a git checkout`);
+      const filters: SourceFilters = { tags: list(a, "tag"), statuses: list(a, "status"), nameIncludes: list(a, "name-includes"), nameExcludes: list(a, "name-excludes"), assignees: list(a, "assignee") };
+      const reviewModels: ReviewPick[] = list(a, "review-models").map((m) => { const [provider, model] = m.split(":"); if ((provider !== "claude" && provider !== "codex") || !model) fail(`bad --review-models entry: ${m}`); return { provider: provider as ReviewPick["provider"], model }; });
+      const job: Job = {
+        id: newId("job"), name: str(a, "name") ?? `${source} ${s.jobs.length + 1}`, source, repo, base: str(a, "base") ?? "main",
+        listId: str(a, "list"), filters, everyMinutes: Number(str(a, "every") ?? 15) || 15, maxParallel: Number(str(a, "max-parallel") ?? 2) || 2,
+        statuses: { progress: str(a, "status-progress") ?? DEFAULT_STATUSES.progress, review: str(a, "status-review") ?? DEFAULT_STATUSES.review, done: str(a, "status-done") ?? DEFAULT_STATUSES.done },
+        ...(reviewModels.length ? { reviewModels } : {}), enabled: true, createdAt: Date.now(),
+      };
+      if (source === "clickup" && !job.listId) fail("--list <clickup list id> is required for a clickup job");
+      s.jobs.push(job); saveState(s);
+      console.log(`Added job ${job.name} (${job.id}): ${source}${job.listId ? ` list ${job.listId}` : ""} every ${job.everyMinutes} min → ${repo} on ${job.base}`);
+      return;
+    }
+    case "jobs list": { for (const j of s.jobs) console.log(`${j.id}  ${j.enabled ? "on " : "off"}  ${j.name.padEnd(20)}  ${j.source}${j.listId ? `:${j.listId}` : ""}  every ${j.everyMinutes}m  ${j.repo} (${j.base})  filters ${JSON.stringify(j.filters)}  last scan ${j.lastScanAt ? new Date(j.lastScanAt).toLocaleString() : "never"}`); if (!s.jobs.length) console.log("No jobs."); return; }
+    case "jobs remove": { s.jobs = s.jobs.filter((j) => j.id !== rest[0]); saveState(s); console.log("Removed."); return; }
+    case "jobs enable": case "jobs disable": { const j = s.jobs.find((x) => x.id === rest[0]) ?? fail("no such job"); j!.enabled = sub === "enable"; saveState(s); console.log(`${j!.name}: ${j!.enabled ? "on" : "off"}`); return; }
+    case "jobs scan": {
+      const j = s.jobs.find((x) => x.id === rest[0]) ?? fail("no such job");
+      const tickets = await sourceFor(j!, s.clickupKey).scan();
+      const taken = new Set(s.tasks.map((t) => t.ticket.id));
+      for (const t of tickets) console.log(`${matchesFilters(t, j!.filters) ? (taken.has(t.id) ? "taken " : "MATCH ") : "skip  "} ${t.id}  ${t.status ?? ""}  [${t.tags.join(", ")}]  ${t.title}`);
+      return;
+    }
+
+    case "run": return daemon();
+    case "work": { const id = sub ?? fail("task id required"); await workTask(id!); return; }
+
+    case "tasks list": { for (const t of s.tasks) console.log(`${t.id}  ${t.status.padEnd(10)}  ${t.ticket.id.padEnd(12)}  ${t.feature.stage.padEnd(14)}  ${t.branch}  ${t.note ?? ""}`); if (!s.tasks.length) console.log("No tasks."); return; }
+    case "tasks release": {
+      const t = s.tasks.find((x) => x.id === sub) ?? fail("no such task");
+      if (t!.pid) { try { process.kill(t!.pid); } catch {} }
+      t!.status = "released"; t!.pid = undefined; saveState(s); console.log(`Released ${t!.ticket.id}; the worktree ${t!.worktree} is left in place.`); return;
+    }
+    case "tasks logs": { const f = join(LOG_DIR, `${sub}.log`); console.log(existsSync(f) ? (await import("node:fs")).readFileSync(f, "utf8") : `no log at ${f}`); return; }
+
+    case "cli status": { for (const p of ["claude", "codex"] as const) { const st = await cliStatus(p, runtimeDeps); console.log(`${p}: ${st.version ?? "not found"} (${st.source})${st.note ? ` · ${st.note}` : ""}`); } return; }
+    case "cli update": { for (const p of ["claude", "codex"] as const) { const changed = await updateCli(p, undefined, runtimeDeps).catch((e) => { console.log(`${p}: ${e.message}`); return false; }); console.log(`${p}: ${changed ? "updated" : "unchanged"}`); } return; }
+
+    case "status": {
+      console.log(`host ${host()} · ${s.accounts.length} account(s) · slack ${s.slack ? "set" : "not set"} · clickup key ${s.clickupKey ? "set" : "not set"} · ${s.jobs.filter((j) => j.enabled).length}/${s.jobs.length} job(s) on`);
+      for (const t of s.tasks.filter((t) => !["done", "released"].includes(t.status))) console.log(`  ${t.status.padEnd(10)} ${t.ticket.id} ${t.feature.stage}${t.note ? ` · ${t.note}` : ""}${t.pid && alive(t.pid) ? ` (pid ${t.pid})` : ""}`);
+      return;
+    }
+    default: fail(`unknown command "${a._.join(" ")}". Try: consort-cli help`);
+  }
+}
+
+const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+/** the daemon: scan due jobs, claim matches, start a worker per task, restart workers that died */
+async function daemon() {
+  const self = fileURLToPath(import.meta.url);
+  mkdirSync(LOG_DIR, { recursive: true });
+  console.log(`consort-cli daemon on ${host()} · state ${LOG_DIR}/.. · ctrl-c to stop`);
+  const spawnWorker = (t: Task) => {
+    const out = openSync(join(LOG_DIR, `${t.id}.log`), "a");
+    const child = spawn(process.execPath, [self, "work", t.id], { stdio: ["ignore", out, out], env: process.env });
+    const s = loadState(); const task = s.tasks.find((x) => x.id === t.id); if (task) { task.pid = child.pid; saveState(s); }
+    console.log(`${new Date().toISOString()} worker ${child.pid} → ${t.ticket.id} (${t.id})`);
+    child.on("exit", (code) => {
+      const s2 = loadState(); const task2 = s2.tasks.find((x) => x.id === t.id);
+      if (task2 && task2.pid === child.pid) { task2.pid = undefined; if (code && !["ready", "done", "released"].includes(task2.status)) { task2.status = "failed"; task2.note = `worker exited ${code}; see tasks logs ${t.id}`; } saveState(s2); }
+      console.log(`${new Date().toISOString()} worker ${child.pid} for ${t.ticket.id} exited ${code}`);
+    });
+  };
+  for (;;) {
+    const s = loadState();
+    // workers that should be running but are not: the daemon restarted, or the box did
+    for (const t of s.tasks) if (["working", "waiting", "monitoring"].includes(t.status) && !(t.pid && alive(t.pid))) spawnWorker(t);
+    for (const job of s.jobs.filter((j) => j.enabled)) {
+      const due = !job.lastScanAt || Date.now() - job.lastScanAt >= job.everyMinutes * 60_000;
+      if (!due) continue;
+      try {
+        const source = sourceFor(job, s.clickupKey);
+        const tickets = await source.scan();
+        const live = loadState();
+        const running = live.tasks.filter((t) => t.jobId === job.id && ["working", "waiting", "monitoring"].includes(t.status)).length;
+        let slots = Math.max(0, job.maxParallel - running);
+        const taken = new Set(live.tasks.filter((t) => t.status !== "released").map((t) => t.ticket.id));
+        for (const t of tickets) {
+          if (slots <= 0) break;
+          if (taken.has(t.id) || !matchesFilters(t, job.filters)) continue;
+          const comments = await source.comments(t.id).catch(() => []);
+          if (claimedByOther(comments, host(), Date.now())) { console.log(`${t.id} claimed elsewhere; skipping`); continue; }
+          await source.claim(t.id, host(), Date.now());
+          const ticket = await source.ticket(t.id);
+          const fresh = loadState();
+          const task: Task = { id: newId("task"), ...newTask(job, ticket, fresh.branchPrefix, Date.now()) };
+          fresh.tasks.push(task); saveState(fresh);
+          console.log(`${new Date().toISOString()} claimed ${t.id} "${t.title}" → ${task.branch}`);
+          spawnWorker(task);
+          slots--;
+        }
+        const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); saveState(after); }
+      } catch (e) { console.error(`${new Date().toISOString()} scan ${job.name} failed: ${(e as Error).message}`); const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); saveState(after); } }
+    }
+    await new Promise((r) => setTimeout(r, 30_000));
+  }
+}
+
+main(process.argv.slice(2)).catch((e) => { console.error(`consort-cli: ${(e as Error).message}`); process.exit(1); });

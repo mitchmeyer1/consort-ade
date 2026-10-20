@@ -80,6 +80,10 @@ Entry: the **Investigate** card (GitHub issue or ClickUp task).
 
 Consort fetches the ticket, its comments and one hop of linked tasks, issues and PRs into `.consort/investigations/<id>/DOSSIER.md` in the Root checkout and opens a chat there. The brief has four fixed headings: Situation, Progress so far, Remaining to-dos, Unanswered questions. Links Consort cannot read are listed for you to paste in. Nothing is written to the tracker and no branch is cut.
 
+## Unattended, on a server (consort-cli)
+
+The same /ship pipeline with no window. A daemon scans a ClickUp list or a repo's issues on a timer, claims what matches, ships each ticket in its own worktree, asks you on Slack only what matters, runs three review rounds on rotating models, answers human reviewers on the PR, and pings you when it is ready to merge. Setup and the full flow are in [CLI.md](CLI.md).
+
 ## Multi-repo workspaces
 
 Entry: **＋** on Projects › Multi-repo workspace.

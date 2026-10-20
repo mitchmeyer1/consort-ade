@@ -13,6 +13,7 @@ Chats, terminals, diffs, commits, PR review and ticket-to-merge shipping, in one
   <a href="#what-you-get">Features</a> ·
   <a href="docs/FLOWS.md">Flows</a> ·
   <a href="docs/ship.md">/ship</a> ·
+  <a href="docs/CLI.md">consort-cli</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
@@ -48,6 +49,9 @@ An agent that edits your working copy competes with you for the same files, bran
 
 **Investigate**
 - Read a ticket before building it: the task, its comments, linked tasks, issues and PRs, and the code it touches, briefed as Situation, Progress so far, Remaining to-dos, Unanswered questions.
+
+**consort-cli: the same pipeline, unattended, on a server**
+- A daemon on Linux or macOS watches a ClickUp list or a repo's issues, claims the tickets that match your filters, and ships each one in its own worktree: spec, build, tests, PR, three review rounds on rotating models, then a watch that answers human reviewers and pings you on Slack when the PR is ready to merge. It decides the obvious itself and asks you only what matters. [docs/CLI.md](docs/CLI.md).
 
 **Everyday tools**
 - Terminals per worktree with saved quick actions. A file editor and a diff view. Commit and push with a generated message. Notes per worktree with one pinned beside the branch. A scratchpad that survives restarts.
@@ -86,6 +90,13 @@ For development:
 
 ```bash
 pnpm dev
+```
+
+The headless CLI, for a server with no window (see [docs/CLI.md](docs/CLI.md)):
+
+```bash
+pnpm install --ignore-scripts && pnpm build:cli
+node out/cli/index.js help
 ```
 
 Then, in the app: **Connect agents** (Settings › AI connectors, sign in to Claude Code or Codex, or paste an API key) and **Add projects**.

@@ -1,5 +1,6 @@
 import { SHIP_DIR, SHIP_REVIEW_ROUNDS, SHIP_STAGES, TICKET_FILE, shipFooter, shipStep, stageIndex, ticketRef, type ShipFeature, type ShipForm } from "./ship.ts";
 import type { ReviewSummary } from "./review.ts";
+import { GRILLING_HEADLESS, HEADLESS_RULES } from "./headless.ts";
 
 /**
  * The prompt for one /ship turn: the rules every stage shares, the feature's state, and the
@@ -22,6 +23,8 @@ export type ShipPromptInput = {
   checks?: string[];
   /** Consort's self-review of the PR: whether its chat is still running, and the review file's counts once written */
   review?: { running: boolean; summary?: ReviewSummary };
+  /** consort-cli: no live user; questions go out as [ask-user] markers (see shared/headless.ts) */
+  headless?: boolean;
 };
 
 const REVIEW_FILE = (f: ShipFeature) => `.consort/pr-review/pr-${f.review?.pr ?? "<n>"}.review.json`;
@@ -246,7 +249,7 @@ export function shipPrompt(i: ShipPromptInput): string {
   const body =
     handler === "pause" ? PAUSE(i)
     : handler === "closed" ? CLOSED()
-    : handler === "grilling" ? GRILLING(i)
+    : handler === "grilling" ? (i.headless ? GRILLING_HEADLESS : GRILLING(i))
     : handler === "implementing" ? IMPLEMENTING(i)
     : handler === "test" ? TEST_SESSION(i)
     : handler === "approve" ? APPROVE(i)
@@ -256,5 +259,6 @@ export function shipPrompt(i: ShipPromptInput): string {
     : REENTRY(i);
   const paused = i.feature.paused && handler !== "pause" && handler !== "closed" ? RESUME_PAUSED(i) : "";
   const redo = i.form.form === "redo" && i.form.stage ? `${REDO(i.form.stage)}\n\n` : "";
-  return `${COMMON(i)}\n\n${paused}${redo}${body}`;
+  const headless = i.headless ? `${HEADLESS_RULES}\n\n` : "";
+  return `${COMMON(i)}\n\n${headless}${paused}${redo}${body}`;
 }
