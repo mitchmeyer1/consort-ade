@@ -227,3 +227,74 @@ export function chooseFrom(answer: string, options: string[]): string[] {
   }
   return out;
 }
+
+/**
+ * Evidence: before a PR is handed to humans, the worker proves the feature works and posts the
+ * proof on the PR and the ticket, each linking to the other. The agent writes a manifest of
+ * items; a frontend feature gets screenshots of the running app over a seeded local database,
+ * anything else gets terminal or database output, rendered to images as well as kept as text.
+ */
+export const EVIDENCE_DIR = ".consort/ship/evidence";
+export const EVIDENCE_MANIFEST = `${EVIDENCE_DIR}/manifest.json`;
+export type EvidenceItem = { title: string; image?: string; text?: string; command?: string; note?: string };
+export type EvidenceManifest = { kind: "frontend" | "backend" | "mixed"; summary: string; seeded?: string; items: EvidenceItem[] };
+
+export function parseEvidenceManifest(raw: unknown): EvidenceManifest | undefined {
+  let v: unknown = raw;
+  if (typeof raw === "string") { try { v = JSON.parse(raw); } catch { return undefined; } }
+  const r = v as Partial<EvidenceManifest> | undefined;
+  if (!r || typeof r !== "object") return undefined;
+  const kind = r.kind === "frontend" || r.kind === "mixed" ? r.kind : "backend";
+  const items: EvidenceItem[] = (Array.isArray(r.items) ? r.items : []).flatMap((i: any) => {
+    if (!i || typeof i.title !== "string" || !i.title.trim()) return [];
+    const image = typeof i.image === "string" && /\.(png|jpe?g|gif|webp)$/i.test(i.image) ? i.image.replace(/^\.?\/?/, "").replace(/^\.consort\/ship\/evidence\//, "") : undefined;
+    const text = typeof i.text === "string" && i.text.trim() ? i.text.trim().slice(0, 6000) : undefined;
+    if (!image && !text) return [];
+    return [{ title: i.title.trim(), image, text, command: typeof i.command === "string" ? i.command.trim() : undefined, note: typeof i.note === "string" ? i.note.trim() : undefined }];
+  });
+  return { kind, summary: typeof r.summary === "string" ? r.summary.trim() : "", seeded: typeof r.seeded === "string" ? r.seeded.trim() : undefined, items };
+}
+
+export const EVIDENCE_PROMPT = (i: { helper: string; ticketUrl: string; prUrl: string; worktree: string }) => `## This turn: evidence the feature works, for the people who will merge it
+
+The PR has been through Consort's review rounds. Before it goes to human reviewers, produce proof a reviewer can look at without running anything, and write it to ${EVIDENCE_DIR}/ in this worktree with a manifest at ${EVIDENCE_MANIFEST}.
+
+Decide from SPEC.md and the diff whether a frontend is involved.
+- **Frontend involved:** seed a local database with data that exercises the feature (use the repo's own seed or fixture scripts, migrations and docker-compose if it has them; invent plausible data where it has none), start the app locally, and take screenshots of the feature in use: the before state where it helps, each step, the result. Take them with the helper: \`node ${i.helper} <url> [width height]\` captures a page to a PNG and prints its path; move or copy each PNG into ${EVIDENCE_DIR}/ with a descriptive file name. Stop the app and any containers when done.
+- **No frontend:** run the feature end to end and capture what proves it: the commands and their output, database queries and their rows, API calls and responses, test runs. Save each as text in the manifest, and also as a picture: pipe the text to \`node ${i.helper} --text "<title>" > ${EVIDENCE_DIR}/<name>.png\`, which renders it as a terminal image.
+- Both when both apply.
+
+Manifest schema (JSON):
+{ "kind": "frontend" | "backend" | "mixed", "summary": "<two or three sentences: what was proven and how>", "seeded": "<how the local data was seeded, or omitted>",
+  "items": [ { "title": "<what this shows>", "image": "<file name in ${EVIDENCE_DIR}>", "text": "<the output, for text items>", "command": "<the command run, if any>", "note": "<one line of context>" } ] }
+
+Rules: real output only, never mocked or hand-edited; no secrets or real customer data in any capture; six to ten items is plenty; name files for what they show. Consort posts the manifest to the PR (${i.prUrl}) and the ticket (${i.ticketUrl}), each linking to the other. Reply with one line per item when done.`;
+
+/** the evidence as a GitHub comment: images inline, text as code blocks, the ticket linked */
+export function evidenceMarkdownForPr(m: EvidenceManifest, images: Record<string, string>, ticketUrl: string, ticketRefText: string): string {
+  const out = [`## Evidence`, "", m.summary || "Proof the feature works, gathered by Consort before handing the PR to reviewers.", "", `Ticket: ${ticketRefText} (${ticketUrl})${m.seeded ? `\nLocal data: ${m.seeded}` : ""}`, ""];
+  m.items.forEach((it, n) => {
+    out.push(`### ${n + 1}. ${it.title}`);
+    if (it.note) out.push(it.note);
+    if (it.command) out.push("", "```", `$ ${it.command}`, "```");
+    if (it.image) out.push("", images[it.image] ? `![${it.title}](${images[it.image]})` : `_(image ${it.image} could not be published)_`);
+    if (it.text) out.push("", "```", it.text, "```");
+    out.push("");
+  });
+  out.push(`_Posted by consort-cli. The same evidence is on the ticket._`);
+  return out.join("\n");
+}
+
+/** the evidence as a ticket comment: plain text, image links listed, the PR linked */
+export function evidenceTextForTicket(m: EvidenceManifest, images: Record<string, string>, prUrl: string): string {
+  const out = [`Evidence the feature works (gathered by Consort before handing the PR to reviewers)`, "", m.summary, "", `PR: ${prUrl}`, m.seeded ? `Local data: ${m.seeded}` : "", ""];
+  m.items.forEach((it, n) => {
+    out.push(`${n + 1}. ${it.title}${it.note ? ` — ${it.note}` : ""}`);
+    if (it.command) out.push(`   $ ${it.command}`);
+    if (it.image) out.push(`   ${images[it.image] ?? `(image ${it.image} not published)`}`);
+    if (it.text) out.push(...it.text.split("\n").slice(0, 40).map((l) => `   ${l}`));
+    out.push("");
+  });
+  out.push(`The same evidence, with the images inline, is on the PR.`);
+  return out.filter((l, i, a) => !(l === "" && a[i - 1] === "")).join("\n");
+}

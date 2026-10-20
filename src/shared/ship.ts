@@ -70,6 +70,8 @@ export type ShipFeature = {
   sync?: ShipSync;
   /** what the tracker said about the ticket and its sub-tasks the last time Consort read it (see TicketSnapshot) */
   snapshot?: TicketSnapshot;
+  /** consort-cli: when the evidence comment was posted on the PR and the ticket */
+  evidenceAt?: number;
 };
 /** one sub-task of the ticket: a ClickUp subtask, or a task-list line in a GitHub issue body */
 export type TicketSubtask = { id: string; title: string; status?: string; done: boolean; url?: string };

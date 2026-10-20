@@ -19,6 +19,7 @@ import { DEFAULT_STATUSES, loadState, LOGINS_DIR, newId, saveState, STATE_FILE, 
  */
 
 import { bad, banner, dim, head, mint, ok } from "./theme";
+import { findBrowser } from "./evidence";
 
 const run = promisify(execFile);
 
@@ -67,6 +68,8 @@ async function checkTools(): Promise<boolean> {
     const st = await cliStatus(p, runtimeDeps);
     console.log(st.version ? ok(`${p === "claude" ? "Claude Code" : "Codex"} binary ${st.version} (${st.source})`) : bad(`${p === "claude" ? "Claude Code" : "Codex"} binary missing for ${process.platform}-${process.arch}: run \`pnpm install\` here, or \`consort-cli cli update\``));
   }
+  const browser = await findBrowser();
+  console.log(browser ? ok(`headless Chrome for evidence screenshots: ${browser}`) : `${dim("–")} no Chrome or Chromium found: evidence will be text only (install google-chrome or chromium, or set CONSORT_CHROME)`);
   mkdirSync(WORK_DIR, { recursive: true });
   console.log(ok(`state at ${STATE_FILE} (mode 600), worktrees under ${WORK_DIR}`));
   return fine;

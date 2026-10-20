@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { applyShipChange, newShipFeature, parseShipMarkers, prNumberFromUrl, shipBranch, shipFolder, shipSlug, stripShipMarkers, type ShipFeature, type ShipTicket } from "../shared/ship.ts";
 import { shipPrompt } from "../shared/shipPrompt.ts";
-import { DEFAULT_BLOCK_MS, earliestUnblock, parseAskUser, pickAccount, prReadiness, RESPOND_TO_REVIEW, reviewRotation, seedModels, slackLines, stripAskUser, suggestReviewers } from "../shared/headless.ts";
+import { DEFAULT_BLOCK_MS, earliestUnblock, EVIDENCE_PROMPT, parseAskUser, pickAccount, prReadiness, RESPOND_TO_REVIEW, reviewRotation, seedModels, slackLines, stripAskUser, suggestReviewers } from "../shared/headless.ts";
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { modelTiers } from "../shared/modelTiers.ts";
@@ -13,6 +13,7 @@ import { addWorktree } from "../main/git";
 import type { Provider } from "../shared/types";
 import { runTurn, packageRoot } from "./agent";
 import { readPr, requestReviewers, shortlogForBranch, whoAmI } from "./prmonitor";
+import { findBrowser, publishEvidence, writeScreenshotHelper } from "./evidence";
 import { Slack } from "./slack";
 import { sourceFor, type Source } from "./sources";
 import { blockAccount, loadState, touchAccount, updateTask, WORK_DIR, type Account, type Job, type Task } from "./state";
@@ -180,6 +181,23 @@ export async function workTask(taskId: string): Promise<void> {
     const fix = await turn(shipPrompt({ feature, form: { form: "pr-loop" }, worktree: task.worktree, branch: task.branch, base: `origin/${job.base}`, review: { running: false, summary }, headless: true }));
     const asked = await applyReply(fix);
     if (asked && pendingUser) { const text = await turn(pendingUser); pendingUser = undefined; await applyReply(text); }
+  }
+
+  // ── evidence: prove it works, post the proof on the PR and the ticket, cross-linked ──────
+  if (!task.feature.evidenceAt) {
+    activity("gathering evidence");
+    try {
+      const browser = await findBrowser();
+      const helper = browser ? writeScreenshotHelper(task.worktree, browser) : undefined;
+      const prompt = EVIDENCE_PROMPT({ helper: helper ?? "(no browser on this machine: skip the images, keep the text items)", ticketUrl: task.ticket.url, prUrl: prUrl!, worktree: task.worktree });
+      const text = await turn(helper ? prompt : `${prompt}\n\nThere is no Chrome on this machine, so no screenshots can be taken; text evidence only.`);
+      const asked = await applyReply(text);
+      if (asked && pendingUser) { const t2 = await turn(pendingUser); pendingUser = undefined; await applyReply(t2); }
+      const published = await publishEvidence({ worktree: task.worktree, repo: job.repo, ticket: task.ticket, pr, prUrl: prUrl!, source, clickupKey: state.clickupKey });
+      feature = { ...feature, evidenceAt: Date.now() };
+      updateTask(task.id, { feature });
+      await say(published ? `Evidence posted: ${published.items} item${published.items === 1 ? "" : "s"}, ${published.images} image${published.images === 1 ? "" : "s"}${published.hosting === "branch" ? " (on the consort-evidence branch)" : ""}, on the PR${published.ticketComment ? " and the ticket" : ""}.` : "No evidence manifest was written; moving on without it.");
+    } catch (e) { await say(`Evidence step failed: ${(e as Error).message.split("\n")[0]}. Moving on.`); }
   }
 
   // ── reviewers, then the watch ─────────────────────────────────────────────────────────────
