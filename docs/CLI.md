@@ -131,6 +131,8 @@ consort-cli view
 
 A live table (header says whether the daemon is running): ticket, title, the step it is on as `n/9` (environment, grilling, build, test, one review per model in the rotation, evidence, watch PR), the step's name, the step that comes next, status, the account in use, how long it has run, and what the worker is doing right now. Finished tasks stay for two hours, then drop off. Below it, the accounts, each with its plan meters as bars (5-hour, weekly, and one per model family, like the desktop's Usage panel; amber from 80%, red from 95%), when the 5-hour window resets, and any block; then the scanners with their next scan, and the commands that stop the daemon or one agent. Usage is read once a minute by asking each login's own CLI, with no model call; API-key accounts have no meters. `--once` prints one frame (`--no-usage` skips the read). `q` quits.
 
+STATUS shows green `RUNNING` while the worker is active, yellow `WAITING` for a Slack reply, and red `STOPPED` when the task failed or its worker is gone. Yellow `LIMIT` means the worker is waiting for account usage to reset; yellow `STALLED` means no activity for ten minutes. ACTIVITY shows the reason. A usage limit can leave a worker alive and waiting, so it does not by itself mean the task failed.
+
 ## Limits of this cut
 
 - Model lists are the seed lists; pass `--review-models` to name others.

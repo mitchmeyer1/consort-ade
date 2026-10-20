@@ -74,7 +74,7 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
     const diff = diffCell(diffOf(t, s.jobs.find((j) => j.id === t.jobId)?.base, now));
     const age = FINISHED.includes(t.status) ? `done ${ago(now - (t.finishedAt ?? t.updatedAt))}` : ago(now - t.startedAt);
     const finished = FINISHED.includes(t.status);
-    const cell = (s: string, f: (x: string) => string) => (finished ? dim(s) : f(s));
+    const cell = (s: string, f: (x: string) => string) => (finished && t.status !== "failed" ? dim(s) : f(s));
     const step = taskStep(t, s.jobs.find((j) => j.id === t.jobId)?.reviewModels?.length || 3);
     lines.push([cell(pad(t.ticket.id, cols.ticket), mint), cell(pad(t.ticket.title, cols.title), cream), cell(pad(`${step.n}/${step.total}`, cols.step), mint), cell(pad(step.name, cols.stage), (x) => x), cell(pad(step.next, cols.next), dim), cell(pad(health.label, cols.status), healthPaint), cell(pad(acct, cols.account), dim), cell(pad(t.portBase ? `${t.portBase}-${t.portBase + 99}` : "", cols.ports), dim), cell(pad(age, cols.age), dim), cell(pad(log.lines ? String(log.lines) : "", cols.log), dim), cell(pad(diff, cols.diff), (x) => (!diff || diff.startsWith("+0 −0") ? dim(x) : mint(x))), cell(pad(activity, activityW), (x) => x)].join("  "));
   }
