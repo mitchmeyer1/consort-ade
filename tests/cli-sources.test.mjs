@@ -94,3 +94,11 @@ test('a space job scans every list in the space, folderless and in folders, and 
   assert.deepEqual(tickets.map((x) => x.id), ['a', 'b']);
   assert.ok(calls.some((p) => p.startsWith('/list/L3/task')), 'every list is scanned');
 });
+
+test('a Slack call with no fields sends no body at all; Slack hangs on an empty one', async (t) => {
+  const bodies = [];
+  t.mock.method(globalThis, 'fetch', async (url, init) => { bodies.push([String(url).split('/api/')[1], init.body]); return new Response(JSON.stringify({ ok: true, user: 'bot', team: 'T', channel: { id: 'D1' } }), { status: 200 }); });
+  const slack = new Slack({ botToken: 'xoxb-1', userId: 'U1' });
+  await slack.test(); await slack.channel();
+  assert.deepEqual(bodies, [['auth.test', undefined], ['conversations.open', 'users=U1']]);
+});

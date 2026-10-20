@@ -23,7 +23,8 @@ export class Slack {
     for (const [k, v] of Object.entries(body)) if (v !== undefined) form.set(k, typeof v === "string" ? v : JSON.stringify(v));
     const res = await this.fetchImpl(`https://slack.com/api/${method}`, {
       method: "POST", headers: { Authorization: `Bearer ${this.cfg.botToken}`, "Content-Type": "application/x-www-form-urlencoded; charset=utf-8" },
-      body: form.toString(), signal: AbortSignal.timeout(20_000),
+      // a zero-length body makes Node's fetch hang against slack.com (auth.test has no fields), so none is sent then
+      ...(form.size ? { body: form.toString() } : {}), signal: AbortSignal.timeout(20_000),
     });
     const j = await res.json();
     if (!j.ok) throw new Error(`Slack ${method}: ${j.error ?? res.status}`);
