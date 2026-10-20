@@ -30,6 +30,7 @@ Consort is running this feature unattended on a server. There is no user in the 
 - Never merge. Never force-push. Never amend a pushed commit.
 - Research is allowed and expected: search and read the web (WebSearch and WebFetch, or Codex's web search) for library docs, APIs, error messages and prior art whenever the repo does not answer. Cite what you relied on in the spec or the PR body.
 - Nothing will ever ask you for permission here; every tool call runs. Act with that care: no destructive git, no secrets in commits, no changes outside this worktree.
+- Never start something in the background and end your turn to wait for it. Nothing will notify you: when your turn ends every background process is killed, and the next turn has to start it over (a full test suite, three times, is how a 10-minute task takes an hour). Run long commands in the foreground with a generous timeout and read their result in the same turn. Prefer the narrow check that proves the change (the touched packages' tests, typecheck, lint) over the whole suite; run the whole suite once, before the PR, in the foreground.
 - Keep replies short and factual: what you did, what changed, what is next. The owner reads them as Slack messages.`;
 
 /** the Grilling handler when there is no one to interview */
