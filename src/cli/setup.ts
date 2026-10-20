@@ -166,7 +166,7 @@ export async function runSetup(): Promise<void> {
         s = loadState(); s.jobs = s.jobs.filter((x) => x.id !== j.id); saveState(s); console.log(`scanner "${j.name}" removed`);
       }
     }
-    if (!s.jobs.length || await yes(ask, "Add another source?", false)) {
+    if (!s.jobs.length || await yes(ask, "Add another scanner? (another ClickUp list, folder or space, or a GitHub repo, with its own filters and repo)", false)) {
       for (;;) {
         const kind = (await ask("Source: clickup or github", { default: "clickup" })).toLowerCase();
         if (kind !== "clickup" && kind !== "github") { console.log(bad("type clickup or github")); continue; }
@@ -222,7 +222,7 @@ export async function runSetup(): Promise<void> {
         const sub = await ask("Only titles containing this text (empty for any)");
         if (sub) job.filters!.nameIncludes = [sub];
         const repo = await repoChecks(ask);
-        if (!repo) { console.log("Skipping this source."); if (await yes(ask, "Add a different source?", false)) continue; break; }
+        if (!repo) { console.log("Skipping this source."); if (await yes(ask, "Try a different scanner?", false)) continue; break; }
         job.repo = repo.repo; job.base = repo.base;
         if (kind === "github") {
           const n = await run("gh", ["issue", "list", "--state", "open", "--limit", "5", "--json", "number"], { cwd: job.repo, timeout: 30_000 }).then((r) => JSON.parse(r.stdout).length, () => -1);
@@ -232,7 +232,7 @@ export async function runSetup(): Promise<void> {
         job.maxParallel = Number(await ask("Tickets this scanner works on at once", { default: "2" })) || 2;
         s = loadState(); s.jobs.push(job as Job); saveState(s);
         console.log(ok(`scanner "${job.name}" saved`));
-        if (!(await yes(ask, "Add another source?", false))) break;
+        if (!(await yes(ask, "Add another scanner? (another ClickUp list, folder or space, or a GitHub repo, with its own filters and repo)", false))) break;
       }
     }
     s = loadState();
