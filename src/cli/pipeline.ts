@@ -104,6 +104,7 @@ export async function workTask(taskId: string): Promise<void> {
   let feature: ShipFeature = task.feature;
   let pendingUser: string | undefined;
   let idle = 0;
+  const crashes = new Map<string, number>(); // consecutive failed turns per account
   const turn = async (prompt: string, provider: Provider = builderProvider, model = builderModel, resume = true): Promise<string> => {
     for (let attempt = 0; attempt < 12; attempt++) {
       const live = loadState();
@@ -127,10 +128,26 @@ export async function workTask(taskId: string): Promise<void> {
         continue;
       }
       if (res.sessionId && resume) updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: res.sessionId } }));
-      if (res.error) throw new Error(`${provider} turn failed: ${res.error}`);
+      if (res.error) {
+        crashes.set(who.id, (crashes.get(who.id) ?? 0) + 1);
+        const n = crashes.get(who.id)!;
+        log(task, `${provider} turn failed on ${who.name} (${n}): ${res.error}`);
+        if (n >= 2) {
+          // two crashes in a row on one account: park it for a while (a limit the CLI did not name, most likely) and use another
+          blockAccount(who.id, Date.now() + 15 * 60_000, `crashed twice: ${res.error.slice(0, 80)}`);
+          updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: undefined } }));
+          crashes.delete(who.id);
+          await say(`${who.name} failed twice (${res.error.split(":")[0]}); parking it for 15 minutes and continuing on another ${provider} account.`);
+          continue;
+        }
+        activity(`turn failed, retrying in 20s: ${res.error.slice(0, 100)}`);
+        await new Promise((r) => setTimeout(r, 20_000));
+        continue;
+      }
+      crashes.delete(who.id);
       return res.text;
     }
-    throw new Error(`gave up after repeated usage limits on ${provider}`);
+    throw new Error(`gave up after repeated failures on ${provider}`);
   };
   const reviewSummaryOf = (pr: number): ReviewSummary | undefined => {
     const file = join(task.worktree, ".consort", "pr-review", `pr-${pr}.review.json`);

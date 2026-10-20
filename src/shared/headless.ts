@@ -230,6 +230,32 @@ export function taskStep(t: { status: string; envReadyAt?: number; reviewsDone: 
   return { n: Math.min(n, total), total, name, next };
 }
 
+/**
+ * The STATUS cell: is the agent moving? RUNNING when the worker is alive and the log is fresh;
+ * WAITING on a Slack answer; LIMIT when every account it can use is blocked; STALLED when it should
+ * be running but has said nothing for a while; STOPPED when it failed or its worker is gone.
+ */
+export type TaskHealth = { label: "RUNNING" | "WAITING" | "LIMIT" | "STALLED" | "STOPPED" | "READY" | "DONE" | "RELEASED"; tone: "ok" | "warn" | "bad" | "off"; note?: string };
+export function taskHealth(
+  t: { status: string; accountIds: Partial<Record<string, string>>; activity?: string; note?: string },
+  accounts: { id: string; provider: string; blockedUntil?: number }[],
+  live: { workerAlive: boolean; logAgeMs: number | undefined },
+  now: number,
+  stalledAfterMs = 10 * 60_000,
+): TaskHealth {
+  if (t.status === "ready") return { label: "READY", tone: "ok" };
+  if (t.status === "done") return { label: "DONE", tone: "off" };
+  if (t.status === "released") return { label: "RELEASED", tone: "off" };
+  if (t.status === "failed") return { label: "STOPPED", tone: "bad", note: t.note };
+  if (!live.workerAlive) return { label: "STOPPED", tone: "bad", note: t.note ?? "no worker process" };
+  if (t.status === "waiting") return { label: "WAITING", tone: "warn", note: "on your Slack reply" };
+  const providers = Object.keys(t.accountIds).filter((p) => t.accountIds[p]);
+  const limited = providers.length > 0 && providers.some((p) => { const mine = accounts.filter((a) => a.provider === p); return mine.length > 0 && mine.every((a) => a.blockedUntil && a.blockedUntil > now); });
+  if (limited || /accounts? at (its|their) limit/i.test(t.activity ?? "")) return { label: "LIMIT", tone: "warn", note: "every account at its usage limit" };
+  if (live.logAgeMs !== undefined && live.logAgeMs > stalledAfterMs) return { label: "STALLED", tone: "warn", note: `quiet for ${Math.round(live.logAgeMs / 60_000)} min` };
+  return { label: "RUNNING", tone: "ok" };
+}
+
 /** the dashboard keeps finished tasks on screen for a while, then drops them */
 export const VIEW_RETENTION_MS = 2 * 60 * 60_000;
 export const FINISHED: readonly string[] = ["ready", "done", "failed", "released"];

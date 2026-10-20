@@ -213,7 +213,7 @@ async function main(argv: string[]) {
     case "tasks retry": {
       const t = s.tasks.find((x) => x.id === rest[0] || x.ticket.id === rest[0]) ?? fail("no such task; use the task id or the ticket id");
       if (t!.pid && alive(t!.pid)) fail(`${t!.ticket.id} is still running (pid ${t!.pid})`);
-      t!.status = "working"; t!.note = undefined; t!.pid = undefined; t!.finishedAt = undefined; t!.updatedAt = Date.now(); saveState(s);
+      t!.status = "working"; t!.note = undefined; t!.pid = undefined; t!.finishedAt = undefined; t!.restarts = 0; t!.updatedAt = Date.now(); saveState(s);
       console.log(`${t!.ticket.id} queued again; the daemon starts its worker within 15 seconds${daemonPid() ? "" : " once it runs (consort-cli run -d)"}.`); return;
     }
     case "tasks logs": {
@@ -252,7 +252,16 @@ async function daemon() {
     console.log(`${new Date().toISOString()} worker ${child.pid} → ${t.ticket.id} (${t.id})`);
     child.on("exit", (code) => {
       const s2 = loadState(); const task2 = s2.tasks.find((x) => x.id === t.id);
-      if (task2 && task2.pid === child.pid) { task2.pid = undefined; if (code && !["ready", "done", "released"].includes(task2.status)) { task2.status = "failed"; task2.note = `worker exited ${code}; see tasks logs ${t.id}`; } saveState(s2); }
+      if (task2 && task2.pid === child.pid) {
+        task2.pid = undefined;
+        if (code && !["ready", "done", "released", "failed"].includes(task2.status)) {
+          task2.restarts = (task2.restarts ?? 0) + 1;
+          // a crash is restarted (the stages resume from disk); the fourth in a row fails the task
+          if (task2.restarts <= 3) { task2.note = `worker exited ${code}; restart ${task2.restarts}/3`; task2.activity = `crashed (exit ${code}); restarting`; }
+          else { task2.status = "failed"; task2.note = `worker exited ${code} four times; see tasks logs ${t.id}`; }
+        }
+        saveState(s2);
+      }
       console.log(`${new Date().toISOString()} worker ${child.pid} for ${t.ticket.id} exited ${code}`);
     });
   };

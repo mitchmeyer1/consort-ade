@@ -1,10 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { ago, diffCell, FINISHED, parseShortstat, taskStep, usageBars, usageBarText, visibleTasks } from "../shared/headless.ts";
+import { ago, diffCell, FINISHED, parseShortstat, taskHealth, taskStep, usageBars, usageBarText, visibleTasks } from "../shared/headless.ts";
 import type { ConnectorUsage } from "../shared/usage.ts";
 import { readAllUsage } from "./usage";
-import { daemonPid } from "./daemonctl";
+import { alive, daemonPid } from "./daemonctl";
 import { resetLabel } from "../shared/seatPool.ts";
 import { loadState, LOG_DIR, type Task } from "./state";
 
@@ -19,15 +19,13 @@ import { loadState, LOG_DIR, type Task } from "./state";
 import { amber, banner, blue, bold, cream, dim, green, mint, red } from "./theme";
 
 const pad = (s: string, n: number) => (s.length > n ? `${s.slice(0, Math.max(0, n - 1))}…` : s).padEnd(n);
-const statusColor: Record<string, (s: string) => string> = { working: mint, waiting: amber, monitoring: blue, ready: green, done: green, failed: red, released: dim };
-const color = (s: string, status: string) => (statusColor[status] ?? ((x: string) => x))(s);
 
 /** the worker's log: how many lines, and the last one */
-const logOf = (task: Task): { lines: number; last: string } => {
+const logOf = (task: Task, now: number): { lines: number; last: string; ageMs?: number } => {
   const f = join(LOG_DIR, `${task.id}.log`);
   if (!existsSync(f)) return { lines: 0, last: "" };
   const lines = readFileSync(f, "utf8").trimEnd().split("\n").filter(Boolean);
-  return { lines: lines.length, last: (lines[lines.length - 1] ?? "").replace(/^\S+ \[[^\]]*\] /, "") };
+  return { lines: lines.length, last: (lines[lines.length - 1] ?? "").replace(/^\S+ \[[^\]]*\] /, ""), ageMs: Math.max(0, now - statSync(f).mtimeMs) };
 };
 
 /** lines changed in the task's worktree against its base (committed and not), untracked files counted; cached a few seconds per task */
@@ -69,14 +67,16 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   if (!tasks.length) lines.push(dim("  nothing in flight; the daemon claims tickets as scanners come due"));
   for (const t of tasks) {
     const acct = accountName(t.accountIds.claude ?? t.accountIds.codex);
-    const log = logOf(t);
-    const activity = t.activity || t.note || log.last || "";
+    const log = logOf(t, now);
+    const health = taskHealth(t, s.accounts, { workerAlive: !!(t.pid && alive(t.pid)), logAgeMs: Math.min(log.ageMs ?? Infinity, now - t.updatedAt) }, now);
+    const healthPaint = (x: string) => (health.tone === "ok" ? green(x) : health.tone === "warn" ? amber(x) : health.tone === "bad" ? red(x) : dim(x));
+    const activity = (health.tone === "bad" || health.tone === "warn") && health.note ? `${health.note}${t.activity ? ` · ${t.activity}` : ""}` : t.activity || t.note || log.last || "";
     const diff = diffCell(diffOf(t, s.jobs.find((j) => j.id === t.jobId)?.base, now));
     const age = FINISHED.includes(t.status) ? `done ${ago(now - (t.finishedAt ?? t.updatedAt))}` : ago(now - t.startedAt);
     const finished = FINISHED.includes(t.status);
     const cell = (s: string, f: (x: string) => string) => (finished ? dim(s) : f(s));
     const step = taskStep(t, s.jobs.find((j) => j.id === t.jobId)?.reviewModels?.length || 3);
-    lines.push([cell(pad(t.ticket.id, cols.ticket), mint), cell(pad(t.ticket.title, cols.title), cream), cell(pad(`${step.n}/${step.total}`, cols.step), mint), cell(pad(step.name, cols.stage), (x) => x), cell(pad(step.next, cols.next), dim), cell(pad(t.status, cols.status), (x) => color(x, t.status)), cell(pad(acct, cols.account), dim), cell(pad(t.portBase ? `${t.portBase}-${t.portBase + 99}` : "", cols.ports), dim), cell(pad(age, cols.age), dim), cell(pad(log.lines ? String(log.lines) : "", cols.log), dim), cell(pad(diff, cols.diff), (x) => (!diff || diff.startsWith("+0 −0") ? dim(x) : mint(x))), cell(pad(activity, activityW), (x) => x)].join("  "));
+    lines.push([cell(pad(t.ticket.id, cols.ticket), mint), cell(pad(t.ticket.title, cols.title), cream), cell(pad(`${step.n}/${step.total}`, cols.step), mint), cell(pad(step.name, cols.stage), (x) => x), cell(pad(step.next, cols.next), dim), cell(pad(health.label, cols.status), healthPaint), cell(pad(acct, cols.account), dim), cell(pad(t.portBase ? `${t.portBase}-${t.portBase + 99}` : "", cols.ports), dim), cell(pad(age, cols.age), dim), cell(pad(log.lines ? String(log.lines) : "", cols.log), dim), cell(pad(diff, cols.diff), (x) => (!diff || diff.startsWith("+0 −0") ? dim(x) : mint(x))), cell(pad(activity, activityW), (x) => x)].join("  "));
   }
   lines.push("");
   const readAt = usage ? Math.max(0, ...[...usage.values()].map((u) => u.at)) : 0;

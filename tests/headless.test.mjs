@@ -275,3 +275,20 @@ test('the DIFF cell reads git shortstat and reads as +added −removed with a fi
   assert.equal(diffCell({ files: 0, added: 0, removed: 0 }), '+0 −0');
   assert.equal(diffCell(undefined), '');
 });
+
+test('STATUS says whether the agent is moving: running, waiting on Slack, at a limit, stalled, or stopped', async () => {
+  const { taskHealth } = await import('../src/shared/headless.ts');
+  const now = Date.UTC(2026, 9, 20, 21);
+  const accounts = [{ id: 'c1', provider: 'claude' }, { id: 'c2', provider: 'claude', blockedUntil: now + 3_600_000 }];
+  const t = (o) => ({ status: 'working', accountIds: { claude: 'c1' }, ...o });
+  assert.equal(taskHealth(t({}), accounts, { workerAlive: true, logAgeMs: 30_000 }, now).label, 'RUNNING');
+  assert.equal(taskHealth(t({ status: 'waiting' }), accounts, { workerAlive: true, logAgeMs: 0 }, now).label, 'WAITING');
+  assert.equal(taskHealth(t({}), accounts, { workerAlive: true, logAgeMs: 11 * 60_000 }, now).label, 'STALLED');
+  assert.equal(taskHealth(t({}), accounts, { workerAlive: false, logAgeMs: 0 }, now).label, 'STOPPED', 'a live status with no worker process is stopped');
+  assert.deepEqual(taskHealth(t({ status: 'failed', note: 'worker exited 1' }), accounts, { workerAlive: false, logAgeMs: 0 }, now), { label: 'STOPPED', tone: 'bad', note: 'worker exited 1' });
+  const allBlocked = accounts.map((a) => ({ ...a, blockedUntil: now + 1 }));
+  assert.equal(taskHealth(t({}), allBlocked, { workerAlive: true, logAgeMs: 0 }, now).label, 'LIMIT');
+  assert.equal(taskHealth(t({ activity: 'all claude accounts at their limit until 9:20 PM' }), accounts, { workerAlive: true, logAgeMs: 0 }, now).label, 'LIMIT');
+  assert.equal(taskHealth(t({ status: 'ready' }), accounts, { workerAlive: false, logAgeMs: 0 }, now).label, 'READY');
+  assert.equal(taskHealth(t({ status: 'monitoring' }), accounts, { workerAlive: true, logAgeMs: 5 * 60_000 }, now).label, 'RUNNING', 'watching the PR is running');
+});

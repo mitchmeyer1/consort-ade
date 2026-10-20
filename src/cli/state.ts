@@ -75,6 +75,8 @@ export type Task = {
   /** review thread ids already answered */
   threadsSeen: string[];
   pid?: number;
+  /** worker crashes so far; the daemon restarts a crashed worker a few times before failing the task */
+  restarts?: number;
   startedAt: number; updatedAt: number; lastPrCheckAt?: number; finishedAt?: number;
   note?: string;
   /** one line on what the worker is doing right now, for `consort-cli view` */

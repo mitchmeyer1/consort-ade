@@ -64,10 +64,12 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
   const ac = new AbortController();
   const stop = () => { ac.abort(); try { (q as any).close?.(); } catch {} };
   inFlight.add(stop);
+  let stderr = ""; // the CLI's own complaints: a usage limit or a crash arrives here, not in the message stream
   const q = query({
     prompt: o.prompt,
     options: {
       cwd: o.cwd, model: o.model, resume: o.resume, pathToClaudeCodeExecutable: binaryFor("claude"), abortController: ac,
+      stderr: (d: string) => { stderr = (stderr + d).slice(-4000); },
       env: envFor(o.account, o.env), settingSources: ["user", "project", "local"],
       permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true,
       ...(o.maxTurns ? { maxTurns: o.maxTurns } : {}),
@@ -89,6 +91,12 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
       else if (m.subtype !== "success") error = (m.errors ?? []).join("\n") || m.subtype;
     }
   }
+  } catch (e) {
+    // the process died: with a limit notice on stderr that is a limit (failover), otherwise a crash the caller may retry
+    const said = stderr.trim();
+    const looksLikeLimit: boolean = isUsageLimitText(said as unknown) || /usage limit|rate.?limit|\b429\b|overloaded/i.test(said);
+    if (looksLikeLimit) limitText = said.split("\n").find((l) => /limit|429|overloaded/i.test(l)) ?? said.slice(0, 200);
+    else error = `${(e as Error).message}${said ? `: ${said.split("\n").filter(Boolean).slice(-3).join(" | ").slice(0, 300)}` : ""}`;
   } finally { inFlight.delete(stop); }
   const limit = limitText || rejected ? { text: limitText ?? "usage limit", window: rejected?.window, resetsAt: rejected?.resetsAt } : undefined;
   return { text: chunks.join("\n"), sessionId, error, limit };
