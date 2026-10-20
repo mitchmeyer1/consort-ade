@@ -46,6 +46,10 @@ export const envFor = (account: Account, extra: Record<string, string> = {}): Re
   return env;
 };
 
+/** the turn in flight, so a stop signal can end the agent process instead of orphaning it */
+const inFlight = new Set<() => void>();
+export const stopAgents = () => { for (const stop of inFlight) { try { stop(); } catch {} } inFlight.clear(); };
+
 export async function runTurn(o: TurnOptions): Promise<Turn> {
   return o.account.provider === "claude" ? runClaude(o) : runCodex(o);
 }
@@ -57,16 +61,20 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
   let error: string | undefined;
   let limitText: string | undefined;
   let rejected: LimitHit | undefined;
+  const ac = new AbortController();
+  const stop = () => { ac.abort(); try { (q as any).close?.(); } catch {} };
+  inFlight.add(stop);
   const q = query({
     prompt: o.prompt,
     options: {
-      cwd: o.cwd, model: o.model, resume: o.resume, pathToClaudeCodeExecutable: binaryFor("claude"),
+      cwd: o.cwd, model: o.model, resume: o.resume, pathToClaudeCodeExecutable: binaryFor("claude"), abortController: ac,
       env: envFor(o.account, o.env), settingSources: ["user", "project", "local"],
       permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true,
       ...(o.maxTurns ? { maxTurns: o.maxTurns } : {}),
     },
   });
   const flat = (content: unknown) => Array.isArray(content) ? content.map((b: any) => (b?.type === "text" ? b.text : "")).join("") : typeof content === "string" ? content : "";
+  try {
   for await (const m of q as AsyncIterable<any>) {
     if (m.type === "system" && m.subtype === "init") sessionId = m.session_id;
     else if (m.type === "rate_limit_event") rejected = limitFromRateEvent(m.rate_limit_info) ?? rejected;
@@ -81,6 +89,7 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
       else if (m.subtype !== "success") error = (m.errors ?? []).join("\n") || m.subtype;
     }
   }
+  } finally { inFlight.delete(stop); }
   const limit = limitText || rejected ? { text: limitText ?? "usage limit", window: rejected?.window, resetsAt: rejected?.resetsAt } : undefined;
   return { text: chunks.join("\n"), sessionId, error, limit };
 }

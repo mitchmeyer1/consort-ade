@@ -5,7 +5,7 @@ import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { claimedByOther, claimHeld, claimOf, matchesFilters, type ReviewPick, type SourceFilters } from "../shared/headless.ts";
 import { cliStatus, updateCli } from "../main/cliRuntime";
-import { accountStatus, loginInteractive, runtimeDeps } from "./agent";
+import { accountStatus, loginInteractive, runtimeDeps, stopAgents } from "./agent";
 import { newTask, workTask } from "./pipeline";
 import { Slack } from "./slack";
 import { sourceFor } from "./sources";
@@ -17,7 +17,7 @@ import { cleanupEnvironment } from "./environment";
 import { alive, DAEMON_LOG, daemonPid, recordDaemon, startDetached, stopDaemon } from "./daemonctl";
 import { banner, cream, dim, mint, ok, bad } from "./theme";
 import { FINISHED } from "../shared/headless.ts";
-import { DEFAULT_STATUSES, host, loadState, LOG_DIR, newId, saveState, type Job, type Task } from "./state";
+import { DEFAULT_STATUSES, host, loadState, LOG_DIR, newId, saveState, updateTask, type Job, type Task } from "./state";
 
 /**
  * consort-cli: Consort's pipeline without the window. Add AI accounts, point it at Slack, add a
@@ -195,7 +195,12 @@ async function main(argv: string[]) {
     }
     case "view": { if (a.once) { const usage = a["no-usage"] ? undefined : await readAllUsage(s.accounts); console.log(renderView(Date.now(), Number(str(a, "width") ?? 0) || undefined, usage)); return; } return viewLoop(); }
     case "accounts unblock": { const acc = s.accounts.find((x) => x.id === rest[0]) ?? fail("no such account"); acc!.blockedUntil = undefined; acc!.blockedWhy = undefined; saveState(s); console.log(`${acc!.name} unblocked.`); return; }
-    case "work": { const id = sub ?? fail("task id required"); await workTask(id!); return; }
+    case "work": {
+      const id = sub ?? fail("task id required");
+      // a stop (consort-cli stop --all, or the box shutting down) ends the agent process too, so no orphan keeps editing the worktree
+      for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(sig, () => { stopAgents(); updateTask(id!, { pid: undefined, activity: "stopped; resumes on the next run" }); process.exit(0); });
+      await workTask(id!); return;
+    }
 
     case "tasks list": { for (const t of s.tasks) console.log(`${t.id}  ${t.status.padEnd(10)}  ${t.ticket.id.padEnd(12)}  ${t.feature.stage.padEnd(14)}  ${t.branch}  ${t.note ?? ""}`); if (!s.tasks.length) console.log("No tasks."); return; }
     case "tasks release": {
