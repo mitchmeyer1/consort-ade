@@ -15,7 +15,7 @@ import { loadState, LOG_DIR, type Task } from "./state";
  * their next scan. `q` quits.
  */
 
-import { amber, blue, bold, cream, dim, glyph, green, mint, red } from "./theme";
+import { amber, banner, blue, bold, cream, dim, green, mint, red } from "./theme";
 
 const pad = (s: string, n: number) => (s.length > n ? `${s.slice(0, Math.max(0, n - 1))}…` : s).padEnd(n);
 const statusColor: Record<string, (s: string) => string> = { working: mint, waiting: amber, monitoring: blue, ready: green, done: green, failed: red, released: dim };
@@ -38,7 +38,10 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   const lines: string[] = [];
   const active = tasks.filter((t) => !FINISHED.includes(t.status)).length;
   const pid = daemonPid();
-  lines.push(`${glyph()} ${cream(bold("Consort"))} ${mint("consort-cli")} ${dim(`· ${new Date(now).toLocaleTimeString()} ·`)} ${pid ? green(`daemon running (pid ${pid})`) : red("daemon not running: consort-cli run -d")} ${dim("·")} ${mint(`${active} active`)} ${dim("· q to quit")}`);
+  lines.push(banner("view", [
+    pid ? green(`daemon running (pid ${pid})`) : red("daemon not running: consort-cli run -d"),
+    `${mint(`${active} active`)} ${dim(`· ${new Date(now).toLocaleTimeString()} · q to quit`)}`,
+  ]));
   lines.push("");
   lines.push(dim([pad("TICKET", cols.ticket), pad("TITLE", cols.title), pad("STAGE", cols.stage), pad("STATUS", cols.status), pad("ACCOUNT", cols.account), pad("PORTS", cols.ports), pad("AGE", cols.age), "ACTIVITY"].join("  ")));
   if (!tasks.length) lines.push(dim("  nothing in flight; the daemon claims tickets as scanners come due"));
