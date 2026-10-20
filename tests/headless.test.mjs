@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { claimComment, claimedByOther, claimHeld, claimOf, githubLoginOf, matchesFilters, parseAskUser, prReadiness, replyAfter, reviewRotation, stripAskUser, suggestReviewers } from '../src/shared/headless.ts';
+import { claimComment, claimedByOther, claimHeld, claimOf, githubLoginOf, matchesFilters, parseAskUser, prReadiness, replyAfter, reviewRotation, stripAskUser, suggestReviewers, taskStep } from '../src/shared/headless.ts';
 import { shipPrompt } from '../src/shared/shipPrompt.ts';
 import { newShipFeature } from '../src/shared/ship.ts';
 
@@ -246,4 +246,32 @@ test('an account row shows 5-hour, weekly and per-model meters as short bars col
   assert.equal(usageBarText(bars[0]), '5h ▰▰▱▱▱▱▱▱▱▱  24');
   assert.equal(usageBarText(bars[2], 4, (s, tone) => `<${tone}>${s}`), 'fable <full>▰▰▰▰  97');
   assert.deepEqual(usageBars([{ id: 'primary', label: '5-hour', percent: 0 }, { id: 'secondary', label: 'Weekly', percent: 0 }]).map((b) => b.short), ['5h', 'wk'], 'Codex names its windows the same way');
+});
+
+test('the dashboard shows a task as step n of the road and names the step after it', () => {
+  const at = (over) => taskStep({ status: 'working', reviewsDone: 0, feature: { stage: 'Grilling' }, ...over });
+  assert.deepEqual(at({}), { n: 1, total: 9, name: 'Environment', next: 'Grilling' });
+  assert.deepEqual(at({ envReadyAt: 1 }), { n: 2, total: 9, name: 'Grilling', next: 'Build' });
+  assert.equal(at({ envReadyAt: 1, status: 'waiting' }).n, 2);
+  assert.equal(at({ envReadyAt: 1, feature: { stage: "Spec'd" } }).name, 'Build');
+  assert.equal(at({ envReadyAt: 1, feature: { stage: 'Implementing' } }).name, 'Build');
+  assert.deepEqual(at({ envReadyAt: 1, feature: { stage: 'Implementing', built: true } }), { n: 4, total: 9, name: 'Test', next: 'Review 1' });
+  assert.equal(at({ envReadyAt: 1, feature: { stage: 'Ready to Test' } }).n, 4);
+  assert.deepEqual(at({ envReadyAt: 1, feature: { stage: 'In Review' }, reviewsDone: 1 }), { n: 6, total: 9, name: 'Review 2', next: 'Review 3' });
+  assert.deepEqual(at({ envReadyAt: 1, feature: { stage: 'In Review' }, reviewsDone: 3 }), { n: 8, total: 9, name: 'Evidence', next: 'Watch PR' });
+  assert.deepEqual(at({ envReadyAt: 1, status: 'monitoring', feature: { stage: 'In Review', evidenceAt: 1 }, reviewsDone: 3 }), { n: 9, total: 9, name: 'Watch PR', next: 'Ready to merge' });
+  assert.deepEqual(at({ envReadyAt: 1, status: 'ready', feature: { stage: 'In Review', evidenceAt: 1 }, reviewsDone: 3 }), { n: 9, total: 9, name: 'Ready to merge', next: '' });
+  assert.equal(at({ envReadyAt: 1, status: 'done', feature: { stage: 'Merged' }, reviewsDone: 3 }).name, 'Done');
+  assert.equal(at({ envReadyAt: 1, status: 'failed', feature: { stage: 'Implementing', built: true }, reviewsDone: 0 }).name, 'Test');
+  assert.equal(taskStep({ status: 'working', envReadyAt: 1, reviewsDone: 0, feature: { stage: 'In Review' } }, 2).total, 8);
+});
+
+test('the DIFF cell reads git shortstat and reads as +added −removed with a file count', async () => {
+  const { parseShortstat, diffCell } = await import('../src/shared/headless.ts');
+  assert.deepEqual(parseShortstat(' 3 files changed, 40 insertions(+), 2 deletions(-)\n'), { files: 3, added: 40, removed: 2 });
+  assert.deepEqual(parseShortstat(' 1 file changed, 1 insertion(+)\n'), { files: 1, added: 1, removed: 0 });
+  assert.deepEqual(parseShortstat(''), { files: 0, added: 0, removed: 0 });
+  assert.equal(diffCell({ files: 3, added: 40, removed: 2 }), '+40 −2 ·3f');
+  assert.equal(diffCell({ files: 0, added: 0, removed: 0 }), '+0 −0');
+  assert.equal(diffCell(undefined), '');
 });

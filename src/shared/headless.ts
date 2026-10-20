@@ -203,6 +203,32 @@ export const earliestUnblock = (accounts: PoolAccount[], provider: Provider, now
 };
 export const DEFAULT_BLOCK_MS = 60 * 60_000;
 
+/**
+ * Where a task is on the worker's road, for the dashboard: "3/9" and the step after it. The
+ * steps are the ones pipeline.ts walks in order: the local environment, the /ship stages
+ * (grilling, build, test), one self-review round per model in the rotation, the evidence, then
+ * the watch on the PR. `reviews` is the rotation length (3 unless the scanner says otherwise).
+ */
+export type TaskStep = { n: number; total: number; name: string; next: string };
+export function taskStep(t: { status: string; envReadyAt?: number; reviewsDone: number; feature: { stage: string; built?: boolean; evidenceAt?: number } }, reviews = 3): TaskStep {
+  const names = ["Environment", "Grilling", "Build", "Test", ...Array.from({ length: reviews }, (_, i) => `Review ${i + 1}`), "Evidence", "Watch PR"];
+  const total = names.length;
+  const stage = t.feature.stage;
+  let n: number;
+  if (t.status === "ready" || t.status === "done") n = total + 1;
+  else if (t.status === "monitoring") n = total;
+  else if (!t.envReadyAt) n = 1;
+  else if (stage === "Grilling") n = 2;
+  else if (stage === "Spec'd" || (stage === "Implementing" && !t.feature.built)) n = 3;
+  else if (stage === "Implementing" || stage === "Ready to Test" || stage === "Revising") n = 4;
+  else if (t.reviewsDone < reviews) n = 5 + t.reviewsDone;
+  else if (!t.feature.evidenceAt) n = 5 + reviews;
+  else n = total;
+  const name = n > total ? (t.status === "done" ? "Done" : "Ready to merge") : names[n - 1];
+  const next = n > total ? "" : n === total ? "Ready to merge" : names[n];
+  return { n: Math.min(n, total), total, name, next };
+}
+
 /** the dashboard keeps finished tasks on screen for a while, then drops them */
 export const VIEW_RETENTION_MS = 2 * 60 * 60_000;
 export const FINISHED: readonly string[] = ["ready", "done", "failed", "released"];
@@ -369,6 +395,15 @@ Before any feature work, work out what it takes to run this repository locally a
 5. Report in a few lines: the services, the ports, what seeds exist, and anything the repo needs that this machine lacks (name the missing tool; do not install system packages).
 
 If the repository is a library or has no runnable app, say so in ENV.md and write up.sh/down.sh that only prepare what the tests need.`;
+
+/** "3 files changed, 40 insertions(+), 2 deletions(-)" → { files, added, removed }; nothing changed → zeros */
+export const parseShortstat = (text: string) => ({
+  files: Number(/(\d+) files? changed/.exec(text)?.[1] ?? 0),
+  added: Number(/(\d+) insertions?\(\+\)/.exec(text)?.[1] ?? 0),
+  removed: Number(/(\d+) deletions?\(-\)/.exec(text)?.[1] ?? 0),
+});
+/** the DIFF cell: "+40 −2 ·3f", "+0 −0" while nothing has changed, "" when unknown */
+export const diffCell = (d: { files: number; added: number; removed: number } | undefined) => (d ? `+${d.added} −${d.removed}${d.files ? ` ·${d.files}f` : ""}` : "");
 
 /** the meters an account row shows: 5-hour, weekly, then one per model family, as short labels */
 export type UsageBar = { short: string; label: string; percent: number; resetsAt?: number; tone: "ok" | "high" | "full" };
