@@ -18,7 +18,7 @@ import { DEFAULT_STATUSES, host, loadState, LOG_DIR, newId, saveState, type Job,
 
 /**
  * consort-cli: Consort's pipeline without the window. Add AI accounts, point it at Slack, add a
- * job that watches a ClickUp list or a repo's issues, and `consort-cli run` keeps a daemon
+ * scanner that watches a ClickUp list, folder or space or a repo's issues, and `consort-cli run` keeps a daemon
  * going: every N minutes it scans, claims what matches, and hands each ticket to a worker
  * process that ships it (src/cli/pipeline.ts) and asks the owner over Slack when it must.
  */
@@ -51,12 +51,13 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   slack test
   clickup set-key <key>
   prefix set <branch-prefix>                                             e.g. "bot" → bot/<slug>-<id>
-  jobs add --name <n> --source clickup --list|--folder|--space <id> --repo <path> --base main [--tag ai-handle] [--status "to do"]
+  scanners add --name <n> --source clickup --list|--folder|--space <id> --repo <path> --base main [--tag ai-handle] [--status "to do"]
            [--name-includes <s>] [--name-excludes <s>] [--assignee <who>] [--every 1] [--max-parallel 2]
            [--status-progress "in progress"] [--status-review "in review"] [--status-done complete]
            [--review-models claude:claude-fable-5-1,codex:gpt-6-astra,claude:claude-opus-5]
-  jobs add --name <n> --source github --repo <path> --base main [--tag ai-handle] …
-  jobs list | jobs remove <id> | jobs enable <id> | jobs disable <id> | jobs scan <id>   (scan: dry run)
+  scanners add --name <n> --source github --repo <path> --base main [--tag ai-handle] …
+  scanners list | scanners remove <id> | scanners enable|disable <id> | scanners scan <id>   (scan: dry run)
+                                                                          a scanner watches one place for tickets and hands each match to a worker agent
   run                                                                     the daemon: scan, claim, dispatch, watch
   view [--once] [--width N]                                              live table of agents, what they are doing, and progress
   work <taskId>                                                           one worker (the daemon runs this)
@@ -68,7 +69,7 @@ async function main(argv: string[]) {
   const a = parseArgs(argv);
   const [cmd, sub, ...rest] = a._;
   const s = loadState();
-  const key = `${cmd ?? "help"} ${sub ?? ""}`.trim();
+  const key = `${cmd === "jobs" ? "scanners" : cmd ?? "help"} ${sub ?? ""}`.trim(); // "jobs" was the first name for scanners
   // everything that touches tickets, accounts or agents waits for the walk-through
   const open = ["help", "--help", "-h", "setup", "status", "cli status", "cli update"];
   if (!open.includes(key) && !setupDone(s)) fail("not set up yet. Run `consort-cli setup` first; it checks the tools, adds your issue sources, AI accounts and Slack, and tests each one.");
@@ -106,7 +107,7 @@ async function main(argv: string[]) {
     case "clickup set-key": { s.clickupKey = rest[0] ?? fail("key required"); saveState(s); console.log("ClickUp key saved."); return; }
     case "prefix set": { s.branchPrefix = (rest[0] ?? "").replace(/^\/+|\/+$/g, ""); saveState(s); console.log(`Branch prefix: ${s.branchPrefix || "(none)"}`); return; }
 
-    case "jobs add": {
+    case "scanners add": {
       const source = need(a, "source") as Job["source"];
       if (source !== "clickup" && source !== "github") fail("--source must be clickup or github");
       const repo = resolve(need(a, "repo"));
@@ -119,16 +120,16 @@ async function main(argv: string[]) {
         statuses: { progress: str(a, "status-progress") ?? DEFAULT_STATUSES.progress, review: str(a, "status-review") ?? DEFAULT_STATUSES.review, done: str(a, "status-done") ?? DEFAULT_STATUSES.done },
         ...(reviewModels.length ? { reviewModels } : {}), enabled: true, createdAt: Date.now(),
       };
-      if (source === "clickup" && !job.scope) fail("--list, --folder or --space <clickup id> is required for a clickup job");
+      if (source === "clickup" && !job.scope) fail("--list, --folder or --space <clickup id> is required for a clickup scanner");
       s.jobs.push(job); saveState(s);
-      console.log(`Added job ${job.name} (${job.id}): ${source}${job.scope ? ` ${job.scope.kind} ${job.scope.id}` : ""} every ${job.everyMinutes} min → ${repo} on ${job.base}`);
+      console.log(`Added scanner ${job.name} (${job.id}): ${source}${job.scope ? ` ${job.scope.kind} ${job.scope.id}` : ""} every ${job.everyMinutes} min → ${repo} on ${job.base}`);
       return;
     }
-    case "jobs list": { for (const j of s.jobs) console.log(`${j.id}  ${j.enabled ? "on " : "off"}  ${j.name.padEnd(20)}  ${j.source}${j.scope ? ` ${j.scope.kind} ${j.scope.id}` : j.listId ? ` list ${j.listId}` : ""}  every ${j.everyMinutes}m  ${j.repo} (${j.base})  filters ${JSON.stringify(j.filters)}  last scan ${j.lastScanAt ? new Date(j.lastScanAt).toLocaleString() : "never"}`); if (!s.jobs.length) console.log("No jobs."); return; }
-    case "jobs remove": { s.jobs = s.jobs.filter((j) => j.id !== rest[0]); saveState(s); console.log("Removed."); return; }
-    case "jobs enable": case "jobs disable": { const j = s.jobs.find((x) => x.id === rest[0]) ?? fail("no such job"); j!.enabled = sub === "enable"; saveState(s); console.log(`${j!.name}: ${j!.enabled ? "on" : "off"}`); return; }
-    case "jobs scan": {
-      const j = s.jobs.find((x) => x.id === rest[0]) ?? fail("no such job");
+    case "scanners list": { for (const j of s.jobs) console.log(`${j.id}  ${j.enabled ? "on " : "off"}  ${j.name.padEnd(20)}  ${j.source}${j.scope ? ` ${j.scope.kind} ${j.scope.id}` : j.listId ? ` list ${j.listId}` : ""}  every ${j.everyMinutes}m  ${j.repo} (${j.base})  filters ${JSON.stringify(j.filters)}  last scan ${j.lastScanAt ? new Date(j.lastScanAt).toLocaleString() : "never"}`); if (!s.jobs.length) console.log("No scanners."); return; }
+    case "scanners remove": { s.jobs = s.jobs.filter((j) => j.id !== rest[0]); saveState(s); console.log("Removed."); return; }
+    case "scanners enable": case "scanners disable": { const j = s.jobs.find((x) => x.id === rest[0]) ?? fail("no such scanner"); j!.enabled = sub === "enable"; saveState(s); console.log(`${j!.name}: ${j!.enabled ? "on" : "off"}`); return; }
+    case "scanners scan": {
+      const j = s.jobs.find((x) => x.id === rest[0]) ?? fail("no such scanner");
       const tickets = await sourceFor(j!, s.clickupKey).scan();
       const taken = new Set(s.tasks.map((t) => t.ticket.id));
       for (const t of tickets) console.log(`${matchesFilters(t, j!.filters) ? (taken.has(t.id) ? "taken " : "MATCH ") : "skip  "} ${t.id}  ${t.status ?? ""}  [${t.tags.join(", ")}]  ${t.title}`);
@@ -156,7 +157,7 @@ async function main(argv: string[]) {
     case "status": {
       console.log(`${cream("Consort")} ${mint("consort-cli")} ${dim("on")} ${host()}`);
       console.log(setupDone(s) ? ok(`set up ${new Date(s.setupCompletedAt!).toLocaleDateString()}`) : bad("not set up: run consort-cli setup"));
-      console.log(`  ${s.accounts.length} account(s) · slack ${s.slack ? mint("set") : dim("not set")} · clickup key ${s.clickupKey ? mint("set") : dim("not set")} · ${s.jobs.filter((j) => j.enabled).length}/${s.jobs.length} job(s) on`);
+      console.log(`  ${s.accounts.length} account(s) · slack ${s.slack ? mint("set") : dim("not set")} · clickup key ${s.clickupKey ? mint("set") : dim("not set")} · ${s.jobs.filter((j) => j.enabled).length}/${s.jobs.length} scanner(s) on`);
       for (const t of s.tasks.filter((t) => !["done", "released"].includes(t.status))) console.log(`  ${t.status.padEnd(10)} ${t.ticket.id} ${t.feature.stage}${t.note ? ` · ${t.note}` : ""}${t.pid && alive(t.pid) ? ` (pid ${t.pid})` : ""}`);
       return;
     }
@@ -166,7 +167,7 @@ async function main(argv: string[]) {
 
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-/** the daemon: scan due jobs, claim matches, start a worker per task, restart workers that died */
+/** the daemon: run due scanners, claim matches, start a worker per task, restart workers that died */
 async function daemon() {
   const self = fileURLToPath(import.meta.url);
   mkdirSync(LOG_DIR, { recursive: true });
@@ -214,7 +215,7 @@ async function daemon() {
           slots--;
         }
         const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); saveState(after); }
-      } catch (e) { console.error(`${new Date().toISOString()} scan ${job.name} failed: ${(e as Error).message}`); const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); saveState(after); } }
+      } catch (e) { console.error(`${new Date().toISOString()} scanner ${job.name} failed: ${(e as Error).message}`); const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); saveState(after); } }
     }
     await new Promise((r) => setTimeout(r, 15_000));
   }

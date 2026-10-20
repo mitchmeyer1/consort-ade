@@ -8,7 +8,7 @@ import { loadState, LOG_DIR, type Task } from "./state";
  * `consort-cli view`: a terminal dashboard that redraws every couple of seconds from the state
  * file. One row per task: ticket, title, stage, status, the account it is on, what the worker
  * is doing right now, and how long it has run. Finished tasks stay for two hours, then drop
- * off. Below the table: the accounts (and which are blocked until when) and the jobs with
+ * off. Below the table: the accounts (and which are blocked until when) and the scanners with
  * their next scan. `q` quits.
  */
 
@@ -37,7 +37,7 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   lines.push(`${glyph()} ${cream(bold("Consort"))} ${mint("consort-cli")} ${dim(`· ${new Date(now).toLocaleTimeString()} ·`)} ${mint(`${active} active`)} ${dim("· q to quit")}`);
   lines.push("");
   lines.push(dim([pad("TICKET", cols.ticket), pad("TITLE", cols.title), pad("STAGE", cols.stage), pad("STATUS", cols.status), pad("ACCOUNT", cols.account), pad("PORTS", cols.ports), pad("AGE", cols.age), "ACTIVITY"].join("  ")));
-  if (!tasks.length) lines.push(dim("  nothing in flight; the daemon claims tickets as jobs come due"));
+  if (!tasks.length) lines.push(dim("  nothing in flight; the daemon claims tickets as scanners come due"));
   for (const t of tasks) {
     const acct = accountName(t.accountIds.claude ?? t.accountIds.codex);
     const activity = t.activity || t.note || lastLogLine(t) || "";
@@ -55,8 +55,8 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
     lines.push(`  ${pad(a.provider, 7)} ${pad(a.name, 20)} ${blocked ? amber(`blocked until ${resetLabel(a.blockedUntil, now)}${a.blockedWhy ? ` · ${a.blockedWhy.slice(0, 50)}` : ""}`) : green("available")}${inUse ? dim(`  · ${inUse} task${inUse === 1 ? "" : "s"}`) : ""}`);
   }
   lines.push("");
-  lines.push(cream(bold("Jobs")));
-  if (!s.jobs.length) lines.push(dim("  none: consort-cli jobs add …"));
+  lines.push(cream(bold("Scanners")));
+  if (!s.jobs.length) lines.push(dim("  none: consort-cli scanners add …"));
   for (const j of s.jobs) {
     const next = j.lastScanAt ? Math.max(0, j.lastScanAt + j.everyMinutes * 60_000 - now) : 0;
     lines.push(`  ${pad(j.name, 20)} ${pad(`${j.source}${j.scope ? ` ${j.scope.kind} ${j.scope.id}` : j.listId ? ` list ${j.listId}` : ""}`, 22)} ${j.enabled ? mint(`next scan in ${ago(next)}`) : dim("off")}  ${dim(j.repo)}`);

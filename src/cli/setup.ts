@@ -155,13 +155,13 @@ export async function runSetup(): Promise<void> {
     if (!toolsFine && !(await yes(ask, "Some tools are missing. Continue anyway?", false))) return;
 
     // ── sources ────────────────────────────────────────────────────────────────────────────
-    console.log(head("2. Where tickets come from"));
+    console.log(head("2. Scanners: where tickets come from"));
     let s = loadState();
     for (const j of [...s.jobs]) {
       const scope = j.scope ? `${j.scope.kind} ${j.scope.id}` : j.listId ? `list ${j.listId}` : "issues";
       const f = [j.filters.tags?.length ? `tags ${j.filters.tags.join("/")}` : "", j.filters.statuses?.length ? `status ${j.filters.statuses.join("/")}` : ""].filter(Boolean).join(", ");
-      if (!(await keep(ask, `job "${j.name}"`, `${j.source} ${scope} → ${j.repo} (${j.base})${f ? `; ${f}` : ""}; every ${j.everyMinutes} min`))) {
-        s = loadState(); s.jobs = s.jobs.filter((x) => x.id !== j.id); saveState(s); console.log(`job "${j.name}" removed`);
+      if (!(await keep(ask, `scanner "${j.name}"`, `${j.source} ${scope} → ${j.repo} (${j.base})${f ? `; ${f}` : ""}; every ${j.everyMinutes} min`))) {
+        s = loadState(); s.jobs = s.jobs.filter((x) => x.id !== j.id); saveState(s); console.log(`scanner "${j.name}" removed`);
       }
     }
     if (!s.jobs.length || await yes(ask, "Add another source?", false)) {
@@ -200,10 +200,11 @@ export async function runSetup(): Promise<void> {
             if (scope.kind === "list") job.listId = scope.id;
             console.log(ok(`${scope.kind} "${list.name}": ${list.lists.length} list${list.lists.length === 1 ? "" : "s"}${scope.kind !== "list" ? ` (${list.lists.slice(0, 6).map((l) => l.name).join(", ")}${list.lists.length > 6 ? ", …" : ""})` : ""}; statuses: ${list.statuses.join(" · ")}`));
           }
-          job.name = await ask("A name for this job", { default: list.name });
+          console.log(dim("This makes a scanner: it checks that place every minute and hands each ticket that matches to a worker agent. The name only tells scanners apart in lists and Slack."));
+          job.name = await ask("Name this scanner", { default: list.name });
           const tags = await ask("Only tasks with one of these tags (comma-separated; empty for any)", { default: "ai-handle" });
           job.filters!.tags = tags.split(",").map((t) => t.trim()).filter(Boolean);
-          console.log("Statuses the job picks tasks up from:"); list.statuses.forEach((st, i) => console.log(`  ${i + 1}. ${st}`));
+          console.log("Statuses the scanner picks tasks up from:"); list.statuses.forEach((st, i) => console.log(`  ${i + 1}. ${st}`));
           job.filters!.statuses = chooseFrom(await ask("Pick by number or name (comma-separated; empty for any)", { default: "1" }), list.statuses);
           job.statuses = {
             progress: chooseFrom(await ask("Status to set while working", { default: list.statuses.find((x) => /progress/i.test(x)) ?? DEFAULT_STATUSES.progress }), list.statuses)[0] ?? DEFAULT_STATUSES.progress,
@@ -211,7 +212,8 @@ export async function runSetup(): Promise<void> {
             done: chooseFrom(await ask("Status to set when the PR is merged", { default: list.statuses.find((x) => /complete|done|closed/i.test(x)) ?? DEFAULT_STATUSES.done }), list.statuses)[0] ?? DEFAULT_STATUSES.done,
           };
         } else {
-          job.name = await ask("A name for this job", { default: "issues" });
+          console.log(dim("This makes a scanner: it checks the repo's issues every minute and hands each one that matches to a worker agent. The name only tells scanners apart in lists and Slack."));
+          job.name = await ask("Name this scanner", { default: "issues" });
           const labels = await ask("Only issues with one of these labels (comma-separated; empty for any)", { default: "ai-handle" });
           job.filters!.tags = labels.split(",").map((t) => t.trim()).filter(Boolean);
         }
@@ -225,9 +227,9 @@ export async function runSetup(): Promise<void> {
           console.log(n >= 0 ? ok(`gh can list issues here (${n} open among the first five)`) : bad("gh cannot list issues in this repo"));
         }
         job.everyMinutes = Number(await ask("Scan every N minutes", { default: "1" })) || 1;
-        job.maxParallel = Number(await ask("Tickets worked on at once for this job", { default: "2" })) || 2;
+        job.maxParallel = Number(await ask("Tickets this scanner works on at once", { default: "2" })) || 2;
         s = loadState(); s.jobs.push(job as Job); saveState(s);
-        console.log(ok(`job "${job.name}" saved`));
+        console.log(ok(`scanner "${job.name}" saved`));
         if (!(await yes(ask, "Add another source?", false))) break;
       }
     }
@@ -332,7 +334,7 @@ export async function runSetup(): Promise<void> {
 
     s = loadState(); s.setupCompletedAt = Date.now(); saveState(s);
     console.log(head("Done"));
-    console.log(`${s.accounts.length} account(s), ${s.jobs.length} job(s), Slack ${s.slack ? "on" : "off"}.\nStart it:   consort-cli run\nWatch it:   consort-cli view\nDry run:    consort-cli jobs scan <job id>`);
+    console.log(`${s.accounts.length} account(s), ${s.jobs.length} scanner(s), Slack ${s.slack ? "on" : "off"}.\nStart it:   consort-cli run\nWatch it:   consort-cli view\nDry run:    consort-cli scanners scan <scanner id>`);
   } catch (e) {
     // ctrl-d or a closed pipe: what was saved stays saved; the flag is not set
     if (/readline was closed|closed/i.test(String((e as Error).message))) { console.log("\nSetup stopped before finishing; what you entered is saved. Run `consort-cli setup` again to continue."); return; }

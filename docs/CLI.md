@@ -21,7 +21,7 @@ State lives in `~/.consort-cli/state.json` (mode 600; it holds API keys), logins
 consort-cli setup
 ```
 
-The walk-through does everything below in order and tests each piece as it goes: the tools on the box (git, a signed-in `gh`, the Claude Code and Codex binaries), the issue sources (a ClickUp key checked against the API, the list looked up so you pick statuses from its own names, or a GitHub repo checked with `gh`), the repository path and base branch (verified on origin), the AI accounts (each CLI login into this tool's own directory, separate from Consort desktop; API keys checked against the provider), Slack (a DM is sent and you confirm it arrived), and the permissions it needs (worktree directory writable, `git push --dry-run` to origin, the ClickUp list readable). Every step saves, so you can stop and rerun. On a rerun each step shows what is saved (jobs, the ClickUp token, branch prefix, accounts, Slack; secrets masked) and `y` or Enter keeps it, `n` replaces it or, for a job or account, removes it. Until it finishes, every command except `setup`, `status`, `cli …` and `help` refuses and says so.
+The walk-through does everything below in order and tests each piece as it goes: the tools on the box (git, a signed-in `gh`, the Claude Code and Codex binaries), the issue sources (a ClickUp key checked against the API, the list looked up so you pick statuses from its own names, or a GitHub repo checked with `gh`), the repository path and base branch (verified on origin), the AI accounts (each CLI login into this tool's own directory, separate from Consort desktop; API keys checked against the provider), Slack (a DM is sent and you confirm it arrived), and the permissions it needs (worktree directory writable, `git push --dry-run` to origin, the ClickUp list readable). Every step saves, so you can stop and rerun. On a rerun each step shows what is saved (scanners, the ClickUp token, branch prefix, accounts, Slack; secrets masked) and `y` or Enter keeps it, `n` replaces it or, for a scanner or account, removes it. Until it finishes, every command except `setup`, `status`, `cli …` and `help` refuses and says so.
 
 The same things one at a time, if you prefer:
 
@@ -43,14 +43,14 @@ consort-cli slack test                      # posts a hello into your DM
 consort-cli clickup set-key pk_…
 consort-cli prefix set bot                  # branches become bot/<slug>-<ticket id>
 
-# 5. a job: what to scan, how often, which tickets qualify
-consort-cli jobs add --name roster --source clickup --space 90131945617 \   # or --list <id> / --folder <id>
+# 5. a scanner: one place to watch, how often, which tickets qualify; each match goes to a worker agent
+consort-cli scanners add --name roster --source clickup --space 90131945617 \   # or --list <id> / --folder <id>
   --repo ~/repos/roster-service --base main \
   --tag ai-handle --status "to do" --every 1
-consort-cli jobs scan <job id>              # dry run: which tickets would be taken
+consort-cli scanners scan <scanner id>      # dry run: which tickets would be taken
 ```
 
-A ClickUp job watches one list, a folder, or a whole space (every list in it, folderless and in folders); paste the sidebar URL into the wizard (`/v/li/…`, `/v/f/…`, `/v/s/…`) and it works out which. Tasks are matched by tag, status and title across all those lists, and each task's status moves within its own list's statuses. GitHub issues work the same with `--source github` and no list; filters apply to labels and the issue title. Every filter must hold: `--tag` (any of), `--status` (any of), `--name-includes` (all), `--name-excludes`, `--assignee`.
+A ClickUp scanner watches one list, a folder, or a whole space (every list in it, folderless and in folders); paste the sidebar URL into the wizard (`/v/li/…`, `/v/f/…`, `/v/s/…`) and it works out which. Tasks are matched by tag, status and title across all those lists, and each task's status moves within its own list's statuses. GitHub issues work the same with `--source github` and no list; filters apply to labels and the issue title. Every filter must hold: `--tag` (any of), `--status` (any of), `--name-includes` (all), `--name-excludes`, `--assignee`.
 
 ## Run
 
@@ -58,7 +58,7 @@ A ClickUp job watches one list, a folder, or a whole space (every list in it, fo
 consort-cli run
 ```
 
-Keep it running under `systemd`, `tmux` or `nohup`. Every `--every` minutes (1 by default) it scans each job, skips tickets another consort-cli has claimed (a `[consort-claim host=… at=…]` comment on the ticket, honoured for three days), claims up to `--max-parallel` new ones, and starts a worker process per ticket. Workers that die are restarted at the next pass; `consort-cli status` shows them, `consort-cli tasks logs <task>` shows a worker's log.
+Keep it running under `systemd`, `tmux` or `nohup`. Every `--every` minutes (1 by default) it runs each scanner, skips tickets another consort-cli has claimed (a `[consort-claim host=… at=…]` comment on the ticket, honoured for three days), claims up to `--max-parallel` new ones, and starts a worker process per ticket. Workers that die are restarted at the next pass; `consort-cli status` shows them, `consort-cli tasks logs <task>` shows a worker's log.
 
 ## What a worker does
 
@@ -92,7 +92,7 @@ Every stage move is posted to the Slack thread and as a comment on the ticket; t
 | `accounts list` / `accounts remove <id>` | |
 | `slack set --bot-token … --user … [--channel …]` / `slack test` | |
 | `clickup set-key <key>` / `prefix set <prefix>` | |
-| `jobs add …` / `jobs list` / `jobs scan <id>` / `jobs enable\|disable <id>` / `jobs remove <id>` | |
+| `scanners add …` / `scanners list` / `scanners scan <id>` / `scanners enable\|disable <id>` / `scanners remove <id>` | a scanner watches one place and hands matches to worker agents (`jobs …` still works) |
 | `run` | the daemon |
 | `tasks list` / `tasks logs <id>` / `tasks release <id>` | release stops the worker and forgets the claim locally |
 | `cli status` / `cli update` | the Claude Code and Codex binaries |
@@ -110,7 +110,7 @@ Nothing asks for permission: Claude Code runs with permissions bypassed and Code
 consort-cli view
 ```
 
-A live table: ticket, title, stage, status, the account in use, how long it has run, and what the worker is doing right now. Finished tasks stay for two hours, then drop off. Below it, the accounts (and any blocks) and the jobs with their next scan. `q` quits.
+A live table: ticket, title, stage, status, the account in use, how long it has run, and what the worker is doing right now. Finished tasks stay for two hours, then drop off. Below it, the accounts (and any blocks) and the scanners with their next scan. `q` quits.
 
 ## Limits of this cut
 
