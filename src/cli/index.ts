@@ -66,7 +66,7 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   stop [--all]                                                            stop the daemon; --all stops the agents too (they resume on the next run)
   view [--once] [--width N] [--no-usage]                                  live table of agents, what they are doing, and each account's plan usage
   work <taskId>                                                           one worker (the daemon runs this)
-  tasks list | tasks release <taskId> | tasks logs <taskId>
+  tasks list | tasks release <task> | tasks retry <task> | tasks logs <task>      (task or ticket id)
   cli status | cli update                                                 the Claude Code and Codex binaries
   status
   export [--out <file>] [--scanner <id or name>]                          one file with the tokens, accounts and scanners this box runs
@@ -77,7 +77,8 @@ async function main(argv: string[]) {
   const a = parseArgs(argv);
   const [cmd, sub, ...rest] = a._;
   const s = loadState();
-  const key = cmd === "import" ? "import" : `${cmd === "jobs" ? "scanners" : cmd ?? "help"} ${sub ?? ""}`.trim(); // "jobs" was the first name for scanners; import <file> takes a path, not a subcommand
+  // commands whose first word is a value, not a subcommand: import <file>, work <task>
+  const key = cmd === "import" || cmd === "work" ? cmd : `${cmd === "jobs" ? "scanners" : cmd ?? "help"} ${sub ?? ""}`.trim(); // "jobs" was the first name for scanners
   // everything that touches tickets, accounts or agents waits for the walk-through
   const open = ["help", "--help", "-h", "setup", "status", "cli status", "cli update", "import"];
   if (!open.includes(key) && !setupDone(s)) fail("not set up yet. Run `consort-cli setup` first; it checks the tools, adds your issue sources, AI accounts and Slack, and tests each one.");
@@ -203,6 +204,12 @@ async function main(argv: string[]) {
       t!.status = "released"; t!.pid = undefined; t!.finishedAt = Date.now(); saveState(s);
       if (t!.runCode) { const r = await cleanupEnvironment(t!.runCode); console.log(`Removed ${r.containers} container(s), ${r.networks} network(s), ${r.volumes} volume(s) of ${t!.runCode}.`); }
       console.log(`Released ${t!.ticket.id}; the worktree ${t!.worktree} is left in place.`); return;
+    }
+    case "tasks retry": {
+      const t = s.tasks.find((x) => x.id === rest[0] || x.ticket.id === rest[0]) ?? fail("no such task; use the task id or the ticket id");
+      if (t!.pid && alive(t!.pid)) fail(`${t!.ticket.id} is still running (pid ${t!.pid})`);
+      t!.status = "working"; t!.note = undefined; t!.pid = undefined; t!.finishedAt = undefined; t!.updatedAt = Date.now(); saveState(s);
+      console.log(`${t!.ticket.id} queued again; the daemon starts its worker within 15 seconds${daemonPid() ? "" : " once it runs (consort-cli run -d)"}.`); return;
     }
     case "tasks logs": { const id = s.tasks.find((x) => x.id === sub || x.ticket.id === sub)?.id ?? sub; const f = join(LOG_DIR, `${id}.log`); console.log(existsSync(f) ? (await import("node:fs")).readFileSync(f, "utf8") : `no log at ${f}`); return; }
 

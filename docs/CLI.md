@@ -97,7 +97,7 @@ Every stage move is posted to the Slack thread and as a comment on the ticket; t
 | `clickup set-key <key>` / `prefix set <prefix>` | |
 | `scanners add …` / `scanners list` / `scanners scan <id>` / `scanners enable\|disable <id>` / `scanners remove <id>` | a scanner watches one place and hands matches to worker agents (`jobs …` still works) |
 | `run [-d]` / `stop [--all]` | the daemon, in the foreground or detached; stop it, or it and the agents |
-| `tasks list` / `tasks logs <id>` / `tasks release <id>` | by task id or ticket id; release stops the worker and forgets the claim locally |
+| `tasks list` / `tasks logs <id>` / `tasks release <id>` / `tasks retry <id>` | by task id or ticket id; release stops the worker and forgets the claim locally; retry relaunches a failed one |
 | `cli status` / `cli update` | the Claude Code and Codex binaries |
 | `status` | one line per live task |
 | `export [--out f] [--scanner id]` / `import <file>` / `accounts login <id>` | move scanners to another machine |
