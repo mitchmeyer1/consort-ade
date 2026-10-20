@@ -71,6 +71,8 @@ export type Task = {
   /** agent session ids by provider, so a task keeps one conversation per provider */
   sessions: Partial<Record<Provider, string>>;
   accountIds: Partial<Record<Provider, string>>;
+  /** provider executing the current turn, including a fallback from the builder's provider */
+  activeProvider?: Provider;
   reviewsDone: number;
   /** review thread ids already answered */
   threadsSeen: string[];

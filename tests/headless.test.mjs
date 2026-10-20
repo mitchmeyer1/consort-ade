@@ -276,6 +276,24 @@ test('the DIFF cell reads git shortstat and reads as +added −removed with a fi
   assert.equal(diffCell(undefined), '');
 });
 
+test('turns use Codex when Claude is blocked, with sticky accounts per provider and reset recovery', async () => {
+  const { pickTurnAccount } = await import('../src/shared/headless.ts');
+  const now = 1000;
+  const accounts = [
+    { id: 'c1', provider: 'claude', blockedUntil: 2000 },
+    { id: 'c2', provider: 'claude', blockedUntil: 3000 },
+    { id: 'x1', provider: 'codex', lastUsedAt: 10 },
+    { id: 'x2', provider: 'codex', lastUsedAt: 20 },
+  ];
+  assert.equal(pickTurnAccount(accounts, 'claude', now, {}).id, 'x1');
+  assert.equal(pickTurnAccount(accounts, 'claude', now, { codex: 'x2' }).id, 'x2');
+  assert.equal(pickTurnAccount(accounts, 'claude', 2000, {}).id, 'c1');
+  const blocked = accounts.map(a => ({ ...a, blockedUntil: 5000 }));
+  assert.equal(pickTurnAccount(blocked, 'claude', now, {}), undefined);
+  assert.equal(pickTurnAccount([...blocked, { id: 'new', provider: 'codex' }], 'claude', now, {}).id, 'new');
+  assert.equal(pickTurnAccount([{ id: 'c', provider: 'claude' }], 'codex', now, {}).id, 'c');
+});
+
 test('STATUS says whether the agent is moving: running, waiting on Slack, at a limit, stalled, or stopped', async () => {
   const { taskHealth } = await import('../src/shared/headless.ts');
   const now = Date.UTC(2026, 9, 20, 21);
@@ -289,6 +307,7 @@ test('STATUS says whether the agent is moving: running, waiting on Slack, at a l
   const allBlocked = accounts.map((a) => ({ ...a, blockedUntil: now + 1 }));
   assert.equal(taskHealth(t({}), allBlocked, { workerAlive: true, logAgeMs: 0 }, now).label, 'LIMIT');
   assert.equal(taskHealth(t({ activity: 'all claude accounts at their limit until 9:20 PM' }), accounts, { workerAlive: true, logAgeMs: 0 }, now).label, 'LIMIT');
+  assert.equal(taskHealth(t({ activeProvider: 'codex', accountIds: { claude: 'c2', codex: 'x1' } }), [...allBlocked, { id: 'x1', provider: 'codex' }], { workerAlive: true, logAgeMs: 0 }, now).label, 'RUNNING', 'blocked Claude accounts do not mark a running Codex turn as limited');
   assert.equal(taskHealth(t({ status: 'ready' }), accounts, { workerAlive: false, logAgeMs: 0 }, now).label, 'READY');
   assert.equal(taskHealth(t({ status: 'monitoring' }), accounts, { workerAlive: true, logAgeMs: 5 * 60_000 }, now).label, 'RUNNING', 'watching the PR is running');
 });

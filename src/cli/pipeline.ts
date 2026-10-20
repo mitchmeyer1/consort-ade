@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { applyShipChange, newShipFeature, parseShipMarkers, prNumberFromUrl, shipBranch, shipFolder, shipSlug, stripShipMarkers, type ShipFeature, type ShipTicket } from "../shared/ship.ts";
 import { shipPrompt } from "../shared/shipPrompt.ts";
-import { DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, EVIDENCE_PROMPT, parseAskUser, pickAccount, prReadiness, RESPOND_TO_REVIEW, reviewRotation, seedModels, slackLines, stripAskUser, suggestReviewers } from "../shared/headless.ts";
+import { DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, EVIDENCE_PROMPT, parseAskUser, pickTurnAccount, prReadiness, RESPOND_TO_REVIEW, reviewRotation, seedModels, slackLines, stripAskUser, suggestReviewers } from "../shared/headless.ts";
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { modelTiers } from "../shared/modelTiers.ts";
@@ -98,29 +98,37 @@ export async function workTask(taskId: string): Promise<void> {
    * One agent turn on a provider, with the ship markers applied to the feature. The account is
    * the task's sticky one for that provider; a usage limit blocks it, drops the provider's
    * session (another login cannot resume it; the stage handlers pick up from disk), and the
-   * same prompt goes again on the next account. With every account of the provider out, the
-   * worker sleeps until the first one frees and says so on Slack.
+   * same prompt goes again on the next account. When that provider is exhausted, try the other
+   * provider with its own model and session. With neither usable, check again every 30 seconds.
    */
   let feature: ShipFeature = task.feature;
   let pendingUser: string | undefined;
   let idle = 0;
   const crashes = new Map<string, number>(); // consecutive failed turns per account
-  const turn = async (prompt: string, provider: Provider = builderProvider, model = builderModel, resume = true): Promise<string> => {
-    for (let attempt = 0; attempt < 12; attempt++) {
+  const turn = async (prompt: string | ((provider: Provider) => string), provider: Provider = builderProvider, model = builderModel, resume = true): Promise<string> => {
+    for (let attempt = 0; attempt < 12;) {
       const live = loadState();
       const cur = live.tasks.find((t) => t.id === taskId)!;
-      let who = pickAccount(live.accounts, provider, Date.now(), cur.accountIds[provider]);
+      const who = pickTurnAccount(live.accounts, provider, Date.now(), cur.accountIds);
       if (!who) {
-        const until = earliestUnblock(live.accounts, provider, Date.now()) ?? Date.now() + DEFAULT_BLOCK_MS;
-        await say(`Every ${provider} account is at its usage limit; the first frees up ${resetLabel(until)}. Waiting.`);
-        activity(`all ${provider} accounts at their limit until ${resetLabel(until)}`);
-        await new Promise((r) => setTimeout(r, Math.max(30_000, until - Date.now())));
+        const resets = (["claude", "codex"] as const).map((p) => earliestUnblock(live.accounts, p, Date.now())).filter((t): t is number => t !== undefined);
+        const until = resets.length ? Math.min(...resets) : Date.now() + DEFAULT_BLOCK_MS;
+        const waiting = `all accounts at their limit until ${resetLabel(until)}`;
+        if (cur.activity !== waiting) await say(`Every available AI account is blocked; the first frees up ${resetLabel(until)}. Checking again in 30 seconds.`);
+        activity(waiting);
+        await new Promise((r) => setTimeout(r, Math.min(30_000, Math.max(1_000, until - Date.now()))));
         continue;
       }
-      if (cur.accountIds[provider] !== who.id) updateTask(task.id, (t) => ({ accountIds: { ...t.accountIds, [provider]: who!.id } }));
+      attempt++;
+      if (who.provider !== provider) {
+        log(task, `No usable ${provider} account; continuing on ${who.provider} (${who.name})`);
+        provider = who.provider;
+        model = modelTiers(provider, models[provider]).orchestrator;
+      }
+      updateTask(task.id, (t) => ({ activeProvider: provider, accountIds: { ...t.accountIds, [provider]: who.id }, activity: `${turnTag}running ${provider} on ${who.name}` }));
       touchAccount(who.id);
-      const session = resume ? cur.sessions[provider] : undefined;
-      const res = await runTurn({ cwd: task.worktree, prompt: `${prompt}\n\n${ENVIRONMENT_RULES(env)}`, model, account: who, resume: session, env, onText: (t) => { const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) activity(`${turnTag}${line.slice(0, 160)}`); } });
+      const session = resume && cur.accountIds[provider] === who.id ? cur.sessions[provider] : undefined;
+      const res = await runTurn({ cwd: task.worktree, prompt: `${typeof prompt === "function" ? prompt(provider) : prompt}\n\n${ENVIRONMENT_RULES(env)}`, model, account: who, resume: session, env, onText: (t) => { const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) activity(`${turnTag}${line.slice(0, 160)}`); } });
       if (res.limit) {
         blockAccount(who.id, res.limit.resetsAt, res.limit.text);
         updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: undefined } }));
@@ -206,8 +214,7 @@ export async function workTask(taskId: string): Promise<void> {
     const model = have[pick.provider] ? pick.model : builderModel;
     log(task, `review round ${round} on ${provider}:${model}`);
     activity(`review round ${round} on ${model}`);
-    const delegate = modelTiers(provider, models[provider]).delegate;
-    await turn(reviewSkillPrompt(task.worktree, pr, delegate), provider, model, false);
+    await turn((active) => reviewSkillPrompt(task.worktree, pr, modelTiers(active, models[active]).delegate), provider, model, false);
     const summary = reviewSummaryOf(pr);
     await say(slackLines.review(round, model, summary?.total ?? 0));
     feature = { ...feature, review: { chatId: `cli-${round}`, pr, round, startedAt: Date.now(), doneAt: Date.now() }, reviewRound: round };

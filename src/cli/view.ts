@@ -66,7 +66,7 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   lines.push(dim([pad("TICKET", cols.ticket), pad("TITLE", cols.title), pad("STEP", cols.step), pad("STAGE", cols.stage), pad("NEXT", cols.next), pad("STATUS", cols.status), pad("ACCOUNT", cols.account), pad("PORTS", cols.ports), pad("AGE", cols.age), pad("LOG", cols.log), pad("DIFF", cols.diff), "ACTIVITY"].join("  ")));
   if (!tasks.length) lines.push(dim("  nothing in flight; the daemon claims tickets as scanners come due"));
   for (const t of tasks) {
-    const acct = accountName(t.accountIds.claude ?? t.accountIds.codex);
+    const acct = accountName(t.activeProvider ? t.accountIds[t.activeProvider] : t.accountIds.claude ?? t.accountIds.codex);
     const log = logOf(t, now);
     const health = taskHealth(t, s.accounts, { workerAlive: !!(t.pid && alive(t.pid)), logAgeMs: Math.min(log.ageMs ?? Infinity, now - t.updatedAt) }, now);
     const healthPaint = (x: string) => (health.tone === "ok" ? green(x) : health.tone === "warn" ? amber(x) : health.tone === "bad" ? red(x) : dim(x));

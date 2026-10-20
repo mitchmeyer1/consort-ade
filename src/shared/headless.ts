@@ -197,6 +197,11 @@ export function pickAccount<A extends PoolAccount>(accounts: A[], provider: Prov
   if (sticky) return sticky;
   return usable.sort((a, b) => (a.lastUsedAt ?? 0) - (b.lastUsedAt ?? 0))[0];
 }
+/** Try the requested provider first, then the other provider before waiting for a reset. */
+export function pickTurnAccount<A extends PoolAccount>(accounts: A[], provider: Provider, now: number, preferred: Partial<Record<Provider, string>>): A | undefined {
+  return pickAccount(accounts, provider, now, preferred[provider])
+    ?? pickAccount(accounts, provider === "claude" ? "codex" : "claude", now, preferred[provider === "claude" ? "codex" : "claude"]);
+}
 /** when the soonest blocked account of the provider frees up, for "every account is out" */
 export const earliestUnblock = (accounts: PoolAccount[], provider: Provider, now: number) => {
   const times = accounts.filter((a) => a.provider === provider && a.blockedUntil && a.blockedUntil > now).map((a) => a.blockedUntil!);
@@ -237,7 +242,7 @@ export function taskStep(t: { status: string; envReadyAt?: number; reviewsDone: 
  */
 export type TaskHealth = { label: "RUNNING" | "WAITING" | "LIMIT" | "STALLED" | "STOPPED" | "READY" | "DONE" | "RELEASED"; tone: "ok" | "warn" | "bad" | "off"; note?: string };
 export function taskHealth(
-  t: { status: string; accountIds: Partial<Record<string, string>>; activity?: string; note?: string },
+  t: { status: string; accountIds: Partial<Record<string, string>>; activeProvider?: Provider; activity?: string; note?: string },
   accounts: { id: string; provider: string; blockedUntil?: number }[],
   live: { workerAlive: boolean; logAgeMs: number | undefined },
   now: number,
@@ -249,7 +254,7 @@ export function taskHealth(
   if (t.status === "failed") return { label: "STOPPED", tone: "bad", note: t.note };
   if (!live.workerAlive) return { label: "STOPPED", tone: "bad", note: t.note ?? "no worker process" };
   if (t.status === "waiting") return { label: "WAITING", tone: "warn", note: "on your Slack reply" };
-  const providers = Object.keys(t.accountIds).filter((p) => t.accountIds[p]);
+  const providers = t.activeProvider ? [t.activeProvider] : Object.keys(t.accountIds).filter((p) => t.accountIds[p]);
   const limited = providers.length > 0 && providers.some((p) => { const mine = accounts.filter((a) => a.provider === p); return mine.length > 0 && mine.every((a) => a.blockedUntil && a.blockedUntil > now); });
   if (limited || /accounts? at (its|their) limit/i.test(t.activity ?? "")) return { label: "LIMIT", tone: "warn", note: "every account at its usage limit" };
   if (live.logAgeMs !== undefined && live.logAgeMs > stalledAfterMs) return { label: "STALLED", tone: "warn", note: `quiet for ${Math.round(live.logAgeMs / 60_000)} min` };

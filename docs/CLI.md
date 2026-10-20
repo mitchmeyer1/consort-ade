@@ -119,7 +119,7 @@ The file holds everything the scanners need: the ClickUp token, Slack, the branc
 
 ## Accounts and usage limits
 
-Add as many accounts per provider as you have (`accounts add` once per login or key). A task sticks to one account per provider; when that account hits a usage limit the worker blocks it until the provider's reset time (or an hour when it does not say), says so in the Slack thread, and continues on the least recently used account of the same provider, starting a fresh session (the stage handlers pick up from the files on disk). With every account of a provider out, the worker waits for the first to free up. `accounts list` shows blocks; `accounts unblock <id>` clears one by hand.
+Add as many accounts per provider as you have (`accounts add` once per login or key). A task sticks to one account per provider; when that account hits a usage limit the worker blocks it until the provider's reset time (or an hour when it does not say), says so in the Slack thread, and continues on the least recently used account of the same provider, starting a fresh session (the stage handlers pick up from the files on disk). With every account of a provider out, the worker tries the other provider with its own model and session. Only when neither provider has a usable account does the worker wait; it checks again every 30 seconds, including for newly added accounts. `accounts list` shows blocks; `accounts unblock <id>` clears one by hand.
 
 Nothing asks for permission: Claude Code runs with permissions bypassed and Codex with approvals off and full access on the box, so run consort-cli on a machine you dedicate to it. Both agents may search and read the web for research.
 
