@@ -52,7 +52,7 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   clickup set-key <key>
   prefix set <branch-prefix>                                             e.g. "bot" → bot/<slug>-<id>
   jobs add --name <n> --source clickup --list <id> --repo <path> --base main [--tag ai-handle] [--status "to do"]
-           [--name-includes <s>] [--name-excludes <s>] [--assignee <who>] [--every 15] [--max-parallel 2]
+           [--name-includes <s>] [--name-excludes <s>] [--assignee <who>] [--every 1] [--max-parallel 2]
            [--status-progress "in progress"] [--status-review "in review"] [--status-done complete]
            [--review-models claude:claude-fable-5-1,codex:gpt-6-astra,claude:claude-opus-5]
   jobs add --name <n> --source github --repo <path> --base main [--tag ai-handle] …
@@ -115,7 +115,7 @@ async function main(argv: string[]) {
       const reviewModels: ReviewPick[] = list(a, "review-models").map((m) => { const [provider, model] = m.split(":"); if ((provider !== "claude" && provider !== "codex") || !model) fail(`bad --review-models entry: ${m}`); return { provider: provider as ReviewPick["provider"], model }; });
       const job: Job = {
         id: newId("job"), name: str(a, "name") ?? `${source} ${s.jobs.length + 1}`, source, repo, base: str(a, "base") ?? "main",
-        listId: str(a, "list"), filters, everyMinutes: Number(str(a, "every") ?? 15) || 15, maxParallel: Number(str(a, "max-parallel") ?? 2) || 2,
+        listId: str(a, "list"), filters, everyMinutes: Number(str(a, "every") ?? 1) || 1, maxParallel: Number(str(a, "max-parallel") ?? 2) || 2,
         statuses: { progress: str(a, "status-progress") ?? DEFAULT_STATUSES.progress, review: str(a, "status-review") ?? DEFAULT_STATUSES.review, done: str(a, "status-done") ?? DEFAULT_STATUSES.done },
         ...(reviewModels.length ? { reviewModels } : {}), enabled: true, createdAt: Date.now(),
       };
@@ -216,7 +216,7 @@ async function daemon() {
         const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); saveState(after); }
       } catch (e) { console.error(`${new Date().toISOString()} scan ${job.name} failed: ${(e as Error).message}`); const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); saveState(after); } }
     }
-    await new Promise((r) => setTimeout(r, 30_000));
+    await new Promise((r) => setTimeout(r, 15_000));
   }
 }
 

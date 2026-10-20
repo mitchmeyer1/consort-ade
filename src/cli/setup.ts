@@ -137,7 +137,7 @@ export async function runSetup(): Promise<void> {
       for (;;) {
         const kind = (await ask("Source: clickup or github", { default: "clickup" })).toLowerCase();
         if (kind !== "clickup" && kind !== "github") { console.log(bad("type clickup or github")); continue; }
-        const job: Partial<Job> = { id: newId("job"), source: kind as Job["source"], filters: {}, everyMinutes: 15, maxParallel: 2, statuses: { ...DEFAULT_STATUSES }, enabled: true, createdAt: Date.now() };
+        const job: Partial<Job> = { id: newId("job"), source: kind as Job["source"], filters: {}, everyMinutes: 1, maxParallel: 2, statuses: { ...DEFAULT_STATUSES }, enabled: true, createdAt: Date.now() };
         if (kind === "clickup") {
           s = loadState();
           let key = s.clickupKey;
@@ -182,7 +182,7 @@ export async function runSetup(): Promise<void> {
           const n = await run("gh", ["issue", "list", "--state", "open", "--limit", "5", "--json", "number"], { cwd: job.repo, timeout: 30_000 }).then((r) => JSON.parse(r.stdout).length, () => -1);
           console.log(n >= 0 ? ok(`gh can list issues here (${n} open among the first five)`) : bad("gh cannot list issues in this repo"));
         }
-        job.everyMinutes = Number(await ask("Scan every N minutes", { default: "15" })) || 15;
+        job.everyMinutes = Number(await ask("Scan every N minutes", { default: "1" })) || 1;
         job.maxParallel = Number(await ask("Tickets worked on at once for this job", { default: "2" })) || 2;
         s = loadState(); s.jobs.push(job as Job); saveState(s);
         console.log(ok(`job "${job.name}" saved`));

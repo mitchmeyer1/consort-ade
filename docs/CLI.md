@@ -46,7 +46,7 @@ consort-cli prefix set bot                  # branches become bot/<slug>-<ticket
 # 5. a job: what to scan, how often, which tickets qualify
 consort-cli jobs add --name roster --source clickup --list 901234 \
   --repo ~/repos/roster-service --base main \
-  --tag ai-handle --status "to do" --every 15
+  --tag ai-handle --status "to do" --every 1
 consort-cli jobs scan <job id>              # dry run: which tickets would be taken
 ```
 
@@ -58,7 +58,7 @@ GitHub issues work the same with `--source github` and no `--list`; filters appl
 consort-cli run
 ```
 
-Keep it running under `systemd`, `tmux` or `nohup`. Every `--every` minutes it scans each job, skips tickets another consort-cli has claimed (a `[consort-claim host=… at=…]` comment on the ticket, honoured for three days), claims up to `--max-parallel` new ones, and starts a worker process per ticket. Workers that die are restarted at the next pass; `consort-cli status` shows them, `consort-cli tasks logs <task>` shows a worker's log.
+Keep it running under `systemd`, `tmux` or `nohup`. Every `--every` minutes (1 by default) it scans each job, skips tickets another consort-cli has claimed (a `[consort-claim host=… at=…]` comment on the ticket, honoured for three days), claims up to `--max-parallel` new ones, and starts a worker process per ticket. Workers that die are restarted at the next pass; `consort-cli status` shows them, `consort-cli tasks logs <task>` shows a worker's log.
 
 ## What a worker does
 
@@ -115,5 +115,5 @@ A live table: ticket, title, stage, status, the account in use, how long it has 
 ## Limits of this cut
 
 - Model lists are the seed lists; pass `--review-models` to name others.
-- Slack is polled, not pushed, so an answer is seen within about 20 seconds.
+- Slack is polled, not pushed, so an answer is seen within about 10 seconds.
 - A ticket released with `tasks release` keeps its claim comment on the tracker; delete it there if another box should take it.
