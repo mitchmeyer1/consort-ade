@@ -217,6 +217,8 @@ export const clickupScopeFrom = (text: string): ClickupScope | undefined => {
   const bare = /^(?:(list|folder|space)[:\s]+)?(\d{6,})$/i.exec(t);
   return bare ? { kind: (bare[1]?.toLowerCase() as ClickupScope["kind"]) ?? "list", id: bare[2] } : undefined;
 };
+/** a saved secret as the wizard shows it back: first and last few characters only */
+export const masked = (v: string) => (v.length > 12 ? `${v.slice(0, 5)}…${v.slice(-4)}` : "••••");
 /** what the setup wizard accepts for a ClickUp list: the list's URL or its bare id */
 export const clickupListIdFrom = (text: string): string | undefined => { const s = clickupScopeFrom(text); return s?.kind === "list" ? s.id : undefined; };
 /** a Slack member id as people paste it: bare, as a mention, or at the end of a profile URL */

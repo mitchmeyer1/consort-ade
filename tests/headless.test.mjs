@@ -209,3 +209,10 @@ test('a pasted ClickUp sidebar link is a list, a folder or a space; a bare id is
   assert.equal(clickupScopeFrom('roster'), undefined);
   assert.equal(clickupListIdFrom('https://app.clickup.com/9013448339/v/s/90131945617'), undefined, 'a space is not a list');
 });
+
+test('a saved secret is shown back masked, never in full', async () => {
+  const { masked } = await import('../src/shared/headless.ts');
+  assert.equal(masked('xoxb-1234567890-abcdefgh'), 'xoxb-…efgh');
+  assert.equal(masked('short'), '••••');
+  assert.ok(!masked('pk_12345678_ABCDEFGHIJKL').includes('12345678_ABCD'));
+});

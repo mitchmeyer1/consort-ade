@@ -23,7 +23,7 @@ import { findBrowser } from "./evidence";
 
 const run = promisify(execFile);
 
-import { chooseFrom, clickupListIdFrom, clickupScopeFrom, slackUserIdFrom, type ClickupScope } from "../shared/headless.ts";
+import { chooseFrom, clickupListIdFrom, clickupScopeFrom, masked, slackUserIdFrom, type ClickupScope } from "../shared/headless.ts";
 export { chooseFrom, clickupListIdFrom, slackUserIdFrom };
 export const setupDone = (s: Pick<CliState, "setupCompletedAt">) => !!s.setupCompletedAt;
 
@@ -54,6 +54,8 @@ function prompter(): { ask: Ask; close: () => void } {
 }
 
 const yes = async (ask: Ask, q: string, dflt = true) => /^y/i.test(await ask(`${q} (${dflt ? "Y/n" : "y/N"})`, { default: dflt ? "y" : "n" }));
+/** a step that already has a value: show it, and "y" (or Enter) keeps it; "n" asks again */
+const keep = async (ask: Ask, what: string, value: string, dflt = true) => { console.log(`${dim("Saved")} ${what}: ${value}`); return yes(ask, "Keep it?", dflt); };
 
 /** before each credential: what it is for, where to get it, and what it lets consort-cli do */
 const why = (title: string, lines: { for: string; where: string; can: string; not?: string }) => {
@@ -155,7 +157,13 @@ export async function runSetup(): Promise<void> {
     // ── sources ────────────────────────────────────────────────────────────────────────────
     console.log(head("2. Where tickets come from"));
     let s = loadState();
-    if (s.jobs.length) { console.log(`${s.jobs.length} job(s) already set up: ${s.jobs.map((j) => j.name).join(", ")}`); }
+    for (const j of [...s.jobs]) {
+      const scope = j.scope ? `${j.scope.kind} ${j.scope.id}` : j.listId ? `list ${j.listId}` : "issues";
+      const f = [j.filters.tags?.length ? `tags ${j.filters.tags.join("/")}` : "", j.filters.statuses?.length ? `status ${j.filters.statuses.join("/")}` : ""].filter(Boolean).join(", ");
+      if (!(await keep(ask, `job "${j.name}"`, `${j.source} ${scope} → ${j.repo} (${j.base})${f ? `; ${f}` : ""}; every ${j.everyMinutes} min`))) {
+        s = loadState(); s.jobs = s.jobs.filter((x) => x.id !== j.id); saveState(s); console.log(`job "${j.name}" removed`);
+      }
+    }
     if (!s.jobs.length || await yes(ask, "Add another source?", false)) {
       for (;;) {
         const kind = (await ask("Source: clickup or github", { default: "clickup" })).toLowerCase();
@@ -164,8 +172,11 @@ export async function runSetup(): Promise<void> {
         if (kind === "clickup") {
           s = loadState();
           let key = s.clickupKey;
-          if (key) console.log(`A ClickUp key is saved${(await testClickupKey(key)) ? " and works" : " but does not work any more"}.`);
-          if (!key || !(await testClickupKey(key))) why("ClickUp API token", {
+          if (key) {
+            const who = await testClickupKey(key);
+            if (!(await keep(ask, "ClickUp API token", `${masked(key)} ${who ? ok(`works (${who})`) : bad("does not work any more")}`, !!who))) key = undefined;
+          }
+          if (!key) why("ClickUp API token", {
             for: "finding tickets to work on, claiming them, moving their status and commenting progress and evidence.",
             where: "ClickUp → your avatar (bottom left) → Settings → Apps → API Token → Generate. It is a personal token, so the comments appear as you.",
             can: "read every list you can see; write comments, statuses and attachments on tasks in those lists.",
@@ -221,8 +232,10 @@ export async function runSetup(): Promise<void> {
       }
     }
     s = loadState();
-    const prefix = await ask("Branch prefix for the branches it creates (e.g. bot → bot/<slug>-<id>)", { default: s.branchPrefix ?? "bot" });
-    s.branchPrefix = prefix.replace(/^\/+|\/+$/g, ""); saveState(s);
+    if (!s.branchPrefix || !(await keep(ask, "branch prefix", `${s.branchPrefix} (branches become ${s.branchPrefix}/<slug>-<id>)`))) {
+      const prefix = await ask("Branch prefix for the branches it creates (e.g. bot → bot/<slug>-<id>)", { default: "bot" });
+      s.branchPrefix = prefix.replace(/^\/+|\/+$/g, ""); saveState(s);
+    }
 
     // ── accounts ───────────────────────────────────────────────────────────────────────────
     console.log(head("3. AI accounts"));
@@ -233,7 +246,12 @@ export async function runSetup(): Promise<void> {
       not: "see other tasks' worktrees or your personal login.",
     });
     s = loadState();
-    for (const acc of s.accounts) console.log(`  ${acc.provider.padEnd(6)} ${acc.name.padEnd(20)} ${await accountStatus(acc)}`);
+    for (const acc of [...s.accounts]) {
+      const status = await accountStatus(acc);
+      if (!(await keep(ask, `${acc.provider} account "${acc.name}"`, `${acc.auth === "key" ? `API key ${masked(acc.apiKey ?? "")}` : "subscription login"}, ${status}`, /signed in|logged in|key/i.test(status)))) {
+        s = loadState(); s.accounts = s.accounts.filter((x) => x.id !== acc.id); saveState(s); console.log(`account "${acc.name}" removed`);
+      }
+    }
     while (!s.accounts.length || await yes(ask, "Add an account?", !s.accounts.length)) {
       const provider = (await ask("Provider: claude or codex", { default: "claude" })).toLowerCase();
       if (provider !== "claude" && provider !== "codex") { console.log(bad("type claude or codex")); continue; }
@@ -269,9 +287,13 @@ export async function runSetup(): Promise<void> {
       can: "nothing on its own; it is an address.",
     });
     s = loadState();
-    if (s.slack) console.log(`Slack is set for user ${s.slack.userId}.`);
-    while (!s.slack || await yes(ask, "Change the Slack settings?", false)) {
-      const botToken = await ask("Bot User OAuth Token (xoxb-…)", { secret: true, default: s.slack?.botToken });
+    let slackOk = false;
+    if (s.slack) {
+      const who = await new Slack(s.slack).test().catch(() => undefined);
+      slackOk = await keep(ask, "Slack", `bot token ${masked(s.slack.botToken)} ${who ? ok(`works (bot "${who.bot}" in ${who.team})`) : bad("does not work any more")}, your member id ${s.slack.userId}`, !!who);
+    }
+    while (!slackOk) {
+      const botToken = await ask("Bot User OAuth Token (xoxb-…)", { secret: true });
       if (!/^xoxb-/.test(botToken)) console.log(bad(`that is not a bot token (it should start with xoxb-${botToken.startsWith("xoxp-") ? "; xoxp- is a user token" : ""})`));
       const userId = slackUserIdFrom(await ask("Your Slack member id (U…)", { default: s.slack?.userId }));
       if (!userId) { console.log(bad("that does not look like a member id (U0123ABC)")); continue; }
