@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { applyShipChange, newShipFeature, parseShipMarkers, prNumberFromUrl, shipBranch, shipFolder, shipSlug, stripShipMarkers, type ShipFeature, type ShipTicket } from "../shared/ship.ts";
 import { shipPrompt } from "../shared/shipPrompt.ts";
-import { DEFAULT_BLOCK_MS, earliestUnblock, EVIDENCE_PROMPT, parseAskUser, pickAccount, prReadiness, RESPOND_TO_REVIEW, reviewRotation, seedModels, slackLines, stripAskUser, suggestReviewers } from "../shared/headless.ts";
+import { DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, EVIDENCE_PROMPT, parseAskUser, pickAccount, prReadiness, RESPOND_TO_REVIEW, reviewRotation, seedModels, slackLines, stripAskUser, suggestReviewers } from "../shared/headless.ts";
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { modelTiers } from "../shared/modelTiers.ts";
@@ -14,6 +14,7 @@ import type { Provider } from "../shared/types";
 import { runTurn, packageRoot } from "./agent";
 import { readPr, requestReviewers, shortlogForBranch, whoAmI } from "./prmonitor";
 import { findBrowser, publishEvidence, writeScreenshotHelper } from "./evidence";
+import { allocateEnvironment, cleanupEnvironment } from "./environment";
 import { Slack } from "./slack";
 import { sourceFor, type Source } from "./sources";
 import { blockAccount, loadState, touchAccount, updateTask, WORK_DIR, type Account, type Job, type Task } from "./state";
@@ -53,6 +54,10 @@ export async function workTask(taskId: string): Promise<void> {
   updateTask(task.id, { pid: process.pid, status: "working", activity: "starting" });
   task = loadState().tasks.find((t) => t.id === taskId)!;
   const activity = (line: string) => { updateTask(task.id, { activity: line }); };
+  // the task's own ports and Docker names, on every turn from here on
+  const env = await allocateEnvironment(task!);
+  task = loadState().tasks.find((t) => t.id === taskId)!;
+  log(task, `environment ${env.CONSORT_RUN} on ports ${env.CONSORT_PORT_RANGE}`);
 
   // the worktree, cut from the base branch the job names; a restart finds it already there
   if (!existsSync(task.worktree)) {
@@ -71,7 +76,10 @@ export async function workTask(taskId: string): Promise<void> {
     updateTask(task.id, { slackThread: thread });
   }
   const say = async (text: string) => { log(task, text.replace(/\n/g, " ⏎ ")); if (slack && thread) await slack.post(text, thread).catch((e) => log(task, `slack failed: ${e.message}`)); };
-  const finish = (status: Task["status"], note?: string) => updateTask(task.id, { status, note, finishedAt: Date.now(), activity: note ?? status });
+  const finish = (status: Task["status"], note?: string) => {
+    updateTask(task.id, { status, note, finishedAt: Date.now(), activity: note ?? status });
+    void cleanupEnvironment(env.CONSORT_RUN).then((r) => { if (r.containers || r.networks || r.volumes) log(task, `removed ${r.containers} container(s), ${r.networks} network(s), ${r.volumes} volume(s)`); });
+  };
   const tell = async (text: string) => { await say(text); await source.comment(task.ticket.id, text.replace(/<([^|>]+)\|([^>]+)>/g, "$2 ($1)")).catch((e) => log(task, `ticket comment failed: ${e.message}`)); };
 
   /** ask the owner on Slack and wait; without Slack the question is logged and the run stops */
@@ -110,7 +118,7 @@ export async function workTask(taskId: string): Promise<void> {
       if (cur.accountIds[provider] !== who.id) updateTask(task.id, (t) => ({ accountIds: { ...t.accountIds, [provider]: who!.id } }));
       touchAccount(who.id);
       const session = resume ? cur.sessions[provider] : undefined;
-      const res = await runTurn({ cwd: task.worktree, prompt, model, account: who, resume: session, onText: (t) => log(task, `agent: ${t.slice(0, 200).replace(/\n/g, " ")}`) });
+      const res = await runTurn({ cwd: task.worktree, prompt: `${prompt}\n\n${ENVIRONMENT_RULES(env)}`, model, account: who, resume: session, env, onText: (t) => log(task, `agent: ${t.slice(0, 200).replace(/\n/g, " ")}`) });
       if (res.limit) {
         blockAccount(who.id, res.limit.resetsAt, res.limit.text);
         updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: undefined } }));
@@ -142,6 +150,16 @@ export async function workTask(taskId: string): Promise<void> {
     idle = feature.stage === before.stage && !change ? idle + 1 : 0;
     return false;
   };
+
+  // ── the environment: what running this repo takes, on this task's ports ────────────────
+  if (!task.envReadyAt) {
+    activity("setting up the local environment");
+    const text = await turn(ENVIRONMENT_PROMPT(env));
+    const asked = await applyReply(text);
+    if (asked && pendingUser) { const t2 = await turn(pendingUser); pendingUser = undefined; await applyReply(t2); }
+    updateTask(task.id, { envReadyAt: Date.now() });
+    await say(`Local environment ready on ports ${env.CONSORT_PORT_RANGE}: ${stripAskUser(stripShipMarkers(text)).split("\n").find((l) => l.trim()) ?? ""}`.slice(0, 400));
+  }
 
   // ── the stages, Grilling through In Review ──────────────────────────────────────────────
   for (let n = 0; n < MAX_TURNS && feature.stage !== "In Review" && feature.stage !== "Merged" && feature.stage !== "Closed"; n++) {

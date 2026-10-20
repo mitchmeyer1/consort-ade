@@ -29,14 +29,14 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   const s = loadState();
   const tasks = visibleTasks(s.tasks, now).sort((a, b) => (FINISHED.includes(a.status) ? 1 : 0) - (FINISHED.includes(b.status) ? 1 : 0) || b.updatedAt - a.updatedAt);
   const accountName = (id?: string) => s.accounts.find((a) => a.id === id)?.name ?? "";
-  const cols = { ticket: 12, title: 30, stage: 14, status: 10, account: 14, age: 8 };
-  const fixed = Object.values(cols).reduce((a, b) => a + b, 0) + 7 * 2;
+  const cols = { ticket: 12, title: 30, stage: 14, status: 10, account: 14, ports: 12, age: 8 };
+  const fixed = Object.values(cols).reduce((a, b) => a + b, 0) + 8 * 2;
   const activityW = Math.max(20, width - fixed);
   const lines: string[] = [];
   const active = tasks.filter((t) => !FINISHED.includes(t.status)).length;
   lines.push(`${glyph()} ${cream(bold("Consort"))} ${mint("consort-cli")} ${dim(`· ${new Date(now).toLocaleTimeString()} ·`)} ${mint(`${active} active`)} ${dim("· q to quit")}`);
   lines.push("");
-  lines.push(dim([pad("TICKET", cols.ticket), pad("TITLE", cols.title), pad("STAGE", cols.stage), pad("STATUS", cols.status), pad("ACCOUNT", cols.account), pad("AGE", cols.age), "ACTIVITY"].join("  ")));
+  lines.push(dim([pad("TICKET", cols.ticket), pad("TITLE", cols.title), pad("STAGE", cols.stage), pad("STATUS", cols.status), pad("ACCOUNT", cols.account), pad("PORTS", cols.ports), pad("AGE", cols.age), "ACTIVITY"].join("  ")));
   if (!tasks.length) lines.push(dim("  nothing in flight; the daemon claims tickets as jobs come due"));
   for (const t of tasks) {
     const acct = accountName(t.accountIds.claude ?? t.accountIds.codex);
@@ -44,7 +44,7 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
     const age = FINISHED.includes(t.status) ? `done ${ago(now - (t.finishedAt ?? t.updatedAt))}` : ago(now - t.startedAt);
     const finished = FINISHED.includes(t.status);
     const cell = (s: string, f: (x: string) => string) => (finished ? dim(s) : f(s));
-    lines.push([cell(pad(t.ticket.id, cols.ticket), mint), cell(pad(t.ticket.title, cols.title), cream), cell(pad(t.feature.stage, cols.stage), (x) => x), cell(pad(t.status, cols.status), (x) => color(x, t.status)), cell(pad(acct, cols.account), dim), cell(pad(age, cols.age), dim), cell(pad(activity, activityW), (x) => x)].join("  "));
+    lines.push([cell(pad(t.ticket.id, cols.ticket), mint), cell(pad(t.ticket.title, cols.title), cream), cell(pad(t.feature.stage, cols.stage), (x) => x), cell(pad(t.status, cols.status), (x) => color(x, t.status)), cell(pad(acct, cols.account), dim), cell(pad(t.portBase ? `${t.portBase}-${t.portBase + 99}` : "", cols.ports), dim), cell(pad(age, cols.age), dim), cell(pad(activity, activityW), (x) => x)].join("  "));
   }
   lines.push("");
   lines.push(cream(bold("Accounts")));

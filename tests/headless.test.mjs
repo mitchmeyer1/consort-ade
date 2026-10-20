@@ -174,3 +174,27 @@ test('the evidence manifest is read leniently and rendered as a PR comment with 
   assert.match(p, /--text "<title>"/);
   assert.match(p, /real output only, never mocked/);
 });
+
+test("every task gets its own port block and Docker names, and the rules on each turn say so", async () => {
+  const { allocatePortBase, taskEnv, ENVIRONMENT_RULES, ENVIRONMENT_PROMPT, PORT_FLOOR, PORT_BLOCK } = await import('../src/shared/headless.ts');
+  assert.equal(allocatePortBase([]), PORT_FLOOR);
+  assert.equal(allocatePortBase([PORT_FLOOR, PORT_FLOOR + PORT_BLOCK]), PORT_FLOOR + 2 * PORT_BLOCK);
+  assert.equal(allocatePortBase([PORT_FLOOR], PORT_FLOOR + PORT_BLOCK), PORT_FLOOR + PORT_BLOCK, 'a floor skips lower blocks');
+  const env = taskEnv('consort-abc', 20300);
+  assert.equal(env.COMPOSE_PROJECT_NAME, 'consort-abc');
+  assert.equal(env.PORT, '20300');
+  assert.equal(env.CONSORT_DB_PORT, '20310');
+  assert.equal(env.CONSORT_REDIS_PORT, '20311');
+  assert.equal(env.CONSORT_PORT_RANGE, '20300-20399');
+  const rules = ENVIRONMENT_RULES(env);
+  assert.match(rules, /io\.consort\.run=consort-abc/);
+  assert.match(rules, /use only 20300-20399/);
+  assert.match(rules, /Never the defaults \(5432, 6379, 3000, 8080/);
+  assert.match(rules, /never edit the repo's tracked env or config files/);
+  assert.match(rules, /\.consort\/env\/up\.sh/);
+  const prompt = ENVIRONMENT_PROMPT(env);
+  assert.match(prompt, /docker-compose\*\.yml/);
+  assert.match(prompt, /\.consort\/ship\/ENV\.md/);
+  assert.match(prompt, /responds on 20300/);
+  assert.match(prompt, /do not install system packages/);
+});

@@ -35,11 +35,11 @@ export const binaryFor = (provider: Provider): string => {
   return bin;
 };
 
-export type TurnOptions = { cwd: string; prompt: string; model: string; account: Account; resume?: string; maxTurns?: number; onText?: (t: string) => void };
+export type TurnOptions = { cwd: string; prompt: string; model: string; account: Account; resume?: string; maxTurns?: number; onText?: (t: string) => void; /** the task's own ports and Docker names, on top of the process env */ env?: Record<string, string> };
 export type Turn = { text: string; sessionId?: string; error?: string; limit?: LimitHit };
 
-const envFor = (account: Account): Record<string, string | undefined> => {
-  const env: Record<string, string | undefined> = { ...process.env };
+const envFor = (account: Account, extra: Record<string, string> = {}): Record<string, string | undefined> => {
+  const env: Record<string, string | undefined> = { ...process.env, ...extra };
   delete env.ANTHROPIC_API_KEY; delete env.OPENAI_API_KEY;
   if (account.auth === "key" && account.apiKey) env[account.provider === "claude" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"] = account.apiKey;
   if (account.auth === "login" && account.configDir) env[account.provider === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME"] = account.configDir;
@@ -61,7 +61,7 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
     prompt: o.prompt,
     options: {
       cwd: o.cwd, model: o.model, resume: o.resume, pathToClaudeCodeExecutable: binaryFor("claude"),
-      env: envFor(o.account), settingSources: ["user", "project", "local"],
+      env: envFor(o.account, o.env), settingSources: ["user", "project", "local"],
       permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true,
       ...(o.maxTurns ? { maxTurns: o.maxTurns } : {}),
     },
@@ -87,7 +87,7 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
 
 async function runCodex(o: TurnOptions): Promise<Turn> {
   const { Codex } = await import("@openai/codex-sdk");
-  const codex = new Codex({ ...(o.account.auth === "key" && o.account.apiKey ? { apiKey: o.account.apiKey } : {}), codexPathOverride: binaryFor("codex"), env: envFor(o.account) as Record<string, string> });
+  const codex = new Codex({ ...(o.account.auth === "key" && o.account.apiKey ? { apiKey: o.account.apiKey } : {}), codexPathOverride: binaryFor("codex"), env: envFor(o.account, o.env) as Record<string, string> });
   // unattended: no approvals, full access on this box, and the web for research
   const opts = { model: o.model, workingDirectory: o.cwd, skipGitRepoCheck: true, sandboxMode: "danger-full-access" as const, networkAccessEnabled: true, approvalPolicy: "never" as const, webSearchEnabled: true, webSearchMode: "live" as const };
   const thread = o.resume ? codex.resumeThread(o.resume, opts) : codex.startThread(opts);

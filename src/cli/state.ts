@@ -66,6 +66,8 @@ export type Task = {
   note?: string;
   /** one line on what the worker is doing right now, for `consort-cli view` */
   activity?: string;
+  /** the task's own environment: Docker run code and the first port of its block (see cli/environment.ts) */
+  runCode?: string; portBase?: number; envReadyAt?: number;
 };
 export type CliState = { version: 1; accounts: Account[]; slack?: SlackConfig; clickupKey?: string; branchPrefix?: string; jobs: Job[]; tasks: Task[];
   /** set by `consort-cli setup` at the end of the walk-through; every other command checks it */

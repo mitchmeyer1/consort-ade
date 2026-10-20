@@ -11,6 +11,7 @@ import { Slack } from "./slack";
 import { sourceFor } from "./sources";
 import { renderView, viewLoop } from "./view";
 import { createAccount, runSetup, setupDone } from "./setup";
+import { cleanupEnvironment } from "./environment";
 import { banner, cream, dim, mint, ok, bad } from "./theme";
 import { FINISHED } from "../shared/headless.ts";
 import { DEFAULT_STATUSES, host, loadState, LOG_DIR, newId, saveState, type Job, type Task } from "./state";
@@ -143,7 +144,9 @@ async function main(argv: string[]) {
     case "tasks release": {
       const t = s.tasks.find((x) => x.id === sub) ?? fail("no such task");
       if (t!.pid) { try { process.kill(t!.pid); } catch {} }
-      t!.status = "released"; t!.pid = undefined; saveState(s); console.log(`Released ${t!.ticket.id}; the worktree ${t!.worktree} is left in place.`); return;
+      t!.status = "released"; t!.pid = undefined; t!.finishedAt = Date.now(); saveState(s);
+      if (t!.runCode) { const r = await cleanupEnvironment(t!.runCode); console.log(`Removed ${r.containers} container(s), ${r.networks} network(s), ${r.volumes} volume(s) of ${t!.runCode}.`); }
+      console.log(`Released ${t!.ticket.id}; the worktree ${t!.worktree} is left in place.`); return;
     }
     case "tasks logs": { const f = join(LOG_DIR, `${sub}.log`); console.log(existsSync(f) ? (await import("node:fs")).readFileSync(f, "utf8") : `no log at ${f}`); return; }
 

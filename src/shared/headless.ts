@@ -298,3 +298,57 @@ export function evidenceTextForTicket(m: EvidenceManifest, images: Record<string
   out.push(`The same evidence, with the images inline, is on the PR.`);
   return out.filter((l, i, a) => !(l === "" && a[i - 1] === "")).join("\n");
 }
+
+/**
+ * Every task gets an environment of its own so agents on one box never collide: a Docker
+ * compose project name and label carrying the task's code, and a block of 100 ports from which
+ * the app, database, cache and anything else take fixed offsets. The agent is told these on
+ * every turn and keeps its overrides in .consort/env/ inside the worktree, never in tracked
+ * files. When the task ends, everything labelled with the code is removed.
+ */
+export const PORT_FLOOR = 20_000;
+export const PORT_BLOCK = 100;
+export const PORT_CEILING = 60_000;
+/** the first block at or above the floor that no live task holds */
+export function allocatePortBase(used: number[], floor = PORT_FLOOR): number {
+  const taken = new Set(used);
+  for (let base = floor; base < PORT_CEILING; base += PORT_BLOCK) if (!taken.has(base)) return base;
+  throw new Error("no free port block");
+}
+export const ENV_DIR = ".consort/env";
+export const ENV_FILE = `${ENV_DIR}/.env.consort`;
+export const ENV_DOC = ".consort/ship/ENV.md";
+export type TaskEnv = Record<string, string>;
+/** the variables every agent turn of the task runs with */
+export function taskEnv(code: string, portBase: number): TaskEnv {
+  const p = (n: number) => String(portBase + n);
+  return {
+    CONSORT_RUN: code, COMPOSE_PROJECT_NAME: code, CONSORT_DOCKER_RUN: code,
+    CONSORT_PORT_BASE: String(portBase), CONSORT_PORT_RANGE: `${portBase}-${portBase + PORT_BLOCK - 1}`,
+    PORT: p(0), CONSORT_APP_PORT: p(0), CONSORT_API_PORT: p(1), CONSORT_WEB_PORT: p(2), CONSORT_WORKER_PORT: p(3),
+    CONSORT_DB_PORT: p(10), CONSORT_POSTGRES_PORT: p(10), CONSORT_REDIS_PORT: p(11), CONSORT_MONGO_PORT: p(12), CONSORT_MYSQL_PORT: p(13), CONSORT_ELASTIC_PORT: p(14), CONSORT_RABBIT_PORT: p(15), CONSORT_MAIL_PORT: p(16), CONSORT_S3_PORT: p(17),
+    CONSORT_ENV_FILE: ENV_FILE, CONSORT_ENV_DIR: ENV_DIR,
+  };
+}
+
+/** appended to every headless turn: the task's own ports and names, and the rules that keep tasks apart */
+export const ENVIRONMENT_RULES = (env: TaskEnv) => `## Your environment on this machine (other agents share the box; these are yours alone)
+
+- Docker: every container, network and volume you create must carry the label \`io.consort.run=${env.CONSORT_RUN}\` and a name starting \`${env.CONSORT_RUN}-\`. \`COMPOSE_PROJECT_NAME\` is already \`${env.CONSORT_RUN}\` in your shell, so \`docker compose\` isolates itself; never pass \`-p\` or a fixed \`container_name\` without the prefix. Consort removes everything with this label when the task ends.
+- Ports: use only ${env.CONSORT_PORT_RANGE}. The app on ${env.CONSORT_APP_PORT} (\`PORT\` is set), a second service on ${env.CONSORT_API_PORT}, Postgres on ${env.CONSORT_DB_PORT}, Redis on ${env.CONSORT_REDIS_PORT}, Mongo on ${env.CONSORT_MONGO_PORT}, MySQL on ${env.CONSORT_MYSQL_PORT}, others from ${env.CONSORT_PORT_BASE}+20 up. Never the defaults (5432, 6379, 3000, 8080…): another task may be on them.
+- Configuration: never edit the repo's tracked env or config files. Put your overrides in \`${env.CONSORT_ENV_FILE}\` (DATABASE_URL, REDIS_URL, PORT, hostnames…) and load it before running anything: \`set -a; . ${env.CONSORT_ENV_FILE}; set +a\`. If the repo has a compose file, add \`${env.CONSORT_ENV_DIR}/compose.override.yml\` that remaps its ports into your range and use \`docker compose -f <repo compose> -f ${env.CONSORT_ENV_DIR}/compose.override.yml\`.
+- \`${env.CONSORT_ENV_DIR}/up.sh\` starts your services and the app, \`${env.CONSORT_ENV_DIR}/down.sh\` stops them. Use them in the test session and for evidence; leave nothing running when a turn ends unless the next step needs it.
+- Secrets: only local, throwaway credentials in your overrides. Never copy production values.`;
+
+/** the first turn of a task: find out what running this repo locally takes, and make it work on this task's ports */
+export const ENVIRONMENT_PROMPT = (env: TaskEnv) => `## This turn: set up this task's local environment
+
+Before any feature work, work out what it takes to run this repository locally and make it run on this task's own ports and containers, so the test session and the evidence step can start the app with seeded data at any time.
+
+1. Read what the repo says about running it: README and docs, \`docker-compose*.yml\`, \`Dockerfile\`, \`.env.example\` or similar, \`package.json\` scripts (or the equivalent for its language), migrations and seed scripts, CI config. List every service it needs (database and kind, cache, queue, search, mail, object store), the env vars it reads, how migrations and seeds run, and how the dev server starts.
+2. Write \`${ENV_DOC}\`: that list, then exactly how to start and stop everything for this task, with the real commands and this task's ports and names.
+3. Write \`${env.CONSORT_ENV_FILE}\` with the overrides that point the app at your services on your ports (connection URLs, PORT, hosts), \`${env.CONSORT_ENV_DIR}/compose.override.yml\` if the repo uses compose, and \`${env.CONSORT_ENV_DIR}/up.sh\` / \`down.sh\` (bash, idempotent; up.sh starts services with the label and name prefix, waits until they answer, runs migrations and the seed when there is one, then starts the app in the background with its pid file under ${env.CONSORT_ENV_DIR}; down.sh stops the app and the services).
+4. Prove it: run up.sh, check the database answers and the app responds on ${env.CONSORT_APP_PORT} (curl its root or health route), then run down.sh. Fix the scripts until both work.
+5. Report in a few lines: the services, the ports, what seeds exist, and anything the repo needs that this machine lacks (name the missing tool; do not install system packages).
+
+If the repository is a library or has no runnable app, say so in ENV.md and write up.sh/down.sh that only prepare what the tests need.`;
