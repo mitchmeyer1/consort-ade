@@ -55,10 +55,13 @@ A ClickUp scanner watches one list, a folder, or a whole space (every list in it
 ## Run
 
 ```bash
-consort-cli run
+consort-cli run -d        # in the background; log in ~/.consort-cli/logs/daemon.log
+consort-cli run           # in this terminal, ctrl-c to stop
+consort-cli stop          # the daemon; agents keep working and the next run adopts them
+consort-cli stop --all    # the daemon and every agent; their tasks resume on the next run
 ```
 
-Keep it running under `systemd`, `tmux` or `nohup`. Every `--every` minutes (1 by default) it runs each scanner, skips tickets another consort-cli has claimed (a `[consort-claim host=… at=…]` comment on the ticket, honoured for three days), claims up to `--max-parallel` new ones, and starts a worker process per ticket. Workers that die are restarted at the next pass; `consort-cli status` shows them, `consort-cli tasks logs <task>` shows a worker's log.
+For a daemon that survives reboots, run it under `systemd` or `launchd`. Every `--every` minutes (1 by default) it runs each scanner, skips tickets another consort-cli has claimed (a `[consort-claim host=… at=…]` comment on the ticket, honoured for three days), claims up to `--max-parallel` new ones, and starts a worker process per ticket. Workers that die are restarted at the next pass; `consort-cli status` shows them, `consort-cli tasks logs <task>` shows a worker's log.
 
 ## What a worker does
 
@@ -93,8 +96,8 @@ Every stage move is posted to the Slack thread and as a comment on the ticket; t
 | `slack set --bot-token … --user … [--channel …]` / `slack test` | |
 | `clickup set-key <key>` / `prefix set <prefix>` | |
 | `scanners add …` / `scanners list` / `scanners scan <id>` / `scanners enable\|disable <id>` / `scanners remove <id>` | a scanner watches one place and hands matches to worker agents (`jobs …` still works) |
-| `run` | the daemon |
-| `tasks list` / `tasks logs <id>` / `tasks release <id>` | release stops the worker and forgets the claim locally |
+| `run [-d]` / `stop [--all]` | the daemon, in the foreground or detached; stop it, or it and the agents |
+| `tasks list` / `tasks logs <id>` / `tasks release <id>` | by task id or ticket id; release stops the worker and forgets the claim locally |
 | `cli status` / `cli update` | the Claude Code and Codex binaries |
 | `status` | one line per live task |
 | `export [--out f] [--scanner id]` / `import <file>` / `accounts login <id>` | move scanners to another machine |
@@ -122,7 +125,7 @@ Nothing asks for permission: Claude Code runs with permissions bypassed and Code
 consort-cli view
 ```
 
-A live table: ticket, title, stage, status, the account in use, how long it has run, and what the worker is doing right now. Finished tasks stay for two hours, then drop off. Below it, the accounts, each with its plan meters as bars (5-hour, weekly, and one per model family, like the desktop's Usage panel; amber from 80%, red from 95%), when the 5-hour window resets, and any block; then the scanners with their next scan. Usage is read once a minute by asking each login's own CLI, with no model call; API-key accounts have no meters. `--once` prints one frame (`--no-usage` skips the read). `q` quits.
+A live table (header says whether the daemon is running): ticket, title, stage, status, the account in use, how long it has run, and what the worker is doing right now. Finished tasks stay for two hours, then drop off. Below it, the accounts, each with its plan meters as bars (5-hour, weekly, and one per model family, like the desktop's Usage panel; amber from 80%, red from 95%), when the 5-hour window resets, and any block; then the scanners with their next scan, and the commands that stop the daemon or one agent. Usage is read once a minute by asking each login's own CLI, with no model call; API-key accounts have no meters. `--once` prints one frame (`--no-usage` skips the read). `q` quits.
 
 ## Limits of this cut
 

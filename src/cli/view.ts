@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { ago, FINISHED, usageBars, usageBarText, visibleTasks } from "../shared/headless.ts";
 import type { ConnectorUsage } from "../shared/usage.ts";
 import { readAllUsage } from "./usage";
+import { daemonPid } from "./daemonctl";
 import { resetLabel } from "../shared/seatPool.ts";
 import { loadState, LOG_DIR, type Task } from "./state";
 
@@ -36,7 +37,8 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   const activityW = Math.max(20, width - fixed);
   const lines: string[] = [];
   const active = tasks.filter((t) => !FINISHED.includes(t.status)).length;
-  lines.push(`${glyph()} ${cream(bold("Consort"))} ${mint("consort-cli")} ${dim(`· ${new Date(now).toLocaleTimeString()} ·`)} ${mint(`${active} active`)} ${dim("· q to quit")}`);
+  const pid = daemonPid();
+  lines.push(`${glyph()} ${cream(bold("Consort"))} ${mint("consort-cli")} ${dim(`· ${new Date(now).toLocaleTimeString()} ·`)} ${pid ? green(`daemon running (pid ${pid})`) : red("daemon not running: consort-cli run -d")} ${dim("·")} ${mint(`${active} active`)} ${dim("· q to quit")}`);
   lines.push("");
   lines.push(dim([pad("TICKET", cols.ticket), pad("TITLE", cols.title), pad("STAGE", cols.stage), pad("STATUS", cols.status), pad("ACCOUNT", cols.account), pad("PORTS", cols.ports), pad("AGE", cols.age), "ACTIVITY"].join("  ")));
   if (!tasks.length) lines.push(dim("  nothing in flight; the daemon claims tickets as scanners come due"));
@@ -72,6 +74,12 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
     const next = j.lastScanAt ? Math.max(0, j.lastScanAt + j.everyMinutes * 60_000 - now) : 0;
     lines.push(`  ${pad(j.name, 20)} ${pad(`${j.source}${j.scope ? ` ${j.scope.kind} ${j.scope.id}` : j.listId ? ` list ${j.listId}` : ""}`, 22)} ${j.enabled ? mint(`next scan in ${ago(next)}`) : dim("off")}  ${dim(j.repo)}`);
   }
+  lines.push("");
+  lines.push(cream(bold("Commands")));
+  lines.push(`  ${mint("consort-cli stop")}                         stop the daemon; agents keep working and the next run adopts them`);
+  lines.push(`  ${mint("consort-cli stop --all")}                   stop the daemon and every agent; tasks resume on the next run`);
+  lines.push(`  ${mint("consort-cli tasks release <ticket>")}       stop one agent for good and forget the ticket (worktree stays)`);
+  lines.push(`  ${mint("consort-cli tasks logs <ticket or task>")}  what an agent has been doing`);
   return lines.join("\n");
 }
 

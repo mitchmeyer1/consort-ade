@@ -14,6 +14,7 @@ import { readAllUsage } from "./usage";
 import { createAccount, runSetup, scannerName, setupDone } from "./setup";
 import { applyBundle, buildBundle } from "./transfer";
 import { cleanupEnvironment } from "./environment";
+import { alive, DAEMON_LOG, daemonPid, recordDaemon, startDetached, stopDaemon } from "./daemonctl";
 import { banner, cream, dim, mint, ok, bad } from "./theme";
 import { FINISHED } from "../shared/headless.ts";
 import { DEFAULT_STATUSES, host, loadState, LOG_DIR, newId, saveState, type Job, type Task } from "./state";
@@ -35,7 +36,8 @@ function parseArgs(argv: string[]): Args {
       const v = inline ?? (argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[++i] : "true");
       const prev = out[k];
       out[k] = prev === undefined ? (v === "true" ? true : v) : Array.isArray(prev) ? [...prev, v] : [String(prev), v];
-    } else out._.push(a);
+    } else if (/^-[a-zA-Z]$/.test(a)) out[a.slice(1)] = true; // short flags like -d stand alone
+    else out._.push(a);
   }
   return out;
 }
@@ -60,7 +62,8 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   scanners add --name <n> --source github --repo <path> --base main [--tag ai-handle] …
   scanners list | scanners remove <id> | scanners enable|disable <id> | scanners scan <id>   (scan: dry run)
                                                                           a scanner watches one place for tickets and hands each match to a worker agent
-  run                                                                     the daemon: scan, claim, dispatch, watch
+  run [-d]                                                                the daemon: scan, claim, dispatch, watch; -d runs it in the background
+  stop [--all]                                                            stop the daemon; --all stops the agents too (they resume on the next run)
   view [--once] [--width N] [--no-usage]                                  live table of agents, what they are doing, and each account's plan usage
   work <taskId>                                                           one worker (the daemon runs this)
   tasks list | tasks release <taskId> | tasks logs <taskId>
@@ -171,20 +174,37 @@ async function main(argv: string[]) {
       return;
     }
 
-    case "run": return daemon();
+    case "run": {
+      const running = daemonPid();
+      if (running && running !== process.pid) fail(`the daemon is already running (pid ${running}). Stop it: consort-cli stop`); // run -d writes our own pid before we start
+      if (a.d || a.detach) {
+        const pid = startDetached(fileURLToPath(import.meta.url));
+        console.log(`${ok(`daemon started in the background (pid ${pid})`)}\n  watch:  consort-cli view\n  log:    ${DAEMON_LOG}\n  stop:   consort-cli stop`);
+        return;
+      }
+      recordDaemon();
+      return daemon();
+    }
+    case "stop": {
+      const r = stopDaemon({ all: !!a.all });
+      console.log(r.daemon ? ok(`daemon stopped (pid ${r.daemon})`) : "no daemon was running");
+      if (a.all) console.log(r.workers.length ? ok(`${r.workers.length} agent process(es) stopped; their tasks resume on the next run (consort-cli tasks release <task> ends one for good)`) : "no agent processes were running");
+      else { const live = s.tasks.filter((t) => t.pid && alive(t.pid)).length; if (live) console.log(dim(`${live} agent process(es) still running; consort-cli stop --all stops them too`)); }
+      return;
+    }
     case "view": { if (a.once) { const usage = a["no-usage"] ? undefined : await readAllUsage(s.accounts); console.log(renderView(Date.now(), Number(str(a, "width") ?? 0) || undefined, usage)); return; } return viewLoop(); }
     case "accounts unblock": { const acc = s.accounts.find((x) => x.id === rest[0]) ?? fail("no such account"); acc!.blockedUntil = undefined; acc!.blockedWhy = undefined; saveState(s); console.log(`${acc!.name} unblocked.`); return; }
     case "work": { const id = sub ?? fail("task id required"); await workTask(id!); return; }
 
     case "tasks list": { for (const t of s.tasks) console.log(`${t.id}  ${t.status.padEnd(10)}  ${t.ticket.id.padEnd(12)}  ${t.feature.stage.padEnd(14)}  ${t.branch}  ${t.note ?? ""}`); if (!s.tasks.length) console.log("No tasks."); return; }
     case "tasks release": {
-      const t = s.tasks.find((x) => x.id === sub) ?? fail("no such task");
+      const t = s.tasks.find((x) => x.id === sub || x.ticket.id === sub) ?? fail("no such task; use the task id or the ticket id from consort-cli view");
       if (t!.pid) { try { process.kill(t!.pid); } catch {} }
       t!.status = "released"; t!.pid = undefined; t!.finishedAt = Date.now(); saveState(s);
       if (t!.runCode) { const r = await cleanupEnvironment(t!.runCode); console.log(`Removed ${r.containers} container(s), ${r.networks} network(s), ${r.volumes} volume(s) of ${t!.runCode}.`); }
       console.log(`Released ${t!.ticket.id}; the worktree ${t!.worktree} is left in place.`); return;
     }
-    case "tasks logs": { const f = join(LOG_DIR, `${sub}.log`); console.log(existsSync(f) ? (await import("node:fs")).readFileSync(f, "utf8") : `no log at ${f}`); return; }
+    case "tasks logs": { const id = s.tasks.find((x) => x.id === sub || x.ticket.id === sub)?.id ?? sub; const f = join(LOG_DIR, `${id}.log`); console.log(existsSync(f) ? (await import("node:fs")).readFileSync(f, "utf8") : `no log at ${f}`); return; }
 
     case "cli status": { for (const p of ["claude", "codex"] as const) { const st = await cliStatus(p, runtimeDeps); console.log(`${p}: ${st.version ?? "not found"} (${st.source})${st.note ? ` · ${st.note}` : ""}`); } return; }
     case "cli update": { for (const p of ["claude", "codex"] as const) { const changed = await updateCli(p, undefined, runtimeDeps).catch((e) => { console.log(`${p}: ${e.message}`); return false; }); console.log(`${p}: ${changed ? "updated" : "unchanged"}`); } return; }
@@ -200,7 +220,6 @@ async function main(argv: string[]) {
   }
 }
 
-const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
 /** the daemon: run due scanners, claim matches, start a worker per task, restart workers that died */
 async function daemon() {
