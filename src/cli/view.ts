@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { ago, diffCell, FINISHED, parseShortstat, taskHealth, taskStep, usageBars, usageBarText, visibleTasks } from "../shared/headless.ts";
+import { ago, diffCell, FINISHED, parseShortstat, taskHealth, taskStep, scanCountdown, usageBars, usageBarText, visibleTasks } from "../shared/headless.ts";
 import { usageBlock, type ConnectorUsage } from "../shared/usage.ts";
+import { recentStatusEvents } from "./statusLog";
 import { readAllUsage } from "./usage";
 import { alive, daemonPid } from "./daemonctl";
 import { resetLabel } from "../shared/seatPool.ts";
@@ -100,8 +101,15 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   lines.push(cream(bold("Scanners")));
   if (!s.jobs.length) lines.push(dim("  none: consort-cli scanners add …"));
   for (const j of s.jobs) {
-    const next = j.lastScanAt ? Math.max(0, j.lastScanAt + j.everyMinutes * 60_000 - now) : 0;
-    lines.push(`  ${pad(j.name, 20)} ${pad(`${j.source}${j.scope ? ` ${j.scope.kind} ${j.scope.id}` : j.listId ? ` list ${j.listId}` : ""}`, 22)} ${j.enabled ? mint(`next scan in ${ago(next)}`) : dim("off")}  ${dim(j.repo)}`);
+    lines.push(`  ${pad(j.name, 20)} ${pad(`${j.source}${j.scope ? ` ${j.scope.kind} ${j.scope.id}` : j.listId ? ` list ${j.listId}` : ""}`, 22)} ${j.enabled ? pid ? mint(scanCountdown(j, now)) : amber("paused · daemon stopped") : dim("off")}  ${dim(j.repo)}`);
+  }
+  lines.push("");
+  lines.push(cream(bold("Status log · last 8")));
+  const events = recentStatusEvents();
+  if (!events.length) lines.push(dim("  no scan or Slack activity recorded yet"));
+  for (const event of events) {
+    const color = event.tone === "success" ? green : event.tone === "error" ? red : event.tone === "warn" ? amber : blue;
+    lines.push(`  ${dim(new Date(event.at).toLocaleTimeString())}  ${color(pad(event.text, Math.max(20, width - 18)).trimEnd())}`);
   }
   lines.push("");
   lines.push(cream(bold("Commands")));
@@ -112,7 +120,7 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   return lines.join("\n");
 }
 
-export async function viewLoop(intervalMs = 2_000, usageEveryMs = 60_000): Promise<void> {
+export async function viewLoop(intervalMs = 1_000, usageEveryMs = 60_000): Promise<void> {
   const out = process.stdout;
   let usage: Map<string, ConnectorUsage> | undefined = new Map();
   const draw = () => { out.write(`\x1b[2J\x1b[H${renderView(Date.now(), undefined, usage)}\n`); };

@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { applyShipChange, newShipFeature, parseShipMarkers, prNumberFromUrl, shipBranch, shipFolder, shipSlug, stripShipMarkers, type ShipFeature, type ShipTicket } from "../shared/ship.ts";
 import { shipPrompt } from "../shared/shipPrompt.ts";
-import { DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, VERIFY_EVIDENCE_PROMPT, parseAskUser, pickTurnAccount, prReadiness, RESPOND_TO_REVIEW, reviewRotation, seedModels, slackLines, stripAskUser, suggestReviewers } from "../shared/headless.ts";
+import { DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, VERIFY_EVIDENCE_PROMPT, parseAskUser, observeReviewBatch, pickTurnAccount, prReadiness, RESPOND_TO_REVIEW, reviewRotation, seedModels, slackLines, stripAskUser } from "../shared/headless.ts";
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { modelTiers } from "../shared/modelTiers.ts";
@@ -12,12 +12,13 @@ import { excludeConsortDir, fetchTicket, writeTicketFile } from "../main/ship";
 import { addWorktree } from "../main/git";
 import type { Provider } from "../shared/types";
 import { runTurn, packageRoot, stopAgents } from "./agent";
-import { readPr, requestReviewers, shortlogForBranch, whoAmI } from "./prmonitor";
+import { readPr, requestReviewers, reviewerSuggestions, whoAmI } from "./prmonitor";
 import { findBrowser, publishEvidence, validateEvidence, writeScreenshotHelper } from "./evidence";
 import { allocateEnvironment, cleanupEnvironment } from "./environment";
 import { flushTaskNotifications, notifyTask } from "./lifecycle";
 import { readUsage } from "./usage";
 import { usageBlock } from "../shared/usage.ts";
+import { statusEvent } from "./statusLog";
 import { Slack } from "./slack";
 import { sourceFor, type Source } from "./sources";
 import { blockAccount, loadState, touchAccount, updateTask, WORK_DIR, type Account, type Job, type Task } from "./state";
@@ -30,7 +31,6 @@ import { blockAccount, loadState, touchAccount, updateTask, WORK_DIR, type Accou
  */
 
 const run = promisify(execFile);
-const MAX_TURNS = 80;
 const PR_POLL_MS = 3 * 60_000;
 const STUCK_AFTER = 3;
 
@@ -93,11 +93,18 @@ export async function workTask(taskId: string): Promise<void> {
     updateTask(task.id, { status: "waiting", note: questions.join(" | "), activity: `waiting on Slack: ${questions[0].slice(0, 80)}` });
     if (!slack || !thread) throw new Error(`Needs the owner but Slack is not configured. Questions: ${questions.join(" | ")}`);
     const pending = loadState().tasks.find((t) => t.id === taskId)?.pendingQuestion;
-    const ts = pending?.afterTs ?? await slack.post(slackLines.question(questions, task.ticket.url), thread, true);
+    const ts = pending?.afterTs ?? await slack.post(slackLines.question(questions, task.ticket.url), thread);
     updateTask(taskId, { pendingQuestion: { questions, afterTs: ts } });
     await notifyTask(taskId, "paused", "Waiting for your answer in Slack.");
     log(task, `waiting on Slack for ${questions.length} answer(s)`);
-    const reply = await slack.waitForReply(thread, ts, { onTick: () => { updateTask(task.id, {}); void flushTaskNotifications(taskId); } });
+    let lastEmptyLog = 0;
+    let lastCheckResult: string | undefined;
+    const reply = await slack.waitForReply(thread, ts, { onCheck: (result) => {
+      if (result !== "answer" && result === lastCheckResult && Date.now() - lastEmptyLog < 60_000) return;
+      lastCheckResult = result;
+      lastEmptyLog = Date.now();
+      statusEvent(result === "answer" ? "success" : result === "error" ? "error" : "warn", result === "answer" ? `Ticket ${task.ticket.id}: answer found in Slack; continuing` : result === "error" ? `Ticket ${task.ticket.id}: Slack reply check failed; retrying` : `Ticket ${task.ticket.id}: no Slack answer yet`);
+    }, onTick: () => { updateTask(task.id, {}); void flushTaskNotifications(taskId); } });
     updateTask(task.id, { status: "working", note: undefined, pendingQuestion: undefined });
     await notifyTask(taskId, "running", "Your Slack answer arrived; continuing the task.");
     return reply ?? "";
@@ -220,6 +227,10 @@ export async function workTask(taskId: string): Promise<void> {
       await applyReply(await turn(prompt, builderProvider, builderModel, true, timeoutMs));
     }
   };
+  if (task.recoveryGuidance) {
+    await completeReply(await turn(`The owner gave recovery guidance on Slack: ${task.recoveryGuidance}\nApply it and continue from the saved task state. Never merge.`));
+    updateTask(taskId, { recoveryGuidance: undefined });
+  }
   if (task.pendingQuestion) {
     const answer = await ask(task.pendingQuestion.questions);
     await completeReply(await turn(`The owner answered on Slack:\n${answer}\nContinue from where you stopped.`));
@@ -235,7 +246,7 @@ export async function workTask(taskId: string): Promise<void> {
   }
 
   // ── the stages, Grilling through In Review ──────────────────────────────────────────────
-  for (let n = 0; n < MAX_TURNS && feature.stage !== "In Review" && feature.stage !== "Merged" && feature.stage !== "Closed"; n++) {
+  for (let n = 0; feature.stage !== "In Review" && feature.stage !== "Merged" && feature.stage !== "Closed"; n++) {
     const form = feature.stage === "Ready to Test" ? "approve" as const : "resume" as const;
     const prompt = pendingUser ?? shipPrompt({ feature, form: { form }, worktree: task.worktree, branch: task.branch, base: `origin/${job.base}`, ticketBody, headless: true });
     pendingUser = undefined;
@@ -249,7 +260,7 @@ export async function workTask(taskId: string): Promise<void> {
       idle = 0;
     }
   }
-  if (feature.stage !== "In Review") { await finish("failed", `stopped at ${feature.stage} after ${MAX_TURNS} turns`); await say(slackLines.stuck(`${MAX_TURNS} turns without reaching In Review`)); return; }
+  if (feature.stage !== "In Review") { await finish("done", `PR was ${feature.stage.toLowerCase()} outside Consort`); return; }
   const prUrl = feature.prs.at(-1);
   const pr = prUrl ? prNumberFromUrl(prUrl) : undefined;
   if (!pr) { await finish("failed", "In Review without a PR"); await say(slackLines.stuck("the feature reached In Review without a PR")); return; }
@@ -317,12 +328,14 @@ export async function workTask(taskId: string): Promise<void> {
   const me = await whoAmI(job.repo);
   let requested = loadState().tasks.find((t) => t.id === taskId)?.reviewersRequested;
   let requestError: string | undefined;
+  const excludedReviewers = [me, beforeReview.author ?? ""].filter(Boolean);
   while (!requested || requested.length < 2) {
-    const suggested = suggestReviewers(await shortlogForBranch(task.worktree, `origin/${job.base}`).catch(() => ""), [me]);
-    const candidates = [...new Set(suggested)].filter((n) => n !== me && /^[A-Za-z0-9-]+$/.test(n));
-    const names = candidates.length === 2 && !requestError ? candidates : (await ask([`Which two GitHub reviewers should I request? Reply with two GitHub logins. ${requestError ?? "File history did not identify two valid GitHub logins."}`])).split(/[\s,]+/).map((n) => n.replace(/^@/, "")).filter(Boolean);
-    const unique = [...new Set(names)].filter((n) => n !== me && /^[A-Za-z0-9-]+$/.test(n));
+    const suggested = await reviewerSuggestions(task.worktree, `origin/${job.base}`, excludedReviewers).catch((e) => { requestError = `Contributor lookup failed: ${(e as Error).message}`; return []; });
+    const candidates = [...new Set(suggested)].filter((n) => !excludedReviewers.some((login) => login.toLowerCase() === n.toLowerCase()) && /^[A-Za-z0-9-]+$/.test(n));
+    const names = candidates.length === 2 && !requestError ? candidates : (await ask([`Which two GitHub reviewers should I request? Reply with two GitHub logins. ${requestError ?? "GitHub contributors did not identify two eligible reviewers."}`])).split(/[\s,]+/).map((n) => n.replace(/^@/, "")).filter(Boolean);
+    const unique = [...new Set(names)].filter((n) => !excludedReviewers.some((login) => login.toLowerCase() === n.toLowerCase()) && /^[A-Za-z0-9-]+$/.test(n));
     if (unique.length !== 2) { requestError = "I need exactly two distinct GitHub logins, excluding the PR author."; continue; }
+    if (candidates.length === 2 && !requestError) await say(`Suggested reviewers from repository contributors: ${candidates.map((n) => `@${n}`).join(", ")}; prioritizing contributors to the changed files.`);
     try { await requestReviewers(job.repo, pr, unique); }
     catch (e) { requestError = `GitHub rejected the review request: ${(e as Error).message}`; continue; }
     requested = unique;
@@ -333,21 +346,44 @@ export async function workTask(taskId: string): Promise<void> {
   await notifyTask(taskId, "paused", "Waiting for human PR reviews or CI; checking every 3 minutes.");
   await say(`Watching the PR every ${PR_POLL_MS / 60_000} minutes: I will answer review comments and tell you when it is ready to merge.`);
 
+  let recoveryGuidance: string | undefined;
   for (;;) {
     const state = await readPr(job.repo, pr).catch((e) => { log(task, `pr read failed: ${e.message}`); return undefined; });
     updateTask(task.id, { lastPrCheckAt: Date.now() });
     if (state) {
+      try {
+      if (recoveryGuidance) {
+        await completeReply(await turn(recoveryGuidance));
+        recoveryGuidance = undefined;
+        continue;
+      }
       if (state.state !== "OPEN") { await tell(`The PR is ${state.state.toLowerCase()}. Done here.`); await finish("done", `PR ${state.state.toLowerCase()}`); if (state.state === "MERGED") await source.setStatus(task.ticket.id, "done").catch(() => {}); return; }
       const seen = new Set(loadState().tasks.find((t) => t.id === taskId)?.threadsSeen ?? []);
-      const fresh = [...state.unresolved, ...(state.feedback ?? [])].filter((t) => !seen.has(t.id) && t.author && t.author !== me);
+      const fresh = [...state.unresolved, ...(state.feedback ?? [])].filter((t) => (!!t.threadId || !seen.has(t.id)) && t.author && t.author !== me && !/\[bot\]$/.test(t.author));
+      const currentTask = loadState().tasks.find((t) => t.id === taskId)!;
+      const observed = observeReviewBatch(currentTask.reviewBatch, fresh, Date.now());
+      const previousBatch = currentTask.reviewBatch?.fingerprint;
+      updateTask(taskId, { reviewBatch: observed.batch });
+      if (fresh.length && !observed.ready) {
+        const note = `collecting ${fresh.length} review comments; waiting for 3 quiet minutes`;
+        updateTask(taskId, { status: "monitoring", activity: note });
+        if (previousBatch !== observed.batch?.fingerprint) statusEvent("info", `Ticket ${task.ticket.id}: ${note}`);
+        await notifyTask(taskId, "paused", "Collecting human review comments into a batch; waiting for three minutes without changes.");
+        await new Promise((r) => setTimeout(r, PR_POLL_MS));
+        continue;
+      }
       if (fresh.length) {
         log(task, `${fresh.length} new review thread(s)`);
         activity(`answering ${fresh.length} review thread${fresh.length === 1 ? "" : "s"}`);
         const text = await turn(RESPOND_TO_REVIEW(fresh));
         await completeReply(text);
-        updateTask(task.id, (t) => ({ threadsSeen: [...t.threadsSeen, ...fresh.map((f) => f.id)] }));
+        const afterFix = await readPr(job.repo, pr);
+        const remaining = new Set(afterFix.unresolved.map((t) => t.threadId).filter(Boolean));
+        const addressed = fresh.filter((t) => !t.threadId || !remaining.has(t.threadId));
+        updateTask(task.id, (t) => ({ threadsSeen: [...t.threadsSeen, ...addressed.map((f) => f.id)], reviewBatch: undefined }));
         await requestReviewers(job.repo, pr, requested);
-        await say(`Answered ${fresh.length} review thread${fresh.length === 1 ? "" : "s"}; pushed what was clear.`);
+        statusEvent("success", `Ticket ${task.ticket.id}: handled a batch of ${fresh.length} review comments`);
+        await say(`Handled ${fresh.length} review comments as a batch; ${fresh.length - addressed.length} threads still unresolved and will be checked again.`);
         continue; // re-read straight away
       }
       if (state.ci === "fail") {
@@ -358,7 +394,7 @@ export async function workTask(taskId: string): Promise<void> {
         await new Promise((r) => setTimeout(r, PR_POLL_MS));
         continue;
       }
-      const ready = prReadiness(state, [me]);
+      const ready = prReadiness(state, [me], requested);
       if (ready.ready) {
         await tell(slackLines.ready(state.url));
         await finish("ready", "ready to merge");
@@ -367,6 +403,11 @@ export async function workTask(taskId: string): Promise<void> {
       log(task, `not ready: ${ready.reasons.join(", ")}`);
       updateTask(taskId, { status: "monitoring", activity: `watching PR: ${ready.reasons.join(", ")}` });
       await notifyTask(taskId, "paused", "Waiting for human PR reviews or CI; checking every 3 minutes.");
+      } catch (e) {
+        log(task, `Review loop needs help: ${(e as Error).message}`);
+        const answer = await ask([`I could not continue the PR review/CI loop: ${(e as Error).message.slice(0, 1200)}. What should I do? I will keep this task open until both requested reviewers approve and CI passes.`]);
+        recoveryGuidance = `The owner answered on Slack: ${answer}\nRecover the PR review/CI loop using this guidance. Fix and push what is needed; never merge.`;
+      }
     }
     await new Promise((r) => setTimeout(r, PR_POLL_MS));
   }

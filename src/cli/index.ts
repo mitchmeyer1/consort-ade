@@ -7,7 +7,8 @@ import { claimedByOther, claimHeld, claimOf, matchesFilters, type ReviewPick, ty
 import { cliStatus, updateCli } from "../main/cliRuntime";
 import { accountStatus, loginInteractive, runtimeDeps, stopAgents } from "./agent";
 import { newTask, workTask } from "./pipeline";
-import { flushTaskNotifications, notifyTask } from "./lifecycle";
+import { flushTaskNotifications, notifyTask, runTaskUntilFinished } from "./lifecycle";
+import { statusEvent } from "./statusLog";
 import { Slack } from "./slack";
 import { sourceFor } from "./sources";
 import { renderView, viewLoop } from "./view";
@@ -199,9 +200,17 @@ async function main(argv: string[]) {
     case "work": {
       const id = sub ?? fail("task id required");
       // a stop (consort-cli stop --all, or the box shutting down) ends the agent process too, so no orphan keeps editing the worktree
-      for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.once(sig, async () => { stopAgents(); updateTask(id!, { pid: undefined, activity: "stopped; resumes on the next run" }); await notifyTask(id!, "stopped", `Worker received ${sig}; resumes on the next run.`); process.exit(0); });
-      try { await workTask(id!); }
-      catch (e) { stopAgents(); await notifyTask(id!, "stopped", `Worker failed: ${(e as Error).message}`); throw e; }
+      let stopping = false;
+      for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(sig, async () => {
+        if (stopping) return;
+        stopping = true;
+        stopAgents();
+        // Keep the pid until exit: the daemon must not start a replacement during Slack delivery.
+        updateTask(id!, { activity: `worker stopping (${sig}); progress saved` });
+        await notifyTask(id!, "stopped", `Worker stopped by ${sig}; progress is saved. The daemon will resume it if running; otherwise it resumes on the next run.`);
+        process.exit(0);
+      });
+      await runTaskUntilFinished(id!, () => workTask(id!), stopAgents, () => stopping);
       return;
     }
 
@@ -260,9 +269,8 @@ async function daemon() {
         task2.pid = undefined;
         if (code && !["ready", "done", "released", "failed"].includes(task2.status)) {
           task2.restarts = (task2.restarts ?? 0) + 1;
-          // a crash is restarted (the stages resume from disk); the fourth in a row fails the task
-          if (task2.restarts <= 3) { task2.note = `worker exited ${code}; restart ${task2.restarts}/3`; task2.activity = `crashed (exit ${code}); restarting`; }
-          else { task2.status = "failed"; task2.note = `worker exited ${code} four times; see tasks logs ${t.id}`; }
+          task2.note = `worker exited ${code}; restart ${task2.restarts}`;
+          task2.activity = task2.restarts >= 4 ? "worker repeatedly exited; restarting to ask Slack for help" : `crashed (exit ${code}); restarting`;
         }
         saveState(s2);
       }
@@ -284,12 +292,19 @@ async function daemon() {
     for (const job of s.jobs.filter((j) => j.enabled)) {
       const due = !job.lastScanAt || Date.now() - job.lastScanAt >= job.everyMinutes * 60_000;
       if (!due) continue;
+      const starting = loadState();
+      const startingJob = starting.jobs.find((j) => j.id === job.id);
+      if (startingJob) { startingJob.scanStartedAt = Date.now(); saveState(starting); }
+      statusEvent("info", `${job.name}: scanning ${job.source} for new tasks`);
       try {
         const source = sourceFor(job, s.clickupKey);
         const tickets = await source.scan();
         const live = loadState();
         const running = live.tasks.filter((t) => t.jobId === job.id && ["working", "waiting", "monitoring"].includes(t.status)).length;
         let slots = Math.max(0, job.maxParallel - running);
+        const availableSlots = slots;
+        const candidates = tickets.filter((t) => !live.tasks.some((old) => old.status !== "released" && old.ticket.id === t.id) && matchesFilters(t, job.filters)).length;
+        let claimed = 0;
         const taken = new Set(live.tasks.filter((t) => t.status !== "released").map((t) => t.ticket.id));
         for (const t of tickets) {
           if (slots <= 0) break;
@@ -314,10 +329,13 @@ async function daemon() {
           fresh.tasks.push(task); saveState(fresh);
           console.log(`${new Date().toISOString()} claimed ${t.id} "${t.title}" → ${task.branch}`);
           spawnWorker(task);
+          claimed++;
+          statusEvent("success", `${job.name}: claimed Ticket ${t.id} — ${t.title}`);
           slots--;
         }
-        const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); saveState(after); }
-      } catch (e) { console.error(`${new Date().toISOString()} scanner ${job.name} failed: ${(e as Error).message}`); const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); saveState(after); } }
+        statusEvent(claimed ? "success" : candidates ? "warn" : "info", `${job.name}: ${tickets.length} tasks checked; ${candidates ? `${candidates} new matching tasks; ${claimed} claimed${availableSlots === 0 ? "; waiting for a free worker slot" : claimed < candidates ? "; remaining tasks deferred" : ""}` : "no new tasks"}`);
+        const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); j.scanStartedAt = undefined; saveState(after); }
+      } catch (e) { statusEvent("error", `${job.name}: ${job.source} scan failed; see daemon log`); console.error(`${new Date().toISOString()} scanner ${job.name} failed: ${(e as Error).message}`); const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); j.scanStartedAt = undefined; saveState(after); } }
     }
     await new Promise((r) => setTimeout(r, 15_000));
   }

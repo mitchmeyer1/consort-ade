@@ -4,11 +4,13 @@ Consort's ship pipeline with no window: a daemon on a Linux or macOS box that wa
 
 ## Install
 
+For a new server, follow the [Linux worker setup checklist](LINUX-SETUP.md) first: host tools, GitHub authentication, Docker, browser evidence, credentials, and reboot persistence.
+
 ```bash
 git clone https://github.com/mitchmeyer1/consort-ade.git && cd consort-ade
-pnpm install --ignore-scripts      # skips the Electron and node-pty builds the desktop app needs
+pnpm install --frozen-lockfile --ignore-scripts # skips the Electron and node-pty builds the desktop app needs
 pnpm build:cli
-npm link                           # or: alias consort-cli="node $PWD/out/cli/index.js"
+npm link --ignore-scripts          # or: alias consort-cli="node $PWD/out/cli/index.js"
 ```
 
 Needs Node 22.12+, git, and the GitHub CLI (`gh auth login`) for PRs and issues. The Claude Code and Codex binaries come with the install as platform packages; `consort-cli cli update` fetches newer ones.
@@ -73,7 +75,7 @@ For a daemon that survives reboots, run it under `systemd` or `launchd`. Every `
 5. **Evidence.** Before anyone is asked to review, the agent proves the feature works and Consort posts the proof on the PR and on the ticket, each linking to the other. A feature with a frontend gets a local database seeded with data that exercises it, the app started, and screenshots of the feature in use (via headless Chrome; `consort-cli setup` checks for one, or set `CONSORT_CHROME`). Anything else gets the commands, database queries and API calls that prove it, kept as text and rendered as terminal images too. Images are hosted as ClickUp task attachments when the ticket is a ClickUp task, else on an orphan `consort-evidence` branch in the repo (they render inline on public repos; on private ones the links open for people with access).
 6. **Reviewers.** The people who touched the changed files most are requested on the PR.
 7. **The watch.** Every three minutes the worker reads the PR. New review threads from humans are answered: clear requests are fixed, pushed, replied to and resolved; anything unclear or disputed gets one neutral reply and a Slack question to you. CI and approvals are read each pass.
-8. **Ready.** One human approval, no changes requested, no open threads, CI green: you get a Slack message with the PR link and the ticket gets a final comment. Merging is yours.
+8. **Ready.** Both selected human reviewers approved, no changes requested, no open threads, CI green: you get a Slack message with the PR link and the ticket gets a final comment. Merging is yours.
 
 ### Claims, with many boxes
 
@@ -81,7 +83,7 @@ A claim is a comment on the ticket: `[consort-claim host=<name> at=<time>]`, whe
 
 Every stage move is posted to the Slack thread and as a comment on the ticket; the ticket status moves to *in review* when the PR is up and to *complete* if the PR is merged while the worker is still watching.
 
-Starts, stops, pauses, resumes, and completion are announced in the task thread and broadcast to its Slack channel. An immediate account/model fallback stays running and does not send pause/resume alerts. Exhausting all accounts sends one pause alert; recovery sends a separate resume alert. Questions pause until your reply, including after a worker restart. Waiting on human reviews or CI sends a pause alert; new feedback resumes work.
+Starts, stops, pauses, resumes, and completion are posted only inside the existing ticket thread. Each ticket has one root message; questions, updates, retries, and worker restarts reuse its saved thread. Replies never broadcast to the channel feed. An immediate account/model fallback stays running and does not send pause/resume alerts. Exhausting all accounts sends one pause alert; recovery sends a separate resume alert. Questions pause until your reply, including after a worker restart. Waiting on human reviews or CI sends a pause alert; new feedback resumes work.
 
 ## Slack messages you will see
 
@@ -133,7 +135,7 @@ consort-cli view
 
 A live table (header says whether the daemon is running): ticket, title, the step it is on as `n/9` (environment, grilling, build, test, one review per model in the rotation, evidence, watch PR), the step's name, the step that comes next, status, the account in use, how long it has run, and what the worker is doing right now. Finished tasks stay for two hours, then drop off. Below it, the accounts, each with its plan meters as bars (5-hour, weekly, and one per model family, like the desktop's Usage panel; amber from 80%, red from 95%), when the 5-hour window resets, and any block; then the scanners with their next scan, and the commands that stop the daemon or one agent. Usage is read once a minute by asking each login's own CLI, with no model call; API-key accounts have no meters. `--once` prints one frame (`--no-usage` skips the read). `q` quits.
 
-STATUS shows green `RUNNING` while the worker is active, yellow `WAITING` for a Slack reply, human PR review, or CI, and red `STOPPED` when the task failed or its worker is gone. Yellow `LIMIT` means the worker is waiting for account usage to reset; yellow `STALLED` means no activity for ten minutes. Bright blue `COMPLETED` means three internal reviews are finished, two human reviewers were requested, a human approved, every thread is resolved, and CI passed. Consort never merges. ACTIVITY shows the reason. A usage limit can leave a worker alive and waiting, so it does not by itself mean the task failed.
+STATUS shows green `RUNNING` while the worker is active, yellow `WAITING` for a Slack reply, human PR review, or CI, and red `STOPPED` when the task failed or its worker is gone. Yellow `LIMIT` means the worker is waiting for account usage to reset; yellow `STALLED` means no activity for ten minutes. Bright blue `COMPLETED` means three internal reviews are finished, two human reviewers were requested, both selected reviewers approved, every thread is resolved, and CI passed. Consort never merges. ACTIVITY shows the reason. A usage limit can leave a worker alive and waiting, so it does not by itself mean the task failed.
 
 ## Limits of this cut
 
@@ -149,3 +151,24 @@ The worker requires a manifest with every acceptance check passed, matching capt
 If evidence fails, the worker pauses and asks the owner on Slack what is needed, then retries after the reply. A capture or inspection that runs beyond fifteen minutes is stopped and escalated to Slack. The owner's reply does not waive acceptance checks. Error pages, missing map tiles, missing API keys, and partially working flows must be fixed and captured again.
 
 For a missing credential, the agent names the exact variable and the repository-root env file on the Consort machine. The owner adds the key there and confirms in Slack. Only then may the agent copy that specific variable into the worktree's appropriate ignored env file, preserving unrelated settings, restart the app, and rerun the flow. Secret values must never be sent through Slack, printed, captured, or committed.
+
+
+### Scanner countdown and status log
+
+The scanner row refreshes every second with `next scan in MM:SS`, `due now`, or `scanning · MM:SS elapsed`. A completed or failed scan starts the next countdown. Disabled scanners show `off`.
+
+Below Scanners, Status log shows only the newest eight events in time order: scan starts, checked/new/claimed task counts, no new tasks, full worker capacity, scan failures, Slack checks with no answer, Slack check failures, and answers found for a named ticket. Blue shows scan progress/results, green shows claims and answers, yellow shows waiting, and red shows failures. Unchanged Slack waits appear at most once per minute per waiting task; answers and changed check results appear immediately. Reply contents stay out of this log. Events persist across dashboard restarts in the CLI log directory's `status.jsonl`.
+
+
+### Contributor reviewers and batched feedback
+
+After three internal review rounds and working evidence, Consort suggests and requests two reviewers using real GitHub contributor accounts. Contributors to the changed files come first; other repository contributors fill remaining slots by contribution count. Bots and the PR author are excluded. If GitHub cannot identify two eligible reviewers or rejects a request, Consort asks the owner in the ticket's existing Slack thread.
+
+PR checks run every three minutes. New unresolved threads and review comments wait as one batch until their contents stay unchanged for at least three minutes. New replies, edits, replacement comments, or resolved threads restart that wait even when the count stays the same. The pending batch survives worker restarts. Once quiet, Consort fixes the batch, runs checks, commits and pushes, then replies and resolves addressed threads. Unclear requests go to Slack. Consort rereads GitHub after the fix; threads still unresolved remain eligible for the next batch. It requests another review and keeps watching until approval and passing CI. Consort never merges.
+
+
+### Final completion rule
+
+The worker stays in the review/CI loop until both saved reviewer usernames have current GitHub approvals, GitHub has no outstanding review requirement or requested changes, every review thread is resolved, and CI has passed. One approval or an approval from a different person does not satisfy this rule. Empty, unknown, or pending CI results block completion. GitHub treats skipped/neutral checks as non-failing; failures, cancelled checks, stale checks, and startup failures trigger repair.
+
+There is no build-turn cutoff. Unrecoverable agent errors ask the owner in the existing Slack thread and resume after the answer. Four repeated process crashes also ask Slack instead of permanently failing the task. Provider capacity waits still resume when credits refill. Waiting for reviewers or CI keeps polling without an owner response. When all completion checks pass, STATUS becomes bright blue COMPLETED, ready for the owner to merge. Consort never merges.

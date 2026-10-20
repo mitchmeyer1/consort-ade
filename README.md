@@ -92,7 +92,7 @@ For development:
 pnpm dev
 ```
 
-The headless CLI, for a server with no window (see [docs/CLI.md](docs/CLI.md)):
+The headless CLI, for a server with no window (start with the [Linux worker setup checklist](docs/LINUX-SETUP.md); CLI reference: [docs/CLI.md](docs/CLI.md)):
 
 ```bash
 pnpm install --ignore-scripts && pnpm build:cli

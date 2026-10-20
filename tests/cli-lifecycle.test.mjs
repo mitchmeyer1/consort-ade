@@ -19,6 +19,8 @@ function harness(opts = {}) {
   const accounts = opts.accounts ?? [{ id: 'c', provider: 'claude', name: 'Claude' }, { id: 'x', provider: 'codex', name: 'Codex' }];
   const state = { tasks: [task], jobs: [{ id: 'j', repo: '/virtual', base: 'main' }], accounts, slack: { userId: 'owner' } };
   let interval, deadline;
+  let clock = Date.now();
+  class Clock extends Date { static now() { return clock; } }
   const basePr = { state: 'OPEN', isDraft: false, reviewDecision: '', approvals: [], unresolved: [], requestedReviewers: [], ci: 'pass', url: 'https://github.com/a/b/pull/1' };
   let reads = 0;
   const mocks = {
@@ -29,6 +31,7 @@ function harness(opts = {}) {
     '../shared/shipPrompt.ts': { shipPrompt: () => 'fix findings' },
     '../shared/review.ts': { parseReview: () => ({}), reviewSummary: () => opts.missingReport ? undefined : opts.summary ?? { total: 0 } },
     '../main/ship': { excludeConsortDir: async () => {}, fetchTicket: async () => ({}), writeTicketFile: () => '' },
+    './statusLog': { statusEvent: (tone, text) => events.push(`status:${tone}:${text}`) },
     './state': {
       loadState: () => state,
       updateTask: (id, patch) => Object.assign(task, typeof patch === 'function' ? patch(task) : patch),
@@ -37,24 +40,25 @@ function harness(opts = {}) {
     './sources': { sourceFor: () => ({ comment: async () => {}, setStatus: async () => {} }) },
     './evidence': { findBrowser: async () => '/browser', writeScreenshotHelper: () => '/helper', validateEvidence: () => { events.push('validate evidence'); return opts.validateEvidence?.(); }, publishEvidence: async () => { events.push('publish evidence'); return opts.publishEvidence?.() ?? { items: 1, images: 1, prComment: true, ticketComment: true }; } },
     './environment': { allocateEnvironment: async () => ({}), cleanupEnvironment: async () => ({}) },
-    './slack': { Slack: class { async post(text, thread, broadcast) { if (opts.failPost?.(text)) throw new Error('Slack unavailable'); messages.push({ text, thread, broadcast }); return String(messages.length); } async waitForReply() { events.push('owner reply'); opts.onReply?.(task); return opts.reply ?? 'Proceed'; } } },
+    './slack': { Slack: class { async post(text, thread, broadcast) { if (opts.failPost?.(text)) throw new Error('Slack unavailable'); messages.push({ text, thread, broadcast }); return String(messages.length); } async waitForReply(thread, ts, options) { options?.onCheck?.('answer'); events.push('owner reply'); opts.onReply?.(task); return opts.reply ?? 'Proceed'; } } },
     './usage': { readUsage: async a => opts.usage?.(a) ?? ({ at: Date.now(), windows: [] }) },
     './agent': { packageRoot: () => '/package', stopAgents: () => events.push('abort agent'), runTurn: async o => { events.push(`turn:${o.account.provider}`); return opts.turn?.(o, task, interval, deadline) ?? { text: o.prompt.includes(headless.VERIFY_EVIDENCE_PROMPT) ? '[evidence-approved]' : '' }; } },
     './prmonitor': {
+      reviewerSuggestions: async () => opts.suggestions ?? (opts.shortlog ? [] : ["ada", "bob"]),
       whoAmI: async () => 'me', shortlogForBranch: async () => opts.shortlog ?? ' 2 Ada <1+ada@users.noreply.github.com>\n 1 Bob <2+bob@users.noreply.github.com>',
       requestReviewers: async (_, __, names) => events.push(`reviewers:${names.join(',')}`),
-      readPr: async () => { events.push('read PR'); return opts.readPr?.(++reads, basePr, task) ?? { ...basePr, approvals: ['ada'], reviewDecision: 'APPROVED' }; },
+      readPr: async () => { events.push('read PR'); return opts.readPr?.(++reads, basePr, task) ?? { ...basePr, approvals: ['ada', 'bob'], reviewDecision: 'APPROVED' }; },
     },
   };
   function load(code) {
     const mod = { exports: {} };
-    new Function('require', 'module', 'exports', 'setTimeout', 'setInterval', 'clearInterval', code)(name => mocks[name] ?? (name.startsWith('.') ? {} : require(name)), mod, mod.exports,
-      (fn, ms) => { if (ms === 15 * 60000) { deadline = fn; return 1; } events.push('sleep'); opts.sleep?.(task, accounts); if (!opts.sleep) throw halt; fn(); },
-      fn => { interval = fn; return 1; }, () => {});
+    new Function('require', 'module', 'exports', 'setTimeout', 'setInterval', 'clearInterval', 'Date', code)(name => mocks[name] ?? (name.startsWith('.') ? {} : require(name)), mod, mod.exports,
+      (fn, ms) => { if (ms === 15 * 60000) { deadline = fn; return 1; } clock += ms ?? 0; events.push('sleep'); opts.sleep?.(task, accounts); if (!opts.sleep) throw halt; fn(); },
+      fn => { interval = fn; return 1; }, () => {}, Clock);
     return mod.exports;
   }
   mocks['./lifecycle'] = load(lifecycle);
-  return { task, accounts, events, messages, work: () => load(pipeline).workTask('t'), notify: mocks['./lifecycle'].notifyTask };
+  return { task, accounts, events, messages, work: () => load(pipeline).workTask('t'), notify: mocks['./lifecycle'].notifyTask, run: (work, isStopping) => mocks['./lifecycle'].runTaskUntilFinished('t', work, () => events.push('stop agents'), isStopping) };
 }
 
 test('all providers exhausted: one pause, then a separate resume after reset', async () => {
@@ -67,7 +71,7 @@ test('all providers exhausted: one pause, then a separate resume after reset', a
   assert.equal(h.messages.filter(m => /\*Paused:/.test(m.text)).length, 1);
   assert.equal(h.messages.filter(m => /\*Resumed:/.test(m.text)).length, 1);
   assert.equal(h.task.status, 'working');
-  assert.ok(h.messages.filter(m => /\*(Paused|Resumed):/.test(m.text)).every(m => m.broadcast));
+  assert.ok(h.messages.filter(m => /\*(Paused|Resumed):/.test(m.text)).every(m => m.thread && !m.broadcast));
 });
 
 test('instant provider fallback produces no pause or resume messages', async () => {
@@ -105,6 +109,7 @@ test('design questions pause and resume, including a repeated question', async (
   assert.equal(h.messages.filter(m => /\*Paused:/.test(m.text)).length, 2);
   assert.equal(h.messages.filter(m => /\*Resumed:/.test(m.text)).length, 2);
   assert.equal(h.task.pendingQuestion, undefined);
+  assert.ok(h.events.some(event => event === 'status:success:Ticket T1: answer found in Slack; continuing'));
 });
 
 test('restart waits for the original unanswered Slack question', async () => {
@@ -116,7 +121,7 @@ test('restart waits for the original unanswered Slack question', async () => {
 
 test('three internal rounds precede two reviewer requests; human feedback resumes then pauses until approval', async () => {
   const h = harness({
-    readPr: (n, pr) => n === 1 ? { ...pr, isDraft: true } : n === 2 ? pr : n === 3 ? { ...pr, unresolved: [{ id: 'thread:1', author: 'ada', body: 'Fix label', url: 'url' }] } : { ...pr, approvals: ['ada'], reviewDecision: 'APPROVED' },
+    readPr: (n, pr) => n === 1 ? { ...pr, isDraft: true } : n === 2 ? pr : n === 3 || n === 4 ? { ...pr, unresolved: [{ id: 'thread:1', author: 'ada', body: 'Fix label', url: 'url' }] } : { ...pr, approvals: ['ada', 'bob'], reviewDecision: 'APPROVED' },
     sleep: () => {},
   });
   await h.work();
@@ -132,7 +137,7 @@ test('three internal rounds precede two reviewer requests; human feedback resume
 });
 
 test('CI failure runs a fix turn and waits for passing CI', async () => {
-  const h = harness({ task: { reviewsDone: 3, reviewersRequested: ['ada', 'bob'] }, readPr: (n, pr) => n < 3 ? { ...pr, ci: 'fail' } : { ...pr, approvals: ['ada'] }, sleep() {} });
+  const h = harness({ task: { reviewsDone: 3, reviewersRequested: ['ada', 'bob'] }, readPr: (n, pr) => n < 3 ? { ...pr, ci: 'fail' } : { ...pr, approvals: ['ada', 'bob'] }, sleep() {} });
   await h.work();
   assert.equal(h.events.filter(e => e.startsWith('turn:')).length, 1);
   assert.equal(h.task.status, 'ready');
@@ -189,7 +194,7 @@ test('unknown reviewer names ask Slack rather than skipping reviewers', async ()
 
 test('no checks or bot-only approvals cannot mark a PR completed', () => {
   const pr = { state: 'OPEN', isDraft: false, reviewDecision: 'APPROVED', approvals: ['bot[bot]'], unresolved: [], ci: 'none', requestedReviewers: [] };
-  assert.deepEqual(headless.prReadiness(pr), { ready: false, reasons: ['no human approval yet', 'no CI checks reported'] });
+  assert.deepEqual(headless.prReadiness(pr, [], ['ada', 'bob']), { ready: false, reasons: ['awaiting approval from @ada', 'awaiting approval from @bob', 'no CI checks reported'] });
 });
 
 
@@ -238,4 +243,86 @@ test('a stalled capture is aborted and asks Slack for help after fifteen minutes
   assert.ok(h.events.includes('abort agent'));
   assert.ok(h.messages.some(m => /exceeded 15 minutes/.test(m.text)));
   assert.ok(!h.events.includes('publish evidence'));
+});
+
+
+test('one root per ticket: questions, pauses, resumes, and retries reuse its thread', async () => {
+  const h = harness({ turn: () => ({ text: '[ask-user: Which design should I use?]' }), onReply: () => { throw halt; } });
+  await assert.rejects(h.work(), e => e === halt);
+  const roots = h.messages.filter(m => !m.thread);
+  assert.equal(roots.length, 1);
+  assert.ok(h.messages.slice(1).every(m => m.thread === h.task.slackThread && !m.broadcast));
+  await h.notify('t', 'stopped', 'worker stopped');
+  await h.notify('t', 'running', 'worker restarted');
+  assert.equal(h.messages.filter(m => !m.thread).length, 1);
+  assert.ok(h.messages.slice(1).every(m => m.thread === h.task.slackThread && !m.broadcast));
+});
+
+
+test('review comments wait for an unchanged batch, including same-count replacements', async () => {
+  let changes = 0;
+  const original = { id: 'first', author: 'ada', body: 'Fix label', url: 'url' };
+  const replacement = { ...original, id: 'second', body: 'Fix button' };
+  const h = harness({ task: { reviewsDone: 3, reviewersRequested: ['ada', 'bob'] },
+    readPr: (n, pr) => n === 1 ? pr : n === 2 ? { ...pr, unresolved: [original] } : n < 5 ? { ...pr, unresolved: [replacement] } : { ...pr, approvals: ['ada', 'bob'] },
+    sleep: () => { changes++; },
+    turn: () => { assert.equal(changes, 2, 'replacement comment must restart the three-minute wait'); return { text: '' }; },
+  });
+  await h.work();
+  assert.equal(h.events.filter(e => e.startsWith('turn:')).length, 1);
+  assert.ok(h.task.threadsSeen.includes('second'));
+  assert.ok(!h.task.threadsSeen.includes('first'));
+  assert.equal(h.task.status, 'ready');
+});
+
+test('an unresolved thread is not recorded as addressed after a batch turn', async () => {
+  const comment = { id: 'first', threadId: 'thread', author: 'ada', body: 'Fix label', url: 'url' };
+  let turns = 0;
+  const h = harness({ task: { reviewsDone: 3, reviewersRequested: ['ada', 'bob'] },
+    readPr: (_, pr) => ({ ...pr, unresolved: [comment] }), sleep() {},
+    turn: () => { if (++turns === 2) throw halt; return { text: '' }; }, onReply: () => { throw halt; },
+  });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.ok(!h.task.threadsSeen.includes('first'));
+  assert.equal(h.task.status, 'waiting');
+});
+
+
+test('one reviewer approval keeps the loop open until both selected reviewers approve and CI passes', async () => {
+  let sleeps = 0;
+  const h = harness({ task: { reviewsDone: 3, reviewersRequested: ['ada', 'bob'] },
+    readPr: (n, pr) => ({ ...pr, approvals: n < 4 ? ['ada'] : ['ada', 'bob'], ci: n === 4 ? 'pending' : 'pass' }), sleep() { sleeps++; },
+  });
+  await h.work();
+  assert.ok(sleeps >= 3);
+  assert.equal(h.task.status, 'ready');
+  assert.ok(h.messages.some(m => /Both requested reviewers approved/.test(m.text)));
+});
+
+test('worker failure asks Slack and resumes rather than ending the task', async () => {
+  const h = harness();
+  let attempts = 0;
+  await h.run(async () => { if (++attempts === 1) throw new Error('Dependency unavailable'); h.task.status = 'ready'; });
+  assert.equal(attempts, 2);
+  assert.ok(h.events.includes('owner reply'));
+  assert.ok(h.messages.some(m => /Dependency unavailable/.test(m.text)));
+  assert.ok(h.messages.filter(m => !m.thread).length === 1);
+  assert.equal(h.task.status, 'ready');
+  assert.equal(h.task.recoveryGuidance, 'Proceed');
+});
+
+test('four process crashes ask Slack and resume instead of failing permanently', async () => {
+  const h = harness({ task: { restarts: 4, note: 'Worker exited repeatedly' } });
+  await h.run(async () => { assert.ok(h.events.includes('owner reply')); h.task.status = 'ready'; });
+  assert.equal(h.task.restarts, 0);
+  assert.equal(h.task.status, 'ready');
+});
+
+
+test('intentional worker shutdown does not ask Slack to recover an aborted turn', async () => {
+  const h = harness();
+  let stopping = false;
+  await h.run(async () => { stopping = true; throw new Error('agent aborted during SIGTERM'); }, () => stopping);
+  assert.equal(h.messages.length, 0);
+  assert.ok(!h.events.includes('owner reply'));
 });

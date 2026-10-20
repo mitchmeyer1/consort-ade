@@ -45,18 +45,19 @@ export class Slack {
   }
 
   /** post a message; in `thread` when given. Resolves to the message ts, which is also the thread id for replies. */
-  async post(text: string, thread?: string, broadcast = false): Promise<string> {
-    const j = await this.api("chat.postMessage", { channel: await this.channel(), text, ...(thread ? { thread_ts: thread, ...(broadcast ? { reply_broadcast: true } : {}) } : {}), unfurl_links: false });
+  async post(text: string, thread?: string): Promise<string> {
+    const j = await this.api("chat.postMessage", { channel: await this.channel(), text, ...(thread ? { thread_ts: thread } : {}), unfurl_links: false });
     return j.ts as string;
   }
 
   /** wait for the owner's reply in the thread after `afterTs`; polls, and gives up after `timeoutMs` when set */
-  async waitForReply(thread: string, afterTs: string, opts: { pollMs?: number; timeoutMs?: number; onTick?: () => void } = {}): Promise<string | undefined> {
+  async waitForReply(thread: string, afterTs: string, opts: { pollMs?: number; timeoutMs?: number; onTick?: () => void; onCheck?: (result: "answer" | "empty" | "error") => void } = {}): Promise<string | undefined> {
     const poll = opts.pollMs ?? 10_000;
     const started = Date.now();
     for (;;) {
       const j = await this.api("conversations.replies", { channel: await this.channel(), ts: thread, limit: 200 }).catch(() => undefined);
       const text = j ? replyAfter(j.messages ?? [], afterTs, this.cfg.userId) : undefined;
+      opts.onCheck?.(text ? "answer" : j ? "empty" : "error");
       if (text) return text;
       opts.onTick?.();
       if (opts.timeoutMs && Date.now() - started > opts.timeoutMs) return undefined;

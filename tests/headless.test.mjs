@@ -78,10 +78,10 @@ test('review rounds rotate: the other provider first when there are two, then th
   assert.deepEqual(reviewRotation({}), []);
 });
 
-test('a PR is ready to merge on one fixed test: open, not draft, a human approval, no changes requested, no open threads, CI green', () => {
-  const base = { state: 'OPEN', isDraft: false, reviewDecision: 'APPROVED', approvals: ['ada'], unresolved: [], ci: 'pass', requestedReviewers: [] };
+test('a PR is ready to merge on one fixed test: open, not draft, both requested approvals, no changes requested, no open threads, CI green', () => {
+  const base = { state: 'OPEN', isDraft: false, reviewDecision: 'APPROVED', approvals: ['ada', 'bob'], unresolved: [], ci: 'pass', requestedReviewers: ['ada', 'bob'] };
   assert.deepEqual(prReadiness(base), { ready: true, reasons: [] });
-  assert.deepEqual(prReadiness({ ...base, approvals: ['consort-bot'] }, ['consort-bot']).reasons, ['no human approval yet']);
+  assert.deepEqual(prReadiness({ ...base, approvals: ['consort-bot'] }, ['consort-bot']).reasons, ['awaiting approval from @ada', 'awaiting approval from @bob']);
   assert.deepEqual(prReadiness({ ...base, isDraft: true, ci: 'pending' }).reasons, ['PR is a draft', 'CI still running']);
   assert.deepEqual(prReadiness({ ...base, reviewDecision: 'CHANGES_REQUESTED', unresolved: [{ id: 't', author: 'ada', body: 'x', url: 'u', createdAt: '' }] }).reasons, ['changes requested', '1 unresolved thread']);
   assert.deepEqual(prReadiness({ ...base, state: 'MERGED' }).reasons, ['PR is merged']);
@@ -310,4 +310,17 @@ test('STATUS says whether the agent is moving: running, waiting on Slack, at a l
   assert.equal(taskHealth(t({ activeProvider: 'codex', accountIds: { claude: 'c2', codex: 'x1' } }), [...allBlocked, { id: 'x1', provider: 'codex' }], { workerAlive: true, logAgeMs: 0 }, now).label, 'RUNNING', 'blocked Claude accounts do not mark a running Codex turn as limited');
   assert.equal(taskHealth(t({ status: 'ready' }), accounts, { workerAlive: false, logAgeMs: 0 }, now).label, 'COMPLETED');
   assert.equal(taskHealth(t({ status: 'monitoring' }), accounts, { workerAlive: true, logAgeMs: 5 * 60_000 }, now).label, 'WAITING', 'watching the PR waits on humans or CI');
+});
+
+
+test('completion requires both selected reviewers, excludes bots and author, and respects GitHub review requirements', () => {
+  const pr = { state: 'OPEN', isDraft: false, approvals: ['ada', 'bob'], author: 'builder', reviewDecision: 'APPROVED', unresolved: [], ci: 'pass', requestedReviewers: [] };
+  const ready = p => prReadiness({ ...pr, ...p }, ['builder'], ['ada', 'bob']);
+  assert.equal(ready({}).ready, true);
+  assert.equal(ready({ approvals: ['ada', 'other'] }).ready, false);
+  assert.equal(ready({ approvals: ['ada', 'builder'] }).ready, false);
+  assert.equal(ready({ approvals: ['ada', 'bot[bot]'] }).ready, false);
+  assert.equal(ready({ reviewDecision: 'REVIEW_REQUIRED' }).ready, false);
+  for (const ci of ['fail', 'pending', 'none']) assert.equal(ready({ ci }).ready, false);
+  assert.equal(prReadiness(pr).ready, false, 'missing saved reviewer identities cannot count as completion');
 });

@@ -12,7 +12,8 @@ import { HOME, LOG_DIR, loadState } from "./state.ts";
 export const DAEMON_PID = join(HOME, "daemon.pid");
 export const DAEMON_LOG = join(LOG_DIR, "daemon.log");
 
-export const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+/** EPERM means the process exists but this caller cannot signal it; only ESRCH means absent. */
+export const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; } };
 
 /** the running daemon's pid, or undefined; a stale pid file is removed */
 export function daemonPid(): number | undefined {

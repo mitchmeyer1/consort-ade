@@ -57,6 +57,7 @@ export type Job = {
   maxParallel: number;
   enabled: boolean;
   lastScanAt?: number;
+  scanStartedAt?: number;
   createdAt: number;
 };
 export type TaskStatus = "working" | "waiting" | "monitoring" | "ready" | "done" | "failed" | "released";
@@ -74,6 +75,7 @@ export type Task = {
   reviewersRequested?: string[];
   /** Written only after evidence validation, independent inspection, and publication succeed. */
   evidenceValidatedAt?: number;
+  recoveryGuidance?: string;
   /** the Slack thread every message about this task goes to */
   slackThread?: string;
   /** agent session ids by provider, so a task keeps one conversation per provider */
@@ -84,6 +86,7 @@ export type Task = {
   reviewsDone: number;
   /** review thread ids already answered */
   threadsSeen: string[];
+  reviewBatch?: { fingerprint: string; stableSince: number };
   pid?: number;
   /** worker crashes so far; the daemon restarts a crashed worker a few times before failing the task */
   restarts?: number;

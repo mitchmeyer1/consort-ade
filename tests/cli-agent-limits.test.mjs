@@ -48,15 +48,18 @@ test('Codex terminal quota errors return immediately instead of waiting on the s
   assert.equal(readPastError, false);
 });
 
-test('Slack lifecycle broadcasts use the real chat.postMessage request field', async () => {
+test('Slack replies always stay inside the ticket thread', async () => {
   const source = ts.transpileModule(readFileSync(new URL('../src/cli/slack.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const mod = { exports: {} };
   new Function('require', 'module', 'exports', source)(() => ({}), mod, mod.exports);
   let body;
   const slack = new mod.exports.Slack({ botToken: 'test', channel: 'C1' }, async (_, init) => { body = new URLSearchParams(init.body); return { json: async () => ({ ok: true, ts: '2' }) }; });
-  await slack.post('Paused', '1', true);
-  assert.equal(body.get('thread_ts'), '1');
-  assert.equal(body.get('reply_broadcast'), 'true');
-  await slack.post('Routine progress', '1');
+  for (const text of ['Paused', 'Resumed', 'Question?', 'Completed', 'Routine progress']) {
+    await slack.post(text, '1');
+    assert.equal(body.get('thread_ts'), '1');
+    assert.equal(body.has('reply_broadcast'), false);
+  }
+  await slack.post('Picked up a ticket');
+  assert.equal(body.has('thread_ts'), false);
   assert.equal(body.has('reply_broadcast'), false);
 });

@@ -44,9 +44,9 @@ Map the idea as a design tree and walk it. Decide every branch yourself where th
 When no open question remains, write ${"`"}.consort/ship/SPEC.md${"`"} in this same turn, sections in this order: Problem, Solution, User stories (a long numbered list, "As a <actor>, I want <feature>, so that <benefit>"), Implementation decisions, Testing decisions, Out of scope, Open questions (only real ones), Assumptions (copied from GRILLING.md). Then emit ${"`"}[ship-spec: .consort/ship/SPEC.md]${"`"}, ${"`"}[ship-stage: Spec'd | Spec written headless in <n> round(s).]${"`"} and ${"`"}[ship-next: /ship]${"`"}.`;
 
 /** what the PR-monitor turn does when humans have commented */
-export const RESPOND_TO_REVIEW = (unresolved: { author: string; path?: string; line?: number; body: string; url: string }[]) => `## This turn: answer the humans on the PR
+export const RESPOND_TO_REVIEW = (unresolved: { threadId?: string; author: string; path?: string; line?: number; body: string; url: string }[]) => `## This turn: answer the humans on the PR
 
-Reviewers left ${unresolved.length} unresolved thread${unresolved.length === 1 ? "" : "s"}. For each one below: if the request is clear and right, make the change, commit, push, reply on the thread with what changed, and resolve it (${"`"}gh api graphql${"`"} resolveReviewThread). If it is unclear or you disagree, reply once, neutrally, with the trade-off, do not resolve it, and raise it as ${"`"}[ask-user: …]${"`"} quoting the reviewer. For a top-level review without a thread, answer with a PR comment and do not try to resolve a thread. Run the repo's checks before pushing. End with one line per thread: resolved / asked / declined.
+Reviewers left ${unresolved.length} unresolved thread${unresolved.length === 1 ? "" : "s"}. For each one below: if the request is clear and right, collect the clear requests into one batch, make the changes, run the relevant checks, commit and push the batch, confirm the push succeeded, then reply on each addressed thread with what changed and resolve it (${"`"}gh api graphql${"`"} resolveReviewThread). If it is unclear or you disagree, reply once, neutrally, with the trade-off, do not resolve it, and raise it as ${"`"}[ask-user: …]${"`"} quoting the reviewer. For a top-level review without a thread, answer with a PR comment and do not try to resolve a thread. If any check or push fails, do not resolve the affected threads; fix and retry or ask the owner. Never resolve an unclear or unaddressed request. Run the repo's checks before pushing. End with one line per thread: resolved / asked / declined.
 
 ${unresolved.map((t, i) => `${i + 1}. ${t.author}${t.path ? ` on ${t.path}${t.line ? `:${t.line}` : ""}` : ""} — ${t.url}\n${t.body.trim().split("\n").map((l) => `   > ${l}`).join("\n")}`).join("\n\n")}`;
 
@@ -132,24 +132,29 @@ export const seedModels = (): Record<Provider, string[]> => ({ claude: [...MODEL
 
 /** the PR as the monitor reads it */
 export type PrState = {
+  author?: string;
   state: "OPEN" | "MERGED" | "CLOSED";
   isDraft: boolean;
   reviewDecision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | "";
   approvals: string[];
-  unresolved: { author: string; path?: string; line?: number; body: string; url: string; id: string; createdAt: string }[];
+  unresolved: { threadId?: string; author: string; path?: string; line?: number; body: string; url: string; id: string; createdAt: string }[];
   feedback?: PrState["unresolved"];
   ci: "pass" | "fail" | "pending" | "none";
   requestedReviewers: string[];
 };
 export type Readiness = { ready: boolean; reasons: string[] };
-/** ready to merge: at least one human approval, nothing requested-changes, no unresolved threads, CI green */
-export function prReadiness(pr: PrState, botLogins: string[] = []): Readiness {
+/** Ready only when both selected humans approve, no threads remain, and CI passes. */
+export function prReadiness(pr: PrState, botLogins: string[] = [], reviewers: string[] = pr.requestedReviewers): Readiness {
   const reasons: string[] = [];
   if (pr.state !== "OPEN") reasons.push(`PR is ${pr.state.toLowerCase()}`);
   if (pr.isDraft) reasons.push("PR is a draft");
-  const human = pr.approvals.filter((a) => !botLogins.includes(a) && !/\[bot\]$/.test(a));
-  if (!human.length) reasons.push("no human approval yet");
+  const excluded = new Set([...botLogins, pr.author ?? ""].map((n) => n.toLowerCase()));
+  const human = new Set(pr.approvals.filter((a) => !excluded.has(a.toLowerCase()) && !/\[bot\]$/i.test(a)).map((a) => a.toLowerCase()));
+  const required = [...new Set(reviewers.map((n) => n.toLowerCase()))];
+  if (required.length < 2) reasons.push("two human reviewers must be selected");
+  for (const reviewer of required) if (!human.has(reviewer)) reasons.push(`awaiting approval from @${reviewer}`);
   if (pr.reviewDecision === "CHANGES_REQUESTED") reasons.push("changes requested");
+  if (pr.reviewDecision === "REVIEW_REQUIRED") reasons.push("GitHub still requires review");
   if (pr.unresolved.length) reasons.push(`${pr.unresolved.length} unresolved thread${pr.unresolved.length === 1 ? "" : "s"}`);
   if (pr.ci === "fail") reasons.push("CI failing");
   if (pr.ci === "pending") reasons.push("CI still running");
@@ -183,7 +188,7 @@ export const slackLines = {
   pr: (url: string) => `Draft PR open: ${url}`,
   review: (round: number, model: string, findings: number) => `Review round ${round} on \`${model}\`: ${findings} finding${findings === 1 ? "" : "s"}, fixing the real ones.`,
   reviewers: (logins: string[]) => `Asked ${logins.map((l) => `@${l}`).join(", ")} to review.`,
-  ready: (url: string) => `*Ready to merge.* Approved, no open threads, CI green: ${url}\nI will not merge; that is yours.`,
+  ready: (url: string) => `*Ready to merge.* Both requested reviewers approved, no open threads, CI green: ${url}\nI will not merge; that is yours.`,
   stuck: (why: string) => `I am stuck: ${why}. Reply here with what to do, or release the ticket with \`consort-cli tasks release\`.`,
 };
 
@@ -483,3 +488,24 @@ export const usageBarText = (b: UsageBar, width = 10, paint: (s: string, tone: U
   const filled = Math.round(Math.min(100, Math.max(0, b.percent)) / 100 * width);
   return `${b.short} ${paint("▰".repeat(filled) + "▱".repeat(width - filled), b.tone)} ${String(b.percent).padStart(3)}`;
 };
+
+
+/** Seconds remain visible until a scanner starts; overdue scanners never pretend to be counting. */
+export function scanCountdown(job: { enabled: boolean; lastScanAt?: number; scanStartedAt?: number; everyMinutes: number }, now: number): string {
+  if (!job.enabled) return "off";
+  const clock = (ms: number) => { const seconds = Math.max(0, Math.ceil(ms / 1000)); return `${Math.floor(seconds / 60).toString().padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`; };
+  if (job.scanStartedAt && job.scanStartedAt > (job.lastScanAt ?? 0)) return `scanning · ${clock(now - job.scanStartedAt)} elapsed`;
+  const remaining = (job.lastScanAt ?? 0) + job.everyMinutes * 60_000 - now;
+  return !job.lastScanAt || remaining <= 0 ? "due now" : `next scan in ${clock(remaining)}`;
+}
+
+
+export const REVIEW_QUIET_MS = 3 * 60_000;
+export type ReviewBatch = { fingerprint: string; stableSince: number };
+/** A new reply, edit, replacement, or resolved thread restarts the three-minute quiet period. */
+export function observeReviewBatch(previous: ReviewBatch | undefined, comments: PrState["unresolved"], now: number): { batch?: ReviewBatch; ready: boolean } {
+  if (!comments.length) return { ready: false };
+  const fingerprint = JSON.stringify(comments.map((c) => [c.id, c.author, c.body]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
+  const batch = previous?.fingerprint === fingerprint ? previous : { fingerprint, stableSince: now };
+  return { batch, ready: now - batch.stableSince >= REVIEW_QUIET_MS };
+}
