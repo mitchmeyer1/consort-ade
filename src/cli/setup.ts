@@ -351,7 +351,7 @@ export async function runSetup(): Promise<void> {
       if (job.source === "clickup" && s.clickupKey && (job.scope || job.listId)) {
         const where = job.scope ? `${job.scope.kind} ${job.scope.id}` : `list ${job.listId}`;
         const cnt = await clickupSource(s.clickupKey, job).scan().then((t) => t.length, () => -1);
-        console.log(cnt >= 0 ? ok(`ClickUp ${where} readable (${cnt} open task${cnt === 1 ? "" : "s"})`) : bad(`cannot read ClickUp ${where}`));
+        console.log(cnt >= 0 ? ok(`ClickUp ${where} readable (${cnt} open task${cnt === 1 ? "" : "s"}${job.filters?.tags?.length ? ` tagged ${job.filters.tags.join("/")}` : ""})`) : bad(`cannot read ClickUp ${where}`));
       }
     }
 
