@@ -54,6 +54,7 @@ export async function workTask(taskId: string): Promise<void> {
   updateTask(task.id, { pid: process.pid, status: "working", activity: "starting" });
   task = loadState().tasks.find((t) => t.id === taskId)!;
   const activity = (line: string) => { updateTask(taskId, { activity: line }); };
+  let turnTag = ""; // "t3 · " while a build turn runs, so the live line shows which turn it came from
   // the task's own ports and Docker names, on every turn from here on
   const env = await allocateEnvironment(task!);
   task = loadState().tasks.find((t) => t.id === taskId)!;
@@ -118,7 +119,7 @@ export async function workTask(taskId: string): Promise<void> {
       if (cur.accountIds[provider] !== who.id) updateTask(task.id, (t) => ({ accountIds: { ...t.accountIds, [provider]: who!.id } }));
       touchAccount(who.id);
       const session = resume ? cur.sessions[provider] : undefined;
-      const res = await runTurn({ cwd: task.worktree, prompt: `${prompt}\n\n${ENVIRONMENT_RULES(env)}`, model, account: who, resume: session, env, onText: (t) => log(task, `agent: ${t.slice(0, 200).replace(/\n/g, " ")}`) });
+      const res = await runTurn({ cwd: task.worktree, prompt: `${prompt}\n\n${ENVIRONMENT_RULES(env)}`, model, account: who, resume: session, env, onText: (t) => { const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) activity(`${turnTag}${line.slice(0, 160)}`); } });
       if (res.limit) {
         blockAccount(who.id, res.limit.resetsAt, res.limit.text);
         updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: undefined } }));
@@ -166,7 +167,7 @@ export async function workTask(taskId: string): Promise<void> {
     const form = feature.stage === "Ready to Test" ? "approve" as const : "resume" as const;
     const prompt = pendingUser ?? shipPrompt({ feature, form: { form }, worktree: task.worktree, branch: task.branch, base: `origin/${job.base}`, ticketBody, headless: true });
     pendingUser = undefined;
-    activity(`${feature.stage}: turn ${n + 1}`);
+    turnTag = `t${n + 1} · `; activity(`${turnTag}starting`);
     const text = await turn(prompt);
     log(task, `turn ${n + 1} at ${feature.stage}: ${stripAskUser(stripShipMarkers(text)).slice(0, 300).replace(/\n/g, " ")}`);
     await applyReply(text);
