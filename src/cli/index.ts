@@ -10,7 +10,7 @@ import { newTask, workTask } from "./pipeline";
 import { Slack } from "./slack";
 import { sourceFor } from "./sources";
 import { renderView, viewLoop } from "./view";
-import { createAccount, runSetup, setupDone } from "./setup";
+import { createAccount, runSetup, scannerName, setupDone } from "./setup";
 import { applyBundle, buildBundle } from "./transfer";
 import { cleanupEnvironment } from "./environment";
 import { banner, cream, dim, mint, ok, bad } from "./theme";
@@ -149,7 +149,7 @@ async function main(argv: string[]) {
       const filters: SourceFilters = { tags: list(a, "tag"), statuses: list(a, "status"), nameIncludes: list(a, "name-includes"), nameExcludes: list(a, "name-excludes"), assignees: list(a, "assignee") };
       const reviewModels: ReviewPick[] = list(a, "review-models").map((m) => { const [provider, model] = m.split(":"); if ((provider !== "claude" && provider !== "codex") || !model) fail(`bad --review-models entry: ${m}`); return { provider: provider as ReviewPick["provider"], model }; });
       const job: Job = {
-        id: newId("job"), name: str(a, "name") ?? `${source} ${s.jobs.length + 1}`, source, repo, base: str(a, "base") ?? "main",
+        id: newId("job"), name: str(a, "name") ?? scannerName(s), source, repo, base: str(a, "base") ?? "main",
         listId: str(a, "list"), ...(str(a, "space") ? { scope: { kind: "space" as const, id: str(a, "space")! } } : str(a, "folder") ? { scope: { kind: "folder" as const, id: str(a, "folder")! } } : str(a, "list") ? { scope: { kind: "list" as const, id: str(a, "list")! } } : {}), filters, everyMinutes: Number(str(a, "every") ?? 1) || 1, maxParallel: Number(str(a, "max-parallel") ?? 2) || 2,
         statuses: { progress: str(a, "status-progress") ?? DEFAULT_STATUSES.progress, review: str(a, "status-review") ?? DEFAULT_STATUSES.review, done: str(a, "status-done") ?? DEFAULT_STATUSES.done },
         ...(reviewModels.length ? { reviewModels } : {}), enabled: true, createdAt: Date.now(),

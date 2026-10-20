@@ -25,6 +25,8 @@ const run = promisify(execFile);
 
 import { chooseFrom, clickupListIdFrom, clickupScopeFrom, masked, slackUserIdFrom, type ClickupScope } from "../shared/headless.ts";
 export { chooseFrom, clickupListIdFrom, slackUserIdFrom };
+/** the default name for a new scanner: Consort Watcher, numbered once there is more than one */
+export const scannerName = (s: Pick<CliState, "jobs">) => (s.jobs.length ? `Consort Watcher ${s.jobs.length + 1}` : "Consort Watcher");
 export const setupDone = (s: Pick<CliState, "setupCompletedAt">) => !!s.setupCompletedAt;
 
 type Ask = (q: string, opts?: { secret?: boolean; default?: string }) => Promise<string>;
@@ -201,7 +203,7 @@ export async function runSetup(): Promise<void> {
             console.log(ok(`${scope.kind} "${list.name}": ${list.lists.length} list${list.lists.length === 1 ? "" : "s"}${scope.kind !== "list" ? ` (${list.lists.slice(0, 6).map((l) => l.name).join(", ")}${list.lists.length > 6 ? ", …" : ""})` : ""}; statuses: ${list.statuses.join(" · ")}`));
           }
           console.log(dim("This makes a scanner: it checks that place every minute and hands each ticket that matches to a worker agent. The name only tells scanners apart in lists and Slack."));
-          job.name = await ask("Name this scanner", { default: list.name });
+          job.name = await ask("Name this scanner", { default: scannerName(s) });
           const tags = await ask("Only tasks with one of these tags (comma-separated; empty for any)", { default: "ai-handle" });
           job.filters!.tags = tags.split(",").map((t) => t.trim()).filter(Boolean);
           console.log("Statuses the scanner picks tasks up from:"); list.statuses.forEach((st, i) => console.log(`  ${i + 1}. ${st}`));
@@ -213,7 +215,7 @@ export async function runSetup(): Promise<void> {
           };
         } else {
           console.log(dim("This makes a scanner: it checks the repo's issues every minute and hands each one that matches to a worker agent. The name only tells scanners apart in lists and Slack."));
-          job.name = await ask("Name this scanner", { default: "issues" });
+          job.name = await ask("Name this scanner", { default: scannerName(s) });
           const labels = await ask("Only issues with one of these labels (comma-separated; empty for any)", { default: "ai-handle" });
           job.filters!.tags = labels.split(",").map((t) => t.trim()).filter(Boolean);
         }
