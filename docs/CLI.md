@@ -44,13 +44,13 @@ consort-cli clickup set-key pk_…
 consort-cli prefix set bot                  # branches become bot/<slug>-<ticket id>
 
 # 5. a job: what to scan, how often, which tickets qualify
-consort-cli jobs add --name roster --source clickup --list 901234 \
+consort-cli jobs add --name roster --source clickup --space 90131945617 \   # or --list <id> / --folder <id>
   --repo ~/repos/roster-service --base main \
   --tag ai-handle --status "to do" --every 1
 consort-cli jobs scan <job id>              # dry run: which tickets would be taken
 ```
 
-GitHub issues work the same with `--source github` and no `--list`; filters apply to labels and the issue title. Every filter must hold: `--tag` (any of), `--status` (any of), `--name-includes` (all), `--name-excludes`, `--assignee`.
+A ClickUp job watches one list, a folder, or a whole space (every list in it, folderless and in folders); paste the sidebar URL into the wizard (`/v/li/…`, `/v/f/…`, `/v/s/…`) and it works out which. Tasks are matched by tag, status and title across all those lists, and each task's status moves within its own list's statuses. GitHub issues work the same with `--source github` and no list; filters apply to labels and the issue title. Every filter must hold: `--tag` (any of), `--status` (any of), `--name-includes` (all), `--name-excludes`, `--assignee`.
 
 ## Run
 

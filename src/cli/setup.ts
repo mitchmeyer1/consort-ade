@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { cliStatus } from "../main/cliRuntime";
 import { accountStatus, loginInteractive, runtimeDeps } from "./agent";
 import { Slack } from "./slack";
-import { clickupSource } from "./sources";
+import { clickupLists, clickupSource } from "./sources";
 import { DEFAULT_STATUSES, loadState, LOGINS_DIR, newId, saveState, STATE_FILE, WORK_DIR, type Account, type CliState, type Job } from "./state";
 
 /**
@@ -23,7 +23,7 @@ import { findBrowser } from "./evidence";
 
 const run = promisify(execFile);
 
-import { chooseFrom, clickupListIdFrom, slackUserIdFrom } from "../shared/headless.ts";
+import { chooseFrom, clickupListIdFrom, clickupScopeFrom, slackUserIdFrom, type ClickupScope } from "../shared/headless.ts";
 export { chooseFrom, clickupListIdFrom, slackUserIdFrom };
 export const setupDone = (s: Pick<CliState, "setupCompletedAt">) => !!s.setupCompletedAt;
 
@@ -94,11 +94,15 @@ async function testClickupKey(key: string): Promise<string | undefined> {
   const j = await res.json();
   return j.user?.username ?? j.user?.email ?? "ok";
 }
-async function describeList(key: string, listId: string): Promise<{ name: string; statuses: string[] } | undefined> {
-  const res = await fetch(`https://api.clickup.com/api/v2/list/${encodeURIComponent(listId)}`, { headers: { Authorization: key }, signal: AbortSignal.timeout(15_000) }).catch(() => undefined);
-  if (!res?.ok) return undefined;
-  const j = await res.json();
-  return { name: j.name ?? listId, statuses: ((j.statuses ?? []) as any[]).map((s) => String(s.status)) };
+/** a scope as the wizard shows it: its name, the lists it holds, and the statuses across them */
+async function describeScope(key: string, scope: ClickupScope): Promise<{ name: string; lists: { id: string; name: string }[]; statuses: string[] } | undefined> {
+  const get = async (path: string) => { const res = await fetch(`https://api.clickup.com/api/v2${path}`, { headers: { Authorization: key }, signal: AbortSignal.timeout(15_000) }).catch(() => undefined); return res?.ok ? res.json() : undefined; };
+  const self = await get(`/${scope.kind}/${encodeURIComponent(scope.id)}`);
+  if (!self) return undefined;
+  const lists = await clickupLists(key, scope).catch(() => [] as { id: string; name: string }[]);
+  const statuses: string[] = [];
+  for (const l of lists.slice(0, 40)) { const j = await get(`/list/${encodeURIComponent(l.id)}`); for (const s of (j?.statuses ?? []) as any[]) { const n = String(s.status); if (!statuses.some((x) => x.toLowerCase() === n.toLowerCase())) statuses.push(n); } }
+  return { name: String(self.name ?? scope.id), lists, statuses };
 }
 async function testAnthropicKey(key: string): Promise<boolean> {
   const res = await fetch("https://api.anthropic.com/v1/models?limit=1", { headers: { "x-api-key": key, "anthropic-version": "2023-06-01" }, signal: AbortSignal.timeout(15_000) }).catch(() => undefined);
@@ -174,14 +178,16 @@ export async function runSetup(): Promise<void> {
             if (!who) key = undefined;
           }
           s.clickupKey = key; saveState(s);
-          let list: { name: string; statuses: string[] } | undefined;
+          let list: { name: string; lists: { id: string; name: string }[]; statuses: string[] } | undefined;
           while (!list) {
-            const id = clickupListIdFrom(await ask("ClickUp list to watch (list id, or the list's URL)"));
-            if (!id) { console.log(bad("that is not a list id or list URL")); continue; }
-            list = await describeList(key, id);
-            if (!list) { console.log(bad("ClickUp has no list with that id for this key")); continue; }
-            job.listId = id;
-            console.log(ok(`list "${list.name}" with statuses: ${list.statuses.join(" · ")}`));
+            const scope = clickupScopeFrom(await ask("ClickUp list, folder or space to watch (paste its URL from the sidebar, or an id)"));
+            if (!scope) { console.log(bad("that is not a ClickUp list, folder or space URL or id")); continue; }
+            list = await describeScope(key, scope);
+            if (!list) { console.log(bad(`ClickUp has no ${scope.kind} with that id for this key`)); continue; }
+            if (!list.lists.length) { console.log(bad(`${scope.kind} "${list.name}" has no lists`)); list = undefined; continue; }
+            job.scope = scope;
+            if (scope.kind === "list") job.listId = scope.id;
+            console.log(ok(`${scope.kind} "${list.name}": ${list.lists.length} list${list.lists.length === 1 ? "" : "s"}${scope.kind !== "list" ? ` (${list.lists.slice(0, 6).map((l) => l.name).join(", ")}${list.lists.length > 6 ? ", …" : ""})` : ""}; statuses: ${list.statuses.join(" · ")}`));
           }
           job.name = await ask("A name for this job", { default: list.name });
           const tags = await ask("Only tasks with one of these tags (comma-separated; empty for any)", { default: "ai-handle" });
@@ -295,9 +301,10 @@ export async function runSetup(): Promise<void> {
       try { mkdirSync(probe, { recursive: true }); (await import("node:fs")).rmSync(probe, { recursive: true }); console.log(ok(`can create worktrees under ${WORK_DIR}`)); } catch { console.log(bad(`cannot write ${WORK_DIR}`)); }
       const push = await run("git", ["push", "--dry-run", "origin", `HEAD:refs/heads/consort-cli-probe-${process.pid}`], { cwd: job.repo, timeout: 60_000 }).then(() => true, () => false);
       console.log(push ? ok(`can push branches to origin of ${job.repo}`) : bad(`cannot push to origin of ${job.repo}: check the deploy key or token`));
-      if (job.source === "clickup" && s.clickupKey && job.listId) {
+      if (job.source === "clickup" && s.clickupKey && (job.scope || job.listId)) {
+        const where = job.scope ? `${job.scope.kind} ${job.scope.id}` : `list ${job.listId}`;
         const cnt = await clickupSource(s.clickupKey, job).scan().then((t) => t.length, () => -1);
-        console.log(cnt >= 0 ? ok(`ClickUp list ${job.listId} readable (${cnt} open task${cnt === 1 ? "" : "s"})`) : bad(`cannot read ClickUp list ${job.listId}`));
+        console.log(cnt >= 0 ? ok(`ClickUp ${where} readable (${cnt} open task${cnt === 1 ? "" : "s"})`) : bad(`cannot read ClickUp ${where}`));
       }
     }
 

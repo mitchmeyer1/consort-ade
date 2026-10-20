@@ -208,12 +208,17 @@ export function ago(ms: number): string {
   return `${Math.floor(h / 24)}d ${h % 24}h`;
 }
 
-/** what the setup wizard accepts for a ClickUp list: the list's URL or its bare id */
-export const clickupListIdFrom = (text: string): string | undefined => {
+/** a ClickUp scope to watch: one list, a folder of lists, or a whole space; from the sidebar URL (/v/li/, /v/f/, /v/s/) or a bare id (a list) */
+export type ClickupScope = { kind: "list" | "folder" | "space"; id: string };
+export const clickupScopeFrom = (text: string): ClickupScope | undefined => {
   const t = text.trim();
-  const m = /\/li\/(\d+)/.exec(t) ?? /^(\d{6,})$/.exec(t);
-  return m?.[1];
+  const m = /\/v\/(li|l|f|s)\/(\d+)/.exec(t);
+  if (m) return { kind: m[1] === "s" ? "space" : m[1] === "f" ? "folder" : "list", id: m[2] };
+  const bare = /^(?:(list|folder|space)[:\s]+)?(\d{6,})$/i.exec(t);
+  return bare ? { kind: (bare[1]?.toLowerCase() as ClickupScope["kind"]) ?? "list", id: bare[2] } : undefined;
 };
+/** what the setup wizard accepts for a ClickUp list: the list's URL or its bare id */
+export const clickupListIdFrom = (text: string): string | undefined => { const s = clickupScopeFrom(text); return s?.kind === "list" ? s.id : undefined; };
 /** a Slack member id as people paste it: bare, as a mention, or at the end of a profile URL */
 export const slackUserIdFrom = (text: string): string | undefined => /\b([UW][A-Z0-9]{6,})\b/.exec(text.trim().toUpperCase())?.[1];
 /** "1,3" or "to do,backlog" against a list of names → the chosen names, once each, unknown ones dropped */

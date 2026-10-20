@@ -51,7 +51,7 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   slack test
   clickup set-key <key>
   prefix set <branch-prefix>                                             e.g. "bot" → bot/<slug>-<id>
-  jobs add --name <n> --source clickup --list <id> --repo <path> --base main [--tag ai-handle] [--status "to do"]
+  jobs add --name <n> --source clickup --list|--folder|--space <id> --repo <path> --base main [--tag ai-handle] [--status "to do"]
            [--name-includes <s>] [--name-excludes <s>] [--assignee <who>] [--every 1] [--max-parallel 2]
            [--status-progress "in progress"] [--status-review "in review"] [--status-done complete]
            [--review-models claude:claude-fable-5-1,codex:gpt-6-astra,claude:claude-opus-5]
@@ -115,16 +115,16 @@ async function main(argv: string[]) {
       const reviewModels: ReviewPick[] = list(a, "review-models").map((m) => { const [provider, model] = m.split(":"); if ((provider !== "claude" && provider !== "codex") || !model) fail(`bad --review-models entry: ${m}`); return { provider: provider as ReviewPick["provider"], model }; });
       const job: Job = {
         id: newId("job"), name: str(a, "name") ?? `${source} ${s.jobs.length + 1}`, source, repo, base: str(a, "base") ?? "main",
-        listId: str(a, "list"), filters, everyMinutes: Number(str(a, "every") ?? 1) || 1, maxParallel: Number(str(a, "max-parallel") ?? 2) || 2,
+        listId: str(a, "list"), ...(str(a, "space") ? { scope: { kind: "space" as const, id: str(a, "space")! } } : str(a, "folder") ? { scope: { kind: "folder" as const, id: str(a, "folder")! } } : str(a, "list") ? { scope: { kind: "list" as const, id: str(a, "list")! } } : {}), filters, everyMinutes: Number(str(a, "every") ?? 1) || 1, maxParallel: Number(str(a, "max-parallel") ?? 2) || 2,
         statuses: { progress: str(a, "status-progress") ?? DEFAULT_STATUSES.progress, review: str(a, "status-review") ?? DEFAULT_STATUSES.review, done: str(a, "status-done") ?? DEFAULT_STATUSES.done },
         ...(reviewModels.length ? { reviewModels } : {}), enabled: true, createdAt: Date.now(),
       };
-      if (source === "clickup" && !job.listId) fail("--list <clickup list id> is required for a clickup job");
+      if (source === "clickup" && !job.scope) fail("--list, --folder or --space <clickup id> is required for a clickup job");
       s.jobs.push(job); saveState(s);
-      console.log(`Added job ${job.name} (${job.id}): ${source}${job.listId ? ` list ${job.listId}` : ""} every ${job.everyMinutes} min → ${repo} on ${job.base}`);
+      console.log(`Added job ${job.name} (${job.id}): ${source}${job.scope ? ` ${job.scope.kind} ${job.scope.id}` : ""} every ${job.everyMinutes} min → ${repo} on ${job.base}`);
       return;
     }
-    case "jobs list": { for (const j of s.jobs) console.log(`${j.id}  ${j.enabled ? "on " : "off"}  ${j.name.padEnd(20)}  ${j.source}${j.listId ? `:${j.listId}` : ""}  every ${j.everyMinutes}m  ${j.repo} (${j.base})  filters ${JSON.stringify(j.filters)}  last scan ${j.lastScanAt ? new Date(j.lastScanAt).toLocaleString() : "never"}`); if (!s.jobs.length) console.log("No jobs."); return; }
+    case "jobs list": { for (const j of s.jobs) console.log(`${j.id}  ${j.enabled ? "on " : "off"}  ${j.name.padEnd(20)}  ${j.source}${j.scope ? ` ${j.scope.kind} ${j.scope.id}` : j.listId ? ` list ${j.listId}` : ""}  every ${j.everyMinutes}m  ${j.repo} (${j.base})  filters ${JSON.stringify(j.filters)}  last scan ${j.lastScanAt ? new Date(j.lastScanAt).toLocaleString() : "never"}`); if (!s.jobs.length) console.log("No jobs."); return; }
     case "jobs remove": { s.jobs = s.jobs.filter((j) => j.id !== rest[0]); saveState(s); console.log("Removed."); return; }
     case "jobs enable": case "jobs disable": { const j = s.jobs.find((x) => x.id === rest[0]) ?? fail("no such job"); j!.enabled = sub === "enable"; saveState(s); console.log(`${j!.name}: ${j!.enabled ? "on" : "off"}`); return; }
     case "jobs scan": {

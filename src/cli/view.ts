@@ -59,7 +59,7 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   if (!s.jobs.length) lines.push(dim("  none: consort-cli jobs add …"));
   for (const j of s.jobs) {
     const next = j.lastScanAt ? Math.max(0, j.lastScanAt + j.everyMinutes * 60_000 - now) : 0;
-    lines.push(`  ${pad(j.name, 20)} ${pad(`${j.source}${j.listId ? `:${j.listId}` : ""}`, 22)} ${j.enabled ? mint(`next scan in ${ago(next)}`) : dim("off")}  ${dim(j.repo)}`);
+    lines.push(`  ${pad(j.name, 20)} ${pad(`${j.source}${j.scope ? ` ${j.scope.kind} ${j.scope.id}` : j.listId ? ` list ${j.listId}` : ""}`, 22)} ${j.enabled ? mint(`next scan in ${ago(next)}`) : dim("off")}  ${dim(j.repo)}`);
   }
   return lines.join("\n");
 }

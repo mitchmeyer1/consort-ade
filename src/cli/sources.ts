@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { claimComment, type ScannedTicket } from "../shared/headless.ts";
+export type { ClickupScope } from "../shared/headless.ts";
 import type { ShipTicket } from "../shared/ship";
 import type { Job, StatusNames } from "./state";
 
@@ -40,8 +41,20 @@ export function pickStatus(listStatuses: string[], wanted: string, which: keyof 
   return by.get(norm(wanted)) ?? SYNONYMS[which].map((s) => by.get(norm(s))).find(Boolean);
 }
 
+/** the lists a scope holds: the list itself; a folder's lists; a space's folderless lists plus every folder's lists */
+export async function clickupLists(key: string, scope: { kind: "list" | "folder" | "space"; id: string }): Promise<{ id: string; name: string }[]> {
+  const row = (l: any) => ({ id: String(l.id), name: String(l.name ?? l.id) });
+  if (scope.kind === "list") return [{ id: scope.id, name: scope.id }];
+  if (scope.kind === "folder") { const j = await clickup(key, `/folder/${encodeURIComponent(scope.id)}/list?archived=false`); return ((j.lists ?? []) as any[]).map(row); }
+  const loose = await clickup(key, `/space/${encodeURIComponent(scope.id)}/list?archived=false`);
+  const folders = await clickup(key, `/space/${encodeURIComponent(scope.id)}/folder?archived=false`);
+  return [...((loose.lists ?? []) as any[]).map(row), ...((folders.folders ?? []) as any[]).flatMap((f) => ((f.lists ?? []) as any[]).map(row))];
+}
+export const clickupScopeOf = (job: Job) => job.scope ?? (job.listId ? { kind: "list" as const, id: job.listId } : undefined);
+
 export function clickupSource(key: string, job: Job): Source {
-  if (!job.listId) throw new Error(`Job ${job.name} has no ClickUp list id.`);
+  const scope = clickupScopeOf(job);
+  if (!scope) throw new Error(`Job ${job.name} has no ClickUp list, folder or space.`);
   const listStatuses = async (taskId: string) => {
     const t = await clickup(key, `/task/${encodeURIComponent(taskId)}`);
     const list = await clickup(key, `/list/${encodeURIComponent(String(t.list?.id))}`);
@@ -50,15 +63,22 @@ export function clickupSource(key: string, job: Job): Source {
   return {
     async scan() {
       const out: ScannedTicket[] = [];
-      for (let page = 0; page < 10; page++) {
-        const j = await clickup(key, `/list/${encodeURIComponent(job.listId!)}/task?page=${page}&include_closed=false&subtasks=false`);
-        const tasks = (j.tasks ?? []) as any[];
-        for (const t of tasks) out.push({
-          id: String(t.id), title: String(t.name ?? t.id), status: t.status?.status, url: t.url ?? `https://app.clickup.com/t/${t.id}`,
-          tags: ((t.tags ?? []) as any[]).map((x) => String(x.name)), assignees: ((t.assignees ?? []) as any[]).flatMap((a) => [a.username, a.email].filter(Boolean).map(String)),
-          updatedAt: Number(t.date_updated) || undefined,
-        });
-        if (j.last_page || tasks.length === 0) break;
+      const seen = new Set<string>();
+      for (const list of await clickupLists(key, scope)) {
+        for (let page = 0; page < 10; page++) {
+          const j = await clickup(key, `/list/${encodeURIComponent(list.id)}/task?page=${page}&include_closed=false&subtasks=false`);
+          const tasks = (j.tasks ?? []) as any[];
+          for (const t of tasks) {
+            if (seen.has(String(t.id))) continue; // a task shown in several lists counts once
+            seen.add(String(t.id));
+            out.push({
+              id: String(t.id), title: String(t.name ?? t.id), status: t.status?.status, url: t.url ?? `https://app.clickup.com/t/${t.id}`,
+              tags: ((t.tags ?? []) as any[]).map((x) => String(x.name)), assignees: ((t.assignees ?? []) as any[]).flatMap((a) => [a.username, a.email].filter(Boolean).map(String)),
+              updatedAt: Number(t.date_updated) || undefined,
+            });
+          }
+          if (j.last_page || tasks.length === 0) break;
+        }
       }
       return out;
     },

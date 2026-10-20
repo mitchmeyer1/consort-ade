@@ -34,8 +34,10 @@ export type Job = {
   repo: string;
   /** the branch features are cut from and PRs target, e.g. main */
   base: string;
-  /** ClickUp list id (clickup source) */
+  /** ClickUp list id (clickup source; the first cut only knew lists) */
   listId?: string;
+  /** ClickUp scope: a list, a folder of lists, or a whole space; every list inside is scanned */
+  scope?: { kind: "list" | "folder" | "space"; id: string };
   filters: SourceFilters;
   everyMinutes: number;
   /** the tracker's own status names the pipeline moves tickets through */

@@ -71,3 +71,25 @@ test('Slack: a DM is opened once, messages go to the thread, and the wait resolv
   assert.equal(reply, 'include archived');
   assert.ok(polls >= 2);
 });
+
+test('a space job scans every list in the space, folderless and in folders, and counts a task shown twice once', async (t) => {
+  const { clickupLists } = await import('../src/cli/sources.ts');
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async (url) => {
+    const path = String(url).replace('https://api.clickup.com/api/v2', '');
+    calls.push(path);
+    const json = (o) => new Response(JSON.stringify(o), { status: 200 });
+    if (path === '/space/9/list?archived=false') return json({ lists: [{ id: 'L1', name: 'Loose' }] });
+    if (path === '/space/9/folder?archived=false') return json({ folders: [{ id: 'F1', name: 'Sprint', lists: [{ id: 'L2', name: 'Backend' }, { id: 'L3', name: 'Frontend' }] }] });
+    if (path.startsWith('/list/L1/task')) return json({ tasks: [{ id: 'a', name: 'One', status: { status: 'to do' }, tags: [], assignees: [] }], last_page: true });
+    if (path.startsWith('/list/L2/task')) return json({ tasks: [{ id: 'b', name: 'Two', status: { status: 'to do' }, tags: [], assignees: [] }, { id: 'a', name: 'One', status: { status: 'to do' }, tags: [], assignees: [] }], last_page: true });
+    if (path.startsWith('/list/L3/task')) return json({ tasks: [], last_page: true });
+    return new Response('nope', { status: 404 });
+  });
+  const lists = await clickupLists('k', { kind: 'space', id: '9' });
+  assert.deepEqual(lists.map((l) => l.id), ['L1', 'L2', 'L3']);
+  const src = clickupSource('k', { ...job, listId: undefined, scope: { kind: 'space', id: '9' } });
+  const tickets = await src.scan();
+  assert.deepEqual(tickets.map((x) => x.id), ['a', 'b']);
+  assert.ok(calls.some((p) => p.startsWith('/list/L3/task')), 'every list is scanned');
+});
