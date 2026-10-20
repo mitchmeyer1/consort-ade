@@ -30,26 +30,39 @@ export const setupDone = (s: Pick<CliState, "setupCompletedAt">) => !!s.setupCom
 type Ask = (q: string, opts?: { secret?: boolean; default?: string }) => Promise<string>;
 
 function prompter(): { ask: Ask; close: () => void } {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  // lines are queued as they arrive, so a piped or pasted answer is never lost between questions
+  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: !!process.stdin.isTTY });
+  const queue: string[] = [];
+  const waiters: ((s: string) => void)[] = [];
+  let closed = false;
+  rl.on("line", (l) => { const w = waiters.shift(); if (w) w(l); else queue.push(l); });
+  rl.on("close", () => { closed = true; for (const w of waiters.splice(0)) w("\u0004"); });
+  const next = () => (queue.length ? Promise.resolve(queue.shift()!) : closed ? Promise.resolve("\u0004") : new Promise<string>((r) => waiters.push(r)));
   const ask: Ask = async (q, opts = {}) => {
     const label = `${mint("›")} ${q}${opts.default ? dim(` [${opts.default}]`) : ""}${mint(":")} `;
-    if (opts.secret && process.stdin.isTTY) {
-      // keystrokes are not echoed: readline writes the prompt, we swallow the input's echo
-      process.stdout.write(label);
-      const out = process.stdout as any;
-      const orig = out.write.bind(out);
-      let muted = true;
-      out.write = (chunk: any, ...rest: any[]) => (muted ? true : orig(chunk, ...rest));
-      try { const v = await rl.question(""); muted = false; orig("\n"); return v.trim() || (opts.default ?? ""); }
-      finally { out.write = orig; }
-    }
-    const v = (await rl.question(label)).trim();
-    return v || (opts.default ?? "");
+    process.stdout.write(label);
+    const out = process.stdout as any;
+    const orig = out.write.bind(out);
+    if (opts.secret && process.stdin.isTTY) out.write = () => true; // keystrokes are not echoed
+    try {
+      const v = await next();
+      if (v === "\u0004") throw new Error("readline was closed");
+      return v.trim() || (opts.default ?? "");
+    } finally { out.write = orig; if (opts.secret && process.stdin.isTTY) orig("\n"); }
   };
   return { ask, close: () => rl.close() };
 }
 
 const yes = async (ask: Ask, q: string, dflt = true) => /^y/i.test(await ask(`${q} (${dflt ? "Y/n" : "y/N"})`, { default: dflt ? "y" : "n" }));
+
+/** before each credential: what it is for, where to get it, and what it lets consort-cli do */
+const why = (title: string, lines: { for: string; where: string; can: string; not?: string }) => {
+  console.log(`\n${mint(title)}`);
+  console.log(`  ${dim("Used for")}   ${lines.for}`);
+  console.log(`  ${dim("Where")}      ${lines.where}`);
+  console.log(`  ${dim("It can")}     ${lines.can}`);
+  if (lines.not) console.log(`  ${dim("It cannot")}  ${lines.not}`);
+};
 
 async function checkTools(): Promise<boolean> {
   console.log(head("1. Tools on this machine"));
@@ -98,6 +111,12 @@ async function testOpenAiKey(key: string): Promise<boolean> {
 
 async function repoChecks(ask: Ask): Promise<{ repo: string; base: string } | undefined> {
   for (;;) {
+    why("Repository checkout", {
+      for: "the base every feature branch is cut from; worktrees are made beside it, never inside your checkout.",
+      where: "an existing `git clone` on this machine, on its base branch, with a remote named origin that `gh` can see.",
+      can: "fetch, create branches, push them and open PRs through your `gh` login.",
+      not: "merge; merging stays yours.",
+    });
     const repo = resolve(await ask("Path of the repository checkout on this machine"));
     if (!existsSync(join(repo, ".git"))) { console.log(bad(`${repo} has no .git; clone it first`)); if (!(await yes(ask, "Try another path?"))) return undefined; continue; }
     const current = (await run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repo }).catch(() => ({ stdout: "" }))).stdout.trim();
@@ -142,8 +161,14 @@ export async function runSetup(): Promise<void> {
           s = loadState();
           let key = s.clickupKey;
           if (key) console.log(`A ClickUp key is saved${(await testClickupKey(key)) ? " and works" : " but does not work any more"}.`);
+          if (!key || !(await testClickupKey(key))) why("ClickUp API token", {
+            for: "finding tickets to work on, claiming them, moving their status and commenting progress and evidence.",
+            where: "ClickUp → your avatar (bottom left) → Settings → Apps → API Token → Generate. It is a personal token, so the comments appear as you.",
+            can: "read every list you can see; write comments, statuses and attachments on tasks in those lists.",
+            not: "see anything your own account cannot.",
+          });
           while (!key || !(await testClickupKey(key))) {
-            key = await ask("ClickUp API key (ClickUp → your avatar → Settings → Apps → API Token)", { secret: true });
+            key = await ask("ClickUp API token (pk_…)", { secret: true });
             const who = await testClickupKey(key);
             console.log(who ? ok(`key works (${who})`) : bad("ClickUp rejected that key"));
             if (!who) key = undefined;
@@ -195,7 +220,12 @@ export async function runSetup(): Promise<void> {
 
     // ── accounts ───────────────────────────────────────────────────────────────────────────
     console.log(head("3. AI accounts"));
-    console.log("Each login lives under ~/.consort-cli/logins/<account>, separate from Consort desktop and from your own `claude` or `codex` login. Add every account you want in the pool: when one hits its usage limit the work moves to the next.");
+    why("AI accounts", {
+      for: "running the agents that build, test and review. A pool: when one account hits its usage limit the work moves to the next.",
+      where: "a Claude or ChatGPT subscription login (runs the provider's login here, into ~/.consort-cli/logins/<account>, separate from Consort desktop and from your own `claude` or `codex`), or an API key from console.anthropic.com or platform.openai.com.",
+      can: "read and change files in the task's worktree, run commands there, push branches, search the web. Nothing asks for permission at run time.",
+      not: "see other tasks' worktrees or your personal login.",
+    });
     s = loadState();
     for (const acc of s.accounts) console.log(`  ${acc.provider.padEnd(6)} ${acc.name.padEnd(20)} ${await accountStatus(acc)}`);
     while (!s.accounts.length || await yes(ask, "Add an account?", !s.accounts.length)) {
@@ -221,20 +251,37 @@ export async function runSetup(): Promise<void> {
 
     // ── slack ──────────────────────────────────────────────────────────────────────────────
     console.log(head("4. Slack, where it asks you things"));
-    console.log("Make a Slack app (api.slack.com/apps → Create New App → From scratch), add a bot with scopes chat:write, im:write and im:history, install it to the workspace, and copy the Bot User OAuth Token (xoxb-…). Your member id is under your profile → ⋯ → Copy member ID.");
+    why("Slack bot token", {
+      for: "the only way consort-cli talks to you: one DM thread per ticket with progress, the few questions it cannot decide, and the ready-to-merge ping. You answer in the thread.",
+      where: "a Slack app with a bot user, yours or an existing one: api.slack.com/apps → your app → OAuth & Permissions → Bot User OAuth Token (starts xoxb-). A user token (xoxp-) or a webhook URL will not do. Scopes: chat:write, im:write, im:history (channels:history if you point it at a channel). Add a missing scope, reinstall the app, copy the token again.",
+      can: "post to the DM with you (or one channel you name) and read replies in those threads.",
+      not: "read any other conversation, or post anywhere else.",
+    });
+    why("Your Slack member id", {
+      for: "telling the bot who to DM, and whose replies count as answers (anyone else's in the thread are ignored).",
+      where: "Slack → your profile → ⋯ (more) → Copy member ID. It starts with U or W. A pasted <@U…> mention or profile URL works too.",
+      can: "nothing on its own; it is an address.",
+    });
     s = loadState();
     if (s.slack) console.log(`Slack is set for user ${s.slack.userId}.`);
     while (!s.slack || await yes(ask, "Change the Slack settings?", false)) {
-      const botToken = await ask("Bot token", { secret: true, default: s.slack?.botToken });
+      const botToken = await ask("Bot User OAuth Token (xoxb-…)", { secret: true, default: s.slack?.botToken });
+      if (!/^xoxb-/.test(botToken)) console.log(bad(`that is not a bot token (it should start with xoxb-${botToken.startsWith("xoxp-") ? "; xoxp- is a user token" : ""})`));
       const userId = slackUserIdFrom(await ask("Your Slack member id (U…)", { default: s.slack?.userId }));
       if (!userId) { console.log(bad("that does not look like a member id (U0123ABC)")); continue; }
       const slack = new Slack({ botToken, userId });
       try {
         const who = await slack.test();
-        const channel = await slack.channel();
-        await slack.post(`consort-cli setup on this machine can reach you. Questions about tickets will arrive in threads here.`);
-        console.log(ok(`bot ${who.bot} in ${who.team} posted a DM`));
-        if (!(await yes(ask, "Did the message arrive in your Slack DMs?"))) { console.log(bad("check the bot has im:write and is installed to the workspace")); continue; }
+        console.log(ok(`token works: bot "${who.bot}" in ${who.team}`));
+        const channel = await slack.channel().catch((e) => { throw new Error(`${e.message} — the bot needs the im:write scope (then reinstall the app)`); });
+        console.log(ok(`DM with you opened (im:write)`));
+        const ts = await slack.post(`consort-cli setup on this machine can reach you. Questions about tickets will arrive in threads here.`).catch((e) => { throw new Error(`${e.message} — the bot needs the chat:write scope`); });
+        console.log(ok(`message posted (chat:write)`));
+        await slack.waitForReply(ts, ts, { pollMs: 1, timeoutMs: 1 }).then(() => undefined, () => undefined);
+        const canRead = await (slack as any).api("conversations.replies", { channel, ts, limit: 1 }).then(() => true, (e: Error) => { console.log(bad(`${e.message} — the bot needs the im:history scope to read your replies`)); return false; });
+        if (canRead) console.log(ok(`replies readable (im:history)`));
+        if (!(await yes(ask, "Did the message arrive in your Slack DMs?"))) { console.log(bad("check the app is installed to this workspace and the member id is yours")); continue; }
+        if (!canRead) { console.log(bad("without im:history it can post but never hear you; add the scope and rerun")); continue; }
         s = loadState(); s.slack = { botToken, userId, channel }; saveState(s);
         break;
       } catch (e) { console.log(bad(`Slack said: ${(e as Error).message}`)); }
