@@ -81,20 +81,30 @@ export function matchesFilters(t: ScannedTicket, f: SourceFilters): boolean {
  */
 export const CLAIM_PREFIX = "[consort-claim";
 export const claimComment = (host: string, at: number) => `${CLAIM_PREFIX} host=${host} at=${new Date(at).toISOString()}] Consort is working on this ticket from ${host}. Other Consort instances will skip it.`;
-export function claimOf(comments: { text: string; at?: number }[]): { host: string; at: number } | undefined {
-  let found: { host: string; at: number } | undefined;
+export const CLAIM_STALE_MS = 3 * 24 * 3_600_000;
+/** every claim marker on the ticket, oldest first */
+export function claimsOf(comments: { text: string; at?: number }[]): { host: string; at: number }[] {
+  const out: { host: string; at: number }[] = [];
   for (const c of comments) {
     const m = /\[consort-claim host=([^\s\]]+) at=([^\s\]]+)\]/.exec(c.text);
     if (!m) continue;
     const at = Date.parse(m[2]);
-    if (!found || at > found.at) found = { host: m[1], at: Number.isFinite(at) ? at : c.at ?? 0 };
+    out.push({ host: m[1], at: Number.isFinite(at) ? at : c.at ?? 0 });
   }
-  return found;
+  return out.sort((a, b) => a.at - b.at || a.host.localeCompare(b.host));
 }
-export const claimedByOther = (comments: { text: string; at?: number }[], host: string, now: number, staleMs = 3 * 24 * 3_600_000) => {
-  const claim = claimOf(comments);
-  return !!claim && claim.host !== host && now - claim.at < staleMs;
+/**
+ * Who holds the ticket: the earliest claim that is still fresh (under three days old). Every box
+ * posts its marker and then re-reads; with "earliest wins" two boxes that raced agree on the same
+ * winner, and a box that lost backs off. Stale markers are abandoned work and count for nothing.
+ */
+export const claimOf = (comments: { text: string; at?: number }[], now = Date.now(), staleMs = CLAIM_STALE_MS) => claimsOf(comments).find((c) => now - c.at < staleMs);
+export const claimedByOther = (comments: { text: string; at?: number }[], host: string, now: number, staleMs = CLAIM_STALE_MS) => {
+  const claim = claimOf(comments, now, staleMs);
+  return !!claim && claim.host !== host;
 };
+/** after posting our marker: do we hold the ticket? false when an earlier fresh marker from another box is there */
+export const claimHeld = (comments: { text: string; at?: number }[], host: string, now: number, staleMs = CLAIM_STALE_MS) => claimOf(comments, now, staleMs)?.host === host;
 
 /**
  * Which model reviews which round. Round 1 goes to the other provider than the builder when

@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { claimedByOther, matchesFilters, type ReviewPick, type SourceFilters } from "../shared/headless.ts";
+import { claimedByOther, claimHeld, claimOf, matchesFilters, type ReviewPick, type SourceFilters } from "../shared/headless.ts";
 import { cliStatus, updateCli } from "../main/cliRuntime";
 import { accountStatus, loginInteractive, runtimeDeps } from "./agent";
 import { newTask, workTask } from "./pipeline";
@@ -199,7 +199,7 @@ async function main(argv: string[]) {
 
     case "tasks list": { for (const t of s.tasks) console.log(`${t.id}  ${t.status.padEnd(10)}  ${t.ticket.id.padEnd(12)}  ${t.feature.stage.padEnd(14)}  ${t.branch}  ${t.note ?? ""}`); if (!s.tasks.length) console.log("No tasks."); return; }
     case "tasks release": {
-      const t = s.tasks.find((x) => x.id === sub || x.ticket.id === sub) ?? fail("no such task; use the task id or the ticket id from consort-cli view");
+      const t = s.tasks.find((x) => x.id === rest[0] || x.ticket.id === rest[0]) ?? fail("no such task; use the task id or the ticket id from consort-cli view");
       if (t!.pid) { try { process.kill(t!.pid); } catch {} }
       t!.status = "released"; t!.pid = undefined; t!.finishedAt = Date.now(); saveState(s);
       if (t!.runCode) { const r = await cleanupEnvironment(t!.runCode); console.log(`Removed ${r.containers} container(s), ${r.networks} network(s), ${r.volumes} volume(s) of ${t!.runCode}.`); }
@@ -211,7 +211,14 @@ async function main(argv: string[]) {
       t!.status = "working"; t!.note = undefined; t!.pid = undefined; t!.finishedAt = undefined; t!.updatedAt = Date.now(); saveState(s);
       console.log(`${t!.ticket.id} queued again; the daemon starts its worker within 15 seconds${daemonPid() ? "" : " once it runs (consort-cli run -d)"}.`); return;
     }
-    case "tasks logs": { const id = s.tasks.find((x) => x.id === sub || x.ticket.id === sub)?.id ?? sub; const f = join(LOG_DIR, `${id}.log`); console.log(existsSync(f) ? (await import("node:fs")).readFileSync(f, "utf8") : `no log at ${f}`); return; }
+    case "tasks logs": {
+      const want = rest[0] ?? fail("task or ticket id required; see consort-cli view");
+      const t = s.tasks.find((x) => x.id === want || x.ticket.id === want);
+      const f = join(LOG_DIR, `${t?.id ?? want}.log`);
+      if (existsSync(f)) { console.log((await import("node:fs")).readFileSync(f, "utf8")); return; }
+      if (!t) fail(`no such task; use the task id or the ticket id from consort-cli view`);
+      console.log(`${t!.ticket.id} (${t!.id}) has no log yet at ${f}; the worker writes it once it starts${t!.pid ? "" : " (no worker is running for it)"}.`); return;
+    }
 
     case "cli status": { for (const p of ["claude", "codex"] as const) { const st = await cliStatus(p, runtimeDeps); console.log(`${p}: ${st.version ?? "not found"} (${st.source})${st.note ? ` · ${st.note}` : ""}`); } return; }
     case "cli update": { for (const p of ["claude", "codex"] as const) { const changed = await updateCli(p, undefined, runtimeDeps).catch((e) => { console.log(`${p}: ${e.message}`); return false; }); console.log(`${p}: ${changed ? "updated" : "unchanged"}`); } return; }
@@ -265,8 +272,19 @@ async function daemon() {
           if (slots <= 0) break;
           if (taken.has(t.id) || !matchesFilters(t, job.filters)) continue;
           const comments = await source.comments(t.id).catch(() => []);
-          if (claimedByOther(comments, host(), Date.now())) { console.log(`${t.id} claimed elsewhere; skipping`); continue; }
-          await source.claim(t.id, host(), Date.now());
+          const me = host();
+          if (claimedByOther(comments, me, Date.now())) { console.log(`${t.id} claimed by ${claimOf(comments)?.host}; skipping`); continue; }
+          // post our marker, then read the ticket again: the earliest fresh marker wins, so two boxes that
+          // raced here agree on the winner; the loser removes its marker and moves on
+          const handle = await source.claim(t.id, me, Date.now());
+          await new Promise((r) => setTimeout(r, 1_500));
+          const after = await source.comments(t.id).catch(() => undefined);
+          if (after && !claimHeld(after, me, Date.now())) {
+            console.log(`${t.id} lost the claim to ${claimOf(after)?.host}; backing off`);
+            await source.unclaim(t.id, handle).catch(() => {});
+            continue;
+          }
+          await source.setStatus(t.id, "progress");
           const ticket = await source.ticket(t.id);
           const fresh = loadState();
           const task: Task = { id: newId("task"), ...newTask(job, ticket, fresh.branchPrefix, Date.now()) };

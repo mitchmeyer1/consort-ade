@@ -17,7 +17,8 @@ function fakeClickup(t) {
       { id: 'a2', name: 'Fix typo', status: { status: 'to do' }, tags: [], assignees: [], url: 'https://app.clickup.com/t/a2' },
     ], last_page: true });
     if (path === '/task/a1/comment' && !init.method) return json({ comments: [{ comment_text: 'hi', date: '1' }] });
-    if (path === '/task/a1/comment' && init.method === 'POST') return json({});
+    if (path === '/task/a1/comment' && init.method === 'POST') return json({ id: 'c77' });
+    if (path === '/comment/c77' && init.method === 'DELETE') return json({});
     if (path === '/task/a1') return init.method === 'PUT' ? json({}) : json({ id: 'a1', list: { id: '901' } });
     if (path === '/list/901') return json({ statuses: [{ status: 'TO DO' }, { status: 'IN PROGRESS' }, { status: 'IN REVIEW' }, { status: 'COMPLETE' }] });
     return new Response('nope', { status: 404 });
@@ -34,16 +35,21 @@ test("the list's own status spelling is used, with synonyms when the configured 
   assert.equal(pickStatus(['Open', 'Closed'], 'in review', 'review'), undefined);
 });
 
-test('a ClickUp job scans its list into tickets, and claiming writes the marker comment then moves the status', async (t) => {
+test('a ClickUp job scans its list into tickets; a claim is a marker comment that can be taken back, and the status moves separately', async (t) => {
   const calls = fakeClickup(t);
   const src = clickupSource('k', job);
   const tickets = await src.scan();
   assert.deepEqual(tickets.map((x) => [x.id, x.title, x.status, x.tags, x.assignees]), [['a1', 'Export roster', 'to do', ['ai-handle'], ['sam', 's@x.io']], ['a2', 'Fix typo', 'to do', [], []]]);
   assert.equal(tickets[0].updatedAt, 1700000000000);
   assert.deepEqual(await src.comments('a1'), [{ text: 'hi', at: 1 }]);
-  await src.claim('a1', 'box-a', Date.UTC(2026, 9, 20));
+  const handle = await src.claim('a1', 'box-a', Date.UTC(2026, 9, 20));
   const posted = calls.find((c) => c.path === '/task/a1/comment' && c.method === 'POST');
   assert.match(posted.body.comment_text, /^\[consort-claim host=box-a at=2026-10-20T00:00:00\.000Z\]/);
+  assert.equal(handle, 'c77');
+  assert.equal(calls.some((c) => c.method === 'PUT'), false, 'claiming alone does not move the status');
+  await src.unclaim('a1', handle);
+  assert.ok(calls.some((c) => c.path === '/comment/c77' && c.method === 'DELETE'), 'a lost claim is deleted');
+  await src.setStatus('a1', 'progress');
   const put = calls.find((c) => c.path === '/task/a1' && c.method === 'PUT');
   assert.deepEqual(put.body, { status: 'IN PROGRESS' });
 });

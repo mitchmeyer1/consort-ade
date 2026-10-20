@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { claimComment, claimedByOther, claimOf, githubLoginOf, matchesFilters, parseAskUser, prReadiness, replyAfter, reviewRotation, stripAskUser, suggestReviewers } from '../src/shared/headless.ts';
+import { claimComment, claimedByOther, claimHeld, claimOf, githubLoginOf, matchesFilters, parseAskUser, prReadiness, replyAfter, reviewRotation, stripAskUser, suggestReviewers } from '../src/shared/headless.ts';
 import { shipPrompt } from '../src/shared/shipPrompt.ts';
 import { newShipFeature } from '../src/shared/ship.ts';
 
@@ -43,12 +43,29 @@ test('a claim is a comment naming the host; another host within three days is sk
   const mine = claimComment('box-a', Date.UTC(2026, 9, 20, 12));
   assert.match(mine, /^\[consort-claim host=box-a at=2026-10-20T12:00:00\.000Z\]/);
   const comments = [{ text: 'looks good' }, { text: mine }];
-  assert.deepEqual(claimOf(comments), { host: 'box-a', at: Date.UTC(2026, 9, 20, 12) });
   const hourLater = Date.UTC(2026, 9, 20, 13);
+  assert.deepEqual(claimOf(comments, hourLater), { host: 'box-a', at: Date.UTC(2026, 9, 20, 12) });
   assert.equal(claimedByOther(comments, 'box-b', hourLater), true);
   assert.equal(claimedByOther(comments, 'box-a', hourLater), false, 'my own claim');
   assert.equal(claimedByOther(comments, 'box-b', Date.UTC(2026, 9, 25)), false, 'abandoned after three days');
   assert.equal(claimedByOther([{ text: 'no claim here' }], 'box-b', hourLater), false);
+});
+
+test('two boxes that race to claim agree on one winner: the earliest fresh marker; a stale marker from a dead box does not count', () => {
+  const t0 = Date.UTC(2026, 9, 20, 12, 0, 0);
+  const a = { text: claimComment('box-a-1f2e', t0 + 200) };
+  const b = { text: claimComment('box-b-9c0d', t0 + 350) };
+  // both posted, both re-read the same two comments (in either order)
+  for (const comments of [[a, b], [b, a]]) {
+    assert.equal(claimHeld(comments, 'box-a-1f2e', t0 + 2000), true, 'a posted first, a holds');
+    assert.equal(claimHeld(comments, 'box-b-9c0d', t0 + 2000), false, 'b backs off');
+  }
+  // a four-day-old marker from a box that died is ignored; the fresh one wins
+  const dead = { text: claimComment('old-box', t0 - 4 * 24 * 3_600_000) };
+  assert.equal(claimOf([dead, b], t0 + 2000).host, 'box-b-9c0d');
+  assert.equal(claimedByOther([dead], 'box-b-9c0d', t0), false);
+  // a box that only ever saw its own marker holds the ticket
+  assert.equal(claimHeld([b], 'box-b-9c0d', t0 + 2000), true);
 });
 
 test('review rounds rotate: the other provider first when there are two, then the strongest Claude, then the next family down', () => {

@@ -1,4 +1,5 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import type { Provider } from "../shared/types";
@@ -18,7 +19,17 @@ export const STATE_FILE = join(HOME, "state.json");
 export const LOG_DIR = join(HOME, "logs");
 export const LOGINS_DIR = join(HOME, "logins");
 export const WORK_DIR = join(HOME, "worktrees");
-export const host = () => process.env.CONSORT_CLI_HOST ?? hostname();
+/**
+ * This install's name on tickets: the hostname plus a short random suffix minted once and kept in
+ * the state file, so two laptops with the same hostname (or two installs on one box, with
+ * CONSORT_CLI_HOME) never look like the same claimant. CONSORT_CLI_HOST overrides it.
+ */
+export const host = (): string => {
+  if (process.env.CONSORT_CLI_HOST) return process.env.CONSORT_CLI_HOST;
+  const s = loadState();
+  if (!s.hostId) { s.hostId = `${hostname().replace(/\.local$/, "").replace(/[^\w.-]+/g, "-")}-${randomBytes(2).toString("hex")}`; saveState(s); }
+  return s.hostId;
+};
 
 export type Account = {
   id: string; name: string; provider: Provider; auth: "login" | "key"; configDir?: string; apiKey?: string; createdAt: number;
@@ -74,6 +85,8 @@ export type Task = {
 export type CliState = { version: 1; accounts: Account[]; slack?: SlackConfig; clickupKey?: string; branchPrefix?: string; jobs: Job[]; tasks: Task[];
   /** set by `consort-cli setup` at the end of the walk-through; every other command checks it */
   setupCompletedAt?: number;
+  /** this install's claim name: hostname plus a random suffix, minted on first use */
+  hostId?: string;
 };
 
 const empty = (): CliState => ({ version: 1, accounts: [], jobs: [], tasks: [] });

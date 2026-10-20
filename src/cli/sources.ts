@@ -12,7 +12,10 @@ import type { Job, StatusNames } from "./state";
 export type Source = {
   scan(): Promise<ScannedTicket[]>;
   comments(id: string): Promise<{ text: string; at?: number }[]>;
-  claim(id: string, host: string, now: number): Promise<void>;
+  /** post our claim marker; resolves to a handle `unclaim` can remove. Does not move the status: the daemon does that once the claim is confirmed held */
+  claim(id: string, host: string, now: number): Promise<string>;
+  /** take back a marker that lost the race */
+  unclaim(id: string, handle: string): Promise<void>;
   setStatus(id: string, which: keyof StatusNames): Promise<void>;
   comment(id: string, text: string): Promise<void>;
   ticket(id: string): Promise<ShipTicket & { body: string; status?: string }>;
@@ -117,9 +120,10 @@ export function clickupSource(key: string, job: Job): Source {
       return ((j.comments ?? []) as any[]).map((c) => ({ text: String(c.comment_text ?? ""), at: Number(c.date) || undefined }));
     },
     async claim(id, host, now) {
-      await clickup(key, `/task/${encodeURIComponent(id)}/comment`, { method: "POST", body: JSON.stringify({ comment_text: claimComment(host, now) }) });
-      await this.setStatus(id, "progress");
+      const j = await clickup(key, `/task/${encodeURIComponent(id)}/comment`, { method: "POST", body: JSON.stringify({ comment_text: claimComment(host, now) }) });
+      return String(j.id ?? "");
     },
+    async unclaim(_id, handle) { if (handle) await clickup(key, `/comment/${encodeURIComponent(handle)}`, { method: "DELETE" }); },
     async setStatus(id, which) {
       const status = pickStatus(await listStatuses(id), job.statuses[which], which);
       if (!status) throw new Error(`The ClickUp list has no status like "${job.statuses[which]}".`);
@@ -152,9 +156,10 @@ export function githubSource(job: Job): Source {
       return ((j.comments ?? []) as any[]).map((c) => ({ text: String(c.body ?? ""), at: Date.parse(c.createdAt) || undefined }));
     },
     async claim(id, host, now) {
-      await gh(job.repo, ["issue", "comment", id, "--body", claimComment(host, now)]);
-      await this.setStatus(id, "progress");
+      const url = (await gh(job.repo, ["issue", "comment", id, "--body", claimComment(host, now)])).trim();
+      return /issuecomment-(\d+)/.exec(url)?.[1] ?? "";
     },
+    async unclaim(_id, handle) { if (handle) await gh(job.repo, ["api", "-X", "DELETE", `repos/{owner}/{repo}/issues/comments/${handle}`]); },
     async setStatus(id, which) {
       const want = label(which);
       await ensureLabel(want);

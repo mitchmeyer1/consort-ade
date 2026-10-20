@@ -61,7 +61,7 @@ consort-cli stop          # the daemon; agents keep working and the next run ado
 consort-cli stop --all    # the daemon and every agent; their tasks resume on the next run
 ```
 
-For a daemon that survives reboots, run it under `systemd` or `launchd`. Every `--every` minutes (1 by default) it runs each scanner, skips tickets another consort-cli has claimed (a `[consort-claim host=… at=…]` comment on the ticket, honoured for three days), claims up to `--max-parallel` new ones, and starts a worker process per ticket. Workers that die are restarted at the next pass; `consort-cli status` shows them, `consort-cli tasks logs <task>` shows a worker's log.
+For a daemon that survives reboots, run it under `systemd` or `launchd`. Every `--every` minutes (1 by default) it runs each scanner, skips tickets another consort-cli has claimed, claims up to `--max-parallel` new ones, and starts a worker process per ticket. Workers that die are restarted at the next pass; `consort-cli status` shows them, `consort-cli tasks logs <task>` shows a worker's log.
 
 ## What a worker does
 
@@ -74,6 +74,10 @@ For a daemon that survives reboots, run it under `systemd` or `launchd`. Every `
 6. **Reviewers.** The people who touched the changed files most are requested on the PR.
 7. **The watch.** Every 15 minutes the worker reads the PR. New review threads from humans are answered: clear requests are fixed, pushed, replied to and resolved; anything unclear or disputed gets one neutral reply and a Slack question to you. CI and approvals are read each pass.
 8. **Ready.** One human approval, no changes requested, no open threads, CI green: you get a Slack message with the PR link and the ticket gets a final comment. Merging is yours.
+
+### Claims, with many boxes
+
+A claim is a comment on the ticket: `[consort-claim host=<name> at=<time>]`, where the name is this install's hostname plus a random suffix minted once (so two laptops called the same thing, or two installs on one box, never collide; `CONSORT_CLI_HOST` overrides it). Before claiming, a scanner reads the comments and skips a ticket with a fresh marker (under three days old) from another install. Because the tracker has no lock, two installs can still post within the same second, so after posting its marker each one reads the ticket again: the earliest fresh marker wins, the loser deletes its own and moves on, and only the winner moves the status to *in progress*. A marker older than three days is abandoned work and is ignored; `tasks release` leaves the marker, so delete it on the ticket if another box should take the ticket sooner.
 
 Every stage move is posted to the Slack thread and as a comment on the ticket; the ticket status moves to *in review* when the PR is up and to *complete* if the PR is merged while the worker is still watching.
 
