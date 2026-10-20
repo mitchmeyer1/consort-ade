@@ -53,7 +53,7 @@ export async function workTask(taskId: string): Promise<void> {
 
   updateTask(task.id, { pid: process.pid, status: "working", activity: "starting" });
   task = loadState().tasks.find((t) => t.id === taskId)!;
-  const activity = (line: string) => { updateTask(task.id, { activity: line }); };
+  const activity = (line: string) => { updateTask(taskId, { activity: line }); };
   // the task's own ports and Docker names, on every turn from here on
   const env = await allocateEnvironment(task!);
   task = loadState().tasks.find((t) => t.id === taskId)!;
