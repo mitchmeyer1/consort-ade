@@ -207,3 +207,23 @@ export function ago(ms: number): string {
   if (h < 24) return `${h}h ${String(m % 60).padStart(2, "0")}m`;
   return `${Math.floor(h / 24)}d ${h % 24}h`;
 }
+
+/** what the setup wizard accepts for a ClickUp list: the list's URL or its bare id */
+export const clickupListIdFrom = (text: string): string | undefined => {
+  const t = text.trim();
+  const m = /\/li\/(\d+)/.exec(t) ?? /^(\d{6,})$/.exec(t);
+  return m?.[1];
+};
+/** a Slack member id as people paste it: bare, as a mention, or at the end of a profile URL */
+export const slackUserIdFrom = (text: string): string | undefined => /\b([UW][A-Z0-9]{6,})\b/.exec(text.trim().toUpperCase())?.[1];
+/** "1,3" or "to do,backlog" against a list of names → the chosen names, once each, unknown ones dropped */
+export function chooseFrom(answer: string, options: string[]): string[] {
+  const picks = answer.split(",").map((s) => s.trim()).filter(Boolean);
+  const out: string[] = [];
+  for (const p of picks) {
+    const n = Number(p);
+    const name = Number.isInteger(n) && n >= 1 && n <= options.length ? options[n - 1] : options.find((o) => o.toLowerCase() === p.toLowerCase());
+    if (name && !out.includes(name)) out.push(name);
+  }
+  return out;
+}

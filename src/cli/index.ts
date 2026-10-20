@@ -10,8 +10,9 @@ import { newTask, workTask } from "./pipeline";
 import { Slack } from "./slack";
 import { sourceFor } from "./sources";
 import { renderView, viewLoop } from "./view";
+import { createAccount, runSetup, setupDone } from "./setup";
 import { FINISHED } from "../shared/headless.ts";
-import { DEFAULT_STATUSES, host, loadState, LOG_DIR, LOGINS_DIR, newId, saveState, type Account, type Job, type Task } from "./state";
+import { DEFAULT_STATUSES, host, loadState, LOG_DIR, newId, saveState, type Job, type Task } from "./state";
 
 /**
  * consort-cli: Consort's pipeline without the window. Add AI accounts, point it at Slack, add a
@@ -41,6 +42,7 @@ const fail = (msg: string): never => { console.error(`consort-cli: ${msg}`); pro
 
 const HELP = `consort-cli — Consort's ship pipeline, headless
 
+  setup                                                                   the walk-through: tools, sources, accounts, Slack, permissions
   accounts add --provider claude|codex --name <label> [--api-key <key>]   add an AI account (a CLI login unless --api-key)
   accounts list | accounts remove <id>
   slack set --bot-token xoxb-… --user <U…> [--channel <C…>]            where questions and progress go (DM by default)
@@ -64,18 +66,20 @@ async function main(argv: string[]) {
   const a = parseArgs(argv);
   const [cmd, sub, ...rest] = a._;
   const s = loadState();
-  switch (`${cmd ?? "help"} ${sub ?? ""}`.trim()) {
+  const key = `${cmd ?? "help"} ${sub ?? ""}`.trim();
+  // everything that touches tickets, accounts or agents waits for the walk-through
+  const open = ["help", "--help", "-h", "setup", "status", "cli status", "cli update"];
+  if (!open.includes(key) && !setupDone(s)) fail("not set up yet. Run `consort-cli setup` first; it checks the tools, adds your issue sources, AI accounts and Slack, and tests each one.");
+  switch (key) {
     case "help": case "--help": case "-h": console.log(HELP); return;
+    case "setup": await runSetup(); return;
 
     case "accounts add": {
       const provider = need(a, "provider") as "claude" | "codex";
       if (provider !== "claude" && provider !== "codex") fail("--provider must be claude or codex");
       const apiKey = str(a, "api-key");
-      const id = newId(provider);
-      const account: Account = { id, name: str(a, "name") ?? `${provider} ${s.accounts.filter((x) => x.provider === provider).length + 1}`, provider, auth: apiKey ? "key" : "login", createdAt: Date.now(), ...(apiKey ? { apiKey } : { configDir: join(LOGINS_DIR, id) }) };
-      if (account.configDir) mkdirSync(account.configDir, { recursive: true, mode: 0o700 });
-      s.accounts.push(account); saveState(s);
-      console.log(`Added ${account.name} (${id}).`);
+      const account = createAccount(s, provider, str(a, "name"), apiKey);
+      console.log(`Added ${account.name} (${account.id}).`);
       if (!apiKey) { console.log(`Signing in; this runs the ${provider === "claude" ? "Claude Code" : "Codex"} login in your terminal.`); await loginInteractive(account); }
       console.log(await accountStatus(account));
       return;
@@ -146,7 +150,7 @@ async function main(argv: string[]) {
     case "cli update": { for (const p of ["claude", "codex"] as const) { const changed = await updateCli(p, undefined, runtimeDeps).catch((e) => { console.log(`${p}: ${e.message}`); return false; }); console.log(`${p}: ${changed ? "updated" : "unchanged"}`); } return; }
 
     case "status": {
-      console.log(`host ${host()} · ${s.accounts.length} account(s) · slack ${s.slack ? "set" : "not set"} · clickup key ${s.clickupKey ? "set" : "not set"} · ${s.jobs.filter((j) => j.enabled).length}/${s.jobs.length} job(s) on`);
+      console.log(`host ${host()} · ${setupDone(s) ? `set up ${new Date(s.setupCompletedAt!).toLocaleDateString()}` : "NOT SET UP: run consort-cli setup"} · ${s.accounts.length} account(s) · slack ${s.slack ? "set" : "not set"} · clickup key ${s.clickupKey ? "set" : "not set"} · ${s.jobs.filter((j) => j.enabled).length}/${s.jobs.length} job(s) on`);
       for (const t of s.tasks.filter((t) => !["done", "released"].includes(t.status))) console.log(`  ${t.status.padEnd(10)} ${t.ticket.id} ${t.feature.stage}${t.note ? ` · ${t.note}` : ""}${t.pid && alive(t.pid) ? ` (pid ${t.pid})` : ""}`);
       return;
     }

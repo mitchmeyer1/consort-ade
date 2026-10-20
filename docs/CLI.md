@@ -18,6 +18,14 @@ State lives in `~/.consort-cli/state.json` (mode 600; it holds API keys), logins
 ## Set up, once
 
 ```bash
+consort-cli setup
+```
+
+The walk-through does everything below in order and tests each piece as it goes: the tools on the box (git, a signed-in `gh`, the Claude Code and Codex binaries), the issue sources (a ClickUp key checked against the API, the list looked up so you pick statuses from its own names, or a GitHub repo checked with `gh`), the repository path and base branch (verified on origin), the AI accounts (each CLI login into this tool's own directory, separate from Consort desktop; API keys checked against the provider), Slack (a DM is sent and you confirm it arrived), and the permissions it needs (worktree directory writable, `git push --dry-run` to origin, the ClickUp list readable). Every step saves, so you can stop and rerun. Until it finishes, every command except `setup`, `status`, `cli …` and `help` refuses and says so.
+
+The same things one at a time, if you prefer:
+
+```bash
 # 1. the repo, checked out on its base branch
 git clone git@github.com:you/roster-service.git ~/repos/roster-service
 

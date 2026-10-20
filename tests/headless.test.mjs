@@ -125,3 +125,21 @@ test('the dashboard keeps finished tasks for two hours, then drops them; running
   assert.equal(ago(2 * h + 5 * 60_000), '2h 05m');
   assert.equal(ago(28 * h), '1d 4h');
 });
+
+test('the setup wizard parses what people paste: ClickUp list URLs or ids, Slack member ids in any wrapper, and numbered or named choices', async () => {
+  const { clickupListIdFrom, slackUserIdFrom, chooseFrom } = await import('../src/shared/headless.ts');
+  const setupDone = (s) => !!s.setupCompletedAt;
+  assert.equal(clickupListIdFrom('https://app.clickup.com/90120345/v/li/901234567'), '901234567');
+  assert.equal(clickupListIdFrom(' 901234567 '), '901234567');
+  assert.equal(clickupListIdFrom('roster'), undefined);
+  assert.equal(slackUserIdFrom('U0123ABCD'), 'U0123ABCD');
+  assert.equal(slackUserIdFrom('<@U0123ABCD>'), 'U0123ABCD');
+  assert.equal(slackUserIdFrom('https://x.slack.com/team/W0ABCDEF1'), 'W0ABCDEF1');
+  assert.equal(slackUserIdFrom('mitch'), undefined);
+  const statuses = ['TO DO', 'IN PROGRESS', 'IN REVIEW', 'COMPLETE'];
+  assert.deepEqual(chooseFrom('1,3', statuses), ['TO DO', 'IN REVIEW']);
+  assert.deepEqual(chooseFrom('in progress, complete', statuses), ['IN PROGRESS', 'COMPLETE']);
+  assert.deepEqual(chooseFrom('9, nope, 2, 2', statuses), ['IN PROGRESS']);
+  assert.equal(setupDone({ version: 1, accounts: [], jobs: [], tasks: [] }), false);
+  assert.equal(setupDone({ version: 1, accounts: [], jobs: [], tasks: [], setupCompletedAt: 1 }), true);
+});

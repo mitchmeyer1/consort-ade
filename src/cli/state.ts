@@ -67,7 +67,10 @@ export type Task = {
   /** one line on what the worker is doing right now, for `consort-cli view` */
   activity?: string;
 };
-export type CliState = { version: 1; accounts: Account[]; slack?: SlackConfig; clickupKey?: string; branchPrefix?: string; jobs: Job[]; tasks: Task[] };
+export type CliState = { version: 1; accounts: Account[]; slack?: SlackConfig; clickupKey?: string; branchPrefix?: string; jobs: Job[]; tasks: Task[];
+  /** set by `consort-cli setup` at the end of the walk-through; every other command checks it */
+  setupCompletedAt?: number;
+};
 
 const empty = (): CliState => ({ version: 1, accounts: [], jobs: [], tasks: [] });
 
