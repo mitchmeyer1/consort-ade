@@ -331,10 +331,10 @@ export async function runSetup(): Promise<void> {
         const ts = await slack.post(`consort-cli setup on this machine can reach you. Questions about tickets will arrive in threads here.`).catch((e) => { throw new Error(`${e.message} — the bot needs the chat:write scope`); });
         console.log(ok(`message posted (chat:write)`));
         await slack.waitForReply(ts, ts, { pollMs: 1, timeoutMs: 1 }).then(() => undefined, () => undefined);
-        const canRead = await (slack as any).api("conversations.replies", { channel, ts, limit: 1 }).then(() => true, (e: Error) => { console.log(bad(`${e.message} — the bot needs the im:history scope to read your replies`)); return false; });
+        const canRead = await (slack as any).api("conversations.replies", { channel, ts, limit: 1 }).then(() => true, (e: Error) => { console.log(bad(/missing_scope/.test(e.message) ? `${e.message} — the bot needs the im:history scope to read your replies` : `${e.message} — reading the thread back failed`)); return false; });
         if (canRead) console.log(ok(`replies readable (im:history)`));
         if (!(await yes(ask, "Did the message arrive in your Slack DMs?"))) { console.log(bad("check the app is installed to this workspace and the member id is yours")); continue; }
-        if (!canRead) { console.log(bad("without im:history it can post but never hear you; add the scope, reinstall the app, and paste the new token")); scopeTrouble = true; continue; }
+        if (!canRead) { console.log(bad("it can post but cannot read the thread back, so it would never hear you; fix the above and try again")); continue; }
         s = loadState(); s.slack = { botToken, userId, channel }; saveState(s);
         break;
       } catch (e) { console.log(bad(`Slack said: ${(e as Error).message}`)); scopeTrouble = /scope/i.test((e as Error).message); }

@@ -53,7 +53,8 @@ test('Slack: a DM is opened once, messages go to the thread, and the wait resolv
   let polls = 0;
   t.mock.method(globalThis, 'fetch', async (url, init) => {
     const method = String(url).split('/api/')[1];
-    const body = JSON.parse(init.body);
+    assert.match(init.headers['Content-Type'], /x-www-form-urlencoded/, 'Slack read methods reject JSON bodies');
+    const body = Object.fromEntries(new URLSearchParams(init.body));
     calls.push({ method, body, auth: init.headers.Authorization });
     const json = (o) => new Response(JSON.stringify({ ok: true, ...o }), { status: 200 });
     if (method === 'conversations.open') return json({ channel: { id: 'D123' } });

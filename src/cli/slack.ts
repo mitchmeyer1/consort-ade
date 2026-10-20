@@ -17,9 +17,13 @@ export class Slack {
   constructor(cfg: SlackConfig, fetchImpl: typeof fetch = (...a) => fetch(...a)) { this.cfg = cfg; this.fetchImpl = fetchImpl; }
 
   private async api(method: string, body: Record<string, unknown>): Promise<any> {
+    // form fields, not JSON: Slack's read methods (conversations.replies, conversations.history…) answer
+    // invalid_arguments to a JSON body; every method accepts form encoding
+    const form = new URLSearchParams();
+    for (const [k, v] of Object.entries(body)) if (v !== undefined) form.set(k, typeof v === "string" ? v : JSON.stringify(v));
     const res = await this.fetchImpl(`https://slack.com/api/${method}`, {
-      method: "POST", headers: { Authorization: `Bearer ${this.cfg.botToken}`, "Content-Type": "application/json; charset=utf-8" },
-      body: JSON.stringify(body), signal: AbortSignal.timeout(20_000),
+      method: "POST", headers: { Authorization: `Bearer ${this.cfg.botToken}`, "Content-Type": "application/x-www-form-urlencoded; charset=utf-8" },
+      body: form.toString(), signal: AbortSignal.timeout(20_000),
     });
     const j = await res.json();
     if (!j.ok) throw new Error(`Slack ${method}: ${j.error ?? res.status}`);
