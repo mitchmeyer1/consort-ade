@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { claimComment, type ScannedTicket } from "../shared/headless.ts";
+import { claimComment, type ClickupScope, type ScannedTicket } from "../shared/headless.ts";
 export type { ClickupScope } from "../shared/headless.ts";
 import type { ShipTicket } from "../shared/ship";
 import type { Job, StatusNames } from "./state";
@@ -23,11 +23,31 @@ const gh = async (cwd: string, args: string[]) => (await run("gh", args, { cwd, 
 const CLICKUP = "https://api.clickup.com/api/v2";
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "");
 
-async function clickup(key: string, path: string, init: RequestInit = {}) {
+async function clickup(key: string, path: string, init: RequestInit = {}, retried = false): Promise<any> {
   const res = await fetch(`${CLICKUP}${path}`, { ...init, headers: { Authorization: key, "Content-Type": "application/json", ...(init.headers ?? {}) }, signal: AbortSignal.timeout(20_000) });
   const text = await res.text();
+  if (res.status === 429 && !retried) {
+    // ClickUp allows 100 requests a minute per token; wait for the window and try once more
+    const ra = res.headers.get("retry-after");
+    const wait = Math.min(90, ra !== null && Number.isFinite(Number(ra)) ? Number(ra) : 60) * 1000;
+    await new Promise((r) => setTimeout(r, wait));
+    return clickup(key, path, init, true);
+  }
   if (!res.ok) throw new Error(`ClickUp ${res.status}: ${text.slice(0, 200)}`);
   return text ? JSON.parse(text) : {};
+}
+
+/** the workspace a space or folder belongs to: from the scope when the URL carried it, else found among the token's workspaces */
+export async function clickupTeamFor(key: string, scope: ClickupScope): Promise<string> {
+  if (scope.teamId) return scope.teamId;
+  const spaceId = scope.kind === "space" ? scope.id : String((await clickup(key, `/folder/${encodeURIComponent(scope.id)}`)).space?.id ?? "");
+  const teams = ((await clickup(key, "/team")).teams ?? []) as any[];
+  if (teams.length === 1) return String(teams[0].id);
+  for (const t of teams) {
+    const spaces = ((await clickup(key, `/team/${encodeURIComponent(String(t.id))}/space?archived=false`)).spaces ?? []) as any[];
+    if (spaces.some((s) => String(s.id) === spaceId)) return String(t.id);
+  }
+  throw new Error(`no workspace of this token holds ${scope.kind} ${scope.id}`);
 }
 
 /** the list's own spelling of a status: exact match on the normalised name, else a few common synonyms */
@@ -62,23 +82,33 @@ export function clickupSource(key: string, job: Job): Source {
   };
   return {
     async scan() {
+      // a list is read directly; a space or folder through the workspace-wide task search, one paginated
+      // call for everything inside it (per-list reads would be hundreds of requests against a 100/min limit).
+      // The tag filter goes to the server too (ClickUp keeps tags lowercase); statuses are matched here.
+      let base: string;
+      if (scope.kind === "list") base = `/list/${encodeURIComponent(scope.id)}/task?include_closed=false&subtasks=false`;
+      else {
+        const team = await clickupTeamFor(key, scope);
+        const q = new URLSearchParams({ include_closed: "false", subtasks: "false" });
+        q.append(scope.kind === "space" ? "space_ids[]" : "project_ids[]", scope.id);
+        for (const t of job.filters.tags ?? []) q.append("tags[]", t.toLowerCase());
+        base = `/team/${encodeURIComponent(team)}/task?${q}`;
+      }
       const out: ScannedTicket[] = [];
       const seen = new Set<string>();
-      for (const list of await clickupLists(key, scope)) {
-        for (let page = 0; page < 10; page++) {
-          const j = await clickup(key, `/list/${encodeURIComponent(list.id)}/task?page=${page}&include_closed=false&subtasks=false`);
-          const tasks = (j.tasks ?? []) as any[];
-          for (const t of tasks) {
-            if (seen.has(String(t.id))) continue; // a task shown in several lists counts once
-            seen.add(String(t.id));
-            out.push({
-              id: String(t.id), title: String(t.name ?? t.id), status: t.status?.status, url: t.url ?? `https://app.clickup.com/t/${t.id}`,
-              tags: ((t.tags ?? []) as any[]).map((x) => String(x.name)), assignees: ((t.assignees ?? []) as any[]).flatMap((a) => [a.username, a.email].filter(Boolean).map(String)),
-              updatedAt: Number(t.date_updated) || undefined,
-            });
-          }
-          if (j.last_page || tasks.length === 0) break;
+      for (let page = 0; page < 50; page++) {
+        const j = await clickup(key, `${base}&page=${page}`);
+        const tasks = (j.tasks ?? []) as any[];
+        for (const t of tasks) {
+          if (seen.has(String(t.id))) continue; // a task shown in several lists counts once
+          seen.add(String(t.id));
+          out.push({
+            id: String(t.id), title: String(t.name ?? t.id), status: t.status?.status, url: t.url ?? `https://app.clickup.com/t/${t.id}`,
+            tags: ((t.tags ?? []) as any[]).map((x) => String(x.name)), assignees: ((t.assignees ?? []) as any[]).flatMap((a) => [a.username, a.email].filter(Boolean).map(String)),
+            updatedAt: Number(t.date_updated) || undefined,
+          });
         }
+        if (j.last_page || tasks.length === 0) break;
       }
       return out;
     },

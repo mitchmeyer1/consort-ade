@@ -73,26 +73,37 @@ test('Slack: a DM is opened once, messages go to the thread, and the wait resolv
   assert.ok(polls >= 2);
 });
 
-test('a space job scans every list in the space, folderless and in folders, and counts a task shown twice once', async (t) => {
-  const { clickupLists } = await import('../src/cli/sources.ts');
+test('a space scanner lists the space\'s lists for the wizard, but scans with one workspace-wide search filtered to the space and tag', async (t) => {
+  const { clickupLists, clickupTeamFor } = await import('../src/cli/sources.ts');
   const calls = [];
   t.mock.method(globalThis, 'fetch', async (url) => {
-    const path = String(url).replace('https://api.clickup.com/api/v2', '');
+    const path = decodeURIComponent(String(url).replace('https://api.clickup.com/api/v2', ''));
     calls.push(path);
     const json = (o) => new Response(JSON.stringify(o), { status: 200 });
     if (path === '/space/9/list?archived=false') return json({ lists: [{ id: 'L1', name: 'Loose' }] });
     if (path === '/space/9/folder?archived=false') return json({ folders: [{ id: 'F1', name: 'Sprint', lists: [{ id: 'L2', name: 'Backend' }, { id: 'L3', name: 'Frontend' }] }] });
-    if (path.startsWith('/list/L1/task')) return json({ tasks: [{ id: 'a', name: 'One', status: { status: 'to do' }, tags: [], assignees: [] }], last_page: true });
-    if (path.startsWith('/list/L2/task')) return json({ tasks: [{ id: 'b', name: 'Two', status: { status: 'to do' }, tags: [], assignees: [] }, { id: 'a', name: 'One', status: { status: 'to do' }, tags: [], assignees: [] }], last_page: true });
-    if (path.startsWith('/list/L3/task')) return json({ tasks: [], last_page: true });
+    if (path === '/team') return json({ teams: [{ id: '77', name: 'Acme' }, { id: '78', name: 'Other' }] });
+    if (path === '/team/77/space?archived=false') return json({ spaces: [{ id: '9' }] });
+    if (path.startsWith('/team/77/task?') && path.includes('page=0')) return json({ tasks: [{ id: 'a', name: 'One', status: { status: 'to do' }, tags: [{ name: 'ai-handle' }], assignees: [] }, { id: 'b', name: 'Two', status: { status: 'to do' }, tags: [{ name: 'ai-handle' }], assignees: [] }], last_page: false });
+    if (path.startsWith('/team/77/task?') && path.includes('page=1')) return json({ tasks: [{ id: 'a', name: 'One', status: { status: 'to do' }, tags: [], assignees: [] }], last_page: true });
     return new Response('nope', { status: 404 });
   });
-  const lists = await clickupLists('k', { kind: 'space', id: '9' });
-  assert.deepEqual(lists.map((l) => l.id), ['L1', 'L2', 'L3']);
-  const src = clickupSource('k', { ...job, listId: undefined, scope: { kind: 'space', id: '9' } });
+  assert.deepEqual((await clickupLists('k', { kind: 'space', id: '9' })).map((l) => l.id), ['L1', 'L2', 'L3']);
+  assert.equal(await clickupTeamFor('k', { kind: 'space', id: '9' }), '77', 'the workspace is found among the token\'s when the URL did not carry it');
+  const src = clickupSource('k', { ...job, listId: undefined, scope: { kind: 'space', id: '9', teamId: '77' }, filters: { tags: ['AI-Handle'] } });
   const tickets = await src.scan();
-  assert.deepEqual(tickets.map((x) => x.id), ['a', 'b']);
-  assert.ok(calls.some((p) => p.startsWith('/list/L3/task')), 'every list is scanned');
+  assert.deepEqual(tickets.map((x) => x.id), ['a', 'b'], 'two pages, one task repeated, counted once');
+  const search = calls.find((p) => p.startsWith('/team/77/task?'));
+  assert.ok(search.includes('space_ids[]=9') && search.includes('tags[]=ai-handle') && search.includes('subtasks=false'), search);
+  assert.ok(!calls.some((p) => p.startsWith('/list/')), 'no per-list reads');
+});
+
+test('a ClickUp 429 is retried once after the window', async (t) => {
+  let n = 0;
+  t.mock.method(globalThis, 'fetch', async () => (++n === 1 ? new Response('{"err":"Rate limit reached"}', { status: 429, headers: { 'retry-after': '0' } }) : new Response(JSON.stringify({ teams: [{ id: '1' }] }), { status: 200 })));
+  const { clickupTeamFor } = await import('../src/cli/sources.ts');
+  assert.equal(await clickupTeamFor('k', { kind: 'space', id: '9' }), '1');
+  assert.equal(n, 2);
 });
 
 test('a Slack call with no fields sends no body at all; Slack hangs on an empty one', async (t) => {

@@ -50,7 +50,7 @@ consort-cli scanners add --name roster --source clickup --space 90131945617 \   
 consort-cli scanners scan <scanner id>      # dry run: which tickets would be taken
 ```
 
-A ClickUp scanner watches one list, a folder, or a whole space (every list in it, folderless and in folders); paste the sidebar URL into the wizard (`/v/li/…`, `/v/f/…`, `/v/s/…`) and it works out which. Tasks are matched by tag, status and title across all those lists, and each task's status moves within its own list's statuses. GitHub issues work the same with `--source github` and no list; filters apply to labels and the issue title. Every filter must hold: `--tag` (any of), `--status` (any of), `--name-includes` (all), `--name-excludes`, `--assignee`.
+A ClickUp scanner watches one list, a folder, or a whole space (every list in it, folderless and in folders); paste the sidebar URL into the wizard (`/v/li/…`, `/v/f/…`, `/v/s/…`) and it works out which. A space or folder is scanned with one workspace-wide search (the tag filter applied by ClickUp), so a space of hundreds of lists costs a few requests a minute, not hundreds; ClickUp allows 100. Tasks are matched by tag, status and title across all those lists, and each task's status moves within its own list's statuses. GitHub issues work the same with `--source github` and no list; filters apply to labels and the issue title. Every filter must hold: `--tag` (any of), `--status` (any of), `--name-includes` (all), `--name-excludes`, `--assignee`.
 
 ## Run
 

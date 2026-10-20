@@ -201,9 +201,9 @@ test("every task gets its own port block and Docker names, and the rules on each
 
 test('a pasted ClickUp sidebar link is a list, a folder or a space; a bare id is a list unless named', async () => {
   const { clickupScopeFrom, clickupListIdFrom } = await import('../src/shared/headless.ts');
-  assert.deepEqual(clickupScopeFrom('https://app.clickup.com/9013448339/v/s/90131945617'), { kind: 'space', id: '90131945617' });
-  assert.deepEqual(clickupScopeFrom('https://app.clickup.com/9013448339/v/f/90130001/li/900'), { kind: 'folder', id: '90130001' });
-  assert.deepEqual(clickupScopeFrom('https://app.clickup.com/9013448339/v/li/901234567'), { kind: 'list', id: '901234567' });
+  assert.deepEqual(clickupScopeFrom('https://app.clickup.com/9013448339/v/s/90131945617'), { kind: 'space', id: '90131945617', teamId: '9013448339' });
+  assert.deepEqual(clickupScopeFrom('https://app.clickup.com/9013448339/v/f/90130001/li/900'), { kind: 'folder', id: '90130001', teamId: '9013448339' });
+  assert.deepEqual(clickupScopeFrom('https://app.clickup.com/9013448339/v/li/901234567'), { kind: 'list', id: '901234567', teamId: '9013448339' });
   assert.deepEqual(clickupScopeFrom('901234567'), { kind: 'list', id: '901234567' });
   assert.deepEqual(clickupScopeFrom('space 90131945617'), { kind: 'space', id: '90131945617' });
   assert.equal(clickupScopeFrom('roster'), undefined);

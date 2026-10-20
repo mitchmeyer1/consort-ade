@@ -209,11 +209,11 @@ export function ago(ms: number): string {
 }
 
 /** a ClickUp scope to watch: one list, a folder of lists, or a whole space; from the sidebar URL (/v/li/, /v/f/, /v/s/) or a bare id (a list) */
-export type ClickupScope = { kind: "list" | "folder" | "space"; id: string };
+export type ClickupScope = { kind: "list" | "folder" | "space"; id: string; /** the workspace, from the URL when it had one; a space or folder scan needs it */ teamId?: string };
 export const clickupScopeFrom = (text: string): ClickupScope | undefined => {
   const t = text.trim();
-  const m = /\/v\/(li|l|f|s)\/(\d+)/.exec(t);
-  if (m) return { kind: m[1] === "s" ? "space" : m[1] === "f" ? "folder" : "list", id: m[2] };
+  const m = /(?:app\.clickup\.com\/(\d+))?\/v\/(li|l|f|s)\/(\d+)/.exec(t);
+  if (m) return { kind: m[2] === "s" ? "space" : m[2] === "f" ? "folder" : "list", id: m[3], ...(m[1] ? { teamId: m[1] } : {}) };
   const bare = /^(?:(list|folder|space)[:\s]+)?(\d{6,})$/i.exec(t);
   return bare ? { kind: (bare[1]?.toLowerCase() as ClickupScope["kind"]) ?? "list", id: bare[2] } : undefined;
 };
