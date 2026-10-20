@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { createWriteStream, existsSync, mkdirSync, openSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { createWriteStream, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { claimedByOther, matchesFilters, type ReviewPick, type SourceFilters } from "../shared/headless.ts";
 import { cliStatus, updateCli } from "../main/cliRuntime";
@@ -11,6 +11,7 @@ import { Slack } from "./slack";
 import { sourceFor } from "./sources";
 import { renderView, viewLoop } from "./view";
 import { createAccount, runSetup, setupDone } from "./setup";
+import { applyBundle, buildBundle } from "./transfer";
 import { cleanupEnvironment } from "./environment";
 import { banner, cream, dim, mint, ok, bad } from "./theme";
 import { FINISHED } from "../shared/headless.ts";
@@ -63,15 +64,18 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   work <taskId>                                                           one worker (the daemon runs this)
   tasks list | tasks release <taskId> | tasks logs <taskId>
   cli status | cli update                                                 the Claude Code and Codex binaries
-  status`;
+  status
+  export [--out <file>] [--scanner <id or name>]                          one file with the tokens, accounts and scanners this box runs
+  import <file> [--repo-dir <dir>] [--replace]                            set up this box from that file; clones repos it lacks
+  accounts login <id>                                                     sign an account in again (after an import without credentials)`;
 
 async function main(argv: string[]) {
   const a = parseArgs(argv);
   const [cmd, sub, ...rest] = a._;
   const s = loadState();
-  const key = `${cmd === "jobs" ? "scanners" : cmd ?? "help"} ${sub ?? ""}`.trim(); // "jobs" was the first name for scanners
+  const key = cmd === "import" ? "import" : `${cmd === "jobs" ? "scanners" : cmd ?? "help"} ${sub ?? ""}`.trim(); // "jobs" was the first name for scanners; import <file> takes a path, not a subcommand
   // everything that touches tickets, accounts or agents waits for the walk-through
-  const open = ["help", "--help", "-h", "setup", "status", "cli status", "cli update"];
+  const open = ["help", "--help", "-h", "setup", "status", "cli status", "cli update", "import"];
   if (!open.includes(key) && !setupDone(s)) fail("not set up yet. Run `consort-cli setup` first; it checks the tools, adds your issue sources, AI accounts and Slack, and tests each one.");
   switch (key) {
     case "help": case "--help": case "-h": console.log(HELP.replace(/^(  )([a-z]+(?: [a-z-]+)?)/gm, (_m, sp, cmd) => `${sp}${mint(cmd)}`)); return;
@@ -90,6 +94,36 @@ async function main(argv: string[]) {
     case "accounts list": {
       if (!s.accounts.length) { console.log("No accounts. Add one with: consort-cli accounts add --provider claude --name work"); return; }
       for (const acc of s.accounts) console.log(`${acc.id}  ${acc.provider.padEnd(6)}  ${acc.name.padEnd(20)}  ${await accountStatus(acc)}${acc.blockedUntil && acc.blockedUntil > Date.now() ? `  · blocked until ${new Date(acc.blockedUntil).toLocaleTimeString()}` : ""}`);
+      return;
+    }
+    case "accounts login": {
+      const acc = s.accounts.find((x) => x.id === rest[0] || x.name === rest[0]) ?? fail("no such account");
+      if (acc!.auth !== "login") fail(`${acc!.name} uses an API key; nothing to sign in`);
+      console.log(`Signing in ${acc!.name}; this runs the ${acc!.provider === "claude" ? "Claude Code" : "Codex"} login in your terminal.`);
+      await loginInteractive(acc!); console.log(await accountStatus(acc!)); return;
+    }
+    case "export": case "agent-dump": {
+      const only = list(a, "scanner");
+      const b = await buildBundle(s, { only: only.length ? only : undefined });
+      const out = resolve(str(a, "out") ?? `consort-cli-${host()}-${new Date().toISOString().slice(0, 10)}.json`);
+      writeFileSync(out, JSON.stringify(b, null, 2), { mode: 0o600 });
+      const noCred = b.accounts.filter((x) => x.auth === "login" && !x.credentials).map((x) => x.name);
+      console.log(`Wrote ${out} (mode 600): ${b.scanners.length} scanner(s), ${b.accounts.length} account(s), ClickUp ${b.clickupKey ? "token" : "none"}, Slack ${b.slack ? "set" : "none"}.`);
+      console.log(`On the other machine: consort-cli import ${basename(out)}`);
+      if (noCred.length) console.log(`${noCred.join(", ")}: login kept in this machine's keychain, so sign in there with: consort-cli accounts login <id>`);
+      console.log("It holds secrets; move it over a private channel and delete it afterwards.");
+      return;
+    }
+    case "import": {
+      const file = sub ?? fail("file required");
+      const b = JSON.parse(readFileSync(resolve(file!), "utf8"));
+      const r = await applyBundle(s, b, { repoDir: str(a, "repo-dir"), replace: !!a.replace, create: createAccount });
+      saveState(s);
+      if (r.cloned.length) console.log(`Cloned: ${r.cloned.join("; ")}`);
+      console.log(`Added: ${r.added.join(", ") || "nothing"}`);
+      if (r.kept.length) console.log(`Already here, kept: ${r.kept.join(", ")}${a.replace ? "" : " (--replace overrides settings)"}`);
+      if (r.needLogin.length) console.log(`Sign in: ${r.needLogin.map((id) => `consort-cli accounts login ${id}`).join("; ")}`);
+      console.log("Ready. Start it: consort-cli run");
       return;
     }
     case "accounts remove": { const id = rest[0] ?? fail("account id required"); s.accounts = s.accounts.filter((x) => x.id !== id); saveState(s); console.log("Removed."); return; }

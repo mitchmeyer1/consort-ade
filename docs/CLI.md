@@ -97,6 +97,18 @@ Every stage move is posted to the Slack thread and as a comment on the ticket; t
 | `tasks list` / `tasks logs <id>` / `tasks release <id>` | release stops the worker and forgets the claim locally |
 | `cli status` / `cli update` | the Claude Code and Codex binaries |
 | `status` | one line per live task |
+| `export [--out f] [--scanner id]` / `import <file>` / `accounts login <id>` | move scanners to another machine |
+
+## Moving scanners to another machine
+
+```bash
+consort-cli export                          # writes consort-cli-<host>-<date>.json, mode 600
+consort-cli export --scanner roster --out roster.json
+# on the other box, after installing consort-cli:
+consort-cli import roster.json [--repo-dir ~/repos] [--replace]
+```
+
+The file holds everything the scanners need: the ClickUp token, Slack, the branch prefix, every account (API keys, and the login's credential file where there is one), and every scanner with its repo's `origin` URL. Import fills in what the box lacks, clones each repo it does not have (under `~/.consort-cli/repos` unless `--repo-dir` says otherwise), skips accounts and scanners with the same name, and marks setup done so `consort-cli run` works at once. `--replace` overwrites the token, Slack and prefix with the file's. Claude Code logins made on a Mac live in the Keychain, not in a file, so those accounts arrive without credentials; import names them and `consort-cli accounts login <id>` signs them in. Work in flight stays where it started. The file is secrets in plain text: move it privately and delete it after.
 
 ## Accounts and usage limits
 
