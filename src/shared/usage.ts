@@ -186,3 +186,12 @@ export function connectorAccess(usage: ConnectorUsage | undefined, models: strin
 
 /** how loudly a meter should read: past 80% it warns, at 95%+ it is effectively spent */
 export const usageTone = (percent: number): "ok" | "high" | "full" => (percent >= 95 ? "full" : percent >= 80 ? "high" : "ok");
+
+/** Only plan-wide exhausted windows block an account; a model window cannot block other models. */
+export function usageBlock(usage: ConnectorUsage, now: number): { until: number; reason: string } | undefined {
+  if (now - usage.at > 120_000 || usage.unavailable) return undefined;
+  const full = usage.windows.filter((w) => !w.model && (w.percent >= 100 || w.locked) && (!w.resetsAt || w.resetsAt > now));
+  if (!usage.blocked && !full.length) return undefined;
+  const resets = full.map((w) => w.resetsAt).filter((t): t is number => !!t && t > now);
+  return { until: resets.length ? Math.max(...resets) : now + 60 * 60_000, reason: usage.blocked ?? `${full.map((w) => w.label).join(" and ")} usage exhausted` };
+}

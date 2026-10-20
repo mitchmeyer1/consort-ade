@@ -27,6 +27,9 @@ for (const blockedAtStart of [true, false]) {
       '../shared/seatPool.ts': seatPool,
       '../shared/modelTiers.ts': { modelTiers },
       '../main/ship': { excludeConsortDir: async () => {}, fetchTicket: async () => ({}), writeTicketFile: () => '' },
+      './lifecycle': { notifyTask: async () => {} },
+      './usage': { readUsage: async () => ({ at: Date.now(), windows: [] }) },
+      '../shared/usage.ts': { usageBlock: () => undefined },
       './sources': { sourceFor: () => ({}) },
       './environment': { allocateEnvironment: async () => ({}) },
       './state': {

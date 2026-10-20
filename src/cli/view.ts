@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { ago, diffCell, FINISHED, parseShortstat, taskHealth, taskStep, usageBars, usageBarText, visibleTasks } from "../shared/headless.ts";
-import type { ConnectorUsage } from "../shared/usage.ts";
+import { usageBlock, type ConnectorUsage } from "../shared/usage.ts";
 import { readAllUsage } from "./usage";
 import { alive, daemonPid } from "./daemonctl";
 import { resetLabel } from "../shared/seatPool.ts";
@@ -50,6 +50,7 @@ const diffOf = (task: Task, base: string | undefined, now: number): { files: num
 
 export function renderView(now = Date.now(), width = process.stdout.columns || 140, usage?: Map<string, ConnectorUsage>): string {
   const s = loadState();
+  s.accounts = s.accounts.map((a) => { const u = usage?.get(a.id); const block = u && usageBlock(u, now); return block ? { ...a, blockedUntil: Math.max(a.blockedUntil ?? 0, block.until), blockedWhy: block.reason } : a; });
   const tasks = visibleTasks(s.tasks, now).sort((a, b) => (FINISHED.includes(a.status) ? 1 : 0) - (FINISHED.includes(b.status) ? 1 : 0) || b.updatedAt - a.updatedAt);
   const accountName = (id?: string) => s.accounts.find((a) => a.id === id)?.name ?? "";
   const cols = { ticket: 12, title: 26, step: 5, stage: 14, next: 14, status: 10, account: 12, ports: 12, age: 8, log: 5, diff: 14 };
@@ -69,14 +70,14 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
     const acct = accountName(t.activeProvider ? t.accountIds[t.activeProvider] : t.accountIds.claude ?? t.accountIds.codex);
     const log = logOf(t, now);
     const health = taskHealth(t, s.accounts, { workerAlive: !!(t.pid && alive(t.pid)), logAgeMs: Math.min(log.ageMs ?? Infinity, now - t.updatedAt) }, now);
-    const healthPaint = (x: string) => (health.tone === "ok" ? green(x) : health.tone === "warn" ? amber(x) : health.tone === "bad" ? red(x) : dim(x));
+    const healthPaint = (x: string) => (health.tone === "complete" ? blue(bold(x)) : health.tone === "ok" ? green(x) : health.tone === "warn" ? amber(x) : health.tone === "bad" ? red(x) : dim(x));
     const activity = (health.tone === "bad" || health.tone === "warn") && health.note ? `${health.note}${t.activity ? ` · ${t.activity}` : ""}` : t.activity || t.note || log.last || "";
     const diff = diffCell(diffOf(t, s.jobs.find((j) => j.id === t.jobId)?.base, now));
     const age = FINISHED.includes(t.status) ? `done ${ago(now - (t.finishedAt ?? t.updatedAt))}` : ago(now - t.startedAt);
     const finished = FINISHED.includes(t.status);
     const cell = (s: string, f: (x: string) => string) => (finished && t.status !== "failed" ? dim(s) : f(s));
-    const step = taskStep(t, s.jobs.find((j) => j.id === t.jobId)?.reviewModels?.length || 3);
-    lines.push([cell(pad(t.ticket.id, cols.ticket), mint), cell(pad(t.ticket.title, cols.title), cream), cell(pad(`${step.n}/${step.total}`, cols.step), mint), cell(pad(step.name, cols.stage), (x) => x), cell(pad(step.next, cols.next), dim), cell(pad(health.label, cols.status), healthPaint), cell(pad(acct, cols.account), dim), cell(pad(t.portBase ? `${t.portBase}-${t.portBase + 99}` : "", cols.ports), dim), cell(pad(age, cols.age), dim), cell(pad(log.lines ? String(log.lines) : "", cols.log), dim), cell(pad(diff, cols.diff), (x) => (!diff || diff.startsWith("+0 −0") ? dim(x) : mint(x))), cell(pad(activity, activityW), (x) => x)].join("  "));
+    const step = taskStep(t, 3);
+    lines.push([cell(pad(t.ticket.id, cols.ticket), mint), cell(pad(t.ticket.title, cols.title), cream), cell(pad(`${step.n}/${step.total}`, cols.step), mint), cell(pad(step.name, cols.stage), (x) => x), cell(pad(step.next, cols.next), dim), healthPaint(pad(health.label, cols.status)), cell(pad(acct, cols.account), dim), cell(pad(t.portBase ? `${t.portBase}-${t.portBase + 99}` : "", cols.ports), dim), cell(pad(age, cols.age), dim), cell(pad(log.lines ? String(log.lines) : "", cols.log), dim), cell(pad(diff, cols.diff), (x) => (!diff || diff.startsWith("+0 −0") ? dim(x) : mint(x))), cell(pad(activity, activityW), (x) => x)].join("  "));
   }
   lines.push("");
   const readAt = usage ? Math.max(0, ...[...usage.values()].map((u) => u.at)) : 0;

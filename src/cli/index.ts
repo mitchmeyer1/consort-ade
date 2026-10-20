@@ -7,6 +7,7 @@ import { claimedByOther, claimHeld, claimOf, matchesFilters, type ReviewPick, ty
 import { cliStatus, updateCli } from "../main/cliRuntime";
 import { accountStatus, loginInteractive, runtimeDeps, stopAgents } from "./agent";
 import { newTask, workTask } from "./pipeline";
+import { flushTaskNotifications, notifyTask } from "./lifecycle";
 import { Slack } from "./slack";
 import { sourceFor } from "./sources";
 import { renderView, viewLoop } from "./view";
@@ -198,13 +199,16 @@ async function main(argv: string[]) {
     case "work": {
       const id = sub ?? fail("task id required");
       // a stop (consort-cli stop --all, or the box shutting down) ends the agent process too, so no orphan keeps editing the worktree
-      for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(sig, () => { stopAgents(); updateTask(id!, { pid: undefined, activity: "stopped; resumes on the next run" }); process.exit(0); });
-      await workTask(id!); return;
+      for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.once(sig, async () => { stopAgents(); updateTask(id!, { pid: undefined, activity: "stopped; resumes on the next run" }); await notifyTask(id!, "stopped", `Worker received ${sig}; resumes on the next run.`); process.exit(0); });
+      try { await workTask(id!); }
+      catch (e) { stopAgents(); await notifyTask(id!, "stopped", `Worker failed: ${(e as Error).message}`); throw e; }
+      return;
     }
 
     case "tasks list": { for (const t of s.tasks) console.log(`${t.id}  ${t.status.padEnd(10)}  ${t.ticket.id.padEnd(12)}  ${t.feature.stage.padEnd(14)}  ${t.branch}  ${t.note ?? ""}`); if (!s.tasks.length) console.log("No tasks."); return; }
     case "tasks release": {
       const t = s.tasks.find((x) => x.id === rest[0] || x.ticket.id === rest[0]) ?? fail("no such task; use the task id or the ticket id from consort-cli view");
+      await notifyTask(t!.id, "stopped", "Task released by the owner.");
       if (t!.pid) { try { process.kill(t!.pid); } catch {} }
       t!.status = "released"; t!.pid = undefined; t!.finishedAt = Date.now(); saveState(s);
       if (t!.runCode) { const r = await cleanupEnvironment(t!.runCode); console.log(`Removed ${r.containers} container(s), ${r.networks} network(s), ${r.volumes} volume(s) of ${t!.runCode}.`); }
@@ -250,7 +254,7 @@ async function daemon() {
     const child = spawn(process.execPath, [self, "work", t.id], { stdio: ["ignore", out, out], env: process.env });
     const s = loadState(); const task = s.tasks.find((x) => x.id === t.id); if (task) { task.pid = child.pid; saveState(s); }
     console.log(`${new Date().toISOString()} worker ${child.pid} → ${t.ticket.id} (${t.id})`);
-    child.on("exit", (code) => {
+    child.on("exit", async (code, signal) => {
       const s2 = loadState(); const task2 = s2.tasks.find((x) => x.id === t.id);
       if (task2 && task2.pid === child.pid) {
         task2.pid = undefined;
@@ -262,6 +266,7 @@ async function daemon() {
         }
         saveState(s2);
       }
+      if (task2 && !FINISHED.includes(task2.status)) await notifyTask(t.id, "stopped", `Worker exited (${signal ?? code}); the daemon will restart it.`);
       console.log(`${new Date().toISOString()} worker ${child.pid} for ${t.ticket.id} exited ${code}`);
     });
   };
@@ -270,8 +275,12 @@ async function daemon() {
     // finished tasks fall out of the state file after a week; the dashboard stops showing them after two hours
     const keep = s.tasks.filter((t) => !FINISHED.includes(t.status) || Date.now() - (t.finishedAt ?? t.updatedAt) < 7 * 24 * 3_600_000);
     if (keep.length !== s.tasks.length) { s.tasks = keep; saveState(s); }
+    for (const t of s.tasks) if (!(t.pid && alive(t.pid))) await flushTaskNotifications(t.id);
     // workers that should be running but are not: the daemon restarted, or the box did
-    for (const t of s.tasks) if (["working", "waiting", "monitoring"].includes(t.status) && !(t.pid && alive(t.pid))) spawnWorker(t);
+    for (const t of s.tasks) if (["working", "waiting", "monitoring"].includes(t.status) && !(t.pid && alive(t.pid))) {
+      if (t.pid) await notifyTask(t.id, "stopped", "Worker process disappeared; restarting it.");
+      spawnWorker(t);
+    }
     for (const job of s.jobs.filter((j) => j.enabled)) {
       const due = !job.lastScanAt || Date.now() - job.lastScanAt >= job.everyMinutes * 60_000;
       if (!due) continue;

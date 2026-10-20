@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { basename, join, relative, isAbsolute } from "node:path";
 import { promisify } from "node:util";
-import { EVIDENCE_DIR, EVIDENCE_MANIFEST, evidenceMarkdownForPr, evidenceTextForTicket, parseEvidenceManifest, type EvidenceManifest } from "../shared/headless.ts";
+import { EVIDENCE_DIR, EVIDENCE_MANIFEST, evidenceMarkdownForPr, evidenceTextForTicket, evidenceProblems, parseEvidenceManifest, type EvidenceManifest } from "../shared/headless.ts";
 import { ticketRef, type ShipTicket } from "../shared/ship.ts";
 import type { Source } from "./sources";
 
@@ -84,6 +84,23 @@ export function readManifest(worktree: string): EvidenceManifest | undefined {
   try { return parseEvidenceManifest(readFileSync(join(worktree, EVIDENCE_MANIFEST), "utf8")); } catch { return undefined; }
 }
 
+/** Reject incomplete manifests and missing/empty captures before any success comment is published. */
+export function validateEvidence(worktree: string): EvidenceManifest {
+  const manifest = readManifest(worktree);
+  const issues = evidenceProblems(manifest);
+  if (issues.length) throw new Error(issues.join(" "));
+  const dir = realpathSync(join(worktree, EVIDENCE_DIR));
+  for (const item of manifest!.items) {
+    if (!item.image) continue;
+    const file = join(dir, item.image);
+    if (!existsSync(file)) throw new Error(`Evidence image is missing: ${item.image}`);
+    const path = relative(dir, realpathSync(file));
+    if (path.startsWith("..") || isAbsolute(path)) throw new Error("Evidence image must stay inside the evidence directory.");
+    if (!statSync(file).isFile() || statSync(file).size === 0) throw new Error(`Evidence image is empty or not a file: ${item.image}`);
+  }
+  return manifest!;
+}
+
 /** upload one file as a ClickUp task attachment; resolves to its public URL */
 export async function uploadClickupAttachment(key: string, taskId: string, file: string): Promise<string> {
   const form = new FormData();
@@ -128,9 +145,8 @@ export async function pushEvidenceBranch(repo: string, ticketId: string, files: 
 export type Published = { items: number; images: number; prComment: boolean; ticketComment: boolean; hosting: "clickup" | "branch" | "none" };
 
 /** post the manifest to the PR and the ticket, images hosted where they will render */
-export async function publishEvidence(o: { worktree: string; repo: string; ticket: ShipTicket; pr: number; prUrl: string; source: Source; clickupKey?: string }): Promise<Published | undefined> {
-  const m = readManifest(o.worktree);
-  if (!m || !m.items.length) return undefined;
+export async function publishEvidence(o: { worktree: string; repo: string; ticket: ShipTicket; pr: number; prUrl: string; source: Source; clickupKey?: string }): Promise<Published> {
+  const m = validateEvidence(o.worktree);
   const dir = join(o.worktree, EVIDENCE_DIR);
   const wanted = [...new Set(m.items.map((i) => i.image).filter((f): f is string => !!f))].filter((f) => existsSync(join(dir, f)));
   let images: Record<string, string> = {};
@@ -138,18 +154,19 @@ export async function publishEvidence(o: { worktree: string; repo: string; ticke
   if (wanted.length) {
     if (o.ticket.source === "clickup" && o.clickupKey) {
       hosting = "clickup";
-      for (const f of wanted) { try { images[f] = await uploadClickupAttachment(o.clickupKey, o.ticket.id, join(dir, f)); } catch (e) { console.log(`evidence upload failed for ${f}: ${(e as Error).message}`); } }
+      for (const f of wanted) images[f] = await uploadClickupAttachment(o.clickupKey, o.ticket.id, join(dir, f));
     } else {
       hosting = "branch";
-      try { images = await pushEvidenceBranch(o.repo, o.ticket.id, wanted.map((f) => join(dir, f))); } catch (e) { console.log(`evidence branch push failed: ${(e as Error).message}`); }
+      images = await pushEvidenceBranch(o.repo, o.ticket.id, wanted.map((f) => join(dir, f)));
     }
   }
+  if (wanted.some((f) => !images[f])) throw new Error("Evidence image hosting did not return every capture URL.");
   const prBody = evidenceMarkdownForPr(m, images, o.ticket.url, ticketRef(o.ticket));
   const bodyFile = join(dir, ".pr-comment.md");
   writeFileSync(bodyFile, prBody);
   let prComment = false, ticketComment = false;
-  try { await gh(o.repo, ["pr", "comment", String(o.pr), "--body-file", bodyFile]); prComment = true; } catch (e) { console.log(`PR comment failed: ${(e as Error).message}`); }
-  try { await o.source.comment(o.ticket.id, evidenceTextForTicket(m, images, o.prUrl)); ticketComment = true; } catch (e) { console.log(`ticket comment failed: ${(e as Error).message}`); }
+  await gh(o.repo, ["pr", "comment", String(o.pr), "--body-file", bodyFile]); prComment = true;
+  await o.source.comment(o.ticket.id, evidenceTextForTicket(m, images, o.prUrl)); ticketComment = true;
   return { items: m.items.length, images: Object.keys(images).length, prComment, ticketComment, hosting };
 }
 

@@ -66,6 +66,14 @@ export type Task = {
   worktree: string; branch: string;
   feature: ShipFeature;
   status: TaskStatus;
+  lifecycle?: "running" | "paused" | "stopped" | "completed";
+  pauseReason?: string;
+  notificationQueue?: { id: string; text: string }[];
+  /** Persist unanswered questions across worker restarts. */
+  pendingQuestion?: { questions: string[]; afterTs: string };
+  reviewersRequested?: string[];
+  /** Written only after evidence validation, independent inspection, and publication succeed. */
+  evidenceValidatedAt?: number;
   /** the Slack thread every message about this task goes to */
   slackThread?: string;
   /** agent session ids by provider, so a task keeps one conversation per provider */

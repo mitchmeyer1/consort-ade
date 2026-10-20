@@ -24,6 +24,7 @@ export const HEADLESS_RULES = `## Headless run: nobody is watching this chat liv
 
 Consort is running this feature unattended on a server. There is no user in the chat; the person who owns the ticket is reachable only through Slack, and only for questions that matter.
 - Decide anything straightforward yourself: naming, file placement, which existing pattern to follow, test shape, obvious defaults. Record each such decision as one line under "Assumptions" in ${"`"}.consort/ship/GRILLING.md${"`"} and in the spec, so a reader can overturn it later.
+- If the business purpose, acceptance criteria, or design is materially unclear, ask the owner before building or changing behavior.
 - Ask only when the answer changes scope, cost, data, security, or user-facing behaviour in a way the ticket does not settle and the code does not imply. Put each such question on its own line as ${"`"}[ask-user: <the question, with your recommended answer>]${"`"}, then end your turn. Consort relays them over Slack and sends the answers back as the next message. Never block on anything you did not mark this way.
 - Where a handler tells you to ask the user for a go-ahead, confirmation, or to "present and wait", proceed instead, noting what you would have asked.
 - Never argue with a human reviewer on the PR. Apply what is clearly right; where you disagree or the request conflicts with the ticket, say so neutrally in one reply on the thread and raise it with ${"`"}[ask-user: …]${"`"}. The owner decides.
@@ -45,7 +46,7 @@ When no open question remains, write ${"`"}.consort/ship/SPEC.md${"`"} in this s
 /** what the PR-monitor turn does when humans have commented */
 export const RESPOND_TO_REVIEW = (unresolved: { author: string; path?: string; line?: number; body: string; url: string }[]) => `## This turn: answer the humans on the PR
 
-Reviewers left ${unresolved.length} unresolved thread${unresolved.length === 1 ? "" : "s"}. For each one below: if the request is clear and right, make the change, commit, push, reply on the thread with what changed, and resolve it (${"`"}gh api graphql${"`"} resolveReviewThread). If it is unclear or you disagree, reply once, neutrally, with the trade-off, do not resolve it, and raise it as ${"`"}[ask-user: …]${"`"} quoting the reviewer. Run the repo's checks before pushing. End with one line per thread: resolved / asked / declined.
+Reviewers left ${unresolved.length} unresolved thread${unresolved.length === 1 ? "" : "s"}. For each one below: if the request is clear and right, make the change, commit, push, reply on the thread with what changed, and resolve it (${"`"}gh api graphql${"`"} resolveReviewThread). If it is unclear or you disagree, reply once, neutrally, with the trade-off, do not resolve it, and raise it as ${"`"}[ask-user: …]${"`"} quoting the reviewer. For a top-level review without a thread, answer with a PR comment and do not try to resolve a thread. Run the repo's checks before pushing. End with one line per thread: resolved / asked / declined.
 
 ${unresolved.map((t, i) => `${i + 1}. ${t.author}${t.path ? ` on ${t.path}${t.line ? `:${t.line}` : ""}` : ""} — ${t.url}\n${t.body.trim().split("\n").map((l) => `   > ${l}`).join("\n")}`).join("\n\n")}`;
 
@@ -136,6 +137,7 @@ export type PrState = {
   reviewDecision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | "";
   approvals: string[];
   unresolved: { author: string; path?: string; line?: number; body: string; url: string; id: string; createdAt: string }[];
+  feedback?: PrState["unresolved"];
   ci: "pass" | "fail" | "pending" | "none";
   requestedReviewers: string[];
 };
@@ -145,12 +147,13 @@ export function prReadiness(pr: PrState, botLogins: string[] = []): Readiness {
   const reasons: string[] = [];
   if (pr.state !== "OPEN") reasons.push(`PR is ${pr.state.toLowerCase()}`);
   if (pr.isDraft) reasons.push("PR is a draft");
-  const human = pr.approvals.filter((a) => !botLogins.includes(a));
+  const human = pr.approvals.filter((a) => !botLogins.includes(a) && !/\[bot\]$/.test(a));
   if (!human.length) reasons.push("no human approval yet");
   if (pr.reviewDecision === "CHANGES_REQUESTED") reasons.push("changes requested");
   if (pr.unresolved.length) reasons.push(`${pr.unresolved.length} unresolved thread${pr.unresolved.length === 1 ? "" : "s"}`);
   if (pr.ci === "fail") reasons.push("CI failing");
   if (pr.ci === "pending") reasons.push("CI still running");
+  if (pr.ci === "none") reasons.push("no CI checks reported");
   return { ready: reasons.length === 0, reasons };
 }
 
@@ -240,22 +243,21 @@ export function taskStep(t: { status: string; envReadyAt?: number; reviewsDone: 
  * WAITING on a Slack answer; LIMIT when every account it can use is blocked; STALLED when it should
  * be running but has said nothing for a while; STOPPED when it failed or its worker is gone.
  */
-export type TaskHealth = { label: "RUNNING" | "WAITING" | "LIMIT" | "STALLED" | "STOPPED" | "READY" | "DONE" | "RELEASED"; tone: "ok" | "warn" | "bad" | "off"; note?: string };
+export type TaskHealth = { label: "RUNNING" | "WAITING" | "LIMIT" | "STALLED" | "STOPPED" | "COMPLETED" | "DONE" | "RELEASED"; tone: "ok" | "warn" | "bad" | "off" | "complete"; note?: string };
 export function taskHealth(
-  t: { status: string; accountIds: Partial<Record<string, string>>; activeProvider?: Provider; activity?: string; note?: string },
+  t: { status: string; accountIds: Partial<Record<string, string>>; activeProvider?: Provider; activity?: string; note?: string; pauseReason?: string },
   accounts: { id: string; provider: string; blockedUntil?: number }[],
   live: { workerAlive: boolean; logAgeMs: number | undefined },
   now: number,
   stalledAfterMs = 10 * 60_000,
 ): TaskHealth {
-  if (t.status === "ready") return { label: "READY", tone: "ok" };
+  if (t.status === "ready") return { label: "COMPLETED", tone: "complete" };
   if (t.status === "done") return { label: "DONE", tone: "off" };
   if (t.status === "released") return { label: "RELEASED", tone: "off" };
   if (t.status === "failed") return { label: "STOPPED", tone: "bad", note: t.note };
   if (!live.workerAlive) return { label: "STOPPED", tone: "bad", note: t.note ?? "no worker process" };
-  if (t.status === "waiting") return { label: "WAITING", tone: "warn", note: "on your Slack reply" };
-  const providers = t.activeProvider ? [t.activeProvider] : Object.keys(t.accountIds).filter((p) => t.accountIds[p]);
-  const limited = providers.length > 0 && providers.some((p) => { const mine = accounts.filter((a) => a.provider === p); return mine.length > 0 && mine.every((a) => a.blockedUntil && a.blockedUntil > now); });
+  if (t.status === "waiting" || t.status === "monitoring") return { label: "WAITING", tone: "warn", note: t.pauseReason ?? t.note ?? (t.status === "monitoring" ? "awaiting human review or CI" : "on your Slack reply") };
+  const limited = accounts.length > 0 && accounts.every((a) => a.blockedUntil && a.blockedUntil > now);
   if (limited || /accounts? at (its|their) limit/i.test(t.activity ?? "")) return { label: "LIMIT", tone: "warn", note: "every account at its usage limit" };
   if (live.logAgeMs !== undefined && live.logAgeMs > stalledAfterMs) return { label: "STALLED", tone: "warn", note: `quiet for ${Math.round(live.logAgeMs / 60_000)} min` };
   return { label: "RUNNING", tone: "ok" };
@@ -312,7 +314,8 @@ export function chooseFrom(answer: string, options: string[]): string[] {
 export const EVIDENCE_DIR = ".consort/ship/evidence";
 export const EVIDENCE_MANIFEST = `${EVIDENCE_DIR}/manifest.json`;
 export type EvidenceItem = { title: string; image?: string; text?: string; command?: string; note?: string };
-export type EvidenceManifest = { kind: "frontend" | "backend" | "mixed"; summary: string; seeded?: string; items: EvidenceItem[] };
+export type EvidenceCheck = { story: string; status: "passed" | "failed" | "blocked"; expected: string; observed: string; items: string[] };
+export type EvidenceManifest = { status?: "passed" | "blocked"; checks?: EvidenceCheck[]; blockers?: string[]; kind: "frontend" | "backend" | "mixed"; summary: string; seeded?: string; items: EvidenceItem[] };
 
 export function parseEvidenceManifest(raw: unknown): EvidenceManifest | undefined {
   let v: unknown = raw;
@@ -327,12 +330,34 @@ export function parseEvidenceManifest(raw: unknown): EvidenceManifest | undefine
     if (!image && !text) return [];
     return [{ title: i.title.trim(), image, text, command: typeof i.command === "string" ? i.command.trim() : undefined, note: typeof i.note === "string" ? i.note.trim() : undefined }];
   });
-  return { kind, summary: typeof r.summary === "string" ? r.summary.trim() : "", seeded: typeof r.seeded === "string" ? r.seeded.trim() : undefined, items };
+  const checks = Array.isArray(r.checks) ? r.checks.map((c: any): EvidenceCheck => ({ story: typeof c?.story === "string" ? c.story : "", status: c?.status === "passed" ? "passed" : c?.status === "failed" ? "failed" : "blocked", expected: typeof c?.expected === "string" ? c.expected : "", observed: typeof c?.observed === "string" ? c.observed : "", items: Array.isArray(c?.items) ? c.items.filter((t: unknown): t is string => typeof t === "string") : [] })) : undefined;
+  return { ...(r.status === "passed" || r.status === "blocked" ? { status: r.status } : {}), ...(checks ? { checks } : {}), ...(Array.isArray(r.blockers) ? { blockers: r.blockers.map(String) } : {}), kind, summary: typeof r.summary === "string" ? r.summary.trim() : "", seeded: typeof r.seeded === "string" ? r.seeded.trim() : undefined, items };
 }
 
-export const EVIDENCE_PROMPT = (i: { helper: string; ticketUrl: string; prUrl: string; worktree: string }) => `## This turn: evidence the feature works, for the people who will merge it
+/** A capture is not proof until every acceptance check passes and points to real output. */
+export function evidenceProblems(m: EvidenceManifest | undefined): string[] {
+  if (!m) return ["No readable evidence manifest was written."];
+  const issues: string[] = [];
+  if (m.status !== "passed") issues.push("Evidence has not passed.");
+  if (m.blockers?.length) issues.push(...m.blockers);
+  if (!m.summary.trim()) issues.push("Evidence needs a summary of the working result.");
+  if (!m.items.length) issues.push("Evidence contains no captures or output.");
+  if (m.kind !== "backend" && !m.items.some((i) => i.image)) issues.push("Frontend evidence needs screenshots of the working feature.");
+  if (!m.checks?.length) issues.push("Acceptance checks are missing.");
+  for (const c of m.checks ?? []) {
+    if (c.status !== "passed" || !c.story.trim() || !c.expected.trim() || !c.observed.trim()) issues.push(`Acceptance check did not pass: ${c.story || "unnamed check"}`);
+    if (!c.items.length || c.items.some((title) => !m.items.some((i) => i.title === title))) issues.push(`Acceptance check has no matching proof: ${c.story}`);
+  }
+  return issues;
+}
+
+export const EVIDENCE_PROMPT = (i: { helper: string; ticketUrl: string; prUrl: string; worktree: string; repoRoot?: string }) => `## This turn: evidence the feature works, for the people who will merge it
 
 The PR has been through Consort's review rounds. Before it goes to human reviewers, produce proof a reviewer can look at without running anything, and write it to ${EVIDENCE_DIR}/ in this worktree with a manifest at ${EVIDENCE_MANIFEST}.
+
+Evidence must demonstrate that the requested feature actually works, including every acceptance criterion in SPEC.md and TICKET.md. An error page, unavailable map tiles, missing API key, broken dependency, or partially working flow is a blocker, never successful evidence. Inspect every screenshot with your image-viewing tool and read every command's output. Fix what you can and capture the successful result again. Preserve diagnostics locally, but exclude failed captures from the successful manifest.
+
+If blocked, stop and ask the owner with [ask-user: <specific blocker and what you need>]. Do not claim success or invent a workaround that changes the business requirement. For a missing credential, determine its exact env variable and the app's env-file convention from the repo. Ask the owner to add that variable to ${i.repoRoot ?? "the repository root on the Consort machine"}/.env (or the repository's documented root env file), then confirm in Slack. Never ask for a secret in Slack. Only after that confirmation, copy the required named variable from the root env file into the worktree's appropriate ignored env file, preserve unrelated settings, restart the app, and rerun the blocked flow. Never print, post, screenshot, or commit env values, and never copy the entire root env file. Do not copy production secrets that the local feature does not require.
 
 Decide from SPEC.md and the diff whether a frontend is involved.
 - **Frontend involved:** seed a local database with data that exercises the feature (use the repo's own seed or fixture scripts, migrations and docker-compose if it has them; invent plausible data where it has none), start the app locally, and take screenshots of the feature in use: the before state where it helps, each step, the result. Take them with the helper: \`node ${i.helper} <url> [width height]\` captures a page to a PNG and prints its path; move or copy each PNG into ${EVIDENCE_DIR}/ with a descriptive file name. Stop the app and any containers when done.
@@ -340,10 +365,13 @@ Decide from SPEC.md and the diff whether a frontend is involved.
 - Both when both apply.
 
 Manifest schema (JSON):
-{ "kind": "frontend" | "backend" | "mixed", "summary": "<two or three sentences: what was proven and how>", "seeded": "<how the local data was seeded, or omitted>",
+{ "status": "passed" | "blocked", "blockers": [], "checks": [{ "story": "<acceptance criterion from SPEC.md>", "status": "passed" | "failed" | "blocked", "expected": "<required result>", "observed": "<actual result>", "items": ["<matching item title>"] }], "kind": "frontend" | "backend" | "mixed", "summary": "<two or three sentences: what was proven and how>", "seeded": "<how the local data was seeded, or omitted>",
   "items": [ { "title": "<what this shows>", "image": "<file name in ${EVIDENCE_DIR}>", "text": "<the output, for text items>", "command": "<the command run, if any>", "note": "<one line of context>" } ] }
 
-Rules: real output only, never mocked or hand-edited; no secrets or real customer data in any capture; six to ten items is plenty; name files for what they show. Consort posts the manifest to the PR (${i.prUrl}) and the ticket (${i.ticketUrl}), each linking to the other. Reply with one line per item when done.`;
+Rules: set status to passed only when all acceptance checks passed and blockers is empty; real output only, never mocked or hand-edited; no secrets or real customer data in any capture; six to ten items is plenty; name files for what they show. Consort posts the manifest to the PR (${i.prUrl}) and the ticket (${i.ticketUrl}), each linking to the other. Reply with one line per item when done.`;
+
+/** A fresh agent independently checks artifacts rather than trusting the capture agent's summary. */
+export const VERIFY_EVIDENCE_PROMPT = `Independently verify ${EVIDENCE_MANIFEST} against .consort/ship/SPEC.md, TICKET.md, the diff, and the actual evidence files. Read every image using image tools and inspect command output. Do not trust manifest.status or prose claiming success. Require proof for every acceptance criterion, successful end-to-end behavior, and working external dependencies. API KEY REQUIRED tiles, error pages, missing credentials, failed checks, placeholder output, or unproven criteria mean evidence is blocked. Failure diagnostics do not prove a working feature. Do not edit the manifest or publish anything. If all criteria are proven, reply with exactly [evidence-approved]. Otherwise explain the concrete blockers, naming any required env variable without its value. Consort will ask the owner on Slack and retry; never waive a requirement.`;
 
 /** the evidence as a GitHub comment: images inline, text as code blocks, the ticket linked */
 export function evidenceMarkdownForPr(m: EvidenceManifest, images: Record<string, string>, ticketUrl: string, ticketRefText: string): string {

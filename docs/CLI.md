@@ -72,7 +72,7 @@ For a daemon that survives reboots, run it under `systemd` or `launchd`. Every `
 4. **Three review rounds.** Consort's own PR review, each round on a different model: Codex's strongest, then Claude's strongest, then the next Claude family down (configurable with `--review-models`). After each round the builder fixes what is real and pushes.
 5. **Evidence.** Before anyone is asked to review, the agent proves the feature works and Consort posts the proof on the PR and on the ticket, each linking to the other. A feature with a frontend gets a local database seeded with data that exercises it, the app started, and screenshots of the feature in use (via headless Chrome; `consort-cli setup` checks for one, or set `CONSORT_CHROME`). Anything else gets the commands, database queries and API calls that prove it, kept as text and rendered as terminal images too. Images are hosted as ClickUp task attachments when the ticket is a ClickUp task, else on an orphan `consort-evidence` branch in the repo (they render inline on public repos; on private ones the links open for people with access).
 6. **Reviewers.** The people who touched the changed files most are requested on the PR.
-7. **The watch.** Every 15 minutes the worker reads the PR. New review threads from humans are answered: clear requests are fixed, pushed, replied to and resolved; anything unclear or disputed gets one neutral reply and a Slack question to you. CI and approvals are read each pass.
+7. **The watch.** Every three minutes the worker reads the PR. New review threads from humans are answered: clear requests are fixed, pushed, replied to and resolved; anything unclear or disputed gets one neutral reply and a Slack question to you. CI and approvals are read each pass.
 8. **Ready.** One human approval, no changes requested, no open threads, CI green: you get a Slack message with the PR link and the ticket gets a final comment. Merging is yours.
 
 ### Claims, with many boxes
@@ -80,6 +80,8 @@ For a daemon that survives reboots, run it under `systemd` or `launchd`. Every `
 A claim is a comment on the ticket: `[consort-claim host=<name> at=<time>]`, where the name is this install's hostname plus a random suffix minted once (so two laptops called the same thing, or two installs on one box, never collide; `CONSORT_CLI_HOST` overrides it). Before claiming, a scanner reads the comments and skips a ticket with a fresh marker (under three days old) from another install. Because the tracker has no lock, two installs can still post within the same second, so after posting its marker each one reads the ticket again: the earliest fresh marker wins, the loser deletes its own and moves on, and only the winner moves the status to *in progress*. A marker older than three days is abandoned work and is ignored; `tasks release` leaves the marker, so delete it on the ticket if another box should take the ticket sooner.
 
 Every stage move is posted to the Slack thread and as a comment on the ticket; the ticket status moves to *in review* when the PR is up and to *complete* if the PR is merged while the worker is still watching.
+
+Starts, stops, pauses, resumes, and completion are announced in the task thread and broadcast to its Slack channel. An immediate account/model fallback stays running and does not send pause/resume alerts. Exhausting all accounts sends one pause alert; recovery sends a separate resume alert. Questions pause until your reply, including after a worker restart. Waiting on human reviews or CI sends a pause alert; new feedback resumes work.
 
 ## Slack messages you will see
 
@@ -119,7 +121,7 @@ The file holds everything the scanners need: the ClickUp token, Slack, the branc
 
 ## Accounts and usage limits
 
-Add as many accounts per provider as you have (`accounts add` once per login or key). A task sticks to one account per provider; when that account hits a usage limit the worker blocks it until the provider's reset time (or an hour when it does not say), says so in the Slack thread, and continues on the least recently used account of the same provider, starting a fresh session (the stage handlers pick up from the files on disk). With every account of a provider out, the worker tries the other provider with its own model and session. Only when neither provider has a usable account does the worker wait; it checks again every 30 seconds, including for newly added accounts. `accounts list` shows blocks; `accounts unblock <id>` clears one by hand.
+Add as many accounts per provider as you have (`accounts add` once per login or key). A task sticks to one account per provider; when that account hits a usage limit the worker blocks it until the provider's reset time (or an hour when it does not say), logs the switch, and continues on the least recently used account of the same provider, starting a fresh session (the stage handlers pick up from the files on disk). With every account of a provider out, the worker tries the other provider with its own model and session. Only when neither provider has a usable account does the worker wait; it checks again every 30 seconds, including for newly added accounts. `accounts list` shows blocks; `accounts unblock <id>` clears one by hand.
 
 Nothing asks for permission: Claude Code runs with permissions bypassed and Codex with approvals off and full access on the box, so run consort-cli on a machine you dedicate to it. Both agents may search and read the web for research.
 
@@ -131,10 +133,19 @@ consort-cli view
 
 A live table (header says whether the daemon is running): ticket, title, the step it is on as `n/9` (environment, grilling, build, test, one review per model in the rotation, evidence, watch PR), the step's name, the step that comes next, status, the account in use, how long it has run, and what the worker is doing right now. Finished tasks stay for two hours, then drop off. Below it, the accounts, each with its plan meters as bars (5-hour, weekly, and one per model family, like the desktop's Usage panel; amber from 80%, red from 95%), when the 5-hour window resets, and any block; then the scanners with their next scan, and the commands that stop the daemon or one agent. Usage is read once a minute by asking each login's own CLI, with no model call; API-key accounts have no meters. `--once` prints one frame (`--no-usage` skips the read). `q` quits.
 
-STATUS shows green `RUNNING` while the worker is active, yellow `WAITING` for a Slack reply, and red `STOPPED` when the task failed or its worker is gone. Yellow `LIMIT` means the worker is waiting for account usage to reset; yellow `STALLED` means no activity for ten minutes. ACTIVITY shows the reason. A usage limit can leave a worker alive and waiting, so it does not by itself mean the task failed.
+STATUS shows green `RUNNING` while the worker is active, yellow `WAITING` for a Slack reply, human PR review, or CI, and red `STOPPED` when the task failed or its worker is gone. Yellow `LIMIT` means the worker is waiting for account usage to reset; yellow `STALLED` means no activity for ten minutes. Bright blue `COMPLETED` means three internal reviews are finished, two human reviewers were requested, a human approved, every thread is resolved, and CI passed. Consort never merges. ACTIVITY shows the reason. A usage limit can leave a worker alive and waiting, so it does not by itself mean the task failed.
 
 ## Limits of this cut
 
 - Model lists are the seed lists; pass `--review-models` to name others.
 - Slack is polled, not pushed, so an answer is seen within about 10 seconds.
 - A ticket released with `tasks release` keeps its claim comment on the tracker; delete it there if another box should take it.
+
+
+### Evidence must pass before human review
+
+The worker requires a manifest with every acceptance check passed, matching captures/output, and no blockers. Frontend changes require screenshots of the working feature. A separate agent inspects the actual files against the ticket and spec before publication. Missing/empty images, failed uploads, or a failed PR/ticket comment block completion. The worker marks evidence complete only after validation, inspection, and publication to both destinations succeed. Older evidence timestamps without this validation are rechecked when a worker resumes.
+
+If evidence fails, the worker pauses and asks the owner on Slack what is needed, then retries after the reply. A capture or inspection that runs beyond fifteen minutes is stopped and escalated to Slack. The owner's reply does not waive acceptance checks. Error pages, missing map tiles, missing API keys, and partially working flows must be fixed and captured again.
+
+For a missing credential, the agent names the exact variable and the repository-root env file on the Consort machine. The owner adds the key there and confirms in Slack. Only then may the agent copy that specific variable into the worktree's appropriate ignored env file, preserving unrelated settings, restart the app, and rerun the flow. Secret values must never be sent through Slack, printed, captured, or committed.

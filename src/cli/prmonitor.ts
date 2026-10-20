@@ -22,8 +22,8 @@ export async function readPr(repoPath: string, number: number): Promise<PrState 
   const t = JSON.parse(await gh(repoPath, ["api", "graphql", "-f", `query=${THREADS}`, "-F", `owner=${owner}`, "-F", `name=${name}`, "-F", `number=${number}`]));
   const threads = (t.data?.repository?.pullRequest?.reviewThreads?.nodes ?? []) as any[];
   const unresolved = threads.filter((th) => !th.isResolved).map((th) => {
-    const first = th.comments?.nodes?.[0] ?? {};
-    return { id: String(th.id), author: String(first.author?.login ?? ""), path: th.path ?? undefined, line: th.line ?? undefined, body: String(first.body ?? ""), url: String(first.url ?? j.url), createdAt: String(first.createdAt ?? "") };
+    const first = [...(th.comments?.nodes ?? [])].reverse().find((c: any) => !/\[bot\]$/.test(c.author?.login ?? "")) ?? {};
+    return { id: `${th.id}:${first.createdAt ?? ""}`, author: String(first.author?.login ?? ""), path: th.path ?? undefined, line: th.line ?? undefined, body: `GitHub thread ID: ${th.id}\n${String(first.body ?? "")}`, url: String(first.url ?? j.url), createdAt: String(first.createdAt ?? "") };
   });
   // the latest verdict per reviewer is the one that counts
   const latest = new Map<string, string>();
@@ -34,6 +34,7 @@ export async function readPr(repoPath: string, number: number): Promise<PrState 
   const ci: PrState["ci"] = !checks.length ? "none" : conclusions.some((c) => ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"].includes(c)) ? "fail"
     : checks.some((c) => ["PENDING", "IN_PROGRESS", "QUEUED", "REQUESTED", "WAITING", ""].includes(String(c.status ?? c.state ?? "").toUpperCase()) && !c.conclusion) ? "pending" : "pass";
   return {
+    feedback: (j.reviews ?? []).filter((r: any) => r.body?.trim() && ["CHANGES_REQUESTED", "COMMENTED"].includes(r.state)).map((r: any) => ({ id: `review:${r.id ?? r.author?.login}:${r.submittedAt}`, author: String(r.author?.login ?? ""), body: `Top-level review (no thread): ${r.body}`, url: j.url, createdAt: String(r.submittedAt ?? "") })),
     state: j.state, isDraft: !!j.isDraft, reviewDecision: j.reviewDecision ?? "", approvals, unresolved, ci,
     requestedReviewers: ((j.reviewRequests ?? []) as any[]).map((r) => String(r.login ?? r.name ?? "")).filter(Boolean),
     url: j.url, headSha: j.headRefOid,

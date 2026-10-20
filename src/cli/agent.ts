@@ -112,17 +112,21 @@ async function runCodex(o: TurnOptions): Promise<Turn> {
   let sessionId = o.resume;
   let error: string | undefined;
   let limit: LimitHit | undefined;
+  const ac = new AbortController();
+  const stop = () => ac.abort();
+  inFlight.add(stop);
   const fail = (message: string) => { if (isCodexLimitText(message)) limit = { text: message }; else error = message; };
   try {
-    const { events } = await thread.runStreamed(o.prompt);
+    const { events } = await thread.runStreamed(o.prompt, { signal: ac.signal });
     for await (const ev of events as AsyncIterable<any>) {
       if (ev.type === "thread.started") sessionId = ev.thread_id;
       else if (ev.type === "item.completed" && ev.item?.type === "agent_message" && ev.item.text) { texts.push(ev.item.text); o.onText?.(ev.item.text); }
-      else if (ev.type === "item.completed" && ev.item?.type === "error" && ev.item.message) fail(String(ev.item.message));
-      else if (ev.type === "turn.failed") fail(ev.error?.message ?? "turn failed");
-      else if (ev.type === "error") fail(ev.message ?? "error");
+      else if (ev.type === "item.completed" && ev.item?.type === "error" && ev.item.message) { fail(String(ev.item.message)); if (limit) break; }
+      else if (ev.type === "turn.failed") { fail(ev.error?.message ?? "turn failed"); break; }
+      else if (ev.type === "error") { fail(ev.message ?? "error"); break; }
     }
   } catch (e) { fail(String((e as Error).message ?? e)); }
+  inFlight.delete(stop);
   return { text: texts.join("\n"), sessionId, error, limit };
 }
 

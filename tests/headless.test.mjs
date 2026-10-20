@@ -308,6 +308,6 @@ test('STATUS says whether the agent is moving: running, waiting on Slack, at a l
   assert.equal(taskHealth(t({}), allBlocked, { workerAlive: true, logAgeMs: 0 }, now).label, 'LIMIT');
   assert.equal(taskHealth(t({ activity: 'all claude accounts at their limit until 9:20 PM' }), accounts, { workerAlive: true, logAgeMs: 0 }, now).label, 'LIMIT');
   assert.equal(taskHealth(t({ activeProvider: 'codex', accountIds: { claude: 'c2', codex: 'x1' } }), [...allBlocked, { id: 'x1', provider: 'codex' }], { workerAlive: true, logAgeMs: 0 }, now).label, 'RUNNING', 'blocked Claude accounts do not mark a running Codex turn as limited');
-  assert.equal(taskHealth(t({ status: 'ready' }), accounts, { workerAlive: false, logAgeMs: 0 }, now).label, 'READY');
-  assert.equal(taskHealth(t({ status: 'monitoring' }), accounts, { workerAlive: true, logAgeMs: 5 * 60_000 }, now).label, 'RUNNING', 'watching the PR is running');
+  assert.equal(taskHealth(t({ status: 'ready' }), accounts, { workerAlive: false, logAgeMs: 0 }, now).label, 'COMPLETED');
+  assert.equal(taskHealth(t({ status: 'monitoring' }), accounts, { workerAlive: true, logAgeMs: 5 * 60_000 }, now).label, 'WAITING', 'watching the PR waits on humans or CI');
 });

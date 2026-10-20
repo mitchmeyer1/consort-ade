@@ -1,20 +1,23 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { applyShipChange, newShipFeature, parseShipMarkers, prNumberFromUrl, shipBranch, shipFolder, shipSlug, stripShipMarkers, type ShipFeature, type ShipTicket } from "../shared/ship.ts";
 import { shipPrompt } from "../shared/shipPrompt.ts";
-import { DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, EVIDENCE_PROMPT, parseAskUser, pickTurnAccount, prReadiness, RESPOND_TO_REVIEW, reviewRotation, seedModels, slackLines, stripAskUser, suggestReviewers } from "../shared/headless.ts";
+import { DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, VERIFY_EVIDENCE_PROMPT, parseAskUser, pickTurnAccount, prReadiness, RESPOND_TO_REVIEW, reviewRotation, seedModels, slackLines, stripAskUser, suggestReviewers } from "../shared/headless.ts";
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { modelTiers } from "../shared/modelTiers.ts";
 import { excludeConsortDir, fetchTicket, writeTicketFile } from "../main/ship";
 import { addWorktree } from "../main/git";
 import type { Provider } from "../shared/types";
-import { runTurn, packageRoot } from "./agent";
+import { runTurn, packageRoot, stopAgents } from "./agent";
 import { readPr, requestReviewers, shortlogForBranch, whoAmI } from "./prmonitor";
-import { findBrowser, publishEvidence, writeScreenshotHelper } from "./evidence";
+import { findBrowser, publishEvidence, validateEvidence, writeScreenshotHelper } from "./evidence";
 import { allocateEnvironment, cleanupEnvironment } from "./environment";
+import { flushTaskNotifications, notifyTask } from "./lifecycle";
+import { readUsage } from "./usage";
+import { usageBlock } from "../shared/usage.ts";
 import { Slack } from "./slack";
 import { sourceFor, type Source } from "./sources";
 import { blockAccount, loadState, touchAccount, updateTask, WORK_DIR, type Account, type Job, type Task } from "./state";
@@ -28,7 +31,7 @@ import { blockAccount, loadState, touchAccount, updateTask, WORK_DIR, type Accou
 
 const run = promisify(execFile);
 const MAX_TURNS = 80;
-const PR_POLL_MS = 15 * 60_000;
+const PR_POLL_MS = 3 * 60_000;
 const STUCK_AFTER = 3;
 
 const log = (task: Task, line: string) => console.log(`${new Date().toISOString()} [${task.ticket.id}] ${line}`);
@@ -49,9 +52,9 @@ export async function workTask(taskId: string): Promise<void> {
   if (!builderProvider) throw new Error("No AI accounts: run `consort-cli accounts add` first.");
   const models = seedModels();
   const builderModel = modelTiers(builderProvider, models[builderProvider]).orchestrator;
-  const rotation = job.reviewModels?.length ? job.reviewModels : reviewRotation({ claude: have.claude ? models.claude : undefined, codex: have.codex ? models.codex : undefined });
+  const rotation = job.reviewModels?.length ? Array.from({ length: 3 }, (_, i) => job.reviewModels![i % job.reviewModels!.length]) : reviewRotation({ claude: have.claude ? models.claude : undefined, codex: have.codex ? models.codex : undefined });
 
-  updateTask(task.id, { pid: process.pid, status: "working", activity: "starting" });
+  updateTask(task.id, { pid: process.pid, activity: "starting" });
   task = loadState().tasks.find((t) => t.id === taskId)!;
   const activity = (line: string) => { updateTask(taskId, { activity: line }); };
   let turnTag = ""; // "t3 · " while a build turn runs, so the live line shows which turn it came from
@@ -77,9 +80,11 @@ export async function workTask(taskId: string): Promise<void> {
     updateTask(task.id, { slackThread: thread });
   }
   const say = async (text: string) => { log(task, text.replace(/\n/g, " ⏎ ")); if (slack && thread) await slack.post(text, thread).catch((e) => log(task, `slack failed: ${e.message}`)); };
-  const finish = (status: Task["status"], note?: string) => {
+  if (!task.pendingQuestion && task.status !== "monitoring" && task.lifecycle !== "paused") await notifyTask(taskId, "running", "Worker started; preparing the task.");
+  const finish = async (status: Task["status"], note?: string) => {
     updateTask(task.id, { status, note, finishedAt: Date.now(), activity: note ?? status });
-    void cleanupEnvironment(env.CONSORT_RUN).then((r) => { if (r.containers || r.networks || r.volumes) log(task, `removed ${r.containers} container(s), ${r.networks} network(s), ${r.volumes} volume(s)`); });
+    await notifyTask(taskId, status === "ready" ? "completed" : "stopped", note ?? status);
+    await cleanupEnvironment(env.CONSORT_RUN).then((r) => { if (r.containers || r.networks || r.volumes) log(task, `removed ${r.containers} container(s), ${r.networks} network(s), ${r.volumes} volume(s)`); });
   };
   const tell = async (text: string) => { await say(text); await source.comment(task.ticket.id, text.replace(/<([^|>]+)\|([^>]+)>/g, "$2 ($1)")).catch((e) => log(task, `ticket comment failed: ${e.message}`)); };
 
@@ -87,10 +92,14 @@ export async function workTask(taskId: string): Promise<void> {
   const ask = async (questions: string[]): Promise<string> => {
     updateTask(task.id, { status: "waiting", note: questions.join(" | "), activity: `waiting on Slack: ${questions[0].slice(0, 80)}` });
     if (!slack || !thread) throw new Error(`Needs the owner but Slack is not configured. Questions: ${questions.join(" | ")}`);
-    const ts = await slack.post(slackLines.question(questions, task.ticket.url), thread);
+    const pending = loadState().tasks.find((t) => t.id === taskId)?.pendingQuestion;
+    const ts = pending?.afterTs ?? await slack.post(slackLines.question(questions, task.ticket.url), thread, true);
+    updateTask(taskId, { pendingQuestion: { questions, afterTs: ts } });
+    await notifyTask(taskId, "paused", "Waiting for your answer in Slack.");
     log(task, `waiting on Slack for ${questions.length} answer(s)`);
-    const reply = await slack.waitForReply(thread, ts, { onTick: () => updateTask(task.id, {}) });
-    updateTask(task.id, { status: "working", note: undefined });
+    const reply = await slack.waitForReply(thread, ts, { onTick: () => { updateTask(task.id, {}); void flushTaskNotifications(taskId); } });
+    updateTask(task.id, { status: "working", note: undefined, pendingQuestion: undefined });
+    await notifyTask(taskId, "running", "Your Slack answer arrived; continuing the task.");
     return reply ?? "";
   };
 
@@ -105,7 +114,7 @@ export async function workTask(taskId: string): Promise<void> {
   let pendingUser: string | undefined;
   let idle = 0;
   const crashes = new Map<string, number>(); // consecutive failed turns per account
-  const turn = async (prompt: string | ((provider: Provider) => string), provider: Provider = builderProvider, model = builderModel, resume = true): Promise<string> => {
+  const turn = async (prompt: string | ((provider: Provider) => string), provider: Provider = builderProvider, model = builderModel, resume = true, timeoutMs?: number): Promise<string> => {
     for (let attempt = 0; attempt < 12;) {
       const live = loadState();
       const cur = live.tasks.find((t) => t.id === taskId)!;
@@ -114,11 +123,16 @@ export async function workTask(taskId: string): Promise<void> {
         const resets = (["claude", "codex"] as const).map((p) => earliestUnblock(live.accounts, p, Date.now())).filter((t): t is number => t !== undefined);
         const until = resets.length ? Math.min(...resets) : Date.now() + DEFAULT_BLOCK_MS;
         const waiting = `all accounts at their limit until ${resetLabel(until)}`;
-        if (cur.activity !== waiting) await say(`Every available AI account is blocked; the first frees up ${resetLabel(until)}. Checking again in 30 seconds.`);
-        activity(waiting);
+        updateTask(taskId, { status: "waiting", note: waiting, activity: waiting });
+        await notifyTask(taskId, "paused", waiting);
         await new Promise((r) => setTimeout(r, Math.min(30_000, Math.max(1_000, until - Date.now()))));
         continue;
       }
+      const usage = await readUsage(who);
+      const blocked = usageBlock(usage, Date.now());
+      if (blocked) { blockAccount(who.id, blocked.until, blocked.reason); continue; }
+      await notifyTask(taskId, "running", `Continuing on ${who.provider} (${who.name}).`);
+      updateTask(taskId, { status: "working", note: undefined });
       attempt++;
       if (who.provider !== provider) {
         log(task, `No usable ${provider} account; continuing on ${who.provider} (${who.name})`);
@@ -128,11 +142,32 @@ export async function workTask(taskId: string): Promise<void> {
       updateTask(task.id, (t) => ({ activeProvider: provider, accountIds: { ...t.accountIds, [provider]: who.id }, activity: `${turnTag}running ${provider} on ${who.name}` }));
       touchAccount(who.id);
       const session = resume && cur.accountIds[provider] === who.id ? cur.sessions[provider] : undefined;
-      const res = await runTurn({ cwd: task.worktree, prompt: `${typeof prompt === "function" ? prompt(provider) : prompt}\n\n${ENVIRONMENT_RULES(env)}`, model, account: who, resume: session, env, onText: (t) => { const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) activity(`${turnTag}${line.slice(0, 160)}`); } });
+      let usageLimit: ReturnType<typeof usageBlock>;
+      let checking = false;
+      let active = true;
+      const usageTimer = setInterval(async () => {
+        if (checking) return;
+        checking = true;
+        try {
+          await flushTaskNotifications(taskId);
+          const block = usageBlock(await readUsage(who), Date.now());
+          if (!active) return;
+          usageLimit = block;
+          if (usageLimit) { blockAccount(who.id, usageLimit.until, usageLimit.reason); stopAgents(); }
+        } catch (e) { log(task, `usage check failed: ${String(e)}`); }
+        finally { checking = false; }
+      }, 60_000);
+      let timedOut = false;
+      const deadline = timeoutMs ? setTimeout(() => { timedOut = true; stopAgents(); }, timeoutMs) : undefined;
+      let res;
+      try { res = await runTurn({ cwd: task.worktree, prompt: `${HEADLESS_RULES}\n\n${typeof prompt === "function" ? prompt(provider) : prompt}\n\n${ENVIRONMENT_RULES(env)}`, model, account: who, resume: session, env, onText: (t) => { const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) activity(`${turnTag}${line.slice(0, 160)}`); } }); }
+      finally { active = false; clearInterval(usageTimer); if (deadline) clearTimeout(deadline); }
+      if (timedOut) throw new Error("Evidence attempt exceeded 15 minutes; stopped the agent so the owner can help.");
+      if (usageLimit) res.limit = { text: usageLimit.reason, resetsAt: usageLimit.until };
       if (res.limit) {
         blockAccount(who.id, res.limit.resetsAt, res.limit.text);
         updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: undefined } }));
-        await say(`${who.name} hit its ${describeLimit(res.limit)}${res.limit.resetsAt ? ` (resets ${resetLabel(res.limit.resetsAt)})` : ""}; moving to another ${provider} account.`);
+        log(task, `${who.name} hit its ${describeLimit(res.limit)}${res.limit.resetsAt ? ` (resets ${resetLabel(res.limit.resetsAt)})` : ""}; moving to another ${provider} account.`);
         continue;
       }
       if (res.sessionId && resume) updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: res.sessionId } }));
@@ -145,7 +180,7 @@ export async function workTask(taskId: string): Promise<void> {
           blockAccount(who.id, Date.now() + 15 * 60_000, `crashed twice: ${res.error.slice(0, 80)}`);
           updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: undefined } }));
           crashes.delete(who.id);
-          await say(`${who.name} failed twice (${res.error.split(":")[0]}); parking it for 15 minutes and continuing on another ${provider} account.`);
+          log(task, `${who.name} failed twice (${res.error.split(":")[0]}); parking it for 15 minutes and continuing on another ${provider} account.`);
           continue;
         }
         activity(`turn failed, retrying in 20s: ${res.error.slice(0, 100)}`);
@@ -177,12 +212,24 @@ export async function workTask(taskId: string): Promise<void> {
     return false;
   };
 
+  const completeReply = async (text: string, timeoutMs?: number) => {
+    await applyReply(text);
+    while (pendingUser) {
+      const prompt = pendingUser;
+      pendingUser = undefined;
+      await applyReply(await turn(prompt, builderProvider, builderModel, true, timeoutMs));
+    }
+  };
+  if (task.pendingQuestion) {
+    const answer = await ask(task.pendingQuestion.questions);
+    await completeReply(await turn(`The owner answered on Slack:\n${answer}\nContinue from where you stopped.`));
+  }
+
   // ── the environment: what running this repo takes, on this task's ports ────────────────
   if (!task.envReadyAt) {
     activity("setting up the local environment");
     const text = await turn(ENVIRONMENT_PROMPT(env));
-    const asked = await applyReply(text);
-    if (asked && pendingUser) { const t2 = await turn(pendingUser); pendingUser = undefined; await applyReply(t2); }
+    await completeReply(text);
     updateTask(task.id, { envReadyAt: Date.now() });
     await say(`Local environment ready on ports ${env.CONSORT_PORT_RANGE}: ${stripAskUser(stripShipMarkers(text)).split("\n").find((l) => l.trim()) ?? ""}`.slice(0, 400));
   }
@@ -202,10 +249,10 @@ export async function workTask(taskId: string): Promise<void> {
       idle = 0;
     }
   }
-  if (feature.stage !== "In Review") { finish("failed", `stopped at ${feature.stage} after ${MAX_TURNS} turns`); await say(slackLines.stuck(`${MAX_TURNS} turns without reaching In Review`)); return; }
+  if (feature.stage !== "In Review") { await finish("failed", `stopped at ${feature.stage} after ${MAX_TURNS} turns`); await say(slackLines.stuck(`${MAX_TURNS} turns without reaching In Review`)); return; }
   const prUrl = feature.prs.at(-1);
   const pr = prUrl ? prNumberFromUrl(prUrl) : undefined;
-  if (!pr) { finish("failed", "In Review without a PR"); await say(slackLines.stuck("the feature reached In Review without a PR")); return; }
+  if (!pr) { await finish("failed", "In Review without a PR"); await say(slackLines.stuck("the feature reached In Review without a PR")); return; }
 
   // ── three review rounds on rotating models, each followed by a fix turn ───────────────────
   for (let round = task.reviewsDone + 1; round <= rotation.length; round++) {
@@ -214,67 +261,112 @@ export async function workTask(taskId: string): Promise<void> {
     const model = have[pick.provider] ? pick.model : builderModel;
     log(task, `review round ${round} on ${provider}:${model}`);
     activity(`review round ${round} on ${model}`);
-    await turn((active) => reviewSkillPrompt(task.worktree, pr, modelTiers(active, models[active]).delegate), provider, model, false);
+    rmSync(join(task.worktree, ".consort", "pr-review", `pr-${pr}.review.json`), { force: true });
+    const reviewText = await turn((active) => reviewSkillPrompt(task.worktree, pr, modelTiers(active, models[active]).delegate), provider, model, false);
+    await completeReply(reviewText);
     const summary = reviewSummaryOf(pr);
-    await say(slackLines.review(round, model, summary?.total ?? 0));
+    if (!summary) throw new Error(`Review round ${round} did not write a valid review report`);
+    await say(slackLines.review(round, model, summary.total));
     feature = { ...feature, review: { chatId: `cli-${round}`, pr, round, startedAt: Date.now(), doneAt: Date.now() }, reviewRound: round };
-    updateTask(task.id, { feature, reviewsDone: round });
-    if (!summary || summary.total === 0) continue;
+    updateTask(task.id, { feature });
+    if (summary.total === 0) { updateTask(task.id, { reviewsDone: round }); continue; }
     activity(`fixing round ${round} findings (${summary.total})`);
     const fix = await turn(shipPrompt({ feature, form: { form: "pr-loop" }, worktree: task.worktree, branch: task.branch, base: `origin/${job.base}`, review: { running: false, summary }, headless: true }));
-    const asked = await applyReply(fix);
-    if (asked && pendingUser) { const text = await turn(pendingUser); pendingUser = undefined; await applyReply(text); }
+    await completeReply(fix);
+    updateTask(task.id, { reviewsDone: round });
   }
 
   // ── evidence: prove it works, post the proof on the PR and the ticket, cross-linked ──────
-  if (!task.feature.evidenceAt) {
-    activity("gathering evidence");
-    try {
-      const browser = await findBrowser();
-      const helper = browser ? writeScreenshotHelper(task.worktree, browser) : undefined;
-      const prompt = EVIDENCE_PROMPT({ helper: helper ?? "(no browser on this machine: skip the images, keep the text items)", ticketUrl: task.ticket.url, prUrl: prUrl!, worktree: task.worktree });
-      const text = await turn(helper ? prompt : `${prompt}\n\nThere is no Chrome on this machine, so no screenshots can be taken; text evidence only.`);
-      const asked = await applyReply(text);
-      if (asked && pendingUser) { const t2 = await turn(pendingUser); pendingUser = undefined; await applyReply(t2); }
-      const published = await publishEvidence({ worktree: task.worktree, repo: job.repo, ticket: task.ticket, pr, prUrl: prUrl!, source, clickupKey: state.clickupKey });
-      feature = { ...feature, evidenceAt: Date.now() };
-      updateTask(task.id, { feature });
-      await say(published ? `Evidence posted: ${published.items} item${published.items === 1 ? "" : "s"}, ${published.images} image${published.images === 1 ? "" : "s"}${published.hosting === "branch" ? " (on the consort-evidence branch)" : ""}, on the PR${published.ticketComment ? " and the ticket" : ""}.` : "No evidence manifest was written; moving on without it.");
-    } catch (e) { await say(`Evidence step failed: ${(e as Error).message.split("\n")[0]}. Moving on.`); }
+  if (!feature.evidenceAt || !task.evidenceValidatedAt) {
+    // Legacy evidence timestamps also counted failed captures; require the new validation gate.
+    feature = { ...feature, evidenceAt: undefined };
+    updateTask(taskId, { feature, evidenceValidatedAt: undefined });
+    let guidance = "";
+    for (;;) {
+      activity("gathering evidence");
+      let blocked: string;
+      try {
+        const browser = await findBrowser();
+        const helper = browser ? writeScreenshotHelper(task.worktree, browser) : undefined;
+        const prompt = EVIDENCE_PROMPT({ helper: helper ?? "(no browser installed: backend output may be text; frontend screenshots require a browser)", ticketUrl: task.ticket.url, prUrl: prUrl!, worktree: task.worktree, repoRoot: job.repo });
+        const text = await turn(`${prompt}\n\n${guidance}`, builderProvider, builderModel, true, 15 * 60_000);
+        await completeReply(text, 15 * 60_000);
+        validateEvidence(task.worktree);
+        activity("checking evidence against acceptance criteria");
+        const verification = await turn(VERIFY_EVIDENCE_PROMPT, builderProvider, builderModel, false, 15 * 60_000);
+        if (verification.trim() !== "[evidence-approved]") throw new Error(`Evidence inspection did not pass: ${stripAskUser(verification) || parseAskUser(verification).join(" ") || "No approval was returned."}`);
+        const published = await publishEvidence({ worktree: task.worktree, repo: job.repo, ticket: task.ticket, pr, prUrl: prUrl!, source, clickupKey: state.clickupKey });
+        if (!published?.items || !published.prComment || !published.ticketComment) throw new Error("Working evidence was not published to both the PR and ticket.");
+        const at = Date.now();
+        feature = { ...feature, evidenceAt: at };
+        updateTask(taskId, { feature, evidenceValidatedAt: at });
+        await say(`Verified evidence posted: ${published.items} items, ${published.images} images, on the PR and the ticket.`);
+        break;
+      } catch (e) {
+        blocked = (e as Error).message;
+        log(task, `Evidence blocked: ${blocked}`);
+      }
+      const answer = await ask([`Evidence is blocked and I will not hand off this PR: ${blocked.slice(0, 1500)}. What should I do to get the feature working? If a credential is missing, add the named variable to the repository-root env file on the Consort machine (${job.repo}/.env, or the repo's documented root env file), then confirm here. Do not send secret values in Slack.`]);
+      guidance = `The previous evidence attempt failed: ${blocked}\nThe owner answered on Slack: ${answer}\nApply the answer, rerun the feature, and replace failed captures with working proof. The answer does not waive acceptance checks. Copy only specifically needed env variables from the root env file after the owner confirms they are ready; never expose their values.`;
+    }
   }
 
   // ── reviewers, then the watch ─────────────────────────────────────────────────────────────
+  const beforeReview = await readPr(job.repo, pr);
+  if (beforeReview.isDraft) await run("gh", ["pr", "ready", String(pr)], { cwd: job.repo, timeout: 60_000 });
   const me = await whoAmI(job.repo);
-  const suggested = suggestReviewers(await shortlogForBranch(task.worktree, `origin/${job.base}`).catch(() => ""), [me]);
-  if (suggested.length) { await requestReviewers(job.repo, pr, suggested).catch((e) => log(task, `review request failed: ${e.message}`)); await say(slackLines.reviewers(suggested)); }
+  let requested = loadState().tasks.find((t) => t.id === taskId)?.reviewersRequested;
+  let requestError: string | undefined;
+  while (!requested || requested.length < 2) {
+    const suggested = suggestReviewers(await shortlogForBranch(task.worktree, `origin/${job.base}`).catch(() => ""), [me]);
+    const candidates = [...new Set(suggested)].filter((n) => n !== me && /^[A-Za-z0-9-]+$/.test(n));
+    const names = candidates.length === 2 && !requestError ? candidates : (await ask([`Which two GitHub reviewers should I request? Reply with two GitHub logins. ${requestError ?? "File history did not identify two valid GitHub logins."}`])).split(/[\s,]+/).map((n) => n.replace(/^@/, "")).filter(Boolean);
+    const unique = [...new Set(names)].filter((n) => n !== me && /^[A-Za-z0-9-]+$/.test(n));
+    if (unique.length !== 2) { requestError = "I need exactly two distinct GitHub logins, excluding the PR author."; continue; }
+    try { await requestReviewers(job.repo, pr, unique); }
+    catch (e) { requestError = `GitHub rejected the review request: ${(e as Error).message}`; continue; }
+    requested = unique;
+    updateTask(taskId, { reviewersRequested: requested });
+    await say(slackLines.reviewers(requested));
+  }
   updateTask(task.id, { status: "monitoring", activity: "watching the PR" });
+  await notifyTask(taskId, "paused", "Waiting for human PR reviews or CI; checking every 3 minutes.");
   await say(`Watching the PR every ${PR_POLL_MS / 60_000} minutes: I will answer review comments and tell you when it is ready to merge.`);
 
   for (;;) {
     const state = await readPr(job.repo, pr).catch((e) => { log(task, `pr read failed: ${e.message}`); return undefined; });
     updateTask(task.id, { lastPrCheckAt: Date.now() });
     if (state) {
-      if (state.state !== "OPEN") { await tell(`The PR is ${state.state.toLowerCase()}. Done here.`); finish("done", `PR ${state.state.toLowerCase()}`); if (state.state === "MERGED") await source.setStatus(task.ticket.id, "done").catch(() => {}); return; }
+      if (state.state !== "OPEN") { await tell(`The PR is ${state.state.toLowerCase()}. Done here.`); await finish("done", `PR ${state.state.toLowerCase()}`); if (state.state === "MERGED") await source.setStatus(task.ticket.id, "done").catch(() => {}); return; }
       const seen = new Set(loadState().tasks.find((t) => t.id === taskId)?.threadsSeen ?? []);
-      const fresh = state.unresolved.filter((t) => !seen.has(t.id) && t.author && t.author !== me);
+      const fresh = [...state.unresolved, ...(state.feedback ?? [])].filter((t) => !seen.has(t.id) && t.author && t.author !== me);
       if (fresh.length) {
         log(task, `${fresh.length} new review thread(s)`);
         activity(`answering ${fresh.length} review thread${fresh.length === 1 ? "" : "s"}`);
         const text = await turn(RESPOND_TO_REVIEW(fresh));
+        await completeReply(text);
         updateTask(task.id, (t) => ({ threadsSeen: [...t.threadsSeen, ...fresh.map((f) => f.id)] }));
-        const asked = await applyReply(text);
-        if (asked && pendingUser) { const t2 = await turn(pendingUser); pendingUser = undefined; await applyReply(t2); }
+        await requestReviewers(job.repo, pr, requested);
         await say(`Answered ${fresh.length} review thread${fresh.length === 1 ? "" : "s"}; pushed what was clear.`);
         continue; // re-read straight away
+      }
+      if (state.ci === "fail") {
+        const answer = await turn(`PR ${prUrl} has failing CI. Read gh pr checks and the failed job logs, fix the failures in this branch, run relevant checks, commit and push. If a failure needs a business or design decision, ask the owner. Never merge.`);
+        await completeReply(answer);
+        await notifyTask(taskId, "paused", "Waiting for CI after the repair; checking every 3 minutes.");
+        updateTask(taskId, { status: "monitoring" });
+        await new Promise((r) => setTimeout(r, PR_POLL_MS));
+        continue;
       }
       const ready = prReadiness(state, [me]);
       if (ready.ready) {
         await tell(slackLines.ready(state.url));
-        finish("ready", "ready to merge");
+        await finish("ready", "ready to merge");
         return;
       }
       log(task, `not ready: ${ready.reasons.join(", ")}`);
-      activity(`watching PR: ${ready.reasons.join(", ")}`);
+      updateTask(taskId, { status: "monitoring", activity: `watching PR: ${ready.reasons.join(", ")}` });
+      await notifyTask(taskId, "paused", "Waiting for human PR reviews or CI; checking every 3 minutes.");
     }
     await new Promise((r) => setTimeout(r, PR_POLL_MS));
   }
