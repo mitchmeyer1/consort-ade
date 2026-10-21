@@ -1,6 +1,6 @@
 import { SHIP_DIR, SHIP_REVIEW_ROUNDS, SHIP_STAGES, TICKET_FILE, shipFooter, shipStep, stageIndex, ticketRef, type ShipFeature, type ShipForm } from "./ship.ts";
 import type { ReviewSummary } from "./review.ts";
-import { GRILLING_HEADLESS, HEADLESS_RULES } from "./headless.ts";
+import { BREAK_CHECK, GRILLING_HEADLESS, HEADLESS_RULES } from "./headless.ts";
 
 /**
  * The prompt for one /ship turn: the rules every stage shares, the feature's state, and the
@@ -142,9 +142,11 @@ Interview the user in rounds. Map the idea as a design tree: every decision bran
 
 Every round ends the turn: post the questions with recommendations, the footer, then [phase:waiting]. The user answers in the next message. Never write the spec in the turn that posed a round.
 
-Auto-stop: after the user has answered a round, ask yourself whether every open question has a recommendation the user would accept as written. If yes, stop and write the spec in that same turn. Hard cap: 3 rounds; in the final round the last question is always "Anything the spec must say that we have not discussed?"
+${BREAK_CHECK} Pose the break question as a numbered question in the round like any other, never buried in prose.
 
-On stop, write ${SHIP_DIR}/SPEC.md by synthesis (no second interview), sections in this order: Problem, Solution, User stories (a long numbered list, "As a <actor>, I want <feature>, so that <benefit>"; the test report later maps to these numbers), Implementation decisions (modules, interfaces, schema, contracts; no file paths or code except a decision-carrying snippet), Testing decisions (what a good test is here, which modules, prior art in the repo), Out of scope, Open questions (only real ones), Notes. Use the repo's own vocabulary.
+Auto-stop: after the user has answered a round, ask yourself whether every open question has a recommendation the user would accept as written. If yes, and the impact check is recorded, stop and write the spec in that same turn. Hard cap: 3 rounds; in the final round the last question is always "Anything the spec must say that we have not discussed?"
+
+On stop, write ${SHIP_DIR}/SPEC.md by synthesis (no second interview), sections in this order: Problem, Solution, User stories (a long numbered list, "As a <actor>, I want <feature>, so that <benefit>"; the test report later maps to these numbers), Implementation decisions (modules, interfaces, schema, contracts; no file paths or code except a decision-carrying snippet), Testing decisions (what a good test is here, which modules, prior art in the repo), Out of scope, Open questions (only real ones), Impact check, Notes. Use the repo's own vocabulary.
 Then emit [ship-spec: ${SHIP_DIR}/SPEC.md] and [ship-stage: Spec'd | Grilled in <n> round(s). Spec written.] and [ship-next: /ship]. Consort posts the spec to the ticket. Print the spec path and the footer.`;
 
 const IMPLEMENTING = (i: ShipPromptInput) => `## This turn: build it, end at "built" (pushed, draft PR, no review yet)

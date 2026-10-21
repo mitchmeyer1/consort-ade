@@ -539,3 +539,14 @@ test('readiness: a conflicting PR is not ready, an unchecked one waits, a clean 
   assert.ok(prReadiness({ ...pr, mergeable: 'MERGEABLE' }).ready);
   assert.ok(prReadiness(pr).ready, 'older callers without the field are unaffected');
 });
+
+test('both grilling handlers run the impact check and ask before breaking a live flow', () => {
+  const f = newShipFeature(ticket, 'export-roster', 1000);
+  for (const headless of [true, false]) {
+    const p = shipPrompt({ feature: f, form: { form: 'resume' }, worktree: '/w', branch: 'b', base: 'origin/main', headless });
+    assert.match(p, /run the impact check/);
+    assert.match(p, /We can do this, but it would break <flow>/);
+    assert.match(p, /Wait for the answer before writing the spec/);
+    assert.match(p, /Impact check/);
+  }
+});

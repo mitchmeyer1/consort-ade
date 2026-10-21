@@ -45,6 +45,9 @@ ${AI_COST_POLICY}
 - Never start something in the background and end your turn to wait for it. Nothing will notify you: when your turn ends every background process is killed, and the next turn has to start it over (a full test suite, three times, is how a 10-minute task takes an hour). Run long commands in the foreground with a generous timeout and read their result in the same turn. Run only the checks that prove the change: the touched packages' tests, typecheck, lint. Never run the whole repository's test suite; on a real codebase that is twenty minutes of database-backed tests, and the PR's CI runs it anyway (the readiness check waits for CI to be green, and the review rounds read its result).
 - Keep replies short and factual: what you did, what changed, what is next. The owner reads them as Slack messages.`;
 
+/** the impact check every Grilling runs before the spec: a change that breaks a live flow is the owner's call, not the agent's */
+export const BREAK_CHECK = `Before the spec, run the impact check. Trace what the change touches: callers, routes, jobs, integrations, data shapes and the tests that pin today's behaviour. List every existing flow that would stop working or give a different result. For each one that still serves a real business purpose, do not decide silently and do not route around it: ask the owner, one line, in this shape: "We can do this, but it would break <flow>: <what stops working for whom>. Proceed? — recommend: <yes or no, and the alternative if there is one>". Wait for the answer before writing the spec. Record the outcome under "## Impact check" in GRILLING.md and in the spec: either "No existing flow breaks" or, per flow, what breaks and the owner's decision.`;
+
 /** the Grilling handler when there is no one to interview */
 export const GRILLING_HEADLESS = `## This turn: Grilling, headless — settle the idea, then write the spec
 
@@ -52,7 +55,9 @@ The ticket's text is the idea. Read ${"`"}.consort/ship/TICKET.md${"`"} (the ful
 
 Map the idea as a design tree and walk it. Decide every branch yourself where the ticket, the code or common practice settles it; write those decisions under "## Assumptions" in GRILLING.md. Only the decisions that are material and genuinely open go to the owner, each as ${"`"}[ask-user: Q — recommended: A]${"`"}; keep them few and precise, and end the turn after writing them.
 
-When no open question remains, write ${"`"}.consort/ship/SPEC.md${"`"} in this same turn, sections in this order: Problem, Solution, User stories (a long numbered list, "As a <actor>, I want <feature>, so that <benefit>"), Implementation decisions, Testing decisions, Out of scope, Open questions (only real ones), Assumptions (copied from GRILLING.md). Then emit ${"`"}[ship-spec: .consort/ship/SPEC.md]${"`"}, ${"`"}[ship-stage: Spec'd | Spec written headless in <n> round(s).]${"`"} and ${"`"}[ship-next: /ship]${"`"}.`;
+${BREAK_CHECK} Put the break question on its own ${"`"}[ask-user: …]${"`"} line like any other.
+
+When no open question remains and the impact check is recorded, write ${"`"}.consort/ship/SPEC.md${"`"} in this same turn, sections in this order: Problem, Solution, User stories (a long numbered list, "As a <actor>, I want <feature>, so that <benefit>"), Implementation decisions, Testing decisions, Out of scope, Open questions (only real ones), Impact check (copied from GRILLING.md), Assumptions (copied from GRILLING.md). Then emit ${"`"}[ship-spec: .consort/ship/SPEC.md]${"`"}, ${"`"}[ship-stage: Spec'd | Spec written headless in <n> round(s).]${"`"} and ${"`"}[ship-next: /ship]${"`"}.`;
 
 /** what the PR-monitor turn does when humans have commented */
 export const RESPOND_TO_REVIEW = (unresolved: { threadId?: string; author: string; path?: string; line?: number; body: string; url: string }[]) => `## This turn: answer the humans on the PR

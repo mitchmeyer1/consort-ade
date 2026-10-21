@@ -53,7 +53,7 @@ The SHIP card at the right of the chat lists every stage, ticks the finished one
 
 | Stage | What happens | You act |
 |---|---|---|
-| Grilling | The agent interviews you in rounds, then writes `SPEC.md` and posts it to the ticket. | Answer the numbered questions; say "stop" or **Continue grilling**. |
+| Grilling | The agent interviews you in rounds, checks whether the change breaks an existing flow and asks before proceeding if so, then writes `SPEC.md` and posts it to the ticket. | Answer the numbered questions; say "stop" or **Continue grilling**. |
 | Spec'd | The spec is on the ticket. | **Start building**. |
 | Implementing | The spec becomes tickets under `.consort/ship/issues/`; each is built, committed and pushed; a draft PR opens; then every story is verified and `TEST-REPORT.md` written. | Confirm the breakdown once; otherwise watch. |
 | Ready to Test | The report maps stories to proof. | **Approve**, or **Give feedback…**. |
