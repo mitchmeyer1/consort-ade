@@ -62,6 +62,9 @@ test('Slack replies always stay inside the ticket thread', async () => {
     assert.equal(body.get('thread_ts'), '1');
     assert.equal(body.has('reply_broadcast'), false);
   }
+  const headed = slackStatus('✅ Watching the PR', 'WAITING', { ticket: 'https://ticket/1', github: 'https://github.com/a/b/pull/1', heading: '🗺️ Create new locations map' });
+  await slack.post(headed, '1');
+  assert.equal(body.get('text'), headed);
   await slack.post('Picked up a ticket');
   assert.equal(body.get('text'), '✅ Picked up a ticket\n\nSTATUS: RUNNING');
   assert.equal(body.has('thread_ts'), false);

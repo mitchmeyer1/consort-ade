@@ -74,6 +74,9 @@ export type Task = {
   /** Persist unanswered questions across worker restarts. */
   pendingQuestion?: { questions: string[]; afterTs: string };
   reviewersRequested?: string[];
+  reviewWaitSince?: number;
+  reviewRequestedHead?: string;
+  reviewRequestedAt?: number;
   /** Written only after evidence validation, independent inspection, and publication succeed. */
   evidenceValidatedAt?: number;
   recoveryGuidance?: string;
@@ -81,6 +84,9 @@ export type Task = {
   rebootedAt?: number;
   /** the Slack thread every message about this task goes to */
   slackThread?: string;
+  slackIdentity?: import("../shared/headless.ts").SlackIdentity;
+  /** Last thread message inspected by the daemon status responder. */
+  slackStatusAfterTs?: string;
   /** agent session ids by provider, so a task keeps one conversation per provider */
   sessions: Partial<Record<Provider, string>>;
   accountIds: Partial<Record<Provider, string>>;
@@ -91,6 +97,7 @@ export type Task = {
   threadsSeen: string[];
   reviewBatch?: { fingerprint: string; stableSince: number };
   pid?: number;
+  workerStop?: { pid: number; command: string; requesterPid: number; at: number; holdUntil: number };
   /** worker crashes so far; the daemon restarts a crashed worker a few times before failing the task */
   restarts?: number;
   startedAt: number; updatedAt: number; lastPrCheckAt?: number; finishedAt?: number;
@@ -128,11 +135,11 @@ export function saveState(s: CliState) {
 }
 
 /** re-read, patch one task, write: the only way a worker touches the file */
-export function updateTask(id: string, patch: Partial<Task> | ((t: Task) => Partial<Task>)): Task {
+export function updateTask(id: string, patch: Partial<Task> | ((t: Task) => Partial<Task>), touch = true): Task {
   const s = loadState();
   const t = s.tasks.find((x) => x.id === id);
   if (!t) throw new Error(`Task ${id} is not in the state file.`);
-  Object.assign(t, typeof patch === "function" ? patch(t) : patch, { updatedAt: Date.now() });
+  Object.assign(t, typeof patch === "function" ? patch(t) : patch, touch ? { updatedAt: Date.now() } : {});
   saveState(s);
   return t;
 }

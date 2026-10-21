@@ -23,6 +23,9 @@ export const stripAskUser = (text: string) => text.replace(ASK_USER_MARKER, "").
 export const AI_COST_POLICY = `Live AI API calls needed to implement, test, or capture evidence are pre-authorized when their combined additional cost for this task is conservatively estimated to stay below USD 1.00. Do not ask the owner to approve a few cents or any other amount within this allowance. Count all planned calls, retries, and earlier calls for this task together; never split calls into separate allowances. Bound requests and output tokens, track the estimate in the task's local notes, and stop before the total could reach USD 1.00. Ask on Slack if the total may reach USD 1.00 or cannot be conservatively bounded.
 For these sub-dollar calls, you may read an existing required API key from the repository-root env file and copy only that named variable into the worktree's appropriate ignored env file without another confirmation. Preserve unrelated settings. Never print, log, screenshot, post, or commit the secret. This does not authorize purchases, plan upgrades, production data access, or changing a material business/security requirement. If the key is missing, ask the owner to add it to the root env file; never request its value in Slack.`;
 
+/** Resolve factual mistakes independently; reserve owner decisions for genuine uncertainty. */
+export const REVIEW_DECISION_RULES = `Do not argue with reviewers. If a request is objectively incorrect, stale, or already satisfied, verify that against the current code and relevant executable checks, then reply once with the concrete evidence and resolve the thread without asking the owner. A generated routeCount of 350 must not be hand-edited to 3500 when the generator's routes.length and regeneration prove 350: cite the generator and result, leave the correct value, and resolve. No code change, commit, or push is required for a verified no-change resolution. If an earlier reply already explains the verified facts, do not leave the thread open or repeat the explanation: resolve that existing thread now. Re-read GitHub to confirm resolution. Confidence alone is not proof. If evidence is missing or conflicting, or intent, business requirements, design, security, or scope needs a decision, leave the thread open and raise [ask-user: …] quoting the reviewer. Do not resolve a request merely because you disagree or prefer another approach. Previously paused review questions must be reassessed under this rule; a verified factual mistake no longer needs an owner decision.`;
+
 /** appended to every headless /ship turn */
 export const HEADLESS_RULES = `## Headless run: nobody is watching this chat live
 
@@ -35,7 +38,7 @@ ${AI_COST_POLICY}
 - Ask only when the answer changes scope, cost outside the pre-authorized AI allowance, data, security, or user-facing behaviour in a way the ticket does not settle and the code does not imply. Put each such question on its own line as ${"`"}[ask-user: <the question, with your recommended answer>]${"`"}, then end your turn. Consort relays them over Slack and sends the answers back as the next message. Never block on anything you did not mark this way.
 - A question is read on a phone: one line, under 200 characters, plain words, no background, no narration of what you did or will do, the recommended answer at the end ("… — recommend: yes"). Ask one thing per marker.
 - Where a handler tells you to ask the user for a go-ahead, confirmation, or to "present and wait", proceed instead, noting what you would have asked.
-- Never argue with a human reviewer on the PR. Apply what is clearly right; where you disagree or the request conflicts with the ticket, say so neutrally in one reply on the thread and raise it with ${"`"}[ask-user: …]${"`"}. The owner decides.
+- Apply reviewer requests that are clearly right. ${REVIEW_DECISION_RULES}
 - Never merge. Never force-push. Never amend a pushed commit.
 - Research is allowed and expected: search and read the web (WebSearch and WebFetch, or Codex's web search) for library docs, APIs, error messages and prior art whenever the repo does not answer. Cite what you relied on in the spec or the PR body.
 - Nothing will ever ask you for permission here; every tool call runs. Act with that care: no destructive git, no secrets in commits, no changes outside this worktree.
@@ -54,7 +57,7 @@ When no open question remains, write ${"`"}.consort/ship/SPEC.md${"`"} in this s
 /** what the PR-monitor turn does when humans have commented */
 export const RESPOND_TO_REVIEW = (unresolved: { threadId?: string; author: string; path?: string; line?: number; body: string; url: string }[]) => `## This turn: answer the humans on the PR
 
-Reviewers left ${unresolved.length} unresolved thread${unresolved.length === 1 ? "" : "s"}. For each one below: if the request is clear and right, collect the clear requests into one batch, make the changes, run the relevant checks, commit and push the batch, confirm the push succeeded, then reply on each addressed thread with what changed and resolve it (${"`"}gh api graphql${"`"} resolveReviewThread). If it is unclear or you disagree, reply once, neutrally, with the trade-off, do not resolve it, and raise it as ${"`"}[ask-user: …]${"`"} quoting the reviewer. For a top-level review without a thread, answer with a PR comment and do not try to resolve a thread. If any check or push fails, do not resolve the affected threads; fix and retry or ask the owner. Never resolve an unclear or unaddressed request. Run the repo's checks before pushing. End with one line per thread: resolved / asked / declined.
+Reviewers left ${unresolved.length} unresolved thread${unresolved.length === 1 ? "" : "s"}. For each one below: if the request is clear and right, collect the clear requests into one batch, make the changes, run the relevant checks, commit and push the batch, confirm the push succeeded, then reply on each addressed thread with what changed and resolve it (${"`"}gh api graphql${"`"} resolveReviewThread). ${REVIEW_DECISION_RULES} For a top-level review without a thread, answer with a PR comment and do not try to resolve a thread. If any check or push fails, do not resolve the affected threads; fix and retry or ask the owner. Never resolve a request left unclear or unaddressed by either a verified fix or a verified factual explanation. Run the repo's checks before pushing. End with one line per thread: resolved / asked / declined.
 
 ${unresolved.map((t, i) => `${i + 1}. ${t.author}${t.path ? ` on ${t.path}${t.line ? `:${t.line}` : ""}` : ""} — ${t.url}\n${t.body.trim().split("\n").map((l) => `   > ${l}`).join("\n")}`).join("\n\n")}`;
 
@@ -145,6 +148,7 @@ export type PrState = {
   isDraft: boolean;
   reviewDecision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | "";
   approvals: string[];
+  changesRequestedBy?: string[];
   unresolved: { threadId?: string; author: string; path?: string; line?: number; body: string; url: string; id: string; createdAt: string }[];
   feedback?: PrState["unresolved"];
   ci: "pass" | "fail" | "pending" | "none";
@@ -170,6 +174,24 @@ export function prReadiness(pr: PrState, botLogins: string[] = [], reviewers: st
   return { ready: reasons.length === 0, reasons };
 }
 
+/** Explain the actual GitHub blockers and the next human/worker action. */
+export function reviewWaitMessage(pr: PrState, reviewers: string[], nudge = false): string {
+  const parts: string[] = [];
+  const approved = new Set(pr.approvals.map(n => n.toLowerCase()));
+  const missing = reviewers.filter(n => !approved.has(n.toLowerCase()));
+  const changes = pr.changesRequestedBy ?? [];
+  const names = (logins: string[]) => logins.map(n => `@${n}`).join(" or ");
+  if (changes.length) parts.push(`${names(changes)} must review again and clear their requested changes`);
+  else if (pr.reviewDecision === "CHANGES_REQUESTED") parts.push("a reviewer must clear their requested changes");
+  if (!reviewers.some(n => approved.has(n.toLowerCase()))) parts.push(`need one approval from ${names(missing) || "a selected reviewer"}`);
+  else if (pr.reviewDecision === "REVIEW_REQUIRED") parts.push("GitHub still requires an additional review");
+  if (pr.unresolved.length) parts.push(`${pr.unresolved.length} review thread(s) remain open; Consort will address them`);
+  parts.push(pr.ci === "pass" ? "CI is green" : pr.ci === "pending" ? "GitHub CI is still running" : pr.ci === "fail" ? "CI failed; Consort will fix it" : "GitHub has not reported CI checks yet");
+  if (pr.isDraft) parts.push("PR is still a draft");
+  const people = changes.length ? changes : missing;
+  return `${parts.join("; ")}. Next check in 3m. Your action: ${nudge && people.length ? `please nudge ${names(people)} to review the PR` : "none now; Consort keeps checking and handles new feedback"}.`;
+}
+
 /** the people who touch the files this branch changed most, from `git shortlog -sne -- <paths>`, minus the bots and the owner */
 export function suggestReviewers(shortlog: string, exclude: string[], max = 2): string[] {
   const rows = shortlog.split("\n").map((l) => /^\s*(\d+)\s+(.+?)\s+<([^>]+)>/.exec(l)).filter((m): m is RegExpExecArray => !!m)
@@ -179,13 +201,27 @@ export function suggestReviewers(shortlog: string, exclude: string[], max = 2): 
   rows.sort((a, b) => b.n - a.n);
   return rows.slice(0, max).map((r) => githubLoginOf(r.email) ?? r.name);
 }
+/** Slack reviewer answers must be exactly two logins, never words extracted from prose. */
+export function parseReviewerReply(text: string): string[] {
+  const explicit = [...text.matchAll(/(?:^|\s|,)@([A-Za-z0-9-]+)/g)].map(m => m[1]);
+  const words = explicit.length ? explicit : text.trim().split(/[\s,]+/);
+  if (words.length !== 2 || !words.every(n => /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(n))) return [];
+  return new Set(words.map(n => n.toLowerCase())).size === 2 ? words : [];
+}
+
 /** "12345+someone@users.noreply.github.com" → "someone"; anything else is unknown */
 export const githubLoginOf = (email: string) => /^(?:\d+\+)?([A-Za-z0-9-]+)@users\.noreply\.github\.com$/i.exec(email)?.[1];
+
+/** Only standalone status questions: messages containing decisions still reach the worker. */
+export function isTaskStatusQuestion(text: string): boolean {
+  const question = text.toLowerCase().replace(/<@[A-Z0-9]+>/gi, "").replace(/[’']/g, "").replace(/[?!.,]/g, "").trim().replace(/\s+/g, " ");
+  return /^(?:(?:hey|hi) )?(?:how(?:s| is) (?:this|it|the task|this task|the ticket) (?:going|doing|progressing)|(?:what(?:s| is) )?(?:the |this tasks? )?status(?: update)?|any (?:updates?|progress)|(?:can you |could you |please )?(?:give me (?:a |an )?)?(?:status update|update me)|where are we(?: (?:at|on this))?)$/.test(question);
+}
 
 /** the Slack reply we wait for: the owner's first message in the thread after the question */
 export function replyAfter(messages: { ts: string; user?: string; text?: string; bot_id?: string }[], afterTs: string, userId: string): string | undefined {
   const after = Number(afterTs);
-  return messages.filter((m) => !m.bot_id && m.user === userId && Number(m.ts) > after && (m.text ?? "").trim()).sort((a, b) => Number(a.ts) - Number(b.ts))[0]?.text?.trim();
+  return messages.filter((m) => !m.bot_id && m.user === userId && Number(m.ts) > after && (m.text ?? "").trim() && !isTaskStatusQuestion(m.text ?? "")).sort((a, b) => Number(a.ts) - Number(b.ts))[0]?.text?.trim();
 }
 
 /** the one-line Slack messages the pipeline posts */
@@ -193,13 +229,36 @@ export function replyAfter(messages: { ts: string; user?: string; text?: string;
  * Every line the worker posts to Slack. House style: short, bullets, plain words. One bold lead
  * when the owner has to act; otherwise one bullet. No narration, no hedging, no "I will".
  */
-export function slackMessage(kind: "blocked" | "update" | "completed", text: string): string {
-  if (/^(?:❌|✅|🎉🍭🎊)/u.test(text.trimStart())) return text;
-  return `${kind === "blocked" ? "❌" : kind === "completed" ? "🎉🍭🎊" : "✅"} ${text}`;
+/**
+ * The marker in front of every Slack message, by what it means for the owner:
+ * ✅ progress, ⏳ waiting (on you, reviews, CI, credits), ❓ a question for you, ⏹️ stopped on purpose,
+ * ❌ something broke and needs a hand, 🎉🍭🎊 ready to merge. A text that already carries one keeps it.
+ */
+export const SLACK_MARKERS = { update: "✅", waiting: "⏳", question: "❓", stopped: "⏹️", blocked: "❌", completed: "🎉🍭🎊" } as const;
+export type SlackKind = keyof typeof SLACK_MARKERS;
+const MARKED = /^(?:❌|✅|⏳|❓|⏹️|🎉🍭🎊)/u;
+export function slackMessage(kind: SlackKind, text: string): string {
+  if (MARKED.test(text.trimStart())) return text;
+  return `${SLACK_MARKERS[kind]} ${text}`;
 }
 export type SlackTaskStatus = "RUNNING" | "WAITING" | "STOPPED" | "COMPLETED";
 /** Keep one final status line, including when a queued message is delivered again. */
-export type SlackTaskLinks = { ticket: string; github?: string };
+export type SlackIdentity = { emoji: string; title: string };
+export function parseSlackIdentity(text: string): SlackIdentity | undefined {
+  try {
+    const value = JSON.parse(text.trim().replace(/^```(?:json)?\s*|\s*```$/g, ""));
+    if (typeof value.emoji !== "string" || typeof value.title !== "string") return;
+    const emoji = value.emoji.trim(), title = value.title.trim();
+    if (!/\p{Extended_Pictographic}/u.test(emoji) || [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(emoji)].length !== 1) return;
+    if (!title || title.length > 80 || title.split(/\s+/).length > 5 || /[<>|*`\r\n]/.test(title)) return;
+    return { emoji, title };
+  } catch { return; }
+}
+export function slackHeading(title: string, identity?: SlackIdentity): string {
+  const clean = (identity?.title ?? title).replace(/[<>|*`\r\n]/g, " ").trim().split(/\s+/).slice(0, 5).join(" ").slice(0, 80);
+  return `${identity?.emoji ?? "📋"} ${clean}`;
+}
+export type SlackTaskLinks = { ticket: string; github?: string; heading?: string };
 /** GitHub SSH and HTTPS remotes produce the same credential-free branch link. */
 export function githubBranchUrl(remote: string, branch: string): string | undefined {
   const match = remote.match(/^(?:https?:\/\/(?:[^/@]+@)?github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/\s]+)\/([^/\s]+?)\/?$/i);
@@ -208,7 +267,8 @@ export function githubBranchUrl(remote: string, branch: string): string | undefi
 }
 export function slackStatus(text: string, status?: SlackTaskStatus, links?: SlackTaskLinks): string {
   const saved = text.match(/\n\nSTATUS: (RUNNING|WAITING|STOPPED|COMPLETED)\s*$/);
-  const current = status ?? saved?.[1] ?? (text.trimStart().startsWith("🎉🍭🎊") ? "COMPLETED" : text.trimStart().startsWith("❌") ? "WAITING" : "RUNNING");
+  const lead = text.trimStart();
+  const current = status ?? saved?.[1] ?? (lead.startsWith("🎉🍭🎊") ? "COMPLETED" : lead.startsWith("⏹️") ? "STOPPED" : /^(?:❌|⏳|❓)/u.test(lead) ? "WAITING" : "RUNNING");
   let body = text.replace(/\n\nSTATUS: (RUNNING|WAITING|STOPPED|COMPLETED)\s*$/, "").trimEnd();
   if (links) {
     body = body.replace(/\n\n<[^>\n]+\|ticket>(?: · <[^>\n]+\|github>)?$/, "");
@@ -216,12 +276,17 @@ export function slackStatus(text: string, status?: SlackTaskStatus, links?: Slac
     const ticket = safe(links.ticket), github = links.github && safe(links.github);
     if (ticket) body += `\n\n<${ticket}|ticket>${github ? ` · <${github}|github>` : ""}`;
   }
+  if (links?.heading) {
+    // the heading is the one bold line: emoji, then the title in bold capitals; the lines under it stay plain
+    const head = links.heading.replace(/^(\S+)\s+(.+)$/u, (_m, emoji: string, title: string) => `${emoji} *${title.toUpperCase()}*`);
+    if (!body.startsWith(`${head}\n`) && !body.startsWith(`${links.heading}\n`)) body = `${head}\n${body}`;
+  }
   return `${body}\n\nSTATUS: ${current}`;
 }
 export const slackLines = {
   claimed: (title: string, url: string, branch: string) => `✅ *Picked up:* <${url}|${title}>\n• branch \`${branch}\``,
   stage: (stage: string, note?: string) => `✅ *${stage}*${note ? ` · ${brief(note, 160)}` : ""}`,
-  question: (qs: string[], url: string) => `❌ *Need you* (<${url}|ticket>)\n${qs.map((q, i) => `${qs.length > 1 ? `${i + 1}. ` : "• "}${brief(q, 600)}`).join("\n")}\n_Reply in this thread._`,
+  question: (qs: string[], url: string) => `❓ *Need you* (<${url}|ticket>)\n${qs.map((q, i) => `${qs.length > 1 ? `${i + 1}. ` : "• "}${brief(q, 600)}`).join("\n")}\n_Reply in this thread._`,
   pr: (url: string) => `✅ Draft PR: ${url}`,
   review: (round: number, model: string, findings: number) => `✅ Review ${round} on \`${model}\`: ${findings} finding${findings === 1 ? "" : "s"}${findings ? ", fixing" : ""}`,
   reviewers: (logins: string[]) => `✅ Review requested: ${logins.map((l) => `@${l}`).join(", ")}`,
@@ -249,6 +314,7 @@ export const slackLines = {
   reviewerPick: (logins: string[]) => `✅ Reviewers from the changed files' contributors: ${logins.map((l) => `@${l}`).join(", ")}`,
   prClosed: (state: string) => `✅ PR ${state}. Done`,
   rebooted: (stage: string) => `✅ Rebooted by you at *${stage}*. Checking where the last run got to, then continuing`,
+  working: (line: string) => `✅ Working: ${brief(line, 200)}`,
 };
 /** one line, cut at a sentence end where possible */
 export const brief = (text: string, max: number): string => {

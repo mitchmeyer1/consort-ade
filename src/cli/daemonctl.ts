@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { requestWorkerStop } from "./workerControl";
 import { HOME, LOG_DIR, loadState } from "./state.ts";
 
 /**
@@ -48,6 +49,6 @@ export function stopDaemon(opts: { all?: boolean } = {}): { daemon?: number; wor
   const pid = daemonPid();
   if (pid) { try { process.kill(pid, "SIGTERM"); } catch {} try { rmSync(DAEMON_PID); } catch {} }
   const workers: number[] = [];
-  if (opts.all) for (const t of loadState().tasks) if (t.pid && alive(t.pid)) { try { process.kill(t.pid, "SIGTERM"); workers.push(t.pid); } catch {} }
+  if (opts.all) for (const t of loadState().tasks) if (t.pid && alive(t.pid)) { try { requestWorkerStop(t.id, t.pid, "consort-cli stop --all"); process.kill(t.pid, "SIGTERM"); workers.push(t.pid); } catch {} }
   return { daemon: pid, workers };
 }

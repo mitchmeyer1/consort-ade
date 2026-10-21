@@ -11,6 +11,8 @@ import { flushTaskNotifications, notifyTask, runTaskUntilFinished } from "./life
 import { statusEvent } from "./statusLog";
 import { scanSentry, validateSentryConfig } from "./sentry";
 import { Slack } from "./slack";
+import { canStartWorker, handleWorkerExit, requestWorkerStop, workerStopMessage } from "./workerControl";
+import { answerTaskStatusQuestions } from "./slackStatus";
 import { sourceFor } from "./sources";
 import { renderView, viewLoop } from "./view";
 import { readAllUsage } from "./usage";
@@ -74,7 +76,7 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   work <taskId>                                                           one worker (the daemon runs this)
   tasks list                                                              every task: id, status, ticket, stage, branch, note
   tasks logs <task>                                                       what that agent has been doing              (task or ticket id)
-  tasks reboot <task>                                                     stop that agent and start it again; it works out where the last run got to
+  tasks reboot <task> | reboot --all                                      stop that agent (or every live one) and start it again; it works out where the last run got to
   tasks retry <task>                                                      queue a failed task again
   tasks release <task>                                                    stop that agent for good and forget the ticket (worktree stays)
   accounts unblock <id>                                                   clear a usage block early
@@ -234,7 +236,10 @@ async function main(argv: string[]) {
         stopAgents();
         // Keep the pid until exit: the daemon must not start a replacement during Slack delivery.
         updateTask(id!, { activity: `worker stopping (${sig}); progress saved` });
-        await notifyTask(id!, "stopped", `Stopped (${sig}). Progress saved; resumes on the next run.`);
+        const current = loadState().tasks.find(t => t.id === id!);
+        const reason = current ? workerStopMessage(current, process.pid, sig) : `Worker received ${sig}; task no longer exists.`;
+        console.log(`${new Date().toISOString()} [${id}] ${reason}`);
+        await notifyTask(id!, "stopped", reason);
         process.exit(0);
       });
       await runTaskUntilFinished(id!, () => workTask(id!), stopAgents, () => stopping);
@@ -244,9 +249,11 @@ async function main(argv: string[]) {
     case "tasks list": { for (const t of s.tasks) console.log(`${t.id}  ${t.status.padEnd(10)}  ${t.ticket.id.padEnd(12)}  ${t.feature.stage.padEnd(14)}  ${t.branch}  ${t.note ?? ""}`); if (!s.tasks.length) console.log("No tasks."); return; }
     case "tasks release": {
       const t = s.tasks.find((x) => x.id === rest[0] || x.ticket.id === rest[0]) ?? fail("no such task; use the task id or the ticket id from consort-cli view");
+      updateTask(t!.id, { status: "released", finishedAt: Date.now() });
+      if (t!.pid) requestWorkerStop(t!.id, t!.pid, "consort-cli tasks release");
       await notifyTask(t!.id, "stopped", "Released by you.");
       if (t!.pid) { try { process.kill(t!.pid); } catch {} }
-      t!.status = "released"; t!.pid = undefined; t!.finishedAt = Date.now(); saveState(s);
+      updateTask(t!.id, { status: "released", pid: undefined, finishedAt: Date.now() });
       if (t!.runCode) { const r = await cleanupEnvironment(t!.runCode); console.log(`Removed ${r.containers} container(s), ${r.networks} network(s), ${r.volumes} volume(s) of ${t!.runCode}.`); }
       console.log(`Released ${t!.ticket.id}; the worktree ${t!.worktree} is left in place.`); return;
     }
@@ -258,22 +265,34 @@ async function main(argv: string[]) {
     }
     case "reboot": case "tasks reboot": {
       // stop the ticket's worker and start it again, opening with a turn that works out where the last run got to
-      const want = (key === "reboot" ? sub : rest[0]) ?? fail("task or ticket id required; see consort-cli view");
-      const t = s.tasks.find((x) => x.id === want || x.ticket.id === want) ?? fail("no such task; use the task id or the ticket id from consort-cli view");
-      if (["done", "released"].includes(t!.status)) fail(`${t!.ticket.id} is ${t!.status}; consort-cli tasks retry runs a finished task again`);
+      // --all reboots every task that is not finished: the ones running, waiting on you, or watching a PR
+      const live = (x: Task) => !["done", "released"].includes(x.status);
+      const want = a.all ? undefined : (key === "reboot" ? sub : rest[0]) ?? fail("task or ticket id required, or --all for every live task; see consort-cli view");
+      const targets: Task[] = a.all ? s.tasks.filter(live) : [s.tasks.find((x) => x.id === want || x.ticket.id === want) ?? fail("no such task; use the task id or the ticket id from consort-cli view")!];
+      if (a.all && !targets.length) { console.log("No live tasks to reboot."); return; }
+      for (const t of targets) {
+      if (!live(t!)) fail(`${t!.ticket.id} is ${t!.status}; consort-cli tasks retry runs a finished task again`);
       if (t!.pid && alive(t!.pid)) {
         // wait for the worker to exit: it saves its state on the way out, and the daemon must not start a second one on top of it
+        requestWorkerStop(t!.id, t!.pid, "consort-cli tasks reboot");
         try { process.kill(t!.pid); } catch {}
         const until = Date.now() + 15_000;
         while (alive(t!.pid) && Date.now() < until) await new Promise((r) => setTimeout(r, 250));
-        if (alive(t!.pid)) { try { process.kill(t!.pid, "SIGKILL"); } catch {} }
+        if (alive(t!.pid)) {
+          try { process.kill(t!.pid, "SIGKILL"); } catch {}
+          const killedUntil = Date.now() + 5000;
+          while (alive(t!.pid) && Date.now() < killedUntil) await new Promise(r => setTimeout(r, 100));
+          if (alive(t!.pid)) fail(`worker ${t!.pid} has not exited; reboot remains held to prevent overlapping workers`);
+        }
         console.log(ok(`stopped worker ${t!.pid}`));
       }
       const fresh = loadState();
       const task = fresh.tasks.find((x) => x.id === t!.id)!;
-      Object.assign(task, { status: "working", note: undefined, pendingQuestion: undefined, pid: undefined, finishedAt: undefined, restarts: 0, rebootedAt: Date.now(), activity: "rebooted by you; the daemon starts the worker shortly", updatedAt: Date.now() });
+      Object.assign(task, { status: "working", note: undefined, pendingQuestion: undefined, pid: undefined, finishedAt: undefined, restarts: 0, rebootedAt: Date.now(), workerStop: undefined, activity: "rebooted by you; the daemon starts the worker shortly", updatedAt: Date.now() });
       saveState(fresh);
-      console.log(`${task.ticket.id} rebooted at ${task.feature.stage}; the worker picks up after the last run within 15 seconds${daemonPid() ? "" : " once the daemon runs (consort-cli run -d)"}.`); return;
+      console.log(`${task.ticket.id} rebooted at ${task.feature.stage}; the worker picks up after the last run within 15 seconds${daemonPid() ? "" : " once the daemon runs (consort-cli run -d)"}.`);
+      }
+      return;
     }
     case "tasks logs": {
       const want = rest[0] ?? fail("task or ticket id required; see consort-cli view");
@@ -305,25 +324,23 @@ async function daemon() {
   mkdirSync(LOG_DIR, { recursive: true });
   console.log(banner("daemon", [dim(`on ${host()}`), dim(`logs in ${LOG_DIR}`), dim("ctrl-c to stop")]));
   const spawnWorker = (t: Task) => {
+    const latest = loadState().tasks.find(task => task.id === t.id);
+    if (!latest || !canStartWorker(latest, !!latest.pid && alive(latest.pid))) return;
     const out = openSync(join(LOG_DIR, `${t.id}.log`), "a");
     const child = spawn(process.execPath, [self, "work", t.id], { stdio: ["ignore", out, out], env: process.env });
-    const s = loadState(); const task = s.tasks.find((x) => x.id === t.id); if (task) { task.pid = child.pid; saveState(s); }
+    const s = loadState(); const task = s.tasks.find((x) => x.id === t.id); if (task) { task.pid = child.pid; task.workerStop = undefined; saveState(s); }
     console.log(`${new Date().toISOString()} worker ${child.pid} → ${t.ticket.id} (${t.id})`);
     child.on("exit", async (code, signal) => {
-      const s2 = loadState(); const task2 = s2.tasks.find((x) => x.id === t.id);
-      if (task2 && task2.pid === child.pid) {
-        task2.pid = undefined;
-        if (code && !["ready", "done", "released", "failed"].includes(task2.status)) {
-          task2.restarts = (task2.restarts ?? 0) + 1;
-          task2.note = `worker exited ${code}; restart ${task2.restarts}`;
-          task2.activity = task2.restarts >= 4 ? "worker repeatedly exited; restarting to ask Slack for help" : `crashed (exit ${code}); restarting`;
-        }
-        saveState(s2);
-      }
-      if (task2 && !FINISHED.includes(task2.status)) await notifyTask(t.id, "stopped", `Worker exited (${signal ?? code}); restarting.`);
+      await handleWorkerExit(t.id, child.pid!, code, signal);
       console.log(`${new Date().toISOString()} worker ${child.pid} for ${t.ticket.id} exited ${code}`);
     });
   };
+  let statusCheck: Promise<void> | undefined;
+  const checkStatusQuestions = () => {
+    if (!statusCheck) statusCheck = answerTaskStatusQuestions(alive).catch(e => console.error(`Slack status responder: ${e.message}`)).finally(() => { statusCheck = undefined; });
+  };
+  checkStatusQuestions();
+  setInterval(checkStatusQuestions, 15_000);
   for (;;) {
     const s = loadState();
     // finished tasks fall out of the state file after a week; the dashboard stops showing them after a day
@@ -331,7 +348,7 @@ async function daemon() {
     if (keep.length !== s.tasks.length) { s.tasks = keep; saveState(s); }
     for (const t of s.tasks) if (!(t.pid && alive(t.pid))) await flushTaskNotifications(t.id);
     // workers that should be running but are not: the daemon restarted, or the box did
-    for (const t of s.tasks) if (["working", "waiting", "monitoring"].includes(t.status) && !(t.pid && alive(t.pid))) {
+    for (const t of s.tasks) if (["working", "waiting", "monitoring"].includes(t.status) && !(t.pid && alive(t.pid)) && !(t.workerStop && t.workerStop.holdUntil > Date.now())) {
       if (t.pid) await notifyTask(t.id, "stopped", "Worker vanished; restarting.");
       spawnWorker(t);
     }
@@ -341,7 +358,7 @@ async function daemon() {
       const starting = loadState();
       const startingJob = starting.jobs.find((j) => j.id === job.id);
       if (startingJob) { startingJob.scanStartedAt = Date.now(); saveState(starting); }
-      statusEvent("info", `${job.name}: scanning ${job.source} for new tasks`);
+      statusEvent("info", `${job.name}: checking ${job.source} for eligible tickets to start`);
       try {
         if (job.source === "sentry") {
           const result = await scanSentry(job, s.clickupKey);
@@ -385,7 +402,7 @@ async function daemon() {
           statusEvent("success", `${job.name}: claimed Ticket ${t.id} — ${t.title}`);
           slots--;
         }
-        statusEvent(claimed ? "success" : candidates ? "warn" : "info", `${job.name}: ${tickets.length} tasks checked; ${candidates ? `${candidates} new matching tasks; ${claimed} claimed${availableSlots === 0 ? "; waiting for a free worker slot" : claimed < candidates ? "; remaining tasks deferred" : ""}` : "no new tasks"}`);
+        statusEvent(claimed ? "success" : candidates ? "warn" : "info", `${job.name}: ${tickets.length} tasks checked; ${candidates ? `${candidates} new matching tasks; ${claimed} claimed${availableSlots === 0 ? "; waiting for a free worker slot" : claimed < candidates ? "; remaining tasks deferred" : ""}` : "no new eligible tickets; existing workers continue separately"}`);
         const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); j.scanStartedAt = undefined; saveState(after); }
       } catch (e) { statusEvent("error", `${job.name}: ${job.source} scan failed; see daemon log`); console.error(`${new Date().toISOString()} scanner ${job.name} failed: ${(e as Error).message}`); const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); j.scanStartedAt = undefined; saveState(after); } }
     }

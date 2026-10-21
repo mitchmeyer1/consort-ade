@@ -116,3 +116,12 @@ test('CI cannot pass with absent, unknown, unfinished, stale, or startup-failed 
     assert.equal((await mod.exports.readPr('/repo', 1)).ci, expected);
   }
 });
+
+test('reviewer validation rejects unrelated accounts and request success requires GitHub confirmation', async () => {
+  let pending = [];
+  const mocks = { '../shared/headless.ts':headless, 'node:child_process':{execFile(){}}, 'node:util':{promisify:()=>async(_,args)=>({stdout:args[0]==='repo'?'org/repo':JSON.stringify(args[0]==='api'?{permission:args[1].includes('/ada/')?'write':'none',user:{login:args[1].split('/').at(-2),type:'User'}}:args[1]==='view'?{reviewRequests:pending.map(login=>({login}))}:{})})} };
+  const mod={exports:{}};new Function('require','module','exports',code)(n=>mocks[n]??require(n),mod,mod.exports);
+  assert.deepEqual(await mod.exports.validateReviewers('/repo',['do','and','ada']),['ada']);
+  await assert.rejects(mod.exports.requestReviewers('/repo',1,['ada']),/did not record review requests/);
+  pending=['ada'];await mod.exports.requestReviewers('/repo',1,['ada']);
+});

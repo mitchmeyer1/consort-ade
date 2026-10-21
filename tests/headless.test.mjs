@@ -380,7 +380,7 @@ test('Slack lines are short bullets; the verifier\'s essay becomes a few blocker
   assert.ok(msg.split('\n').filter((l) => l.startsWith('• ')).length === bullets.length + 1);
   assert.ok(!/I will not hand off/.test(msg));
   assert.match(msg, /\n_If a key is missing: .*\/repo\/\.env.*_$/);
-  assert.equal(slackLines.question(['Keep archived members? — recommend: no'], 'https://t'), '❌ *Need you* (<https://t|ticket>)\n• Keep archived members? — recommend: no\n_Reply in this thread._');
+  assert.equal(slackLines.question(['Keep archived members? — recommend: no'], 'https://t'), '❓ *Need you* (<https://t|ticket>)\n• Keep archived members? — recommend: no\n_Reply in this thread._');
   assert.equal(slackLines.review(2, 'claude-opus-5', 0), '✅ Review 2 on `claude-opus-5`: 0 findings');
   assert.equal(slackLines.evidence(3, 2, '$4.10'), '✅ Evidence posted to the PR and the ticket: 3 items, 2 images\n• Cost so far: $4.10');
   assert.equal(slackLines.answered(3, 1), '✅ Answered 3 review comments; 1 still open');
@@ -420,10 +420,14 @@ test('the stop report carries where, what, the agent\'s last lines newest first,
 
 test('Slack emojis distinguish blockages, updates, and the final merge handoff', async () => {
   const { slackLines, slackMessage } = await import('../src/shared/headless.ts');
-  for (const text of [slackLines.question(['Which design?'], 'url'), slackLines.stuck('quota exhausted'), slackLines.problem({ where: 'evidence', what: 'Missing key' })]) {
+  for (const text of [slackLines.stuck('quota exhausted'), slackLines.problem({ where: 'evidence', what: 'Missing key' })]) {
     assert.ok(text.startsWith('❌ '), text);
     assert.ok(!text.includes('🎉'));
   }
+  assert.ok(slackLines.question(['Which design?'], 'url').startsWith('❓ '), 'a question is not a failure');
+  assert.equal(slackMessage('waiting', 'Waiting on reviews and CI.'), '⏳ Waiting on reviews and CI.');
+  assert.equal(slackMessage('stopped', 'Stopped (SIGTERM).'), '⏹️ Stopped (SIGTERM).');
+  assert.equal(slackMessage('blocked', slackLines.question(['Which?'], 'url')), slackLines.question(['Which?'], 'url'), 'a marked text keeps its own marker');
   for (const text of [slackLines.claimed('Ticket', 'url', 'branch'), slackLines.stage('In Review'), slackLines.pr('url'), slackLines.review(3, 'model', 0), slackLines.evidence(3, 2), slackLines.reviewers(['ada', 'bob']), slackLines.watching(3), slackLines.answered(2, 0), slackLines.env('20000')]) {
     assert.ok(text.startsWith('✅ '), text);
     assert.ok(!text.includes('🎉'));
@@ -444,6 +448,9 @@ test('Slack status footers preserve queued statuses and replace stale footers', 
     assert.equal(slackStatus(text, 'RUNNING'), 'Task update\n\nSTATUS: RUNNING');
   }
   assert.match(slackStatus('❌ Need your answer'), /STATUS: WAITING$/);
+  assert.match(slackStatus('⏳ Waiting on reviews'), /STATUS: WAITING$/);
+  assert.match(slackStatus('❓ Which design?'), /STATUS: WAITING$/);
+  assert.match(slackStatus('⏹️ Stopped (SIGTERM)'), /STATUS: STOPPED$/);
   assert.match(slackStatus('🎉🍭🎊 Merge is yours'), /STATUS: COMPLETED$/);
   assert.match(slackStatus('✅ Continuing'), /STATUS: RUNNING$/);
 });
@@ -474,4 +481,52 @@ test('evidence timing handles seconds, minutes, days, and missing timestamps', a
   }
   assert.deepEqual(evidenceTimingLines(), []);
   assert.deepEqual(evidenceTimingLines({ startedAt, endedAt: startedAt - 1 }), []);
+});
+
+test('the heading is the one bold line: emoji, then the title in bold; the verb line and the rest stay plain', async () => {
+  const { slackStatus } = await import('../src/shared/headless.ts');
+  const links = { ticket: 'https://t', heading: '📋 Map locations' };
+  const once = slackStatus('⏳ Paused: Map locations\nWaiting on you.', 'WAITING', links);
+  assert.ok(once.startsWith('📋 *MAP LOCATIONS*\n⏳ Paused: Map locations\nWaiting on you.'), once, 'title in bold capitals, body unchanged');
+  assert.equal((once.match(/\*/g) ?? []).length, 2, 'only the title is bold');
+  assert.equal(slackStatus(once, 'WAITING', links), once, 'applying the links again does not repeat the heading');
+  assert.equal(slackStatus('📋 Map locations\nold form', 'RUNNING', links).split('\n')[0], '📋 Map locations', 'a message that already carries the plain heading is left alone');
+});
+
+test('review rules resolve proven factual mistakes without escalating real decisions', async () => {
+  const { HEADLESS_RULES, RESPOND_TO_REVIEW, REVIEW_DECISION_RULES } = await import('../src/shared/headless.ts');
+  const prompt = RESPOND_TO_REVIEW([{threadId:'thread',author:'reviewer',path:'api-routes.generated.json',body:'Make routeCount 3500',url:'https://github.com/a/b/pull/1#discussion'}]);
+  for (const text of [HEADLESS_RULES, prompt]) {
+    assert.ok(text.includes(REVIEW_DECISION_RULES));
+    assert.match(text,/executable checks/);
+    assert.match(text,/resolve the thread without asking the owner/);
+    assert.match(text,/350.*3500/);
+    assert.match(text,/No code change, commit, or push is required/);
+    assert.match(text,/resolve that existing thread now/);
+    assert.match(text,/Confidence alone is not proof/);
+    assert.match(text,/leave the thread open and raise \[ask-user:/);
+    assert.doesNotMatch(text,/If it is unclear or you disagree|where you disagree or the request conflicts/);
+  }
+  assert.match(prompt,/If any check or push fails, do not resolve/);
+  assert.match(prompt,/confirm the push succeeded/);
+});
+
+test('PR waiting explains reviewer, CI, next check and owner action', async () => {
+  const { reviewWaitMessage } = await import('../src/shared/headless.ts');
+  const pr = { approvals:[], reviewDecision:'CHANGES_REQUESTED', changesRequestedBy:['ryangoggin'], unresolved:[], ci:'pass', isDraft:false };
+  const text = reviewWaitMessage(pr,['ryangoggin','pmonco']);
+  assert.match(text,/@ryangoggin must review again and clear their requested changes/);
+  assert.match(text,/CI is green/);assert.match(text,/Next check in 3m/);assert.match(text,/Your action: none now/);
+  assert.match(reviewWaitMessage(pr,['ryangoggin','pmonco'],true),/please nudge @ryangoggin/);
+  const ciOnly = reviewWaitMessage({...pr,approvals:['ryangoggin'],changesRequestedBy:[],reviewDecision:'APPROVED',ci:'pending'},['ryangoggin','pmonco']);
+  assert.match(ciOnly,/CI is still running/);assert.doesNotMatch(ciOnly,/need one approval|please nudge/);
+});
+
+test('reviewer replies do not extract usernames from prose or duplicate names', async () => {
+  const {parseReviewerReply}=await import('../src/shared/headless.ts');
+  assert.deepEqual(parseReviewerReply('please do this and continue'),[]);
+  assert.deepEqual(parseReviewerReply('@ada @bob'),['ada','bob']);
+  assert.deepEqual(parseReviewerReply('Use @ada and @bob please'),['ada','bob']);
+  assert.deepEqual(parseReviewerReply('ada, bob'),['ada','bob']);
+  assert.deepEqual(parseReviewerReply('@ada @ADA'),[]);
 });

@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { applyShipChange, newShipFeature, parseShipMarkers, prNumberFromUrl, shipBranch, shipFolder, shipSlug, stripShipMarkers, type ShipFeature, type ShipTicket } from "../shared/ship.ts";
 import { shipPrompt } from "../shared/shipPrompt.ts";
-import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUsd, DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, VERIFY_EVIDENCE_PROMPT, parseAskUser, observeReviewBatch, pickTurnAccount, prReadiness, ProblemError, problemOf, REBOOT_PROMPT, RESPOND_TO_REVIEW, reviewRotation, seedModels, slackLines, slackMessage, slackStatus, stripAskUser, type Problem } from "../shared/headless.ts";
+import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUsd, DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, VERIFY_EVIDENCE_PROMPT, parseAskUser, parseReviewerReply, observeReviewBatch, pickTurnAccount, prReadiness, ProblemError, problemOf, REBOOT_PROMPT, RESPOND_TO_REVIEW, reviewRotation, reviewWaitMessage, seedModels, slackLines, slackMessage, slackStatus, stripAskUser, type Problem } from "../shared/headless.ts";
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { modelTiers } from "../shared/modelTiers.ts";
@@ -12,7 +12,7 @@ import { excludeConsortDir, fetchTicket, writeTicketFile } from "../main/ship";
 import { addWorktree } from "../main/git";
 import type { Provider } from "../shared/types";
 import { runTurn, packageRoot, stopAgents } from "./agent";
-import { readPr, requestReviewers, reviewerSuggestions, whoAmI } from "./prmonitor";
+import { readPr, requestReviewers, reviewerSuggestions, validateReviewers, whoAmI } from "./prmonitor";
 import { findBrowser, publishEvidence, validateEvidence, writeScreenshotHelper } from "./evidence";
 import { allocateEnvironment, cleanupEnvironment } from "./environment";
 import { flushTaskNotifications, notifyTask } from "./lifecycle";
@@ -20,6 +20,7 @@ import { readUsage } from "./usage";
 import { usageBlock } from "../shared/usage.ts";
 import { statusEvent } from "./statusLog";
 import { Slack } from "./slack";
+import { ensureSlackIdentity } from "./slackIdentity";
 import { taskSlackLinks } from "./slackLinks";
 import { sourceFor, type Source } from "./sources";
 import { blockAccount, loadState, touchAccount, updateTask, WORK_DIR, type Account, type Job, type Task } from "./state";
@@ -67,7 +68,16 @@ export async function workTask(taskId: string): Promise<void> {
   let turnTag = ""; // "t3 · " while a build turn runs, so the live line shows which turn it came from
   // the agent's last few progress lines from the current turn: what it was doing when something stopped it
   const recent: string[] = [];
-  const noteProgress = (line: string) => { recent.push(line.slice(0, 200)); if (recent.length > 6) recent.shift(); updateTask(taskId, { activity: `${turnTag}${line.slice(0, 160)}`, recent: [...recent] }); };
+  const noteProgress = (line: string) => { recent.push(line.slice(0, 200)); if (recent.length > 6) recent.shift(); updateTask(taskId, { activity: `${turnTag}${line.slice(0, 160)}`, recent: [...recent] }); void working(line); };
+  // a short "Working: …" note in the thread while a turn runs: the first agent line right after the owner's answer, then at most one every WORKING_NOTE_MS
+  const WORKING_NOTE_MS = 5 * 60_000;
+  let lastWorkingAt = 0;
+  const working = async (line: string) => {
+    const clean = stripAskUser(stripShipMarkers(line)).replace(/\[evidence-approved\]/g, "").trim();
+    if (!clean || !slack || !thread || Date.now() - lastWorkingAt < WORKING_NOTE_MS) return;
+    lastWorkingAt = Date.now();
+    await say(slackLines.working(clean));
+  };
   // the task's own ports and Docker names, on every turn from here on
   const env = await allocateEnvironment(task!);
   task = loadState().tasks.find((t) => t.id === taskId)!;
@@ -82,6 +92,9 @@ export async function workTask(taskId: string): Promise<void> {
   await excludeConsortDir(task.worktree).catch(() => {});
   const fetched = await fetchTicket(task.ticket, { repoPath: job.repo, clickupKey: state.clickupKey });
   const ticketBody = writeTicketFile(task.worktree, task.ticket, fetched);
+
+  await ensureSlackIdentity(taskId);
+  task = loadState().tasks.find(t => t.id === taskId)!;
 
   // one Slack thread per task
   let thread = task.slackThread;
@@ -103,9 +116,10 @@ export async function workTask(taskId: string): Promise<void> {
     updateTask(task.id, { status: "waiting", note: questions.join(" | "), activity: `waiting on Slack: ${questions[0].slice(0, 80)}` });
     if (!slack || !thread) throw new Error(`Needs the owner but Slack is not configured. Questions: ${questions.join(" | ")}`);
     const pending = loadState().tasks.find((t) => t.id === taskId)?.pendingQuestion;
-    const ts = pending?.afterTs ?? await slack.post(slackStatus(slackMessage("blocked", preformatted ? questions[0] : slackLines.question(questions, task.ticket.url)), "WAITING", await taskSlackLinks(loadState().tasks.find((t) => t.id === taskId)!, job.repo)), thread);
+    const ts = pending?.afterTs ?? await slack.post(slackStatus(slackMessage("waiting", preformatted ? questions[0] : slackLines.question(questions, task.ticket.url)), "WAITING", await taskSlackLinks(loadState().tasks.find((t) => t.id === taskId)!, job.repo)), thread);
     updateTask(taskId, { pendingQuestion: { questions, afterTs: ts } });
-    await notifyTask(taskId, "paused", "Waiting on you.");
+    // the pause reason carries the question itself: it shows in the Paused line, in status replies, and in the view
+    await notifyTask(taskId, "paused", `Waiting on you: ${brief(questions[0].split("\n").filter((l) => l.trim()).map((l) => l.replace(/^(?:❌|✅|⏳|❓|⏹️|🎉🍭🎊)?\s*[•\-\d.\s]*/u, "").replace(/\s*\(<[^>]*\|ticket>\)/, "").replace(/[*_`]/g, "")).join(" · "), 300)}`);
     log(task, `waiting on Slack for ${questions.length} answer(s)`);
     let lastEmptyLog = 0;
     let lastCheckResult: string | undefined;
@@ -117,6 +131,7 @@ export async function workTask(taskId: string): Promise<void> {
     }, onTick: () => { updateTask(task.id, {}); void flushTaskNotifications(taskId); } });
     updateTask(task.id, { status: "working", note: undefined, pendingQuestion: undefined });
     await notifyTask(taskId, "running", "Answer received.");
+    lastWorkingAt = 0; // the first agent line after an answer posts right away, so the owner sees it is on it
     return reply ?? "";
   };
 
@@ -141,7 +156,7 @@ export async function workTask(taskId: string): Promise<void> {
       if (!who) {
         const resets = (["claude", "codex"] as const).map((p) => earliestUnblock(live.accounts, p, Date.now())).filter((t): t is number => t !== undefined);
         const until = resets.length ? Math.min(...resets) : Date.now() + DEFAULT_BLOCK_MS;
-        const waiting = `all accounts at their limit until ${resetLabel(until)}`;
+        const waiting = `All AI accounts reached their usage limit until ${resetLabel(until)}. Consort retries every 30s. Your action: none; work resumes when credits reset.`;
         updateTask(taskId, { status: "waiting", note: waiting, activity: waiting });
         await notifyTask(taskId, "paused", waiting);
         await new Promise((r) => setTimeout(r, Math.min(30_000, Math.max(1_000, until - Date.now()))));
@@ -370,23 +385,32 @@ export async function workTask(taskId: string): Promise<void> {
   const me = await whoAmI(job.repo);
   let requested = loadState().tasks.find((t) => t.id === taskId)?.reviewersRequested;
   let requestError: string | undefined;
+  if (requested?.length) {
+    const valid = await validateReviewers(job.repo, requested);
+    if (valid.length !== 2) {
+      await say("✅ The saved reviewer names were not valid repository reviewers; selecting real contributors and verifying GitHub requests.");
+      updateTask(taskId, { reviewersRequested: undefined });
+      requested = undefined;
+    } else requested = valid;
+  }
   const excludedReviewers = [me, beforeReview.author ?? ""].filter(Boolean);
   while (!requested || requested.length < 2) {
     const suggested = await reviewerSuggestions(task.worktree, `origin/${job.base}`, excludedReviewers).catch((e) => { requestError = `Contributor lookup failed: ${(e as Error).message}`; return []; });
     const candidates = [...new Set(suggested)].filter((n) => !excludedReviewers.some((login) => login.toLowerCase() === n.toLowerCase()) && /^[A-Za-z0-9-]+$/.test(n));
-    const names = candidates.length === 2 && !requestError ? candidates : (await ask([`Which two GitHub reviewers? Reply with two logins. ${requestError ?? "The changed files' contributors gave fewer than two."}`])).split(/[\s,]+/).map((n) => n.replace(/^@/, "")).filter(Boolean);
+    const names = candidates.length === 2 && !requestError ? candidates : parseReviewerReply(await ask([`Which two GitHub reviewers? Reply with @login1 @login2. ${requestError ?? "The changed files' contributors gave fewer than two."}`]));
     const unique = [...new Set(names)].filter((n) => !excludedReviewers.some((login) => login.toLowerCase() === n.toLowerCase()) && /^[A-Za-z0-9-]+$/.test(n));
     if (unique.length !== 2) { requestError = "I need exactly two distinct GitHub logins, excluding the PR author."; continue; }
+    const verified = await validateReviewers(job.repo, unique);
+    if (verified.length !== 2) { requestError = "Those logins do not identify two people with repository access. Use two @GitHub logins."; continue; }
     if (candidates.length === 2 && !requestError) await say(slackLines.reviewerPick(candidates));
     try { await requestReviewers(job.repo, pr, unique); }
     catch (e) { requestError = `GitHub rejected the review request: ${(e as Error).message}`; continue; }
-    requested = unique;
+    requested = verified;
     updateTask(taskId, { reviewersRequested: requested });
     await say(slackLines.reviewers(requested));
   }
   updateTask(task.id, { status: "monitoring", activity: "watching the PR" });
-  await notifyTask(taskId, "paused", "Waiting on reviews and CI.");
-  await say(slackLines.watching(PR_POLL_MS / 60_000));
+  // Read GitHub first so the pause explains the real blockers.
 
   let recoveryGuidance: string | undefined;
   for (;;) {
@@ -410,7 +434,7 @@ export async function workTask(taskId: string): Promise<void> {
         const note = `collecting ${fresh.length} review comments; waiting for 3 quiet minutes`;
         updateTask(taskId, { status: "monitoring", activity: note });
         if (previousBatch !== observed.batch?.fingerprint) statusEvent("info", `Ticket ${task.ticket.id}: ${note}`);
-        await notifyTask(taskId, "paused", "Batching new review comments (3m quiet period).");
+        await notifyTask(taskId, "paused", `Collecting ${fresh.length} review comment(s) from ${[...new Set(fresh.map(t => "@" + t.author))].join(", ")}; Consort fixes the batch after 3 quiet minutes. Your action: none.`);
         await new Promise((r) => setTimeout(r, PR_POLL_MS));
         continue;
       }
@@ -424,6 +448,8 @@ export async function workTask(taskId: string): Promise<void> {
         const addressed = fresh.filter((t) => !t.threadId || !remaining.has(t.threadId));
         updateTask(task.id, (t) => ({ threadsSeen: [...t.threadsSeen, ...addressed.map((f) => f.id)], reviewBatch: undefined }));
         await requestReviewers(job.repo, pr, requested);
+        updateTask(taskId, { reviewRequestedHead: afterFix.headSha, reviewRequestedAt: Date.now(), reviewWaitSince: Date.now() });
+        await say(`✅ Re-requested review from ${requested.map(n => "@" + n).join(", ")} after addressing feedback. Your action: none now.`);
         statusEvent("success", `Ticket ${task.ticket.id}: handled a batch of ${fresh.length} review comments`);
         await say(slackLines.answered(fresh.length, fresh.length - addressed.length));
         continue; // re-read straight away
@@ -431,7 +457,7 @@ export async function workTask(taskId: string): Promise<void> {
       if (state.ci === "fail") {
         const answer = await turn(`PR ${prUrl} has failing CI. Read gh pr checks and the failed job logs, fix the failures in this branch, run relevant checks, commit and push. If a failure needs a business or design decision, ask the owner. Never merge.`, builderProvider, workerModel);
         await completeReply(answer, undefined, workerModel);
-        await notifyTask(taskId, "paused", "CI repair pushed; waiting on CI.");
+        await notifyTask(taskId, "paused", "CI repair pushed; waiting for GitHub checks on the repair. Consort will fix another failure automatically. Next check in 3m. Your action: none.");
         updateTask(taskId, { status: "monitoring" });
         await new Promise((r) => setTimeout(r, PR_POLL_MS));
         continue;
@@ -443,8 +469,19 @@ export async function workTask(taskId: string): Promise<void> {
         return;
       }
       log(task, `not ready: ${ready.reasons.join(", ")}`);
-      updateTask(taskId, { status: "monitoring", activity: `watching PR: ${ready.reasons.join(", ")}` });
-      await notifyTask(taskId, "paused", "Waiting on reviews and CI.");
+      const saved = loadState().tasks.find(t => t.id === taskId)!;
+      const waitSince = saved.reviewWaitSince ?? Date.now();
+      const approved = new Set(state.approvals.map(n => n.toLowerCase()));
+      const pending = new Set(state.requestedReviewers.map(n => n.toLowerCase()));
+      const needsRequest = [...new Set([...(state.changesRequestedBy ?? []), ...requested.filter(n => !approved.has(n.toLowerCase()))])].filter(n => !pending.has(n.toLowerCase()));
+      if (needsRequest.length && (!saved.reviewRequestedAt || saved.reviewRequestedHead !== state.headSha || Date.now() - saved.reviewRequestedAt >= 30 * 60_000)) {
+        await requestReviewers(job.repo, pr, needsRequest);
+        updateTask(taskId, { reviewRequestedHead: state.headSha, reviewRequestedAt: Date.now() });
+        await say(`✅ Re-requested review from ${needsRequest.map(n => "@" + n).join(", ")}; waiting for their GitHub review. Your action: none now.`);
+      }
+      const waiting = reviewWaitMessage(state, requested, Date.now() - waitSince >= 60 * 60_000);
+      updateTask(taskId, { status: "monitoring", activity: waiting, reviewWaitSince: waitSince });
+      await notifyTask(taskId, "paused", waiting);
       } catch (e) {
         log(task, `Review loop needs help: ${(e as Error).message}`);
         const answer = await ask([slackLines.problem(problemOf(e, "PR watch", { recent: [...recent], ask: "Reply with what to do. The task stays open until a requested reviewer approves and CI passes." }), task.ticket.url)], true);

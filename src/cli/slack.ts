@@ -46,8 +46,22 @@ export class Slack {
 
   /** post a message; in `thread` when given. Resolves to the message ts, which is also the thread id for replies. */
   async post(text: string, thread?: string): Promise<string> {
-    const j = await this.api("chat.postMessage", { channel: await this.channel(), text: slackStatus(slackMessage("update", text)), ...(thread ? { thread_ts: thread } : {}), unfurl_links: false });
+    const j = await this.api("chat.postMessage", { channel: await this.channel(), text: slackStatus(/\n\nSTATUS: (RUNNING|WAITING|STOPPED|COMPLETED)\s*$/.test(text) ? text : slackMessage("update", text)), ...(thread ? { thread_ts: thread } : {}), unfurl_links: false });
     return j.ts as string;
+  }
+
+  /** Read all newer replies, including long-running ticket threads with multiple pages. */
+  async threadMessages(thread: string, afterTs: string): Promise<{ ts: string; user?: string; text?: string; bot_id?: string }[]> {
+    const messages: { ts: string; user?: string; text?: string; bot_id?: string }[] = [];
+    let cursor: string | undefined;
+    do {
+      const j = await this.api("conversations.replies", { channel: await this.channel(), ts: thread, oldest: afterTs, limit: 100, ...(cursor ? { cursor } : {}) });
+      messages.push(...(j.messages ?? []));
+      const next = j.response_metadata?.next_cursor;
+      if (j.has_more && (!next || next === cursor)) throw new Error("Slack thread pagination did not advance.");
+      cursor = next || undefined;
+    } while (cursor);
+    return messages;
   }
 
   /** wait for the owner's reply in the thread after `afterTs`; polls, and gives up after `timeoutMs` when set */

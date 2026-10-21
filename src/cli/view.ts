@@ -72,7 +72,7 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
     const log = logOf(t, now);
     const health = taskHealth(t, s.accounts, { workerAlive: !!(t.pid && alive(t.pid)), logAgeMs: Math.min(log.ageMs ?? Infinity, now - t.updatedAt) }, now);
     const healthPaint = (x: string) => (health.tone === "complete" ? blue(bold(x)) : health.tone === "ok" ? green(x) : health.tone === "warn" ? amber(x) : health.tone === "bad" ? red(x) : dim(x));
-    const activity = (health.tone === "bad" || health.tone === "warn") && health.note ? `${health.note}${t.activity ? ` · ${t.activity}` : ""}` : t.activity || t.note || log.last || "";
+    const activity = (health.tone === "bad" || health.tone === "warn") && health.note ? `${health.note}${t.activity && t.activity !== health.note ? ` · ${t.activity}` : ""}` : t.activity || t.note || log.last || "";
     const diff = diffCell(diffOf(t, s.jobs.find((j) => j.id === t.jobId)?.base, now));
     const age = FINISHED.includes(t.status) ? `done ${ago(now - (t.finishedAt ?? t.updatedAt))}` : ago(now - t.startedAt);
     const finished = FINISHED.includes(t.status);
@@ -99,6 +99,7 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   }
   lines.push("");
   lines.push(cream(bold("Scanners")));
+  lines.push(dim("  Finds eligible tickets and starts workers; workers handle code, PR feedback, and CI."));
   if (!s.jobs.length) lines.push(dim("  none: consort-cli scanners add …"));
   for (const j of s.jobs) {
     lines.push(`  ${pad(j.name, 20)} ${pad(`${j.source}${j.source === "sentry" ? ` → list ${j.sentry?.listId ?? "?"} #${j.sentry?.tag ?? "?"}` : j.scope ? ` ${j.scope.kind} ${j.scope.id}` : j.listId ? ` list ${j.listId}` : ""}`, 22)} ${j.enabled ? pid ? mint(scanCountdown(j, now)) : amber("paused · daemon stopped") : dim("off")}  ${dim(`${j.repo}${j.source === "sentry" ? ` → ClickUp ${j.sentry?.listId ?? "?"} #${j.sentry?.tag ?? "?"}` : ""}`)}`);
@@ -116,6 +117,7 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   lines.push(`  ${mint("consort-cli stop")}                         stop the daemon; agents keep working and the next run adopts them`);
   lines.push(`  ${mint("consort-cli stop --all")}                   stop the daemon and every agent; tasks resume on the next run`);
   lines.push(`  ${mint("consort-cli tasks reboot <ticket>")}        stop one agent and start it again; it works out where the last run got to`);
+  lines.push(`  ${mint("consort-cli reboot --all")}                 the same for every live agent`);
   lines.push(`  ${mint("consort-cli tasks release <ticket>")}       stop one agent for good and forget the ticket (worktree stays)`);
   lines.push(`  ${mint("consort-cli tasks logs <ticket or task>")}  what an agent has been doing`);
   lines.push(`  ${mint("consort-cli help")}                         every command`);

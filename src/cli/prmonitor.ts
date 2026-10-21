@@ -47,14 +47,31 @@ export async function readPr(repoPath: string, number: number): Promise<PrState 
   return {
     feedback: (j.reviews ?? []).filter((r: any) => r.body?.trim() && ["CHANGES_REQUESTED", "COMMENTED"].includes(r.state)).map((r: any) => ({ id: `review:${r.id ?? r.author?.login}:${r.submittedAt}:${createHash("sha256").update(String(r.body)).digest("hex").slice(0, 16)}`, author: String(r.author?.login ?? ""), body: `Top-level review (no thread): ${r.body}`, url: j.url, createdAt: String(r.submittedAt ?? "") })),
     author: j.author?.login,
-    state: j.state, isDraft: !!j.isDraft, reviewDecision: j.reviewDecision ?? "", approvals, unresolved, ci,
+    state: j.state, isDraft: !!j.isDraft, reviewDecision: j.reviewDecision ?? "", approvals, changesRequestedBy: [...latest.entries()].filter(([, s]) => s === "CHANGES_REQUESTED").map(([a]) => a), unresolved, ci,
     requestedReviewers: ((j.reviewRequests ?? []) as any[]).map((r) => String(r.login ?? r.name ?? "")).filter(Boolean),
     url: j.url, headSha: j.headRefOid,
   };
 }
 
-export const requestReviewers = (repoPath: string, number: number, logins: string[]) =>
-  logins.length ? gh(repoPath, ["pr", "edit", String(number), "--add-reviewer", logins.join(",")]).then(() => undefined) : Promise.resolve();
+/** Validate actual repository access, not merely username-shaped strings. */
+export async function validateReviewers(repoPath: string, logins: string[]): Promise<string[]> {
+  const name = (await gh(repoPath, ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])).trim();
+  const valid: string[] = [];
+  for (const login of logins) {
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(login)) continue;
+    const result = await gh(repoPath, ["api", `repos/${name}/collaborators/${login}/permission`]).then(JSON.parse).catch(() => undefined);
+    if (result?.user?.login && result.user.type !== "Bot" && ["read", "pull", "triage", "write", "push", "maintain", "admin"].includes(result.permission)) valid.push(result.user.login);
+  }
+  return [...new Set(valid)];
+}
+export async function requestReviewers(repoPath: string, number: number, logins: string[]): Promise<void> {
+  if (!logins.length) return;
+  await gh(repoPath, ["pr", "edit", String(number), "--add-reviewer", logins.join(",")]);
+  const actual = JSON.parse(await gh(repoPath, ["pr", "view", String(number), "--json", "reviewRequests"]));
+  const pending = new Set((actual.reviewRequests ?? []).map((r: { login?: string }) => r.login?.toLowerCase()));
+  const missing = logins.filter(n => !pending.has(n.toLowerCase()));
+  if (missing.length) throw new Error(`GitHub did not record review requests for ${missing.map(n => "@" + n).join(", ")}.`);
+}
 
 /** who touched the files this branch changes, from the history those files already have */
 export async function shortlogForBranch(worktree: string, base: string): Promise<string> {

@@ -38,7 +38,7 @@ export async function notifyTask(taskId: string, activity: NonNullable<Task["lif
   if (!task) return;
   if (task.lifecycle !== activity || (activity === "paused" && task.pauseReason !== reason)) {
     const verb = activity === "running" ? (task.lifecycle ? "Resumed" : "Started") : activity === "paused" ? "Paused" : activity === "completed" ? "Completed — ready for you to merge" : "Stopped";
-    const notification = { id: randomUUID(), text: slackStatus(slackMessage(activity === "completed" ? "completed" : activity === "running" ? "update" : "blocked", `*${verb}: ${task.ticket.title}*\n${reason}`), activity === "paused" ? "WAITING" : activity === "running" ? "RUNNING" : activity === "completed" ? "COMPLETED" : "STOPPED") };
+    const notification = { id: randomUUID(), text: slackStatus(slackMessage(activity === "completed" ? "completed" : activity === "running" ? "update" : activity === "paused" ? "waiting" : "stopped",`${verb}: ${task.ticket.title}\n${reason}`), activity === "paused" ? "WAITING" : activity === "running" ? "RUNNING" : activity === "completed" ? "COMPLETED" : "STOPPED") };
     updateTask(taskId, (t) => ({ lifecycle: activity, pauseReason: activity === "paused" ? reason : undefined,
       ...(state.slack ? { notificationQueue: [...(t.notificationQueue ?? []), notification] } : {}) }));
   }

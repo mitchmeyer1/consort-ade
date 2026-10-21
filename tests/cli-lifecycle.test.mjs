@@ -31,6 +31,7 @@ function harness(opts = {}) {
     '../shared/shipPrompt.ts': { shipPrompt: () => 'fix findings' },
     '../shared/review.ts': { parseReview: () => ({}), reviewSummary: () => opts.missingReport ? undefined : opts.summary ?? { total: 0 } },
     '../main/ship': { excludeConsortDir: async () => {}, fetchTicket: async () => ({}), writeTicketFile: () => '' },
+    './slackIdentity': { ensureSlackIdentity: async () => {} },
     './slackLinks': { taskSlackLinks: async t => ({ ticket: t.ticket.url, github: t.feature?.prs?.at(-1) ?? 'https://github.com/a/b/tree/feature' }) },
     './statusLog': { statusEvent: (tone, text) => events.push(`status:${tone}:${text}`) },
     './state': {
@@ -45,6 +46,7 @@ function harness(opts = {}) {
     './usage': { readUsage: async a => opts.usage?.(a) ?? ({ at: Date.now(), windows: [] }) },
     './agent': { packageRoot: () => '/package', stopAgents: () => events.push('abort agent'), runTurn: async o => { events.push(`turn:${o.account.provider}`); return opts.turn?.(o, task, interval, deadline) ?? { text: o.prompt.includes(headless.VERIFY_EVIDENCE_PROMPT) ? '[evidence-approved]' : '' }; } },
     './prmonitor': {
+      validateReviewers: async (_, names) => names.filter(n => ['ada','bob'].includes(n)),
       reviewerSuggestions: async () => opts.suggestions ?? (opts.shortlog ? [] : ["ada", "bob"]),
       whoAmI: async () => 'me', shortlogForBranch: async () => opts.shortlog ?? ' 2 Ada <1+ada@users.noreply.github.com>\n 1 Bob <2+bob@users.noreply.github.com>',
       requestReviewers: async (_, __, names) => events.push(`reviewers:${names.join(',')}`),
@@ -69,8 +71,8 @@ test('all providers exhausted: one pause, then a separate resume after reset', a
     turn: () => { throw halt; },
   });
   await assert.rejects(h.work(), e => e === halt);
-  assert.equal(h.messages.filter(m => /\*Paused:/.test(m.text)).length, 1);
-  assert.equal(h.messages.filter(m => /\*Resumed:/.test(m.text)).length, 1);
+  assert.equal(h.messages.filter(m => /Paused:/.test(m.text)).length, 1);
+  assert.equal(h.messages.filter(m => /Resumed:/.test(m.text)).length, 1);
   assert.equal(h.task.status, 'working');
   assert.ok(h.messages.filter(m => /\*(Paused|Resumed):/.test(m.text)).every(m => m.thread && !m.broadcast));
 });
@@ -89,7 +91,7 @@ test('usage probe prevents starting an exhausted Codex account even without a tu
   await assert.rejects(h.work(), e => e === halt);
   assert.equal(h.task.status, 'waiting');
   assert.equal(h.events.filter(e => e.startsWith('turn:')).length, 0);
-  assert.equal(h.messages.filter(m => /\*Paused:/.test(m.text)).length, 1);
+  assert.equal(h.messages.filter(m => /Paused:/.test(m.text)).length, 1);
 });
 
 test('usage exhaustion during a turn aborts the stalled agent and pauses', async () => {
@@ -107,8 +109,8 @@ test('design questions pause and resume, including a repeated question', async (
   let turns = 0;
   const h = harness({ turn: () => { if (++turns <= 2) return { text: '[ask-user: Which business outcome matters?]' }; throw halt; }, onReply: task => { assert.equal(task.status, 'waiting'); assert.ok(task.pendingQuestion); } });
   await assert.rejects(h.work(), e => e === halt);
-  assert.equal(h.messages.filter(m => /\*Paused:/.test(m.text)).length, 2);
-  assert.equal(h.messages.filter(m => /\*Resumed:/.test(m.text)).length, 2);
+  assert.equal(h.messages.filter(m => /Paused:/.test(m.text)).length, 2);
+  assert.equal(h.messages.filter(m => /Resumed:/.test(m.text)).length, 2);
   assert.equal(h.task.pendingQuestion, undefined);
   assert.ok(h.events.some(event => event === 'status:success:Ticket T1: answer found in Slack; continuing'));
 });
@@ -132,8 +134,8 @@ test('three internal rounds precede two reviewer requests; human feedback resume
   assert.equal(h.task.reviewsDone, 3);
   assert.equal(h.task.status, 'ready');
   assert.equal(h.task.lifecycle, 'completed');
-  assert.ok(h.messages.some(m => /\*Paused:/.test(m.text)));
-  assert.ok(h.messages.some(m => /\*Resumed:/.test(m.text)));
+  assert.ok(h.messages.some(m => /Paused:/.test(m.text)));
+  assert.ok(h.messages.some(m => /Resumed:/.test(m.text)));
   assert.ok(!h.events.some(e => /pr merge/.test(e)));
 });
 
@@ -159,8 +161,8 @@ test('worker stops and restarts announce separate transitions; repeated stop is 
   await h.notify('t', 'stopped', 'process exited');
   await h.notify('t', 'stopped', 'process exited');
   await h.notify('t', 'running', 'restarted');
-  assert.equal(h.messages.filter(m => /\*Stopped:/.test(m.text)).length, 1);
-  assert.equal(h.messages.filter(m => /\*Resumed:/.test(m.text)).length, 1);
+  assert.equal(h.messages.filter(m => /Stopped:/.test(m.text)).length, 1);
+  assert.equal(h.messages.filter(m => /Resumed:/.test(m.text)).length, 1);
 });
 
 test('usage blocks respect all exhausted windows, reset times, staleness and model scope', () => {
@@ -379,7 +381,7 @@ test('a saved question that was really an approval is dropped on restart instead
 });
 
 
-test('lifecycle marks pauses/stops with crosses and reserves celebration for completion', async () => {
+test('lifecycle marks pauses as waiting and stops as stopped, and reserves celebration for completion', async () => {
   const h = harness();
   await h.notify('t', 'running', 'Starting');
   await h.notify('t', 'paused', 'Credits exhausted');
@@ -389,9 +391,9 @@ test('lifecycle marks pauses/stops with crosses and reserves celebration for com
   const notifications = h.messages.filter(m => m.thread);
   assert.deepEqual(notifications.map(m => m.text.match(/STATUS: (\w+)$/)?.[1]), ["RUNNING", "WAITING", "RUNNING", "STOPPED", "COMPLETED"]);
   assert.ok(notifications[0].text.startsWith('✅ '));
-  assert.ok(notifications[1].text.startsWith('❌ '));
+  assert.ok(notifications[1].text.startsWith('⏳ '), 'a pause is waiting, not a failure');
   assert.ok(notifications[2].text.startsWith('✅ '));
-  assert.ok(notifications[3].text.startsWith('❌ '));
+  assert.ok(notifications[3].text.startsWith('⏹️ '), 'a stop on purpose is not a failure');
   assert.ok(notifications[4].text.startsWith('🎉🍭🎊 '));
   assert.ok(notifications.every(m => m.thread === h.task.slackThread && !m.broadcast));
   assert.ok(notifications.every(m => /<https:\/\/ticket\/1\|ticket> · <https:\/\/github.com\/a\/b\/pull\/1\|github>\n\nSTATUS: \w+$/.test(m.text)));
@@ -406,4 +408,58 @@ test('a rebooted task opens with a pickup turn that works out where the last run
   assert.equal(h.task.rebootedAt, undefined);
   assert.ok(h.messages.some(m => /Rebooted by you at \*Implementing\*/.test(m.text)));
   assert.ok(!h.events.includes('owner reply'));
+});
+
+test('while a turn runs the thread gets a short Working note: the first agent line right away, then at most one every five minutes', async () => {
+  let turns = 0;
+  const h = harness({ task: { feature: { stage: 'Implementing', prs: [] } }, turn: o => {
+    turns++;
+    o.onText('Reading the spec and the ticket');
+    o.onText('Writing the migration [ask-user: Keep archived rows? — recommend: no]');
+    if (turns === 1) return { text: '[ask-user: Keep archived rows? — recommend: no]' };
+    o.onText('Applying the answer');
+    throw halt;
+  }, onReply: () => {} });
+  await assert.rejects(h.work(), e => e === halt);
+  const notes = h.messages.filter(m => /Working:/.test(m.text)).map(m => m.text);
+  assert.ok(notes.every(text => /STATUS: RUNNING$/.test(text)));
+  assert.deepEqual(notes.map(text => text.split('\n')[0]), ['✅ Working: Reading the spec and the ticket', '✅ Working: Reading the spec and the ticket'], 'one note per turn start; the second line is inside the five-minute window; markers never leak');
+  assert.ok(notes.every(n => !/ask-user/.test(n)));
+});
+
+test('the Paused line says what it is waiting on: the question itself, one line, no markup, so a status reply can repeat it', async () => {
+  const h = harness({ turn: () => ({ text: '[ask-user: ryangoggin asked to set routeCount to 3500 in a generated file — recommend: leave it]' }), onReply: () => { throw halt; } });
+  await assert.rejects(h.work(), e => e === halt);
+  const paused = h.messages.find(m => /Paused:/.test(m.text));
+  assert.match(paused.text, /\nWaiting on you: ryangoggin asked to set routeCount to 3500 in a generated file — recommend: leave it/);
+  assert.equal(h.task.pauseReason, 'Waiting on you: ryangoggin asked to set routeCount to 3500 in a generated file — recommend: leave it');
+  // a preformatted stop report pauses with its lead and first reason, markup and the ticket link stripped
+  const h2 = harness({ task: { reviewsDone: 3, evidenceValidatedAt: undefined }, validateEvidence: () => { throw new Error('Map tiles show API KEY REQUIRED'); }, onReply: () => { throw halt; } });
+  await assert.rejects(h2.work(), e => e === halt);
+  assert.match(h2.task.pauseReason, /^Waiting on you: Evidence blocked\. PR not handed off · Evidence was not accepted · Map tiles show API KEY REQUIRED/);
+  assert.ok(!/[*_<>]/.test(h2.task.pauseReason), h2.task.pauseReason);
+});
+
+test('watch names a blocking reviewer and green CI, re-requests once and does not spam', async () => {
+  let polls=0;
+  const h=harness({task:{reviewsDone:3,reviewersRequested:['ada','bob']},readPr:(n,pr)=>({...pr,headSha:'sha1',reviewDecision:'CHANGES_REQUESTED',changesRequestedBy:['ada']}),sleep(){if(++polls===3)throw halt;}});
+  await assert.rejects(h.work(),e=>e===halt);
+  assert.equal(h.events.filter(e=>e==='reviewers:ada,bob').length,1);
+  assert.ok(h.messages.some(m=>/ada must review again/.test(m.text)&&/CI is green/.test(m.text)&&/Your action: none now/.test(m.text)));
+  assert.ok(!h.messages.some(m=>/Waiting on reviews and CI\./.test(m.text)));
+});
+
+test('after one hour the PR wait tells the owner whom to nudge', async () => {
+  let polls=0;
+  const h=harness({task:{reviewsDone:3,reviewersRequested:['ada','bob'],reviewWaitSince:Date.now()-61*60000},readPr:(n,pr)=>({...pr,headSha:'sha1',requestedReviewers:['ada','bob'],changesRequestedBy:['ada'],reviewDecision:'CHANGES_REQUESTED'}),sleep(){if(++polls===1)throw halt;}});
+  await assert.rejects(h.work(),e=>e===halt);
+  assert.ok(h.messages.some(m=>/Your action: please nudge @ada to review the PR/.test(m.text)));
+  assert.equal(h.events.filter(e=>e.startsWith('reviewers:')).length,0,'pending review requests need no duplicate request');
+});
+
+test('invalid saved reviewer words are replaced with validated contributors', async () => {
+  const h=harness({task:{reviewsDone:3,reviewersRequested:['do','and']}});
+  await h.work();assert.deepEqual(h.task.reviewersRequested,['ada','bob']);
+  assert.ok(h.events.includes('reviewers:ada,bob'));
+  assert.ok(!h.events.includes('reviewers:do,and'));
 });
