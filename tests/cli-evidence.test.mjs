@@ -19,13 +19,14 @@ function fixture(t, options = {}) {
   save();
   writeFileSync(join(dir, 'map.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jT1sAAAAASUVORK5CYII=', 'base64'));
   const calls = [];
+  const comments = [];
   const mocks = { '../shared/headless.ts': headless, '../shared/ship.ts': ship,
     'node:util': { promisify: () => async (cmd, args) => { calls.push(args); if (options.prFails) throw new Error('PR comment rejected'); return { stdout: '' }; } },
   };
   const mod = { exports: {} };
   new Function('require', 'module', 'exports', 'fetch', code)(n => mocks[n] ?? require(n), mod, mod.exports, async () => { calls.push('upload'); return options.uploadFails ? { ok: false, status: 403, text: async () => 'Upload denied' } : { ok: true, text: async () => JSON.stringify({ url: 'https://image.example/map.png' }) }; });
-  const args = { worktree: root, repo: root, ticket: { source: 'clickup', id: '1', title: 'Map', url: 'https://ticket/1' }, pr: 1, prUrl: 'https://pr/1', clickupKey: 'test', source: { comment: async () => { calls.push('ticket'); if (options.ticketFails) throw new Error('Ticket unavailable'); } } };
-  return { api: mod.exports, root, dir, manifest, save, args, calls };
+  const args = { worktree: root, repo: root, ticket: { source: 'clickup', id: '1', title: 'Map', url: 'https://ticket/1' }, pr: 1, prUrl: 'https://pr/1', clickupKey: 'test', source: { comment: async (_, text) => { comments.push(text); calls.push('ticket'); if (options.ticketFails) throw new Error('Ticket unavailable'); } } };
+  return { api: mod.exports, root, dir, manifest, save, args, calls, comments };
 }
 
 test('manifest rejects missing checks, failed checks, blockers, and frontend text-only output', () => {
@@ -75,10 +76,15 @@ for (const [key, message] of [['uploadFails', /Upload denied/], ['prFails', /PR 
 
 test('working evidence publishes images and both comments', async t => {
   const f = fixture(t);
+  f.args.cost = { usd: 0, turns: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+  f.args.timing = { startedAt: Date.UTC(2026, 9, 21, 12), endedAt: Date.UTC(2026, 9, 21, 13, 2, 3) };
   const published = await f.api.publishEvidence(f.args);
   assert.deepEqual(published, { items: 1, images: 1, prComment: true, ticketComment: true, hosting: 'clickup' });
   assert.ok(readFileSync(join(f.dir, '.pr-comment.md'), 'utf8').includes('https://image.example/map.png'));
   assert.equal(f.calls.at(-1), 'ticket');
+  for (const text of [readFileSync(join(f.dir, '.pr-comment.md'), 'utf8'), f.comments[0]]) {
+    assert.match(text.replace(/  \n/g, "\n"), /Agent cost:[^\n]+\nStart time: 2026-10-21 12:00:00 UTC\nEnd time \(evidence ready\): 2026-10-21 13:02:03 UTC\nDuration \(including pauses\): 1h 2m 3s/);
+  }
 });
 
 test('credential recovery names the root path and requires confirmation without sharing secrets', () => {

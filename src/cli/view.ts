@@ -115,8 +115,10 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   lines.push(cream(bold("Commands")));
   lines.push(`  ${mint("consort-cli stop")}                         stop the daemon; agents keep working and the next run adopts them`);
   lines.push(`  ${mint("consort-cli stop --all")}                   stop the daemon and every agent; tasks resume on the next run`);
+  lines.push(`  ${mint("consort-cli tasks reboot <ticket>")}        stop one agent and start it again; it works out where the last run got to`);
   lines.push(`  ${mint("consort-cli tasks release <ticket>")}       stop one agent for good and forget the ticket (worktree stays)`);
   lines.push(`  ${mint("consort-cli tasks logs <ticket or task>")}  what an agent has been doing`);
+  lines.push(`  ${mint("consort-cli help")}                         every command`);
   return lines.join("\n");
 }
 

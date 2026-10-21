@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import ts from 'typescript';
-import { scanCountdown, replyAfter } from '../src/shared/headless.ts';
+import { scanCountdown, replyAfter, slackMessage, slackStatus } from '../src/shared/headless.ts';
 const require = createRequire(import.meta.url);
 const compile = file => ts.transpileModule(readFileSync(new URL(`../src/cli/${file}.ts`, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 
@@ -55,7 +55,7 @@ test('status journal reads the tail of a large log', t => {
 
 test('Slack polling reports empty, failed, and answered checks without exposing reply text', async () => {
   const mod = { exports: {} };
-  new Function('require', 'module', 'exports', 'setTimeout', compile('slack'))(() => ({ replyAfter }), mod, mod.exports, fn => fn());
+  new Function('require', 'module', 'exports', 'setTimeout', compile('slack'))(() => ({ replyAfter, slackMessage, slackStatus }), mod, mod.exports, fn => fn());
   let checks = 0;
   const slack = new mod.exports.Slack({ channel: 'C1', userId: 'owner', botToken: 'test' }, async () => ({ json: async () => {
     checks++;

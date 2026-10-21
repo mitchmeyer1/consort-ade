@@ -78,10 +78,10 @@ test('review rounds rotate: the other provider first when there are two, then th
   assert.deepEqual(reviewRotation({}), []);
 });
 
-test('a PR is ready to merge on one fixed test: open, not draft, both requested approvals, no changes requested, no open threads, CI green', () => {
+test('a PR is ready to merge on one fixed test: open, not draft, one requested approval, no changes requested, no open threads, CI green', () => {
   const base = { state: 'OPEN', isDraft: false, reviewDecision: 'APPROVED', approvals: ['ada', 'bob'], unresolved: [], ci: 'pass', requestedReviewers: ['ada', 'bob'] };
   assert.deepEqual(prReadiness(base), { ready: true, reasons: [] });
-  assert.deepEqual(prReadiness({ ...base, approvals: ['consort-bot'] }, ['consort-bot']).reasons, ['awaiting approval from @ada', 'awaiting approval from @bob']);
+  assert.deepEqual(prReadiness({ ...base, approvals: ['consort-bot'] }, ['consort-bot']).reasons, ['awaiting approval from a selected reviewer']);
   assert.deepEqual(prReadiness({ ...base, isDraft: true, ci: 'pending' }).reasons, ['PR is a draft', 'CI still running']);
   assert.deepEqual(prReadiness({ ...base, reviewDecision: 'CHANGES_REQUESTED', unresolved: [{ id: 't', author: 'ada', body: 'x', url: 'u', createdAt: '' }] }).reasons, ['changes requested', '1 unresolved thread']);
   assert.deepEqual(prReadiness({ ...base, state: 'MERGED' }).reasons, ['PR is merged']);
@@ -177,7 +177,7 @@ test('the evidence manifest is read leniently and rendered as a PR comment with 
   assert.deepEqual(m.items.map((i) => [i.title, i.image, !!i.text]), [['Roster page with the new Export button', '01-roster.png', false], ['Downloaded CSV head', undefined, true]]);
   const pr = evidenceMarkdownForPr(m, { '01-roster.png': 'https://cdn.example/01.png' }, 'https://app.clickup.com/t/86abc', '86abc');
   assert.match(pr, /^## Evidence\n/);
-  assert.match(pr, /Ticket: 86abc \(https:\/\/app\.clickup\.com\/t\/86abc\)\nLocal data: pnpm seed:roster/);
+  assert.match(pr, /Ticket: 86abc \(https:\/\/app\.clickup\.com\/t\/86abc\)  \nLocal data: pnpm seed:roster/);
   assert.match(pr, /### 1\. Roster page with the new Export button\nfilters applied\n\n!\[Roster page with the new Export button\]\(https:\/\/cdn\.example\/01\.png\)/);
   assert.match(pr, /### 2\. Downloaded CSV head\n\n```\n\$ head -3 roster\.csv\n```\n\n```\nid,name,email\n1,Ada,ada@x\n```/);
   const missing = evidenceMarkdownForPr(m, {}, 'u', 'r');
@@ -314,13 +314,16 @@ test('STATUS says whether the agent is moving: running, waiting on Slack, at a l
 });
 
 
-test('completion requires both selected reviewers, excludes bots and author, and respects GitHub review requirements', () => {
+test('completion requires one selected reviewer, excludes bots and author, and respects GitHub review requirements', () => {
   const pr = { state: 'OPEN', isDraft: false, approvals: ['ada', 'bob'], author: 'builder', reviewDecision: 'APPROVED', unresolved: [], ci: 'pass', requestedReviewers: [] };
   const ready = p => prReadiness({ ...pr, ...p }, ['builder'], ['ada', 'bob']);
   assert.equal(ready({}).ready, true);
-  assert.equal(ready({ approvals: ['ada', 'other'] }).ready, false);
-  assert.equal(ready({ approvals: ['ada', 'builder'] }).ready, false);
-  assert.equal(ready({ approvals: ['ada', 'bot[bot]'] }).ready, false);
+  assert.equal(ready({ approvals: ['ada'] }).ready, true);
+  assert.equal(ready({ approvals: ['bob'] }).ready, true);
+  for (const approvals of [[], ['other'], ['builder'], ['bot[bot]']]) assert.equal(ready({ approvals }).ready, false);
+  assert.equal(ready({ approvals: ['ada', 'other'] }).ready, true);
+  assert.equal(ready({ approvals: ['ada', 'builder'] }).ready, true);
+  assert.equal(ready({ approvals: ['ada', 'bot[bot]'] }).ready, true);
   assert.equal(ready({ reviewDecision: 'REVIEW_REQUIRED' }).ready, false);
   for (const ci of ['fail', 'pending', 'none']) assert.equal(ready({ ci }).ready, false);
   assert.equal(prReadiness(pr).ready, false, 'missing saved reviewer identities cannot count as completion');
@@ -372,16 +375,103 @@ test('Slack lines are short bullets; the verifier\'s essay becomes a few blocker
   assert.ok(bullets.length >= 3 && bullets.length <= 5, bullets.join('|'));
   assert.ok(bullets.some((b) => /OPENAI_API_KEY/.test(b)));
   assert.ok(!bullets.some((b) => /^Let me|^I'll/.test(b)), 'narration is dropped');
-  const msg = slackLines.evidenceBlocked(bullets, '/repo/.env');
-  assert.match(msg, /^\*Evidence blocked\.\*/);
-  assert.ok(msg.split('\n').filter((l) => l.startsWith('• ')).length === bullets.length);
+  const msg = slackLines.problem({ where: 'evidence', lead: 'Evidence blocked. PR not handed off', what: 'The evidence check did not pass', why: bullets, ask: 'If a key is missing: add it to `/repo/.env`, then reply "done".' }, 'https://t');
+  assert.match(msg, /^❌ \*Evidence blocked\. PR not handed off\* \(<https:\/\/t\|ticket>\)\n• The evidence check did not pass\n/);
+  assert.ok(msg.split('\n').filter((l) => l.startsWith('• ')).length === bullets.length + 1);
   assert.ok(!/I will not hand off/.test(msg));
-  assert.equal(slackLines.question(['Keep archived members? — recommend: no'], 'https://t'), '*Need you* (<https://t|ticket>)\n• Keep archived members? — recommend: no\n_Reply in this thread._');
-  assert.equal(slackLines.review(2, 'claude-opus-5', 0), '• Review 2 on `claude-opus-5`: 0 findings');
-  assert.equal(slackLines.evidence(3, 2, '$4.10'), '• Evidence posted to the PR and the ticket: 3 items, 2 images\n• Cost so far: $4.10');
-  assert.equal(slackLines.answered(3, 1), '• Answered 3 review comments; 1 still open');
+  assert.match(msg, /\n_If a key is missing: .*\/repo\/\.env.*_$/);
+  assert.equal(slackLines.question(['Keep archived members? — recommend: no'], 'https://t'), '❌ *Need you* (<https://t|ticket>)\n• Keep archived members? — recommend: no\n_Reply in this thread._');
+  assert.equal(slackLines.review(2, 'claude-opus-5', 0), '✅ Review 2 on `claude-opus-5`: 0 findings');
+  assert.equal(slackLines.evidence(3, 2, '$4.10'), '✅ Evidence posted to the PR and the ticket: 3 items, 2 images\n• Cost so far: $4.10');
+  assert.equal(slackLines.answered(3, 1), '✅ Answered 3 review comments; 1 still open');
   assert.equal(brief('a'.repeat(50) + '. ' + 'b'.repeat(300), 120).endsWith('…'), true);
   for (const line of [slackLines.claimed('T', 'https://t', 'mm/x'), slackLines.ready('https://pr'), slackLines.stuck('the PR vanished'), slackLines.watching(15), slackLines.env('20000-20099')]) {
     for (const l of line.split('\n')) assert.ok(l.length <= 160, l);
   }
+});
+
+
+test('the stop report carries where, what, the agent\'s last lines newest first, the raw error in a code block, and how to reply', async () => {
+  const { slackLines, problemOf, ProblemError } = await import('../src/shared/headless.ts');
+  const msg = slackLines.problem({ where: 'evidence', what: 'The agent exceeded 15 minutes on one turn and was stopped', recent: ['Reading the ticket', 'Starting the app', 'CI shard 4 failed on the pushed commit', 'Rerunning that job and finishing the manifest'], tried: 'one attempt', error: 'Error: aborted\n  stderr: ECONNRESET' }, 'https://t');
+  assert.equal(msg.split('\n')[0], '❌ *Stuck at evidence* (<https://t|ticket>)');
+  assert.match(msg, /\n• Last seen: Rerunning that job and finishing the manifest\n• Before that: CI shard 4 failed on the pushed commit\n• Before that: Starting the app\n• Tried: one attempt\n```\nError: aborted\n  stderr: ECONNRESET\n```\n_Reply "retry", or say what to do\._$/);
+  assert.ok(!/Reading the ticket/.test(msg), 'only the last three lines');
+  assert.ok(!/```/.test(slackLines.problem({ where: 'worker', what: 'x' })), 'no empty code block');
+  // a plain error: first line is the summary; the rest, stderr and the exit code are the raw error
+  const gh = Object.assign(new Error('Command failed: gh pr edit 639 --add-reviewer x\nGraphQL: Could not resolve user with login \'x\'.'), { stderr: 'gh: GraphQL error', code: 1 });
+  const p = problemOf(gh, 'PR watch', { recent: ['pushing'], ask: 'Say what to do.' });
+  assert.equal(p.where, 'PR watch');
+  assert.equal(p.what, 'Command failed: gh pr edit 639 --add-reviewer x');
+  assert.match(p.error, /GraphQL: Could not resolve user/);
+  assert.match(p.error, /exit 1/);
+  assert.match(p.error, /gh: GraphQL error/);
+  assert.deepEqual(p.recent, ['pushing']);
+  // a code bug keeps the top of its stack; an ordinary failure does not
+  const bug = problemOf(new TypeError("Cannot read properties of undefined (reading 'prs')"), 'worker');
+  assert.match(bug.error ?? '', /at /);
+  assert.ok(!/at /.test(problemOf(new Error('Slack unavailable'), 'worker').error ?? ''));
+  // a ProblemError keeps its own fields and takes the caller's stage and recent lines only when it has none
+  const kept = problemOf(new ProblemError({ where: '', what: 'timed out', recent: [] }), 'evidence', { recent: ['last line'], ask: 'Reply.' });
+  assert.deepEqual([kept.where, kept.what, kept.recent, kept.ask], ['evidence', 'timed out', ['last line'], 'Reply.']);
+  assert.equal(problemOf(new ProblemError({ where: 'evidence', what: 'timed out', recent: ['own'] }), 'worker', { recent: ['caller'] }).recent[0], 'own');
+  assert.equal(problemOf('a string reason', 'worker').what, 'a string reason');
+});
+
+test('Slack emojis distinguish blockages, updates, and the final merge handoff', async () => {
+  const { slackLines, slackMessage } = await import('../src/shared/headless.ts');
+  for (const text of [slackLines.question(['Which design?'], 'url'), slackLines.stuck('quota exhausted'), slackLines.problem({ where: 'evidence', what: 'Missing key' })]) {
+    assert.ok(text.startsWith('❌ '), text);
+    assert.ok(!text.includes('🎉'));
+  }
+  for (const text of [slackLines.claimed('Ticket', 'url', 'branch'), slackLines.stage('In Review'), slackLines.pr('url'), slackLines.review(3, 'model', 0), slackLines.evidence(3, 2), slackLines.reviewers(['ada', 'bob']), slackLines.watching(3), slackLines.answered(2, 0), slackLines.env('20000')]) {
+    assert.ok(text.startsWith('✅ '), text);
+    assert.ok(!text.includes('🎉'));
+  }
+  assert.ok(slackLines.ready('url').startsWith('🎉🍭🎊 '));
+  assert.match(slackLines.ready('url'), /Merge is yours/);
+  assert.equal(slackMessage('update', slackLines.ready('url')), slackLines.ready('url'), 'do not duplicate or replace the handoff emojis');
+  assert.equal(slackMessage('blocked', 'Waiting for credits'), '❌ Waiting for credits');
+});
+
+
+test('Slack status footers preserve queued statuses and replace stale footers', async () => {
+  const { slackStatus } = await import('../src/shared/headless.ts');
+  for (const status of ['RUNNING', 'WAITING', 'STOPPED', 'COMPLETED']) {
+    const text = slackStatus('Task update', status);
+    assert.equal(text, `Task update\n\nSTATUS: ${status}`);
+    assert.equal(slackStatus(text), text);
+    assert.equal(slackStatus(text, 'RUNNING'), 'Task update\n\nSTATUS: RUNNING');
+  }
+  assert.match(slackStatus('❌ Need your answer'), /STATUS: WAITING$/);
+  assert.match(slackStatus('🎉🍭🎊 Merge is yours'), /STATUS: COMPLETED$/);
+  assert.match(slackStatus('✅ Continuing'), /STATUS: RUNNING$/);
+});
+
+test('Slack footer shows only ticket and github labels above the final status', async () => {
+  const { slackStatus, githubBranchUrl } = await import('../src/shared/headless.ts');
+  const links = { ticket: 'https://app.clickup.com/t/T1', github: 'https://github.com/a/b/pull/42' };
+  const text = slackStatus('✅ Update', 'RUNNING', links);
+  assert.equal(text, '✅ Update\n\n<https://app.clickup.com/t/T1|ticket> · <https://github.com/a/b/pull/42|github>\n\nSTATUS: RUNNING');
+  assert.equal(slackStatus(text), text);
+  assert.equal(slackStatus(text, undefined, links), text);
+  const branch = 'https://github.com/a/b/tree/feature%2Fticket';
+  for (const remote of ['git@github.com:a/b.git', 'https://github.com/a/b.git', 'ssh://git@github.com/a/b.git', 'https://token@github.com/a/b.git']) {
+    assert.equal(githubBranchUrl(remote, 'feature/ticket'), branch);
+  }
+  assert.equal(githubBranchUrl('https://gitlab.com/a/b.git', 'feature'), undefined);
+  const updated = slackStatus(slackStatus('Update', 'WAITING', { ...links, github: branch }), 'COMPLETED', links);
+  assert.equal(updated.match(/\|github>/g).length, 1);
+  assert.ok(!updated.includes(branch));
+  assert.ok(updated.endsWith('<https://github.com/a/b/pull/42|github>\n\nSTATUS: COMPLETED'));
+});
+
+test('evidence timing handles seconds, minutes, days, and missing timestamps', async () => {
+  const { evidenceTimingLines } = await import('../src/shared/headless.ts');
+  const startedAt = Date.UTC(2026, 9, 21);
+  for (const [seconds, expected] of [[0, '0s'], [59, '59s'], [60, '1m 0s'], [90061, '25h 1m 1s']]) {
+    assert.equal(evidenceTimingLines({ startedAt, endedAt: startedAt + seconds * 1000 }).at(-1), `Duration (including pauses): ${expected}`);
+  }
+  assert.deepEqual(evidenceTimingLines(), []);
+  assert.deepEqual(evidenceTimingLines({ startedAt, endedAt: startedAt - 1 }), []);
 });

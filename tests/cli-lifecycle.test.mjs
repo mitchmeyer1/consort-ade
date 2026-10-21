@@ -31,6 +31,7 @@ function harness(opts = {}) {
     '../shared/shipPrompt.ts': { shipPrompt: () => 'fix findings' },
     '../shared/review.ts': { parseReview: () => ({}), reviewSummary: () => opts.missingReport ? undefined : opts.summary ?? { total: 0 } },
     '../main/ship': { excludeConsortDir: async () => {}, fetchTicket: async () => ({}), writeTicketFile: () => '' },
+    './slackLinks': { taskSlackLinks: async t => ({ ticket: t.ticket.url, github: t.feature?.prs?.at(-1) ?? 'https://github.com/a/b/tree/feature' }) },
     './statusLog': { statusEvent: (tone, text) => events.push(`status:${tone}:${text}`) },
     './state': {
       loadState: () => state,
@@ -194,7 +195,7 @@ test('unknown reviewer names ask Slack rather than skipping reviewers', async ()
 
 test('no checks or bot-only approvals cannot mark a PR completed', () => {
   const pr = { state: 'OPEN', isDraft: false, reviewDecision: 'APPROVED', approvals: ['bot[bot]'], unresolved: [], ci: 'none', requestedReviewers: [] };
-  assert.deepEqual(headless.prReadiness(pr, [], ['ada', 'bob']), { ready: false, reasons: ['awaiting approval from @ada', 'awaiting approval from @bob', 'no CI checks reported'] });
+  assert.deepEqual(headless.prReadiness(pr, [], ['ada', 'bob']), { ready: false, reasons: ['awaiting approval from a selected reviewer', 'no CI checks reported'] });
 });
 
 
@@ -206,7 +207,7 @@ test('failed evidence pauses on Slack and cannot request reviewers or complete',
     throw halt;
   } });
   await assert.rejects(h.work(), e => e === halt);
-  assert.ok(h.messages.some(m => /^\*Evidence blocked\.\*/.test(m.text) && /API KEY REQUIRED/.test(m.text) && /\.env/.test(m.text)));
+  assert.ok(h.messages.some(m => /^❌ \*Evidence blocked\. PR not handed off\*/.test(m.text) && /\n• Map tiles show API KEY REQUIRED/.test(m.text) && /\.env/.test(m.text)));
   assert.ok(!h.events.includes('publish evidence'));
   assert.ok(!h.events.some(e => e.startsWith('reviewers:')));
 });
@@ -225,7 +226,7 @@ test('confirmed root env repair retries capture and inspection before publishing
 test('independent inspection rejects a passed manifest with broken screenshots', async () => {
   const h = harness({ task: { reviewsDone: 3, evidenceValidatedAt: undefined }, turn: o => ({ text: o.prompt.includes(headless.VERIFY_EVIDENCE_PROMPT) ? 'API KEY REQUIRED appears instead of the map.' : '' }), onReply: () => { throw halt; } });
   await assert.rejects(h.work(), e => e === halt);
-  assert.ok(h.messages.some(m => /^\*Evidence blocked\.\*\n• API KEY REQUIRED/.test(m.text)));
+  assert.ok(h.messages.some(m => /^❌ \*Evidence blocked\./.test(m.text) && /\n• The evidence check did not pass\n• API KEY REQUIRED appears instead of the map\./.test(m.text)));
   assert.ok(!h.events.includes('publish evidence'));
 });
 
@@ -238,10 +239,16 @@ test('evidence publication failure pauses instead of marking evidence complete',
 });
 
 test('a stalled capture is aborted and asks Slack for help after fifteen minutes', async () => {
-  const h = harness({ task: { reviewsDone: 3, evidenceValidatedAt: undefined }, turn: (_, __, ___, deadline) => { deadline(); return { text: '', error: 'aborted' }; }, onReply: () => { throw halt; } });
+  const h = harness({ task: { reviewsDone: 3, evidenceValidatedAt: undefined }, turn: (o, _, __, deadline) => { o.onText('CI shard 4 failed on the pushed commit'); o.onText('Rerunning that job and finishing the manifest'); deadline(); return { text: '', error: 'aborted' }; }, onReply: () => { throw halt; } });
   await assert.rejects(h.work(), e => e === halt);
   assert.ok(h.events.includes('abort agent'));
-  assert.ok(h.messages.some(m => /exceeded 15 minutes/.test(m.text)));
+  const report = h.messages.find(m => /exceeded 15 minutes/.test(m.text));
+  assert.ok(report, 'the timeout is reported');
+  // the owner sees what the agent was doing when it was stopped, newest first, and the raw error
+  assert.match(report.text, /^❌ \*Evidence blocked\. PR not handed off\*/);
+  assert.match(report.text, /\n• Last seen: Rerunning that job and finishing the manifest\n• Before that: CI shard 4 failed on the pushed commit\n/);
+  assert.match(report.text, /```\naborted\n```/);
+  assert.deepEqual(h.task.recent, ['CI shard 4 failed on the pushed commit', 'Rerunning that job and finishing the manifest']);
   assert.ok(!h.events.includes('publish evidence'));
 });
 
@@ -288,24 +295,26 @@ test('an unresolved thread is not recorded as addressed after a batch turn', asy
 });
 
 
-test('one reviewer approval keeps the loop open until both selected reviewers approve and CI passes', async () => {
+test('one reviewer approval completes once CI passes without waiting for the second reviewer', async () => {
   let sleeps = 0;
   const h = harness({ task: { reviewsDone: 3, reviewersRequested: ['ada', 'bob'] },
-    readPr: (n, pr) => ({ ...pr, approvals: n < 4 ? ['ada'] : ['ada', 'bob'], ci: n === 4 ? 'pending' : 'pass' }), sleep() { sleeps++; },
+    readPr: (n, pr) => ({ ...pr, approvals: ['ada'], ci: n < 4 ? 'pending' : 'pass' }), sleep() { sleeps++; },
   });
   await h.work();
-  assert.ok(sleeps >= 3);
+  assert.ok(sleeps >= 1, "pending CI must keep the worker polling");
   assert.equal(h.task.status, 'ready');
-  assert.ok(h.messages.some(m => /^\*Ready to merge:\*/.test(m.text) && /2 approvals/.test(m.text)));
+  assert.ok(h.messages.some(m => /^🎉🍭🎊 \*Ready to merge:\*/.test(m.text) && /1 reviewer approval/.test(m.text)));
 });
 
 test('worker failure asks Slack and resumes rather than ending the task', async () => {
-  const h = harness();
+  const h = harness({ task: { feature: { stage: 'Implementing', prs: [] }, recent: ['Running the migration', 'Pushing the branch'] } });
   let attempts = 0;
-  await h.run(async () => { if (++attempts === 1) throw new Error('Dependency unavailable'); h.task.status = 'ready'; });
+  await h.run(async () => { if (++attempts === 1) throw Object.assign(new Error('Dependency unavailable\nECONNREFUSED 127.0.0.1:5432'), { stderr: 'psql: connection refused', code: 2 }); h.task.status = 'ready'; });
   assert.equal(attempts, 2);
   assert.ok(h.events.includes('owner reply'));
-  assert.ok(h.messages.some(m => /Dependency unavailable/.test(m.text)));
+  // the crash report names the stage, the error, the agent's last lines and the raw detail in a code block
+  const report = h.messages.find(m => /Dependency unavailable/.test(m.text));
+  assert.match(report.text, /^❌ \*Stuck at Implementing\* \(<https:\/\/ticket\/1\|ticket>\)\n• Dependency unavailable\n• Last seen: Pushing the branch\n• Before that: Running the migration\n```\nECONNREFUSED 127\.0\.0\.1:5432\nexit 2\npsql: connection refused\n```\n_Reply with what to do; the task stays open\._\n\n<https:\/\/ticket\/1\|ticket> · <https:\/\/github.com\/a\/b\/tree\/feature\|github>\n\nSTATUS: WAITING$/);
   assert.ok(h.messages.filter(m => !m.thread).length === 1);
   assert.equal(h.task.status, 'ready');
   assert.equal(h.task.recoveryGuidance, 'Proceed');
@@ -356,4 +365,45 @@ test('a CI repair on the watch runs one tier down', async () => {
     turn: (o) => { seen.push(o.model); if (seen.length >= 1) throw halt; } });
   await assert.rejects(h.work(), e => e === halt);
   assert.equal(seen[0], tiers.delegate);
+});
+
+test('a saved question that was really an approval is dropped on restart instead of re-asked', async () => {
+  const h = harness({ task: { reviewsDone: 3, evidenceValidatedAt: undefined, pendingQuestion: { questions: ['Evidence is blocked: Evidence inspection did not pass: [evidence-approved] All nine captures inspected.'], afterTs: '1' } },
+    turn: o => ({ text: o.prompt.includes(headless.VERIFY_EVIDENCE_PROMPT) ? 'Looks right.\n[evidence-approved]' : '' }), onReply: () => { throw new Error('must not wait on Slack'); } });
+  await h.work();
+  assert.equal(h.task.pendingQuestion, undefined);
+  assert.equal(h.task.status, 'ready');
+  assert.ok(h.events.includes('publish evidence'));
+  assert.ok(h.messages.some(m => /Ignore the question above/.test(m.text)));
+  assert.ok(!h.events.includes('owner reply'));
+});
+
+
+test('lifecycle marks pauses/stops with crosses and reserves celebration for completion', async () => {
+  const h = harness();
+  await h.notify('t', 'running', 'Starting');
+  await h.notify('t', 'paused', 'Credits exhausted');
+  await h.notify('t', 'running', 'Credits restored');
+  await h.notify('t', 'stopped', 'Worker stopped');
+  await h.notify('t', 'completed', 'Both reviewers and CI approved; merge is yours');
+  const notifications = h.messages.filter(m => m.thread);
+  assert.deepEqual(notifications.map(m => m.text.match(/STATUS: (\w+)$/)?.[1]), ["RUNNING", "WAITING", "RUNNING", "STOPPED", "COMPLETED"]);
+  assert.ok(notifications[0].text.startsWith('✅ '));
+  assert.ok(notifications[1].text.startsWith('❌ '));
+  assert.ok(notifications[2].text.startsWith('✅ '));
+  assert.ok(notifications[3].text.startsWith('❌ '));
+  assert.ok(notifications[4].text.startsWith('🎉🍭🎊 '));
+  assert.ok(notifications.every(m => m.thread === h.task.slackThread && !m.broadcast));
+  assert.ok(notifications.every(m => /<https:\/\/ticket\/1\|ticket> · <https:\/\/github.com\/a\/b\/pull\/1\|github>\n\nSTATUS: \w+$/.test(m.text)));
+});
+
+test('a rebooted task opens with a pickup turn that works out where the last run got to, then continues', async () => {
+  const prompts = [];
+  const h = harness({ task: { rebootedAt: 5, feature: { stage: 'Implementing', prs: [] } }, turn: o => { prompts.push(o.prompt); if (prompts.length > 1) throw halt; return { text: '' }; } });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.ok(prompts[0].includes(headless.REBOOT_PROMPT), 'the first turn is the pickup');
+  assert.ok(!prompts[1].includes(headless.REBOOT_PROMPT), 'then the stage resumes');
+  assert.equal(h.task.rebootedAt, undefined);
+  assert.ok(h.messages.some(m => /Rebooted by you at \*Implementing\*/.test(m.text)));
+  assert.ok(!h.events.includes('owner reply'));
 });

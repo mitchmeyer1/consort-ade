@@ -72,7 +72,12 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   stop [--all]                                                            stop the daemon; --all stops the agents too (they resume on the next run)
   view [--once] [--width N] [--no-usage]                                  live table of agents, what they are doing, and each account's plan usage
   work <taskId>                                                           one worker (the daemon runs this)
-  tasks list | tasks release <task> | tasks retry <task> | tasks logs <task>      (task or ticket id)
+  tasks list                                                              every task: id, status, ticket, stage, branch, note
+  tasks logs <task>                                                       what that agent has been doing              (task or ticket id)
+  tasks reboot <task>                                                     stop that agent and start it again; it works out where the last run got to
+  tasks retry <task>                                                      queue a failed task again
+  tasks release <task>                                                    stop that agent for good and forget the ticket (worktree stays)
+  accounts unblock <id>                                                   clear a usage block early
   cli status | cli update                                                 the Claude Code and Codex binaries
   status
   export [--out <file>] [--scanner <id or name>]                          one file with the tokens, accounts and scanners this box runs
@@ -83,8 +88,8 @@ async function main(argv: string[]) {
   const a = parseArgs(argv);
   const [cmd, sub, ...rest] = a._;
   const s = loadState();
-  // commands whose first word is a value, not a subcommand: import <file>, work <task>
-  const key = cmd === "import" || cmd === "work" ? cmd : `${cmd === "jobs" ? "scanners" : cmd ?? "help"} ${sub ?? ""}`.trim(); // "jobs" was the first name for scanners
+  // commands whose first word is a value, not a subcommand: import <file>, work <task>, reboot <task>
+  const key = cmd === "import" || cmd === "work" || cmd === "reboot" ? cmd : `${cmd === "jobs" ? "scanners" : cmd ?? "help"} ${sub ?? ""}`.trim(); // "jobs" was the first name for scanners
   // everything that touches tickets, accounts or agents waits for the walk-through
   const open = ["help", "--help", "-h", "setup", "status", "cli status", "cli update", "import"];
   if (!open.includes(key) && !setupDone(s)) fail("not set up yet. Run `consort-cli setup` first; it checks the tools, adds your issue sources, AI accounts and Slack, and tests each one.");
@@ -250,6 +255,25 @@ async function main(argv: string[]) {
       if (t!.pid && alive(t!.pid)) fail(`${t!.ticket.id} is still running (pid ${t!.pid})`);
       t!.status = "working"; t!.note = undefined; t!.pid = undefined; t!.finishedAt = undefined; t!.restarts = 0; t!.updatedAt = Date.now(); saveState(s);
       console.log(`${t!.ticket.id} queued again; the daemon starts its worker within 15 seconds${daemonPid() ? "" : " once it runs (consort-cli run -d)"}.`); return;
+    }
+    case "reboot": case "tasks reboot": {
+      // stop the ticket's worker and start it again, opening with a turn that works out where the last run got to
+      const want = (key === "reboot" ? sub : rest[0]) ?? fail("task or ticket id required; see consort-cli view");
+      const t = s.tasks.find((x) => x.id === want || x.ticket.id === want) ?? fail("no such task; use the task id or the ticket id from consort-cli view");
+      if (["done", "released"].includes(t!.status)) fail(`${t!.ticket.id} is ${t!.status}; consort-cli tasks retry runs a finished task again`);
+      if (t!.pid && alive(t!.pid)) {
+        // wait for the worker to exit: it saves its state on the way out, and the daemon must not start a second one on top of it
+        try { process.kill(t!.pid); } catch {}
+        const until = Date.now() + 15_000;
+        while (alive(t!.pid) && Date.now() < until) await new Promise((r) => setTimeout(r, 250));
+        if (alive(t!.pid)) { try { process.kill(t!.pid, "SIGKILL"); } catch {} }
+        console.log(ok(`stopped worker ${t!.pid}`));
+      }
+      const fresh = loadState();
+      const task = fresh.tasks.find((x) => x.id === t!.id)!;
+      Object.assign(task, { status: "working", note: undefined, pendingQuestion: undefined, pid: undefined, finishedAt: undefined, restarts: 0, rebootedAt: Date.now(), activity: "rebooted by you; the daemon starts the worker shortly", updatedAt: Date.now() });
+      saveState(fresh);
+      console.log(`${task.ticket.id} rebooted at ${task.feature.stage}; the worker picks up after the last run within 15 seconds${daemonPid() ? "" : " once the daemon runs (consort-cli run -d)"}.`); return;
     }
     case "tasks logs": {
       const want = rest[0] ?? fail("task or ticket id required; see consort-cli view");

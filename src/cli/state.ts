@@ -77,6 +77,8 @@ export type Task = {
   /** Written only after evidence validation, independent inspection, and publication succeed. */
   evidenceValidatedAt?: number;
   recoveryGuidance?: string;
+  /** set by `consort-cli reboot`: the next worker opens with a turn that works out where the last run got to */
+  rebootedAt?: number;
   /** the Slack thread every message about this task goes to */
   slackThread?: string;
   /** agent session ids by provider, so a task keeps one conversation per provider */
@@ -95,6 +97,8 @@ export type Task = {
   note?: string;
   /** one line on what the worker is doing right now, for `consort-cli view` */
   activity?: string;
+  /** the agent's last few progress lines from its current turn, for the stop report on Slack */
+  recent?: string[];
   /** the task's own environment: Docker run code and the first port of its block (see cli/environment.ts) */
   runCode?: string; portBase?: number; envReadyAt?: number;
   /** tokens and estimated dollars over every agent turn so far (shared/headless.ts addTurnCost) */

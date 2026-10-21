@@ -151,7 +151,7 @@ export type PrState = {
   requestedReviewers: string[];
 };
 export type Readiness = { ready: boolean; reasons: string[] };
-/** Ready only when both selected humans approve, no threads remain, and CI passes. */
+/** Ready only when a selected human approves, no threads remain, and CI passes. */
 export function prReadiness(pr: PrState, botLogins: string[] = [], reviewers: string[] = pr.requestedReviewers): Readiness {
   const reasons: string[] = [];
   if (pr.state !== "OPEN") reasons.push(`PR is ${pr.state.toLowerCase()}`);
@@ -159,8 +159,8 @@ export function prReadiness(pr: PrState, botLogins: string[] = [], reviewers: st
   const excluded = new Set([...botLogins, pr.author ?? ""].map((n) => n.toLowerCase()));
   const human = new Set(pr.approvals.filter((a) => !excluded.has(a.toLowerCase()) && !/\[bot\]$/i.test(a)).map((a) => a.toLowerCase()));
   const required = [...new Set(reviewers.map((n) => n.toLowerCase()))];
-  if (required.length < 2) reasons.push("two human reviewers must be selected");
-  for (const reviewer of required) if (!human.has(reviewer)) reasons.push(`awaiting approval from @${reviewer}`);
+  if (!required.length) reasons.push("a human reviewer must be selected");
+  else if (!required.some((reviewer) => human.has(reviewer))) reasons.push("awaiting approval from a selected reviewer");
   if (pr.reviewDecision === "CHANGES_REQUESTED") reasons.push("changes requested");
   if (pr.reviewDecision === "REVIEW_REQUIRED") reasons.push("GitHub still requires review");
   if (pr.unresolved.length) reasons.push(`${pr.unresolved.length} unresolved thread${pr.unresolved.length === 1 ? "" : "s"}`);
@@ -193,22 +193,62 @@ export function replyAfter(messages: { ts: string; user?: string; text?: string;
  * Every line the worker posts to Slack. House style: short, bullets, plain words. One bold lead
  * when the owner has to act; otherwise one bullet. No narration, no hedging, no "I will".
  */
+export function slackMessage(kind: "blocked" | "update" | "completed", text: string): string {
+  if (/^(?:❌|✅|🎉🍭🎊)/u.test(text.trimStart())) return text;
+  return `${kind === "blocked" ? "❌" : kind === "completed" ? "🎉🍭🎊" : "✅"} ${text}`;
+}
+export type SlackTaskStatus = "RUNNING" | "WAITING" | "STOPPED" | "COMPLETED";
+/** Keep one final status line, including when a queued message is delivered again. */
+export type SlackTaskLinks = { ticket: string; github?: string };
+/** GitHub SSH and HTTPS remotes produce the same credential-free branch link. */
+export function githubBranchUrl(remote: string, branch: string): string | undefined {
+  const match = remote.match(/^(?:https?:\/\/(?:[^/@]+@)?github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/\s]+)\/([^/\s]+?)\/?$/i);
+  if (!match) return undefined;
+  return `https://github.com/${match[1]}/${match[2].replace(/\.git$/, "")}/tree/${encodeURIComponent(branch)}`;
+}
+export function slackStatus(text: string, status?: SlackTaskStatus, links?: SlackTaskLinks): string {
+  const saved = text.match(/\n\nSTATUS: (RUNNING|WAITING|STOPPED|COMPLETED)\s*$/);
+  const current = status ?? saved?.[1] ?? (text.trimStart().startsWith("🎉🍭🎊") ? "COMPLETED" : text.trimStart().startsWith("❌") ? "WAITING" : "RUNNING");
+  let body = text.replace(/\n\nSTATUS: (RUNNING|WAITING|STOPPED|COMPLETED)\s*$/, "").trimEnd();
+  if (links) {
+    body = body.replace(/\n\n<[^>\n]+\|ticket>(?: · <[^>\n]+\|github>)?$/, "");
+    const safe = (url: string) => /^https?:\/\//i.test(url) ? url.replace(/&/g, "&amp;").replace(/</g, "%3C").replace(/>/g, "%3E").replace(/\|/g, "%7C") : undefined;
+    const ticket = safe(links.ticket), github = links.github && safe(links.github);
+    if (ticket) body += `\n\n<${ticket}|ticket>${github ? ` · <${github}|github>` : ""}`;
+  }
+  return `${body}\n\nSTATUS: ${current}`;
+}
 export const slackLines = {
-  claimed: (title: string, url: string, branch: string) => `*Picked up:* <${url}|${title}>\n• branch \`${branch}\``,
-  stage: (stage: string, note?: string) => `• *${stage}*${note ? ` · ${brief(note, 160)}` : ""}`,
-  question: (qs: string[], url: string) => `*Need you* (<${url}|ticket>)\n${qs.map((q, i) => `${qs.length > 1 ? `${i + 1}. ` : "• "}${brief(q, 600)}`).join("\n")}\n_Reply in this thread._`,
-  pr: (url: string) => `• Draft PR: ${url}`,
-  review: (round: number, model: string, findings: number) => `• Review ${round} on \`${model}\`: ${findings} finding${findings === 1 ? "" : "s"}${findings ? ", fixing" : ""}`,
-  reviewers: (logins: string[]) => `• Review requested: ${logins.map((l) => `@${l}`).join(", ")}`,
-  ready: (url: string) => `*Ready to merge:* ${url}\n• 2 approvals · no open threads · CI green\n• Merge is yours`,
-  stuck: (why: string) => `*Stuck:* ${brief(why, 300)}\n• Reply here with what to do, or \`consort-cli tasks release <ticket>\``,
-  env: (ports: string) => `• Environment ready on ports ${ports}`,
-  evidence: (items: number, images: number, cost?: string) => `• Evidence posted to the PR and the ticket: ${items} item${items === 1 ? "" : "s"}, ${images} image${images === 1 ? "" : "s"}${cost ? `\n• Cost so far: ${cost}` : ""}`,
-  evidenceBlocked: (blockers: string[], envFile: string) => `*Evidence blocked.* Not handing off the PR.\n${blockers.map((b) => `• ${b}`).join("\n")}\n_What should I do? If a key is missing: add it to \`${envFile}\` on this machine, then reply "done". No secrets in Slack._`,
-  watching: (minutes: number) => `• Watching the PR (every ${minutes}m). I answer review comments and ping you when it is mergeable`,
-  answered: (n: number, open: number) => `• Answered ${n} review comment${n === 1 ? "" : "s"}${open ? `; ${open} still open` : ""}`,
-  reviewerPick: (logins: string[]) => `• Reviewers from the changed files' contributors: ${logins.map((l) => `@${l}`).join(", ")}`,
-  prClosed: (state: string) => `• PR ${state}. Done`,
+  claimed: (title: string, url: string, branch: string) => `✅ *Picked up:* <${url}|${title}>\n• branch \`${branch}\``,
+  stage: (stage: string, note?: string) => `✅ *${stage}*${note ? ` · ${brief(note, 160)}` : ""}`,
+  question: (qs: string[], url: string) => `❌ *Need you* (<${url}|ticket>)\n${qs.map((q, i) => `${qs.length > 1 ? `${i + 1}. ` : "• "}${brief(q, 600)}`).join("\n")}\n_Reply in this thread._`,
+  pr: (url: string) => `✅ Draft PR: ${url}`,
+  review: (round: number, model: string, findings: number) => `✅ Review ${round} on \`${model}\`: ${findings} finding${findings === 1 ? "" : "s"}${findings ? ", fixing" : ""}`,
+  reviewers: (logins: string[]) => `✅ Review requested: ${logins.map((l) => `@${l}`).join(", ")}`,
+  ready: (url: string) => `🎉🍭🎊 *Ready to merge:* ${url}\n• 1 reviewer approval · no open threads · CI green\n• Merge is yours`,
+  stuck: (why: string) => `❌ *Stuck:* ${brief(why, 300)}\n• Reply here with what to do, or \`consort-cli tasks release <ticket>\``,
+  env: (ports: string) => `✅ Environment ready on ports ${ports}`,
+  evidence: (items: number, images: number, cost?: string) => `✅ Evidence posted to the PR and the ticket: ${items} item${items === 1 ? "" : "s"}, ${images} image${images === 1 ? "" : "s"}${cost ? `\n• Cost so far: ${cost}` : ""}`,
+  /**
+   * The stop report: where it was, what broke, the agent's last lines, the raw error in a code
+   * block, and how to answer. Everything the owner needs to reply from a phone.
+   */
+  problem: (p: Problem, url?: string) => {
+    const lines = [`❌ *${p.lead ?? `Stuck at ${p.where}`}*${url ? ` (<${url}|ticket>)` : ""}`, `• ${brief(p.what, 200)}`];
+    for (const w of (p.why ?? []).slice(0, 5)) lines.push(`• ${brief(w, 200)}`);
+    const recent = (p.recent ?? []).filter(Boolean).slice(-3).reverse();
+    recent.forEach((r, i) => lines.push(`• ${i === 0 ? "Last seen" : "Before that"}: ${brief(r, 200)}`));
+    if (p.tried) lines.push(`• Tried: ${brief(p.tried, 200)}`);
+    const raw = (p.error ?? "").replace(/```/g, "'''").trim();
+    if (raw) lines.push("```", raw.length > 700 ? `…${raw.slice(-700)}` : raw, "```");
+    lines.push(`_${p.ask ?? 'Reply "retry", or say what to do.'}_`);
+    return lines.join("\n");
+  },
+  watching: (minutes: number) => `✅ Watching the PR (every ${minutes}m). I answer review comments and ping you when it is mergeable`,
+  answered: (n: number, open: number) => `✅ Answered ${n} review comment${n === 1 ? "" : "s"}${open ? `; ${open} still open` : ""}`,
+  reviewerPick: (logins: string[]) => `✅ Reviewers from the changed files' contributors: ${logins.map((l) => `@${l}`).join(", ")}`,
+  prClosed: (state: string) => `✅ PR ${state}. Done`,
+  rebooted: (stage: string) => `✅ Rebooted by you at *${stage}*. Checking where the last run got to, then continuing`,
 };
 /** one line, cut at a sentence end where possible */
 export const brief = (text: string, max: number): string => {
@@ -225,10 +265,56 @@ export const brief = (text: string, max: number): string => {
 export function blockerBullets(text: string, max = 5): string[] {
   const clean = text.replace(/\[evidence-approved\]/g, "").replace(/^Evidence inspection did not pass:\s*/i, "").replace(/\s+/g, " ").trim();
   const parts = clean.split(/(?<=[.!?])\s+(?=[A-Z0-9`(])/).map((p) => p.trim()).filter((p) => p.length > 3);
-  const keep = parts.filter((p) => !/^(I'll|I will|Let me|Now |Next,?)/i.test(p));
-  const out = (keep.length ? keep : parts).slice(0, max).map((p) => brief(p, 200));
+  const keep = parts.filter((p) => !/\b(I'll|I will|Let me|I re-ran|myself)\b|^(Now |Next,?)/i.test(p));
+  const out = (keep.length ? keep : parts).slice(0, max).map((p) => brief(p, 160));
   return out.length ? out : [brief(clean, 300) || "No reason given."];
 }
+/**
+ * What the owner needs when the worker stops. Thrown as a ProblemError by the places that know
+ * the details; anything else becomes one through problemOf. Rendered by slackLines.problem.
+ */
+export type Problem = {
+  /** the stage or step: "evidence", "Implementing", "PR watch", "worker" */
+  where: string;
+  /** the bold first line; defaults to "Stuck at <where>" */
+  lead?: string;
+  /** one line on what went wrong */
+  what: string;
+  /** the reasons, one bullet each: verifier blockers, missing files, readiness reasons */
+  why?: string[];
+  /** the agent's last progress lines, oldest first */
+  recent?: string[];
+  /** the raw error: message tail, stderr, exit code, stack. Shown in a code block */
+  error?: string;
+  /** what was already retried on its own */
+  tried?: string;
+  /** how to answer */
+  ask?: string;
+};
+export class ProblemError extends Error {
+  problem: Problem;
+  constructor(problem: Problem) { super(problem.what); this.name = "ProblemError"; this.problem = problem; }
+}
+/**
+ * Any thrown value as a Problem. A ProblemError keeps its fields; a plain error gives its first
+ * line as the summary and the rest (more lines, stderr, stdout, exit code, a stack for a code bug)
+ * as the raw error. `extra` fills what the throw site could not know: the stage, the recent lines, the ask.
+ */
+export function problemOf(e: unknown, where: string, extra: Partial<Problem> = {}): Problem {
+  if (e instanceof ProblemError) return { ...extra, ...e.problem, where: e.problem.where || where, recent: e.problem.recent?.length ? e.problem.recent : extra.recent };
+  const err = (typeof e === "object" && e ? e : {}) as { message?: string; stack?: string; stderr?: string; stdout?: string; code?: number | string };
+  const message = String(err.message ?? e ?? "unknown error").trim();
+  const [first, ...rest] = message.split("\n");
+  const bug = /^(TypeError|ReferenceError|RangeError|SyntaxError)\b/.test(message) || /^Cannot read|is not a function|is not defined/.test(first);
+  const stack = bug && err.stack ? err.stack.split("\n").slice(1, 4).map((l) => l.trim()).join("\n") : "";
+  const detail = [first.length > 200 ? first : "", rest.join("\n").trim(), typeof err.code !== "undefined" ? `exit ${err.code}` : "", (err.stderr ?? "").trim().slice(-600), (err.stdout ?? "").trim().slice(-300), stack].filter(Boolean).join("\n");
+  return { where, what: brief(first, 200), ...(detail ? { error: detail } : {}), ...extra };
+}
+/** the opening turn after `consort-cli reboot`: find out where the last run got to before doing anything else */
+export const REBOOT_PROMPT = `The owner stopped this worker and started it again: the previous run died or stalled. You are picking up after it.
+First find out where it got to. Read the ticket file and the saved ship state. On the branch run \`git status\` and \`git log --oneline -10\`. Check for uncommitted edits and whether the PR exists.
+Keep finished work. Finish or revert half-done edits so the tree is consistent. Then continue from that point; do not redo what is done.
+Reply in a few lines: where the last run got to, what you found half-done, and what you are doing next. Never merge.`;
 /** the verifier approved when its reply carries the marker, even with prose around it */
 export const evidenceApproved = (text: string) => /\[evidence-approved\]/.test(text);
 
@@ -472,9 +558,21 @@ Rules: set status to passed only when all acceptance checks passed and blockers 
 /** A fresh agent independently checks artifacts rather than trusting the capture agent's summary. */
 export const VERIFY_EVIDENCE_PROMPT = `Independently verify ${EVIDENCE_MANIFEST} against .consort/ship/SPEC.md, TICKET.md, the diff, and the actual evidence files. Read every image using image tools and inspect command output. Do not trust manifest.status or prose claiming success. Require proof for every acceptance criterion, successful end-to-end behavior, and working external dependencies. API KEY REQUIRED tiles, error pages, missing credentials, failed checks, placeholder output, or unproven criteria mean evidence is blocked. Failure diagnostics do not prove a working feature. Do not edit the manifest or publish anything. If all criteria are proven, reply with exactly [evidence-approved]. Otherwise explain the concrete blockers, naming any required env variable without its value. Consort will ask the owner on Slack and retry; never waive a requirement.`;
 
+export type EvidenceTiming = { startedAt: number; endedAt: number };
+/** Wall-clock task time through verified evidence, including pauses. */
+export function evidenceTimingLines(timing?: EvidenceTiming): string[] {
+  if (!timing || !Number.isFinite(timing.startedAt) || !Number.isFinite(timing.endedAt) || timing.endedAt < timing.startedAt) return [];
+  const stamp = (at: number) => new Date(at).toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
+  const seconds = Math.floor((timing.endedAt - timing.startedAt) / 1000);
+  const hours = Math.floor(seconds / 3600), minutes = Math.floor((seconds % 3600) / 60);
+  const duration = `${hours ? `${hours}h ` : ""}${hours || minutes ? `${minutes}m ` : ""}${seconds % 60}s`;
+  return [`Start time: ${stamp(timing.startedAt)}`, `End time (evidence ready): ${stamp(timing.endedAt)}`, `Duration (including pauses): ${duration}`];
+}
+
 /** the evidence as a GitHub comment: images inline, text as code blocks, the ticket linked */
-export function evidenceMarkdownForPr(m: EvidenceManifest, images: Record<string, string>, ticketUrl: string, ticketRefText: string, cost?: TaskCost): string {
-  const out = [`## Evidence`, "", m.summary || "Proof the feature works, gathered by Consort before handing the PR to reviewers.", "", `Ticket: ${ticketRefText} (${ticketUrl})${m.seeded ? `\nLocal data: ${m.seeded}` : ""}${cost ? `\n${costLine(cost)}` : ""}`, ""];
+export function evidenceMarkdownForPr(m: EvidenceManifest, images: Record<string, string>, ticketUrl: string, ticketRefText: string, cost?: TaskCost, timing?: EvidenceTiming): string {
+  const metadata = [`Ticket: ${ticketRefText} (${ticketUrl})`, ...(m.seeded ? [`Local data: ${m.seeded}`] : []), ...(cost ? [costLine(cost)] : []), ...evidenceTimingLines(timing)];
+  const out = [`## Evidence`, "", m.summary || "Proof the feature works, gathered by Consort before handing the PR to reviewers.", "", metadata.join("  \n"), ""];
   m.items.forEach((it, n) => {
     out.push(`### ${n + 1}. ${it.title}`);
     if (it.note) out.push(it.note);
@@ -488,8 +586,8 @@ export function evidenceMarkdownForPr(m: EvidenceManifest, images: Record<string
 }
 
 /** the evidence as a ticket comment: plain text, image links listed, the PR linked */
-export function evidenceTextForTicket(m: EvidenceManifest, images: Record<string, string>, prUrl: string, cost?: TaskCost): string {
-  const out = [`Evidence the feature works (gathered by Consort before handing the PR to reviewers)`, "", m.summary, "", `PR: ${prUrl}`, m.seeded ? `Local data: ${m.seeded}` : "", cost ? costLine(cost) : "", ""];
+export function evidenceTextForTicket(m: EvidenceManifest, images: Record<string, string>, prUrl: string, cost?: TaskCost, timing?: EvidenceTiming): string {
+  const out = [`Evidence the feature works (gathered by Consort before handing the PR to reviewers)`, "", m.summary, "", `PR: ${prUrl}`, m.seeded ? `Local data: ${m.seeded}` : "", cost ? costLine(cost) : "", ...evidenceTimingLines(timing), ""];
   m.items.forEach((it, n) => {
     out.push(`${n + 1}. ${it.title}${it.note ? ` — ${it.note}` : ""}`);
     if (it.command) out.push(`   $ ${it.command}`);
