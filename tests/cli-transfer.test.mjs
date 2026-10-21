@@ -49,3 +49,17 @@ test('import on an empty box clones the repo it lacks, writes the login file, li
   assert.equal(s.clickupKey, 'pk_2'); assert.equal(s.accounts.length, 3);
   await assert.rejects(applyBundle(s, { kind: 'other' }, { create }), /not a consort-cli export/);
 });
+
+
+test('Sentry producer routing and credentials survive export/import without live scan clocks', async () => {
+  const s = state();
+  s.jobs = [{ ...s.jobs[0], source: 'sentry', name: 'Sentry intake', scanStartedAt: 88, sentry: { host: 'https://sentry.io', org: 'org', projects: ['node'], environments: ['production'], token: 'sentry-secret', workspaceId: 'w', listId: 'l', folderId: 'f', tag: 'sentry', status: 'to do', query: 'is:unresolved' } }];
+  const bundle = await buildBundle(s, { readFile: () => undefined, remoteOf: async () => 'https://github.com/org/repo.git' });
+  assert.equal(bundle.scanners[0].sentry.token, 'sentry-secret');
+  assert.equal(bundle.scanners[0].sentry.listId, 'l');
+  assert.equal('scanStartedAt' in bundle.scanners[0], false);
+  const fresh = { version: 1, tasks: [], jobs: [], accounts: [] };
+  await applyBundle(fresh, { ...bundle, accounts: [] }, { exists: () => true, create() { throw new Error('not needed'); } });
+  assert.equal(fresh.jobs[0].source, 'sentry');
+  assert.equal(fresh.jobs[0].sentry.tag, 'sentry');
+});

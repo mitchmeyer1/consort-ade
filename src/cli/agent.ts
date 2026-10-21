@@ -6,6 +6,7 @@ import { cliBinary, type Deps as RuntimeDeps } from "../main/cliRuntime";
 import type { Provider } from "../shared/types";
 import { HOME, type Account } from "./state";
 import { isCodexLimitText, isUsageLimitText, limitFromRateEvent, type LimitHit } from "../shared/seatPool.ts";
+import type { TurnUsage } from "../shared/headless.ts";
 
 /**
  * One agent turn, headless: Claude Code through the agent SDK, Codex through its SDK, each on the
@@ -36,7 +37,7 @@ export const binaryFor = (provider: Provider): string => {
 };
 
 export type TurnOptions = { cwd: string; prompt: string; model: string; account: Account; resume?: string; maxTurns?: number; onText?: (t: string) => void; /** the task's own ports and Docker names, on top of the process env */ env?: Record<string, string> };
-export type Turn = { text: string; sessionId?: string; error?: string; limit?: LimitHit };
+export type Turn = { text: string; sessionId?: string; error?: string; limit?: LimitHit; /** what the turn spent, per model (Claude Code prices its own; Codex gives tokens only) */ usage?: TurnUsage[] };
 
 export const envFor = (account: Account, extra: Record<string, string> = {}): Record<string, string | undefined> => {
   const env: Record<string, string | undefined> = { ...process.env, ...extra };
@@ -61,6 +62,7 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
   let error: string | undefined;
   let limitText: string | undefined;
   let rejected: LimitHit | undefined;
+  let usage: TurnUsage[] | undefined;
   const ac = new AbortController();
   const stop = () => { ac.abort(); try { (q as any).close?.(); } catch {} };
   inFlight.add(stop);
@@ -85,6 +87,10 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
       if ((m.error === "rate_limit" || m.error === "billing_error") && isUsageLimitText(said)) limitText = said;
       else for (const b of m.message?.content ?? []) if (b.type === "text" && b.text) { chunks.push(b.text); o.onText?.(b.text); }
     } else if (m.type === "result") {
+      // one query() is one turn here, so its per-model totals are this turn's spend
+      const mu = m.modelUsage as Record<string, { inputTokens?: number; outputTokens?: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number; costUSD?: number }> | undefined;
+      if (mu && Object.keys(mu).length) usage = Object.entries(mu).map(([model, u]) => ({ model, tokens: { input: u.inputTokens ?? 0, output: u.outputTokens ?? 0, cacheRead: u.cacheReadInputTokens ?? 0, cacheWrite: u.cacheCreationInputTokens ?? 0 }, usd: typeof u.costUSD === "number" ? u.costUSD : undefined }));
+      else if (m.usage) usage = [{ model: o.model, tokens: { input: m.usage.input_tokens ?? 0, output: m.usage.output_tokens ?? 0, cacheRead: m.usage.cache_read_input_tokens ?? 0, cacheWrite: m.usage.cache_creation_input_tokens ?? 0 }, usd: typeof m.total_cost_usd === "number" ? m.total_cost_usd : undefined }];
       // a usage limit ends the turn as a "success" flagged is_error, with the limit notice as its result
       const said = [m.result, ...(m.errors ?? [])].find(isUsageLimitText);
       if (said) limitText = said;
@@ -99,7 +105,7 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
     else error = `${(e as Error).message}${said ? `: ${said.split("\n").filter(Boolean).slice(-3).join(" | ").slice(0, 300)}` : ""}`;
   } finally { inFlight.delete(stop); }
   const limit = limitText || rejected ? { text: limitText ?? "usage limit", window: rejected?.window, resetsAt: rejected?.resetsAt } : undefined;
-  return { text: chunks.join("\n"), sessionId, error, limit };
+  return { text: chunks.join("\n"), sessionId, error, limit, usage };
 }
 
 async function runCodex(o: TurnOptions): Promise<Turn> {
@@ -112,6 +118,7 @@ async function runCodex(o: TurnOptions): Promise<Turn> {
   let sessionId = o.resume;
   let error: string | undefined;
   let limit: LimitHit | undefined;
+  let usage: TurnUsage[] | undefined;
   const ac = new AbortController();
   const stop = () => ac.abort();
   inFlight.add(stop);
@@ -122,12 +129,13 @@ async function runCodex(o: TurnOptions): Promise<Turn> {
       if (ev.type === "thread.started") sessionId = ev.thread_id;
       else if (ev.type === "item.completed" && ev.item?.type === "agent_message" && ev.item.text) { texts.push(ev.item.text); o.onText?.(ev.item.text); }
       else if (ev.type === "item.completed" && ev.item?.type === "error" && ev.item.message) { fail(String(ev.item.message)); if (limit) break; }
+      else if (ev.type === "turn.completed" && ev.usage) usage = [{ model: o.model, tokens: { input: ev.usage.input_tokens ?? 0, output: ev.usage.output_tokens ?? 0, cacheRead: ev.usage.cached_input_tokens ?? 0, cacheWrite: ev.usage.cache_write_input_tokens ?? 0 } }];
       else if (ev.type === "turn.failed") { fail(ev.error?.message ?? "turn failed"); break; }
       else if (ev.type === "error") { fail(ev.message ?? "error"); break; }
     }
   } catch (e) { fail(String((e as Error).message ?? e)); }
   inFlight.delete(stop);
-  return { text: texts.join("\n"), sessionId, error, limit };
+  return { text: texts.join("\n"), sessionId, error, limit, usage };
 }
 
 /** a one-line "is this account usable" check: version of the binary and whether the login dir has credentials */

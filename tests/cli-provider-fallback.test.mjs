@@ -49,7 +49,8 @@ for (const blockedAtStart of [true, false]) {
     await assert.rejects(mod.exports.workTask('t'), e => e === reachedCodex);
     const codex = calls.at(-1);
     assert.equal(codex.account.id, 'x');
-    assert.equal(codex.model, modelTiers('codex', headless.seedModels().codex).orchestrator);
+    // the first turn is the environment setup, a routine turn, so it lands on Codex's worker tier (Sol, not Astra)
+    assert.equal(codex.model, modelTiers('codex', headless.seedModels().codex).delegate);
     assert.equal(codex.resume, undefined, 'Claude session must never be passed to Codex');
     assert.equal(task.activeProvider, 'codex');
     assert.equal(task.accountIds.codex, 'x');

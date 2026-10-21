@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { applyShipChange, newShipFeature, parseShipMarkers, prNumberFromUrl, shipBranch, shipFolder, shipSlug, stripShipMarkers, type ShipFeature, type ShipTicket } from "../shared/ship.ts";
 import { shipPrompt } from "../shared/shipPrompt.ts";
-import { DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, VERIFY_EVIDENCE_PROMPT, parseAskUser, observeReviewBatch, pickTurnAccount, prReadiness, RESPOND_TO_REVIEW, reviewRotation, seedModels, slackLines, stripAskUser } from "../shared/headless.ts";
+import { addTurnCost, blockerBullets, costLine, evidenceApproved, shortUsd, DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, VERIFY_EVIDENCE_PROMPT, parseAskUser, observeReviewBatch, pickTurnAccount, prReadiness, RESPOND_TO_REVIEW, reviewRotation, seedModels, slackLines, stripAskUser } from "../shared/headless.ts";
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { modelTiers } from "../shared/modelTiers.ts";
@@ -51,7 +51,13 @@ export async function workTask(taskId: string): Promise<void> {
   const builderProvider: Provider | undefined = have.claude ? "claude" : have.codex ? "codex" : undefined;
   if (!builderProvider) throw new Error("No AI accounts: run `consort-cli accounts add` first.");
   const models = seedModels();
+  // two tiers: the strongest model (Fable, Astra) plans, specs, reviews and judges; the tier below it
+  // (Opus, Sol) does the build and every routine turn (environment, fixes, review replies, CI repairs),
+  // which is nearly all of the tokens. shared/modelTiers.ts picks both off what the provider offers.
   const builderModel = modelTiers(builderProvider, models[builderProvider]).orchestrator;
+  const workerModel = modelTiers(builderProvider, models[builderProvider]).delegate;
+  /** the stages where the agent is executing a settled plan, so the worker tier is enough */
+  const EXECUTION_STAGES: readonly string[] = ["Implementing", "Ready to Test", "Revising"];
   const rotation = job.reviewModels?.length ? Array.from({ length: 3 }, (_, i) => job.reviewModels![i % job.reviewModels!.length]) : reviewRotation({ claude: have.claude ? models.claude : undefined, codex: have.codex ? models.codex : undefined });
 
   updateTask(task.id, { pid: process.pid, activity: "starting" });
@@ -89,13 +95,13 @@ export async function workTask(taskId: string): Promise<void> {
   const tell = async (text: string) => { await say(text); await source.comment(task.ticket.id, text.replace(/<([^|>]+)\|([^>]+)>/g, "$2 ($1)")).catch((e) => log(task, `ticket comment failed: ${e.message}`)); };
 
   /** ask the owner on Slack and wait; without Slack the question is logged and the run stops */
-  const ask = async (questions: string[]): Promise<string> => {
+  const ask = async (questions: string[], preformatted = false): Promise<string> => {
     updateTask(task.id, { status: "waiting", note: questions.join(" | "), activity: `waiting on Slack: ${questions[0].slice(0, 80)}` });
     if (!slack || !thread) throw new Error(`Needs the owner but Slack is not configured. Questions: ${questions.join(" | ")}`);
     const pending = loadState().tasks.find((t) => t.id === taskId)?.pendingQuestion;
-    const ts = pending?.afterTs ?? await slack.post(slackLines.question(questions, task.ticket.url), thread);
+    const ts = pending?.afterTs ?? await slack.post(preformatted ? questions[0] : slackLines.question(questions, task.ticket.url), thread);
     updateTask(taskId, { pendingQuestion: { questions, afterTs: ts } });
-    await notifyTask(taskId, "paused", "Waiting for your answer in Slack.");
+    await notifyTask(taskId, "paused", "Waiting on you.");
     log(task, `waiting on Slack for ${questions.length} answer(s)`);
     let lastEmptyLog = 0;
     let lastCheckResult: string | undefined;
@@ -106,7 +112,7 @@ export async function workTask(taskId: string): Promise<void> {
       statusEvent(result === "answer" ? "success" : result === "error" ? "error" : "warn", result === "answer" ? `Ticket ${task.ticket.id}: answer found in Slack; continuing` : result === "error" ? `Ticket ${task.ticket.id}: Slack reply check failed; retrying` : `Ticket ${task.ticket.id}: no Slack answer yet`);
     }, onTick: () => { updateTask(task.id, {}); void flushTaskNotifications(taskId); } });
     updateTask(task.id, { status: "working", note: undefined, pendingQuestion: undefined });
-    await notifyTask(taskId, "running", "Your Slack answer arrived; continuing the task.");
+    await notifyTask(taskId, "running", "Answer received.");
     return reply ?? "";
   };
 
@@ -142,11 +148,13 @@ export async function workTask(taskId: string): Promise<void> {
       updateTask(taskId, { status: "working", note: undefined });
       attempt++;
       if (who.provider !== provider) {
+        // keep the tier when the provider changes: a worker turn stays on the other provider's worker model
+        const wasWorker = model === modelTiers(provider, models[provider]).delegate;
         log(task, `No usable ${provider} account; continuing on ${who.provider} (${who.name})`);
         provider = who.provider;
-        model = modelTiers(provider, models[provider]).orchestrator;
+        model = modelTiers(provider, models[provider])[wasWorker ? "delegate" : "orchestrator"];
       }
-      updateTask(task.id, (t) => ({ activeProvider: provider, accountIds: { ...t.accountIds, [provider]: who.id }, activity: `${turnTag}running ${provider} on ${who.name}` }));
+      updateTask(task.id, (t) => ({ activeProvider: provider, accountIds: { ...t.accountIds, [provider]: who.id }, activity: `${turnTag}running ${provider} ${model} on ${who.name}` }));
       touchAccount(who.id);
       const session = resume && cur.accountIds[provider] === who.id ? cur.sessions[provider] : undefined;
       let usageLimit: ReturnType<typeof usageBlock>;
@@ -177,6 +185,7 @@ export async function workTask(taskId: string): Promise<void> {
         log(task, `${who.name} hit its ${describeLimit(res.limit)}${res.limit.resetsAt ? ` (resets ${resetLabel(res.limit.resetsAt)})` : ""}; moving to another ${provider} account.`);
         continue;
       }
+      if (res.usage?.length) updateTask(task.id, (t) => ({ cost: addTurnCost(t.cost, res.usage!) }));
       if (res.sessionId && resume) updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: res.sessionId } }));
       if (res.error) {
         crashes.set(who.id, (crashes.get(who.id) ?? 0) + 1);
@@ -219,14 +228,15 @@ export async function workTask(taskId: string): Promise<void> {
     return false;
   };
 
-  const completeReply = async (text: string, timeoutMs?: number) => {
+  const completeReply = async (text: string, timeoutMs?: number, model = builderModel) => {
     await applyReply(text);
     while (pendingUser) {
       const prompt = pendingUser;
       pendingUser = undefined;
-      await applyReply(await turn(prompt, builderProvider, builderModel, true, timeoutMs));
+      await applyReply(await turn(prompt, builderProvider, model, true, timeoutMs));
     }
   };
+  log(task, `models: planning, spec and judgement on ${builderModel}; build and routine turns on ${workerModel}`);
   if (task.recoveryGuidance) {
     await completeReply(await turn(`The owner gave recovery guidance on Slack: ${task.recoveryGuidance}\nApply it and continue from the saved task state. Never merge.`));
     updateTask(taskId, { recoveryGuidance: undefined });
@@ -239,10 +249,10 @@ export async function workTask(taskId: string): Promise<void> {
   // ── the environment: what running this repo takes, on this task's ports ────────────────
   if (!task.envReadyAt) {
     activity("setting up the local environment");
-    const text = await turn(ENVIRONMENT_PROMPT(env));
-    await completeReply(text);
+    const text = await turn(ENVIRONMENT_PROMPT(env), builderProvider, workerModel);
+    await completeReply(text, undefined, workerModel);
     updateTask(task.id, { envReadyAt: Date.now() });
-    await say(`Local environment ready on ports ${env.CONSORT_PORT_RANGE}: ${stripAskUser(stripShipMarkers(text)).split("\n").find((l) => l.trim()) ?? ""}`.slice(0, 400));
+    await say(slackLines.env(env.CONSORT_PORT_RANGE));
   }
 
   // ── the stages, Grilling through In Review ──────────────────────────────────────────────
@@ -250,8 +260,9 @@ export async function workTask(taskId: string): Promise<void> {
     const form = feature.stage === "Ready to Test" ? "approve" as const : "resume" as const;
     const prompt = pendingUser ?? shipPrompt({ feature, form: { form }, worktree: task.worktree, branch: task.branch, base: `origin/${job.base}`, ticketBody, headless: true });
     pendingUser = undefined;
+    const model = EXECUTION_STAGES.includes(feature.stage) ? workerModel : builderModel;
     turnTag = `t${n + 1} · `; activity(`${turnTag}starting`);
-    const text = await turn(prompt);
+    const text = await turn(prompt, builderProvider, model);
     log(task, `turn ${n + 1} at ${feature.stage}: ${stripAskUser(stripShipMarkers(text)).slice(0, 300).replace(/\n/g, " ")}`);
     await applyReply(text);
     if (idle >= STUCK_AFTER) {
@@ -282,8 +293,8 @@ export async function workTask(taskId: string): Promise<void> {
     updateTask(task.id, { feature });
     if (summary.total === 0) { updateTask(task.id, { reviewsDone: round }); continue; }
     activity(`fixing round ${round} findings (${summary.total})`);
-    const fix = await turn(shipPrompt({ feature, form: { form: "pr-loop" }, worktree: task.worktree, branch: task.branch, base: `origin/${job.base}`, review: { running: false, summary }, headless: true }));
-    await completeReply(fix);
+    const fix = await turn(shipPrompt({ feature, form: { form: "pr-loop" }, worktree: task.worktree, branch: task.branch, base: `origin/${job.base}`, review: { running: false, summary }, headless: true }), builderProvider, workerModel);
+    await completeReply(fix, undefined, workerModel);
     updateTask(task.id, { reviewsDone: round });
   }
 
@@ -300,25 +311,26 @@ export async function workTask(taskId: string): Promise<void> {
         const browser = await findBrowser();
         const helper = browser ? writeScreenshotHelper(task.worktree, browser) : undefined;
         const prompt = EVIDENCE_PROMPT({ helper: helper ?? "(no browser installed: backend output may be text; frontend screenshots require a browser)", ticketUrl: task.ticket.url, prUrl: prUrl!, worktree: task.worktree, repoRoot: job.repo });
-        const text = await turn(`${prompt}\n\n${guidance}`, builderProvider, builderModel, true, 15 * 60_000);
-        await completeReply(text, 15 * 60_000);
+        const text = await turn(`${prompt}\n\n${guidance}`, builderProvider, workerModel, true, 15 * 60_000);
+        await completeReply(text, 15 * 60_000, workerModel);
         validateEvidence(task.worktree);
         activity("checking evidence against acceptance criteria");
         const verification = await turn(VERIFY_EVIDENCE_PROMPT, builderProvider, builderModel, false, 15 * 60_000);
-        if (verification.trim() !== "[evidence-approved]") throw new Error(`Evidence inspection did not pass: ${stripAskUser(verification) || parseAskUser(verification).join(" ") || "No approval was returned."}`);
-        const published = await publishEvidence({ worktree: task.worktree, repo: job.repo, ticket: task.ticket, pr, prUrl: prUrl!, source, clickupKey: state.clickupKey });
+        if (!evidenceApproved(verification)) throw new Error(`Evidence inspection did not pass: ${stripAskUser(verification) || parseAskUser(verification).join(" ") || "No approval was returned."}`);
+        const cost = loadState().tasks.find((t) => t.id === taskId)?.cost;
+        const published = await publishEvidence({ worktree: task.worktree, repo: job.repo, ticket: task.ticket, pr, prUrl: prUrl!, source, clickupKey: state.clickupKey, cost });
         if (!published?.items || !published.prComment || !published.ticketComment) throw new Error("Working evidence was not published to both the PR and ticket.");
         const at = Date.now();
         feature = { ...feature, evidenceAt: at };
         updateTask(taskId, { feature, evidenceValidatedAt: at });
-        await say(`Verified evidence posted: ${published.items} items, ${published.images} images, on the PR and the ticket.`);
+        await say(slackLines.evidence(published.items, published.images, cost ? shortUsd(cost) : undefined));
         break;
       } catch (e) {
         blocked = (e as Error).message;
         log(task, `Evidence blocked: ${blocked}`);
       }
-      const answer = await ask([`Evidence is blocked and I will not hand off this PR: ${blocked.slice(0, 1500)}. What should I do to get the feature working? If a credential is missing, add the named variable to the repository-root env file on the Consort machine (${job.repo}/.env, or the repo's documented root env file), then confirm here. Do not send secret values in Slack.`]);
-      guidance = `The previous evidence attempt failed: ${blocked}\nThe owner answered on Slack: ${answer}\nApply the answer, rerun the feature, and replace failed captures with working proof. The answer does not waive acceptance checks. Copy only specifically needed env variables from the root env file after the owner confirms they are ready; never expose their values.`;
+      const answer = await ask([slackLines.evidenceBlocked(blockerBullets(blocked), `${job.repo}/.env`)], true);
+      guidance = `The previous evidence attempt failed: ${blocked}\nThe owner answered on Slack: ${answer}\nApply the answer, rerun the feature, and replace failed captures with working proof. The answer does not waive acceptance checks. Use existing required root env variables without another approval when covered by the sub-dollar AI allowance. If a key was missing, copy only that named variable after the owner confirms it is ready; never expose secret values.`;
     }
   }
 
@@ -335,7 +347,7 @@ export async function workTask(taskId: string): Promise<void> {
     const names = candidates.length === 2 && !requestError ? candidates : (await ask([`Which two GitHub reviewers should I request? Reply with two GitHub logins. ${requestError ?? "GitHub contributors did not identify two eligible reviewers."}`])).split(/[\s,]+/).map((n) => n.replace(/^@/, "")).filter(Boolean);
     const unique = [...new Set(names)].filter((n) => !excludedReviewers.some((login) => login.toLowerCase() === n.toLowerCase()) && /^[A-Za-z0-9-]+$/.test(n));
     if (unique.length !== 2) { requestError = "I need exactly two distinct GitHub logins, excluding the PR author."; continue; }
-    if (candidates.length === 2 && !requestError) await say(`Suggested reviewers from repository contributors: ${candidates.map((n) => `@${n}`).join(", ")}; prioritizing contributors to the changed files.`);
+    if (candidates.length === 2 && !requestError) await say(slackLines.reviewerPick(candidates));
     try { await requestReviewers(job.repo, pr, unique); }
     catch (e) { requestError = `GitHub rejected the review request: ${(e as Error).message}`; continue; }
     requested = unique;
@@ -343,8 +355,8 @@ export async function workTask(taskId: string): Promise<void> {
     await say(slackLines.reviewers(requested));
   }
   updateTask(task.id, { status: "monitoring", activity: "watching the PR" });
-  await notifyTask(taskId, "paused", "Waiting for human PR reviews or CI; checking every 3 minutes.");
-  await say(`Watching the PR every ${PR_POLL_MS / 60_000} minutes: I will answer review comments and tell you when it is ready to merge.`);
+  await notifyTask(taskId, "paused", "Waiting on reviews and CI.");
+  await say(slackLines.watching(PR_POLL_MS / 60_000));
 
   let recoveryGuidance: string | undefined;
   for (;;) {
@@ -357,7 +369,7 @@ export async function workTask(taskId: string): Promise<void> {
         recoveryGuidance = undefined;
         continue;
       }
-      if (state.state !== "OPEN") { await tell(`The PR is ${state.state.toLowerCase()}. Done here.`); await finish("done", `PR ${state.state.toLowerCase()}`); if (state.state === "MERGED") await source.setStatus(task.ticket.id, "done").catch(() => {}); return; }
+      if (state.state !== "OPEN") { await tell(slackLines.prClosed(state.state.toLowerCase())); await finish("done", `PR ${state.state.toLowerCase()}`); if (state.state === "MERGED") await source.setStatus(task.ticket.id, "done").catch(() => {}); return; }
       const seen = new Set(loadState().tasks.find((t) => t.id === taskId)?.threadsSeen ?? []);
       const fresh = [...state.unresolved, ...(state.feedback ?? [])].filter((t) => (!!t.threadId || !seen.has(t.id)) && t.author && t.author !== me && !/\[bot\]$/.test(t.author));
       const currentTask = loadState().tasks.find((t) => t.id === taskId)!;
@@ -368,28 +380,28 @@ export async function workTask(taskId: string): Promise<void> {
         const note = `collecting ${fresh.length} review comments; waiting for 3 quiet minutes`;
         updateTask(taskId, { status: "monitoring", activity: note });
         if (previousBatch !== observed.batch?.fingerprint) statusEvent("info", `Ticket ${task.ticket.id}: ${note}`);
-        await notifyTask(taskId, "paused", "Collecting human review comments into a batch; waiting for three minutes without changes.");
+        await notifyTask(taskId, "paused", "Batching new review comments (3m quiet period).");
         await new Promise((r) => setTimeout(r, PR_POLL_MS));
         continue;
       }
       if (fresh.length) {
         log(task, `${fresh.length} new review thread(s)`);
         activity(`answering ${fresh.length} review thread${fresh.length === 1 ? "" : "s"}`);
-        const text = await turn(RESPOND_TO_REVIEW(fresh));
-        await completeReply(text);
+        const text = await turn(RESPOND_TO_REVIEW(fresh), builderProvider, workerModel);
+        await completeReply(text, undefined, workerModel);
         const afterFix = await readPr(job.repo, pr);
         const remaining = new Set(afterFix.unresolved.map((t) => t.threadId).filter(Boolean));
         const addressed = fresh.filter((t) => !t.threadId || !remaining.has(t.threadId));
         updateTask(task.id, (t) => ({ threadsSeen: [...t.threadsSeen, ...addressed.map((f) => f.id)], reviewBatch: undefined }));
         await requestReviewers(job.repo, pr, requested);
         statusEvent("success", `Ticket ${task.ticket.id}: handled a batch of ${fresh.length} review comments`);
-        await say(`Handled ${fresh.length} review comments as a batch; ${fresh.length - addressed.length} threads still unresolved and will be checked again.`);
+        await say(slackLines.answered(fresh.length, fresh.length - addressed.length));
         continue; // re-read straight away
       }
       if (state.ci === "fail") {
-        const answer = await turn(`PR ${prUrl} has failing CI. Read gh pr checks and the failed job logs, fix the failures in this branch, run relevant checks, commit and push. If a failure needs a business or design decision, ask the owner. Never merge.`);
-        await completeReply(answer);
-        await notifyTask(taskId, "paused", "Waiting for CI after the repair; checking every 3 minutes.");
+        const answer = await turn(`PR ${prUrl} has failing CI. Read gh pr checks and the failed job logs, fix the failures in this branch, run relevant checks, commit and push. If a failure needs a business or design decision, ask the owner. Never merge.`, builderProvider, workerModel);
+        await completeReply(answer, undefined, workerModel);
+        await notifyTask(taskId, "paused", "CI repair pushed; waiting on CI.");
         updateTask(taskId, { status: "monitoring" });
         await new Promise((r) => setTimeout(r, PR_POLL_MS));
         continue;
@@ -402,7 +414,7 @@ export async function workTask(taskId: string): Promise<void> {
       }
       log(task, `not ready: ${ready.reasons.join(", ")}`);
       updateTask(taskId, { status: "monitoring", activity: `watching PR: ${ready.reasons.join(", ")}` });
-      await notifyTask(taskId, "paused", "Waiting for human PR reviews or CI; checking every 3 minutes.");
+      await notifyTask(taskId, "paused", "Waiting on reviews and CI.");
       } catch (e) {
         log(task, `Review loop needs help: ${(e as Error).message}`);
         const answer = await ask([`I could not continue the PR review/CI loop: ${(e as Error).message.slice(0, 1200)}. What should I do? I will keep this task open until both requested reviewers approve and CI passes.`]);

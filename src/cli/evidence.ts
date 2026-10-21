@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative, isAbsolute } from "node:path";
 import { promisify } from "node:util";
-import { EVIDENCE_DIR, EVIDENCE_MANIFEST, evidenceMarkdownForPr, evidenceTextForTicket, evidenceProblems, parseEvidenceManifest, type EvidenceManifest } from "../shared/headless.ts";
+import { EVIDENCE_DIR, EVIDENCE_MANIFEST, evidenceMarkdownForPr, evidenceTextForTicket, evidenceProblems, parseEvidenceManifest, type EvidenceManifest, type TaskCost } from "../shared/headless.ts";
 import { ticketRef, type ShipTicket } from "../shared/ship.ts";
 import type { Source } from "./sources";
 
@@ -145,7 +145,7 @@ export async function pushEvidenceBranch(repo: string, ticketId: string, files: 
 export type Published = { items: number; images: number; prComment: boolean; ticketComment: boolean; hosting: "clickup" | "branch" | "none" };
 
 /** post the manifest to the PR and the ticket, images hosted where they will render */
-export async function publishEvidence(o: { worktree: string; repo: string; ticket: ShipTicket; pr: number; prUrl: string; source: Source; clickupKey?: string }): Promise<Published> {
+export async function publishEvidence(o: { worktree: string; repo: string; ticket: ShipTicket; pr: number; prUrl: string; source: Source; clickupKey?: string; /** what the task has spent, printed with the evidence */ cost?: TaskCost }): Promise<Published> {
   const m = validateEvidence(o.worktree);
   const dir = join(o.worktree, EVIDENCE_DIR);
   const wanted = [...new Set(m.items.map((i) => i.image).filter((f): f is string => !!f))].filter((f) => existsSync(join(dir, f)));
@@ -161,12 +161,12 @@ export async function publishEvidence(o: { worktree: string; repo: string; ticke
     }
   }
   if (wanted.some((f) => !images[f])) throw new Error("Evidence image hosting did not return every capture URL.");
-  const prBody = evidenceMarkdownForPr(m, images, o.ticket.url, ticketRef(o.ticket));
+  const prBody = evidenceMarkdownForPr(m, images, o.ticket.url, ticketRef(o.ticket), o.cost);
   const bodyFile = join(dir, ".pr-comment.md");
   writeFileSync(bodyFile, prBody);
   let prComment = false, ticketComment = false;
   await gh(o.repo, ["pr", "comment", String(o.pr), "--body-file", bodyFile]); prComment = true;
-  await o.source.comment(o.ticket.id, evidenceTextForTicket(m, images, o.prUrl)); ticketComment = true;
+  await o.source.comment(o.ticket.id, evidenceTextForTicket(m, images, o.prUrl, o.cost)); ticketComment = true;
   return { items: m.items.length, images: Object.keys(images).length, prComment, ticketComment, hosting };
 }
 

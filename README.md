@@ -92,6 +92,8 @@ For development:
 pnpm dev
 ```
 
+Sentry can also feed grouped, deduplicated issues into a chosen ClickUp list/tag for those workers: [Sentry scanner setup](docs/SENTRY-SCANNER.md).
+
 The headless CLI, for a server with no window (start with the [Linux worker setup checklist](docs/LINUX-SETUP.md); CLI reference: [docs/CLI.md](docs/CLI.md)):
 
 ```bash

@@ -206,7 +206,7 @@ test('failed evidence pauses on Slack and cannot request reviewers or complete',
     throw halt;
   } });
   await assert.rejects(h.work(), e => e === halt);
-  assert.ok(h.messages.some(m => /API KEY REQUIRED/.test(m.text) && /root env file/.test(m.text)));
+  assert.ok(h.messages.some(m => /^\*Evidence blocked\.\*/.test(m.text) && /API KEY REQUIRED/.test(m.text) && /\.env/.test(m.text)));
   assert.ok(!h.events.includes('publish evidence'));
   assert.ok(!h.events.some(e => e.startsWith('reviewers:')));
 });
@@ -225,7 +225,7 @@ test('confirmed root env repair retries capture and inspection before publishing
 test('independent inspection rejects a passed manifest with broken screenshots', async () => {
   const h = harness({ task: { reviewsDone: 3, evidenceValidatedAt: undefined }, turn: o => ({ text: o.prompt.includes(headless.VERIFY_EVIDENCE_PROMPT) ? 'API KEY REQUIRED appears instead of the map.' : '' }), onReply: () => { throw halt; } });
   await assert.rejects(h.work(), e => e === halt);
-  assert.ok(h.messages.some(m => /inspection did not pass.*API KEY REQUIRED/.test(m.text)));
+  assert.ok(h.messages.some(m => /^\*Evidence blocked\.\*\n• API KEY REQUIRED/.test(m.text)));
   assert.ok(!h.events.includes('publish evidence'));
 });
 
@@ -296,7 +296,7 @@ test('one reviewer approval keeps the loop open until both selected reviewers ap
   await h.work();
   assert.ok(sleeps >= 3);
   assert.equal(h.task.status, 'ready');
-  assert.ok(h.messages.some(m => /Both requested reviewers approved/.test(m.text)));
+  assert.ok(h.messages.some(m => /^\*Ready to merge:\*/.test(m.text) && /2 approvals/.test(m.text)));
 });
 
 test('worker failure asks Slack and resumes rather than ending the task', async () => {
@@ -325,4 +325,35 @@ test('intentional worker shutdown does not ask Slack to recover an aborted turn'
   await h.run(async () => { stopping = true; throw new Error('agent aborted during SIGTERM'); }, () => stopping);
   assert.equal(h.messages.length, 0);
   assert.ok(!h.events.includes('owner reply'));
+});
+
+test('planning turns run on the strongest model; build, environment, fix and review-reply turns run one tier down', async () => {
+  const tiers = modelTiers('claude');
+  const seen = [];
+  // environment (worker) → Grilling (orchestrator) → Implementing (worker): the turn text moves the stage along
+  let n = 0;
+  const h = harness({ task: { envReadyAt: undefined, feature: { stage: 'Grilling', prs: [], history: [] } }, turn: (o) => {
+    seen.push({ model: o.model, prompt: o.prompt });
+    n++;
+    if (n === 1) return { text: 'env ready' };
+    if (n === 2) return { text: "[ship-stage: Spec'd | done]" };
+    if (n === 3) return { text: '[ship-stage: Implementing | building]' };
+    throw halt;
+  } });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.equal(seen[0].model, tiers.delegate, 'environment setup is routine');
+  assert.equal(seen[1].model, tiers.orchestrator, 'grilling needs judgement');
+  assert.equal(seen[2].model, tiers.orchestrator, "spec'd still plans");
+  assert.equal(seen[3].model, tiers.delegate, 'implementing executes a settled plan');
+  assert.notEqual(tiers.delegate, tiers.orchestrator);
+  assert.match(h.task.activity, new RegExp(`running claude ${tiers.delegate}`));
+});
+
+test('a CI repair on the watch runs one tier down', async () => {
+  const tiers = modelTiers('claude');
+  const seen = [];
+  const h = harness({ task: { reviewsDone: 3 }, readPr: (n, base) => ({ ...base, ci: 'fail' }),
+    turn: (o) => { seen.push(o.model); if (seen.length >= 1) throw halt; } });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.equal(seen[0], tiers.delegate);
 });

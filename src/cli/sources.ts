@@ -177,5 +177,6 @@ export function githubSource(job: Job): Source {
 
 export const sourceFor = (job: Job, clickupKey?: string): Source => {
   if (job.source === "clickup") { if (!clickupKey) throw new Error("No ClickUp API key: run `consort-cli clickup set-key <key>`."); return clickupSource(clickupKey, job); }
+  if (job.source === "sentry") throw new Error("Sentry scanners create ClickUp tickets; they do not dispatch workers.");
   return githubSource(job);
 };

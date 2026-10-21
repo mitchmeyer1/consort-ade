@@ -128,7 +128,7 @@ test('the account pool: sticky while usable, least recently used otherwise, bloc
   assert.equal(earliestUnblock(accounts, 'codex', now), undefined);
 });
 
-test('the dashboard keeps finished tasks for two hours, then drops them; running ones always show', async () => {
+test('the dashboard keeps finished tasks for a day, then drops them; running ones always show', async () => {
   const { visibleTasks, ago } = await import('../src/shared/headless.ts');
   const h = 3_600_000, now = 10 * h;
   const tasks = [
@@ -136,8 +136,9 @@ test('the dashboard keeps finished tasks for two hours, then drops them; running
     { id: 'fresh', status: 'ready', finishedAt: now - 1 * h, updatedAt: now - 1 * h },
     { id: 'old', status: 'done', finishedAt: now - 3 * h, updatedAt: now - 3 * h },
     { id: 'legacy', status: 'failed', updatedAt: now - 2.5 * h },
+    { id: 'stale', status: 'done', finishedAt: now - 25 * h, updatedAt: now - 25 * h },
   ];
-  assert.deepEqual(visibleTasks(tasks, now).map((t) => t.id), ['live', 'fresh']);
+  assert.deepEqual(visibleTasks(tasks, now).map((t) => t.id), ['live', 'fresh', 'old', 'legacy']);
   assert.equal(ago(5 * 60_000), '5m');
   assert.equal(ago(2 * h + 5 * 60_000), '2h 05m');
   assert.equal(ago(28 * h), '1d 4h');
@@ -323,4 +324,64 @@ test('completion requires both selected reviewers, excludes bots and author, and
   assert.equal(ready({ reviewDecision: 'REVIEW_REQUIRED' }).ready, false);
   for (const ci of ['fail', 'pending', 'none']) assert.equal(ready({ ci }).ready, false);
   assert.equal(prReadiness(pr).ready, false, 'missing saved reviewer identities cannot count as completion');
+});
+
+
+test('all unattended turns pre-authorize cumulative sub-dollar AI calls and existing env keys', async () => {
+  const { AI_COST_POLICY, HEADLESS_RULES, EVIDENCE_PROMPT } = await import('../src/shared/headless.ts');
+  assert.match(AI_COST_POLICY, /combined additional cost for this task/);
+  assert.match(AI_COST_POLICY, /below USD 1\.00/);
+  assert.match(AI_COST_POLICY, /Count all planned calls, retries, and earlier calls/);
+  assert.match(AI_COST_POLICY, /may reach USD 1\.00 or cannot be conservatively bounded/);
+  assert.match(AI_COST_POLICY, /copy only that named variable.*without another confirmation/);
+  assert.ok(HEADLESS_RULES.includes(AI_COST_POLICY));
+  const evidence = EVIDENCE_PROMPT({ helper: '/helper', ticketUrl: 'ticket', prUrl: 'pr', worktree: '/work', repoRoot: '/root-repo' });
+  assert.ok(evidence.includes(AI_COST_POLICY));
+  assert.match(evidence, /For a missing credential/);
+});
+
+test('a task\'s cost grows turn by turn: Claude Code\'s own dollars are kept, Codex tokens are priced from the table, unknown models count tokens only', async () => {
+  const { addTurnCost, costCell, costLine, priceFor, usdFor, evidenceMarkdownForPr, evidenceTextForTicket } = await import('../src/shared/headless.ts');
+  assert.deepEqual(priceFor('claude-opus-5-5-20260401'), priceFor('claude-opus-5-5'));
+  assert.deepEqual(priceFor('gpt-5.1-codex-max'), priceFor('gpt-5-codex'));
+  assert.equal(priceFor('llama-9'), undefined);
+  assert.equal(usdFor('claude-opus-5-5', { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0 }), 4);
+  let c = addTurnCost(undefined, [{ model: 'claude-fable-5-1', tokens: { input: 1000, output: 500, cacheRead: 20_000, cacheWrite: 0 }, usd: 0.4 }]);
+  assert.equal(c.turns, 1); assert.equal(c.usd, 0.4);
+  c = addTurnCost(c, [{ model: 'gpt-5-codex', tokens: { input: 1_000_000, output: 100_000, cacheRead: 0, cacheWrite: 0 } }]);
+  assert.equal(c.turns, 2); assert.equal(Math.round(c.usd * 100) / 100, 2.65); assert.equal(c.unpriced, undefined);
+  assert.equal(costCell(c), '$2.65 1.1M');
+  c = addTurnCost(c, [{ model: 'mystery-1', tokens: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0 } }]);
+  assert.deepEqual(c.unpriced, ['mystery-1']); assert.equal(costCell(c), '~$2.65 1.1M');
+  assert.equal(costCell(undefined), '');
+  const line = costLine(c);
+  assert.match(line, /^Agent cost: ~\$2\.65 \(est\.\) over 3 turns and 1\.1M tokens/);
+  assert.match(line, /no price known for mystery-1/);
+  const m = { kind: 'backend', summary: 'It works.', items: [{ title: 'Ran it', text: 'ok' }] };
+  assert.match(evidenceMarkdownForPr(m, {}, 'https://t', 'T-1', c), /Agent cost: ~\$2\.65/);
+  assert.match(evidenceTextForTicket(m, {}, 'https://pr', c), /Agent cost: ~\$2\.65/);
+  assert.doesNotMatch(evidenceTextForTicket(m, {}, 'https://pr'), /Agent cost/);
+});
+
+test('Slack lines are short bullets; the verifier\'s essay becomes a few blockers and an approval with prose around it still counts', async () => {
+  const { slackLines, blockerBullets, evidenceApproved, brief } = await import('../src/shared/headless.ts');
+  assert.ok(evidenceApproved('Everything checks out.\n[evidence-approved]. Nothing else to do.'));
+  assert.ok(!evidenceApproved('Blocked: the API key tile shows API KEY REQUIRED.'));
+  const essay = "Evidence inspection did not pass: Nothing's running; I'll bring up the test DBs and re-run the 24 backend tests myself. The sign-in screenshot shows a 500 from the API. OPENAI_API_KEY is required and not set. Let me check the logs now. The Playwright specs did not run.";
+  const bullets = blockerBullets(essay);
+  assert.ok(bullets.length >= 3 && bullets.length <= 5, bullets.join('|'));
+  assert.ok(bullets.some((b) => /OPENAI_API_KEY/.test(b)));
+  assert.ok(!bullets.some((b) => /^Let me|^I'll/.test(b)), 'narration is dropped');
+  const msg = slackLines.evidenceBlocked(bullets, '/repo/.env');
+  assert.match(msg, /^\*Evidence blocked\.\*/);
+  assert.ok(msg.split('\n').filter((l) => l.startsWith('• ')).length === bullets.length);
+  assert.ok(!/I will not hand off/.test(msg));
+  assert.equal(slackLines.question(['Keep archived members? — recommend: no'], 'https://t'), '*Need you* (<https://t|ticket>)\n• Keep archived members? — recommend: no\n_Reply in this thread._');
+  assert.equal(slackLines.review(2, 'claude-opus-5', 0), '• Review 2 on `claude-opus-5`: 0 findings');
+  assert.equal(slackLines.evidence(3, 2, '$4.10'), '• Evidence posted to the PR and the ticket: 3 items, 2 images\n• Cost so far: $4.10');
+  assert.equal(slackLines.answered(3, 1), '• Answered 3 review comments; 1 still open');
+  assert.equal(brief('a'.repeat(50) + '. ' + 'b'.repeat(300), 120).endsWith('…'), true);
+  for (const line of [slackLines.claimed('T', 'https://t', 'mm/x'), slackLines.ready('https://pr'), slackLines.stuck('the PR vanished'), slackLines.watching(15), slackLines.env('20000-20099')]) {
+    for (const l of line.split('\n')) assert.ok(l.length <= 160, l);
+  }
 });

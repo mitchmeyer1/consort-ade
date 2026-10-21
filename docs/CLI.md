@@ -17,6 +17,10 @@ Needs Node 22.12+, git, and the GitHub CLI (`gh auth login`) for PRs and issues.
 
 State lives in `~/.consort-cli/state.json` (mode 600; it holds API keys), logins in `~/.consort-cli/logins/<account>/`, worktrees in `~/.consort-cli/worktrees/`, logs in `~/.consort-cli/logs/`. Set `CONSORT_CLI_HOME` to move it.
 
+## Sentry ticket producer
+
+A third scanner type, `sentry`, groups unresolved Sentry issues and creates tagged ClickUp tickets in a setup-selected list (or a selected list inside a folder). It does not start workers. Align a ClickUp worker scanner with that destination and tag to implement the tickets later. See [Sentry routing and duplicate protection](SENTRY-SCANNER.md).
+
 ## Set up, once
 
 ```bash
@@ -85,6 +89,10 @@ Every stage move is posted to the Slack thread and as a comment on the ticket; t
 
 Starts, stops, pauses, resumes, and completion are posted only inside the existing ticket thread. Each ticket has one root message; questions, updates, retries, and worker restarts reuse its saved thread. Replies never broadcast to the channel feed. An immediate account/model fallback stays running and does not send pause/resume alerts. Exhausting all accounts sends one pause alert; recovery sends a separate resume alert. Questions pause until your reply, including after a worker restart. Waiting on human reviews or CI sends a pause alert; new feedback resumes work.
 
+## Which model does what
+
+Two tiers per provider, read off what the provider offers (`src/shared/modelTiers.ts`). The strongest model (Claude Fable, Codex Astra) does the thinking: grilling, the spec, the review rounds, and the check that the evidence proves the acceptance criteria. The tier below it (Claude Opus, Codex Sol) does the execution, which is nearly all of the tokens: the local environment, the build (Implementing, Ready to Test, Revising), the fixes after each review round, the evidence gathering, review-comment replies and CI repairs. When a turn falls over to the other provider it keeps its tier. The task log's first lines name both models.
+
 ## Slack messages you will see
 
 - `Picked up <title>. Working on branch …` — the thread opens.
@@ -133,7 +141,7 @@ Nothing asks for permission: Claude Code runs with permissions bypassed and Code
 consort-cli view
 ```
 
-A live table (header says whether the daemon is running): ticket, title, the step it is on as `n/9` (environment, grilling, build, test, one review per model in the rotation, evidence, watch PR), the step's name, the step that comes next, status, the account in use, how long it has run, and what the worker is doing right now. Finished tasks stay for two hours, then drop off. Below it, the accounts, each with its plan meters as bars (5-hour, weekly, and one per model family, like the desktop's Usage panel; amber from 80%, red from 95%), when the 5-hour window resets, and any block; then the scanners with their next scan, and the commands that stop the daemon or one agent. Usage is read once a minute by asking each login's own CLI, with no model call; API-key accounts have no meters. `--once` prints one frame (`--no-usage` skips the read). `q` quits.
+A live table (header says whether the daemon is running): ticket, title, the step it is on as `n/9` (environment, grilling, build, test, one review per model in the rotation, evidence, watch PR), the step's name, the step that comes next, status, the account in use, what it has cost so far (estimated dollars and total tokens over every agent turn; Claude Code prices its own turns, Codex turns are priced from the table in `src/shared/headless.ts`), how long it has run, and what the worker is doing right now. Finished tasks stay for 24 hours, then drop off. The same cost line is printed with the evidence on the PR and the ticket. Below it, the accounts, each with its plan meters as bars (5-hour, weekly, and one per model family, like the desktop's Usage panel; amber from 80%, red from 95%), when the 5-hour window resets, and any block; then the scanners with their next scan, and the commands that stop the daemon or one agent. Usage is read once a minute by asking each login's own CLI, with no model call; API-key accounts have no meters. `--once` prints one frame (`--no-usage` skips the read). `q` quits.
 
 STATUS shows green `RUNNING` while the worker is active, yellow `WAITING` for a Slack reply, human PR review, or CI, and red `STOPPED` when the task failed or its worker is gone. Yellow `LIMIT` means the worker is waiting for account usage to reset; yellow `STALLED` means no activity for ten minutes. Bright blue `COMPLETED` means three internal reviews are finished, two human reviewers were requested, both selected reviewers approved, every thread is resolved, and CI passed. Consort never merges. ACTIVITY shows the reason. A usage limit can leave a worker alive and waiting, so it does not by itself mean the task failed.
 
@@ -172,3 +180,10 @@ PR checks run every three minutes. New unresolved threads and review comments wa
 The worker stays in the review/CI loop until both saved reviewer usernames have current GitHub approvals, GitHub has no outstanding review requirement or requested changes, every review thread is resolved, and CI has passed. One approval or an approval from a different person does not satisfy this rule. Empty, unknown, or pending CI results block completion. GitHub treats skipped/neutral checks as non-failing; failures, cancelled checks, stale checks, and startup failures trigger repair.
 
 There is no build-turn cutoff. Unrecoverable agent errors ask the owner in the existing Slack thread and resume after the answer. Four repeated process crashes also ask Slack instead of permanently failing the task. Provider capacity waits still resume when credits refill. Waiting for reviewers or CI keeps polling without an owner response. When all completion checks pass, STATUS becomes bright blue COMPLETED, ready for the owner to merge. Consort never merges.
+
+
+### Small AI API costs
+
+Live AI API calls for implementation, tests, and evidence are pre-authorized when their combined additional cost for the task is conservatively estimated below USD 1.00. The worker counts planned calls, retries, and earlier calls together, bounds request/output sizes, and records the estimate locally. It asks on Slack if the total may reach USD 1.00 or cannot be bounded. This is agent guidance, not an enforced provider billing cap.
+
+Within that allowance, the worker may use an existing required API key from the repository-root env file and copy only the named variable into the worktree's appropriate ignored env file without another confirmation. Secret values never belong in logs, screenshots, Slack, or commits. A missing key still requires the owner to add it on the Consort machine. Material business/security decisions and plan upgrades still require an answer.

@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { ago, diffCell, FINISHED, parseShortstat, taskHealth, taskStep, scanCountdown, usageBars, usageBarText, visibleTasks } from "../shared/headless.ts";
+import { ago, costCell, diffCell, FINISHED, parseShortstat, taskHealth, taskStep, scanCountdown, usageBars, usageBarText, visibleTasks } from "../shared/headless.ts";
 import { usageBlock, type ConnectorUsage } from "../shared/usage.ts";
 import { recentStatusEvents } from "./statusLog";
 import { readAllUsage } from "./usage";
@@ -12,7 +12,7 @@ import { loadState, LOG_DIR, type Task } from "./state";
 /**
  * `consort-cli view`: a terminal dashboard that redraws every couple of seconds from the state
  * file. One row per task: ticket, title, stage, status, the account it is on, what the worker
- * is doing right now, and how long it has run. Finished tasks stay for two hours, then drop
+ * is doing right now, and how long it has run. Finished tasks stay for a day, then drop
  * off. Below the table: the accounts (and which are blocked until when) and the scanners with
  * their next scan. `q` quits.
  */
@@ -54,8 +54,8 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   s.accounts = s.accounts.map((a) => { const u = usage?.get(a.id); const block = u && usageBlock(u, now); return block ? { ...a, blockedUntil: Math.max(a.blockedUntil ?? 0, block.until), blockedWhy: block.reason } : a; });
   const tasks = visibleTasks(s.tasks, now).sort((a, b) => (FINISHED.includes(a.status) ? 1 : 0) - (FINISHED.includes(b.status) ? 1 : 0) || b.updatedAt - a.updatedAt);
   const accountName = (id?: string) => s.accounts.find((a) => a.id === id)?.name ?? "";
-  const cols = { ticket: 12, title: 26, step: 5, stage: 14, next: 14, status: 10, account: 12, ports: 12, age: 8, log: 5, diff: 14 };
-  const fixed = Object.values(cols).reduce((a, b) => a + b, 0) + 12 * 2;
+  const cols = { ticket: 12, title: 26, step: 5, stage: 14, next: 14, status: 10, account: 12, cost: 12, ports: 12, age: 8, log: 5, diff: 14 };
+  const fixed = Object.values(cols).reduce((a, b) => a + b, 0) + 13 * 2;
   const activityW = Math.max(20, width - fixed);
   const lines: string[] = [];
   const active = tasks.filter((t) => !FINISHED.includes(t.status)).length;
@@ -65,7 +65,7 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
     `${mint(`${active} active`)} ${dim(`· ${new Date(now).toLocaleTimeString()} · q to quit`)}`,
   ]));
   lines.push("");
-  lines.push(dim([pad("TICKET", cols.ticket), pad("TITLE", cols.title), pad("STEP", cols.step), pad("STAGE", cols.stage), pad("NEXT", cols.next), pad("STATUS", cols.status), pad("ACCOUNT", cols.account), pad("PORTS", cols.ports), pad("AGE", cols.age), pad("LOG", cols.log), pad("DIFF", cols.diff), "ACTIVITY"].join("  ")));
+  lines.push(dim([pad("TICKET", cols.ticket), pad("TITLE", cols.title), pad("STEP", cols.step), pad("STAGE", cols.stage), pad("NEXT", cols.next), pad("STATUS", cols.status), pad("ACCOUNT", cols.account), pad("COST", cols.cost), pad("PORTS", cols.ports), pad("AGE", cols.age), pad("LOG", cols.log), pad("DIFF", cols.diff), "ACTIVITY"].join("  ")));
   if (!tasks.length) lines.push(dim("  nothing in flight; the daemon claims tickets as scanners come due"));
   for (const t of tasks) {
     const acct = accountName(t.activeProvider ? t.accountIds[t.activeProvider] : t.accountIds.claude ?? t.accountIds.codex);
@@ -78,7 +78,7 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
     const finished = FINISHED.includes(t.status);
     const cell = (s: string, f: (x: string) => string) => (finished && t.status !== "failed" ? dim(s) : f(s));
     const step = taskStep(t, 3);
-    lines.push([cell(pad(t.ticket.id, cols.ticket), mint), cell(pad(t.ticket.title, cols.title), cream), cell(pad(`${step.n}/${step.total}`, cols.step), mint), cell(pad(step.name, cols.stage), (x) => x), cell(pad(step.next, cols.next), dim), healthPaint(pad(health.label, cols.status)), cell(pad(acct, cols.account), dim), cell(pad(t.portBase ? `${t.portBase}-${t.portBase + 99}` : "", cols.ports), dim), cell(pad(age, cols.age), dim), cell(pad(log.lines ? String(log.lines) : "", cols.log), dim), cell(pad(diff, cols.diff), (x) => (!diff || diff.startsWith("+0 −0") ? dim(x) : mint(x))), cell(pad(activity, activityW), (x) => x)].join("  "));
+    lines.push([cell(pad(t.ticket.id, cols.ticket), mint), cell(pad(t.ticket.title, cols.title), cream), cell(pad(`${step.n}/${step.total}`, cols.step), mint), cell(pad(step.name, cols.stage), (x) => x), cell(pad(step.next, cols.next), dim), healthPaint(pad(health.label, cols.status)), cell(pad(acct, cols.account), dim), cell(pad(costCell(t.cost), cols.cost), amber), cell(pad(t.portBase ? `${t.portBase}-${t.portBase + 99}` : "", cols.ports), dim), cell(pad(age, cols.age), dim), cell(pad(log.lines ? String(log.lines) : "", cols.log), dim), cell(pad(diff, cols.diff), (x) => (!diff || diff.startsWith("+0 −0") ? dim(x) : mint(x))), cell(pad(activity, activityW), (x) => x)].join("  "));
   }
   lines.push("");
   const readAt = usage ? Math.max(0, ...[...usage.values()].map((u) => u.at)) : 0;
@@ -101,7 +101,7 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   lines.push(cream(bold("Scanners")));
   if (!s.jobs.length) lines.push(dim("  none: consort-cli scanners add …"));
   for (const j of s.jobs) {
-    lines.push(`  ${pad(j.name, 20)} ${pad(`${j.source}${j.scope ? ` ${j.scope.kind} ${j.scope.id}` : j.listId ? ` list ${j.listId}` : ""}`, 22)} ${j.enabled ? pid ? mint(scanCountdown(j, now)) : amber("paused · daemon stopped") : dim("off")}  ${dim(j.repo)}`);
+    lines.push(`  ${pad(j.name, 20)} ${pad(`${j.source}${j.source === "sentry" ? ` → list ${j.sentry?.listId ?? "?"} #${j.sentry?.tag ?? "?"}` : j.scope ? ` ${j.scope.kind} ${j.scope.id}` : j.listId ? ` list ${j.listId}` : ""}`, 22)} ${j.enabled ? pid ? mint(scanCountdown(j, now)) : amber("paused · daemon stopped") : dim("off")}  ${dim(`${j.repo}${j.source === "sentry" ? ` → ClickUp ${j.sentry?.listId ?? "?"} #${j.sentry?.tag ?? "?"}` : ""}`)}`);
   }
   lines.push("");
   lines.push(cream(bold("Status log · last 8")));

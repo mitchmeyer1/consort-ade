@@ -9,6 +9,7 @@ import { accountStatus, loginInteractive, runtimeDeps, stopAgents } from "./agen
 import { newTask, workTask } from "./pipeline";
 import { flushTaskNotifications, notifyTask, runTaskUntilFinished } from "./lifecycle";
 import { statusEvent } from "./statusLog";
+import { scanSentry, validateSentryConfig } from "./sentry";
 import { Slack } from "./slack";
 import { sourceFor } from "./sources";
 import { renderView, viewLoop } from "./view";
@@ -62,6 +63,9 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
            [--status-progress "in progress"] [--status-review "in review"] [--status-done complete]
            [--review-models claude:claude-fable-5-1,codex:gpt-6-astra,claude:claude-opus-5]
   scanners add --name <n> --source github --repo <path> --base main [--tag ai-handle] …
+  scanners add --name <n> --source sentry --repo <shared-checkout> --sentry-org <org> --sentry-project <slug> --workspace <id> --list <id> --tag <tag>
+           [--sentry-host https://sentry.io] [--environment production] [--query is:unresolved] [--create-status "to do"]
+           reads SENTRY_AUTH_TOKEN from the environment; creates ClickUp tickets without starting workers
   scanners list | scanners remove <id> | scanners enable|disable <id> | scanners scan <id>   (scan: dry run)
                                                                           a scanner watches one place for tickets and hands each match to a worker agent
   run [-d]                                                                the daemon: scan, claim, dispatch, watch; -d runs it in the background
@@ -150,7 +154,7 @@ async function main(argv: string[]) {
 
     case "scanners add": {
       const source = need(a, "source") as Job["source"];
-      if (source !== "clickup" && source !== "github") fail("--source must be clickup or github");
+      if (source !== "clickup" && source !== "github" && source !== "sentry") fail("--source must be clickup, github or sentry");
       const repo = resolve(need(a, "repo"));
       if (!existsSync(join(repo, ".git"))) fail(`${repo} is not a git checkout`);
       const filters: SourceFilters = { tags: list(a, "tag"), statuses: list(a, "status"), nameIncludes: list(a, "name-includes"), nameExcludes: list(a, "name-excludes"), assignees: list(a, "assignee") };
@@ -161,16 +165,34 @@ async function main(argv: string[]) {
         statuses: { progress: str(a, "status-progress") ?? DEFAULT_STATUSES.progress, review: str(a, "status-review") ?? DEFAULT_STATUSES.review, done: str(a, "status-done") ?? DEFAULT_STATUSES.done },
         ...(reviewModels.length ? { reviewModels } : {}), enabled: true, createdAt: Date.now(),
       };
+      if (source === "sentry") {
+        job.sentry = { host: str(a, "sentry-host") ?? "https://sentry.io", org: need(a, "sentry-org"), projects: list(a, "sentry-project"), environments: list(a, "environment"), query: str(a, "query") ?? "is:unresolved", token: process.env.SENTRY_AUTH_TOKEN ?? "", workspaceId: need(a, "workspace"), listId: need(a, "list"), ...(str(a, "folder") ? { folderId: str(a, "folder") } : {}), tag: need(a, "tag").toLowerCase(), status: str(a, "create-status") };
+        if (!s.clickupKey) fail("Configure ClickUp first: consort-cli clickup set-key <key>");
+        validateSentryConfig(job.sentry);
+        job.maxParallel = 0;
+        job.everyMinutes = Number(str(a, "every") ?? 15) || 15;
+      }
       if (source === "clickup" && !job.scope) fail("--list, --folder or --space <clickup id> is required for a clickup scanner");
       s.jobs.push(job); saveState(s);
       console.log(`Added scanner ${job.name} (${job.id}): ${source}${job.scope ? ` ${job.scope.kind} ${job.scope.id}` : ""} every ${job.everyMinutes} min → ${repo} on ${job.base}`);
       return;
     }
-    case "scanners list": { for (const j of s.jobs) console.log(`${j.id}  ${j.enabled ? "on " : "off"}  ${j.name.padEnd(20)}  ${j.source}${j.scope ? ` ${j.scope.kind} ${j.scope.id}` : j.listId ? ` list ${j.listId}` : ""}  every ${j.everyMinutes}m  ${j.repo} (${j.base})  filters ${JSON.stringify(j.filters)}  last scan ${j.lastScanAt ? new Date(j.lastScanAt).toLocaleString() : "never"}`); if (!s.jobs.length) console.log("No scanners."); return; }
+    case "scanners list": {
+      for (const j of s.jobs) {
+        const target = j.source === "sentry" ? ` ${j.sentry?.org}/${j.sentry?.projects.join(",")} → ClickUp list ${j.sentry?.listId} #${j.sentry?.tag} (${j.sentry?.status ?? "list default"})` : j.scope ? ` ${j.scope.kind} ${j.scope.id}` : j.listId ? ` list ${j.listId}` : "";
+        console.log(`${j.id}  ${j.enabled ? "on " : "off"}  ${j.name.padEnd(20)}  ${j.source}${target}  every ${j.everyMinutes}m  ${j.repo} (${j.base})  filters ${JSON.stringify(j.filters)}  last scan ${j.lastScanAt ? new Date(j.lastScanAt).toLocaleString() : "never"}`);
+      }
+      if (!s.jobs.length) console.log("No scanners."); return;
+    }
     case "scanners remove": { s.jobs = s.jobs.filter((j) => j.id !== rest[0]); saveState(s); console.log("Removed."); return; }
     case "scanners enable": case "scanners disable": { const j = s.jobs.find((x) => x.id === rest[0]) ?? fail("no such scanner"); j!.enabled = sub === "enable"; saveState(s); console.log(`${j!.name}: ${j!.enabled ? "on" : "off"}`); return; }
     case "scanners scan": {
       const j = s.jobs.find((x) => x.id === rest[0]) ?? fail("no such scanner");
+      if (j!.source === "sentry") {
+        const result = await scanSentry(j!, s.clickupKey, { dryRun: true });
+        console.log(`Sentry preview: ${result.issues} issues → ${result.groups} groups; ${result.existing} already ticketed; ${result.preview} would create in ClickUp list ${j!.sentry!.listId} tagged ${j!.sentry!.tag}. No writes performed.`);
+        return;
+      }
       const tickets = await sourceFor(j!, s.clickupKey).scan();
       const taken = new Set(s.tasks.map((t) => t.ticket.id));
       for (const t of tickets) console.log(`${matchesFilters(t, j!.filters) ? (taken.has(t.id) ? "taken " : "MATCH ") : "skip  "} ${t.id}  ${t.status ?? ""}  [${t.tags.join(", ")}]  ${t.title}`);
@@ -207,7 +229,7 @@ async function main(argv: string[]) {
         stopAgents();
         // Keep the pid until exit: the daemon must not start a replacement during Slack delivery.
         updateTask(id!, { activity: `worker stopping (${sig}); progress saved` });
-        await notifyTask(id!, "stopped", `Worker stopped by ${sig}; progress is saved. The daemon will resume it if running; otherwise it resumes on the next run.`);
+        await notifyTask(id!, "stopped", `Stopped (${sig}). Progress saved; resumes on the next run.`);
         process.exit(0);
       });
       await runTaskUntilFinished(id!, () => workTask(id!), stopAgents, () => stopping);
@@ -217,7 +239,7 @@ async function main(argv: string[]) {
     case "tasks list": { for (const t of s.tasks) console.log(`${t.id}  ${t.status.padEnd(10)}  ${t.ticket.id.padEnd(12)}  ${t.feature.stage.padEnd(14)}  ${t.branch}  ${t.note ?? ""}`); if (!s.tasks.length) console.log("No tasks."); return; }
     case "tasks release": {
       const t = s.tasks.find((x) => x.id === rest[0] || x.ticket.id === rest[0]) ?? fail("no such task; use the task id or the ticket id from consort-cli view");
-      await notifyTask(t!.id, "stopped", "Task released by the owner.");
+      await notifyTask(t!.id, "stopped", "Released by you.");
       if (t!.pid) { try { process.kill(t!.pid); } catch {} }
       t!.status = "released"; t!.pid = undefined; t!.finishedAt = Date.now(); saveState(s);
       if (t!.runCode) { const r = await cleanupEnvironment(t!.runCode); console.log(`Removed ${r.containers} container(s), ${r.networks} network(s), ${r.volumes} volume(s) of ${t!.runCode}.`); }
@@ -274,19 +296,19 @@ async function daemon() {
         }
         saveState(s2);
       }
-      if (task2 && !FINISHED.includes(task2.status)) await notifyTask(t.id, "stopped", `Worker exited (${signal ?? code}); the daemon will restart it.`);
+      if (task2 && !FINISHED.includes(task2.status)) await notifyTask(t.id, "stopped", `Worker exited (${signal ?? code}); restarting.`);
       console.log(`${new Date().toISOString()} worker ${child.pid} for ${t.ticket.id} exited ${code}`);
     });
   };
   for (;;) {
     const s = loadState();
-    // finished tasks fall out of the state file after a week; the dashboard stops showing them after two hours
+    // finished tasks fall out of the state file after a week; the dashboard stops showing them after a day
     const keep = s.tasks.filter((t) => !FINISHED.includes(t.status) || Date.now() - (t.finishedAt ?? t.updatedAt) < 7 * 24 * 3_600_000);
     if (keep.length !== s.tasks.length) { s.tasks = keep; saveState(s); }
     for (const t of s.tasks) if (!(t.pid && alive(t.pid))) await flushTaskNotifications(t.id);
     // workers that should be running but are not: the daemon restarted, or the box did
     for (const t of s.tasks) if (["working", "waiting", "monitoring"].includes(t.status) && !(t.pid && alive(t.pid))) {
-      if (t.pid) await notifyTask(t.id, "stopped", "Worker process disappeared; restarting it.");
+      if (t.pid) await notifyTask(t.id, "stopped", "Worker vanished; restarting.");
       spawnWorker(t);
     }
     for (const job of s.jobs.filter((j) => j.enabled)) {
@@ -297,6 +319,12 @@ async function daemon() {
       if (startingJob) { startingJob.scanStartedAt = Date.now(); saveState(starting); }
       statusEvent("info", `${job.name}: scanning ${job.source} for new tasks`);
       try {
+        if (job.source === "sentry") {
+          const result = await scanSentry(job, s.clickupKey);
+          statusEvent(result.reserved ? "warn" : "success", `${job.name}: ${result.issues} Sentry issues → ${result.groups} groups; ${result.created} ClickUp tickets created; ${result.existing} existing; ${result.reserved} reserved elsewhere or awaiting reconciliation`);
+          const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); j.scanStartedAt = undefined; saveState(after); }
+          continue;
+        }
         const source = sourceFor(job, s.clickupKey);
         const tickets = await source.scan();
         const live = loadState();

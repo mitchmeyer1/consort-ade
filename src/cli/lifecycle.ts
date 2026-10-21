@@ -1,4 +1,5 @@
 /** Persist task activity transitions and retry Slack delivery without repeating pause alerts. */
+import { blockerBullets, slackLines } from "../shared/headless.ts";
 import { randomUUID } from "node:crypto";
 import { loadState, updateTask, type Task } from "./state";
 import { Slack } from "./slack";
@@ -65,7 +66,7 @@ export async function runTaskUntilFinished(taskId: string, work: () => Promise<v
 
 async function askForRecovery(taskId: string, reason: string): Promise<void> {
   updateTask(taskId, { status: "waiting", note: reason, activity: "waiting for recovery guidance in Slack" });
-  await notifyTask(taskId, "paused", "Waiting for your recovery guidance in Slack; this task remains open.");
+  await notifyTask(taskId, "paused", "Needs a hand. Reply here; the task stays open.");
   for (;;) {
     const state = loadState();
     const task = state.tasks.find((t) => t.id === taskId);
@@ -76,13 +77,13 @@ async function askForRecovery(taskId: string, reason: string): Promise<void> {
       const thread = loadState().tasks.find((t) => t.id === taskId)?.slackThread;
       if (!thread) throw new Error("Waiting for the task's Slack thread.");
       const slack = new Slack(state.slack);
-      const questions = task.pendingQuestion?.questions ?? [`I could not continue: ${reason.slice(0, 1200)}. What should I do? I will resume after your answer and keep working until both requested reviewers approve and CI passes.`];
+      const questions = task.pendingQuestion?.questions ?? [slackLines.stuck(blockerBullets(reason, 3).join(" "))];
       const ts = task.pendingQuestion?.afterTs ?? await slack.post(questions.join("\n"), thread);
       updateTask(taskId, { pendingQuestion: { questions, afterTs: ts } });
       const answer = await slack.waitForReply(thread, ts, { onTick: () => { updateTask(taskId, {}); void flushTaskNotifications(taskId); } });
       if (!answer) continue;
       updateTask(taskId, { status: "working", pendingQuestion: undefined, restarts: 0, note: undefined, recoveryGuidance: answer });
-      await notifyTask(taskId, "running", "Your Slack recovery answer arrived; continuing this task.");
+      await notifyTask(taskId, "running", "Answer received.");
       return;
     } catch (e) {
       console.error(`Recovery is waiting for Slack: ${(e as Error).message}`);

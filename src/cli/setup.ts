@@ -5,6 +5,7 @@ import { createInterface } from "node:readline/promises";
 import { promisify } from "node:util";
 import { cliStatus } from "../main/cliRuntime";
 import { accountStatus, loginInteractive, runtimeDeps } from "./agent";
+import { configureSentryScanner } from "./sentrySetup";
 import { Slack } from "./slack";
 import { clickupLists, clickupSource } from "./sources";
 import { DEFAULT_STATUSES, loadState, LOGINS_DIR, newId, saveState, STATE_FILE, WORK_DIR, type Account, type CliState, type Job } from "./state";
@@ -176,10 +177,22 @@ export async function runSetup(): Promise<void> {
         s = loadState(); s.jobs = s.jobs.filter((x) => x.id !== j.id); saveState(s); console.log(`scanner "${j.name}" removed`);
       }
     }
-    if (!s.jobs.length || await yes(ask, "Add another scanner? (another ClickUp list, folder or space, or a GitHub repo, with its own filters and repo)", false)) {
+    if (!s.jobs.length || await yes(ask, "Add another scanner? (a ClickUp worker, GitHub worker, or Sentry ticket producer)", false)) {
       for (;;) {
-        const kind = (await ask("Source: clickup or github", { default: "clickup" })).toLowerCase();
-        if (kind !== "clickup" && kind !== "github") { console.log(bad("type clickup or github")); continue; }
+        const kind = (await ask("Source: clickup, github or sentry", { default: "clickup" })).toLowerCase();
+        if (kind !== "clickup" && kind !== "github" && kind !== "sentry") { console.log(bad("type clickup, github or sentry")); continue; }
+        if (kind === "sentry") {
+          console.log(dim("Sentry creates grouped ClickUp tickets only. Select the shared GitHub checkout used for atomic duplicate reservations; existing worker scanners pick up the output list/tag."));
+          const repo = await repoChecks(ask);
+          if (!repo) continue;
+          try {
+            const configured = await configureSentryScanner(ask, loadState().clickupKey, repo);
+            s = loadState(); s.clickupKey = configured.clickupKey; s.jobs.push(configured.job); saveState(s);
+            console.log(ok(`Sentry scanner saved: ClickUp list ${configured.job.sentry!.listId}, tag ${configured.job.sentry!.tag}. Align a ClickUp worker scanner with that destination to implement the tickets.`));
+          } catch (e) { console.log(bad(`Sentry setup failed: ${(e as Error).message}`)); }
+          if (await yes(ask, "Add another scanner?", false)) continue;
+          break;
+        }
         const job: Partial<Job> = { id: newId("job"), source: kind as Job["source"], filters: {}, everyMinutes: 1, maxParallel: 2, statuses: { ...DEFAULT_STATUSES }, enabled: true, createdAt: Date.now() };
         if (kind === "clickup") {
           s = loadState();
@@ -242,7 +255,7 @@ export async function runSetup(): Promise<void> {
         job.maxParallel = Number(await ask("Tickets this scanner works on at once", { default: "2" })) || 2;
         s = loadState(); s.jobs.push(job as Job); saveState(s);
         console.log(ok(`scanner "${job.name}" saved`));
-        if (!(await yes(ask, "Add another scanner? (another ClickUp list, folder or space, or a GitHub repo, with its own filters and repo)", false))) break;
+        if (!(await yes(ask, "Add another scanner? (a ClickUp worker, GitHub worker, or Sentry ticket producer)", false))) break;
       }
     }
     s = loadState();
@@ -266,7 +279,7 @@ export async function runSetup(): Promise<void> {
         s = loadState(); s.accounts = s.accounts.filter((x) => x.id !== acc.id); saveState(s); console.log(`account "${acc.name}" removed`);
       }
     }
-    while (!s.accounts.length || await yes(ask, "Add an account?", !s.accounts.length)) {
+    while (s.jobs.some((j) => j.source !== "sentry") && (!s.accounts.length || await yes(ask, "Add an account?", !s.accounts.length))) {
       const provider = (await ask("Provider: claude or codex", { default: "claude" })).toLowerCase();
       if (provider !== "claude" && provider !== "codex") { console.log(bad("type claude or codex")); continue; }
       const name = await ask("A label for it (e.g. work, personal, billing)", { default: `${provider} ${s.accounts.filter((x) => x.provider === provider).length + 1}` });

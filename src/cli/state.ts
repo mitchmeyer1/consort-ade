@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import type { Provider } from "../shared/types";
-import type { ReviewPick, SourceFilters } from "../shared/headless";
+import type { ReviewPick, SourceFilters, TaskCost } from "../shared/headless";
 import type { ShipFeature, ShipTicket } from "../shared/ship";
 
 /**
@@ -40,7 +40,8 @@ export type SlackConfig = { botToken: string; userId: string; channel?: string }
 export type StatusNames = { progress: string; review: string; done: string };
 export type Job = {
   id: string; name: string;
-  source: "clickup" | "github";
+  source: "clickup" | "github" | "sentry";
+  sentry?: import("../shared/sentryScanner.ts").SentryScannerConfig;
   /** absolute path of the repository checkout on this machine (on its base branch) */
   repo: string;
   /** the branch features are cut from and PRs target, e.g. main */
@@ -96,6 +97,8 @@ export type Task = {
   activity?: string;
   /** the task's own environment: Docker run code and the first port of its block (see cli/environment.ts) */
   runCode?: string; portBase?: number; envReadyAt?: number;
+  /** tokens and estimated dollars over every agent turn so far (shared/headless.ts addTurnCost) */
+  cost?: TaskCost;
 };
 export type CliState = { version: 1; accounts: Account[]; slack?: SlackConfig; clickupKey?: string; branchPrefix?: string; jobs: Job[]; tasks: Task[];
   /** set by `consort-cli setup` at the end of the walk-through; every other command checks it */

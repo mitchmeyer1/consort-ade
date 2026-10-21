@@ -19,13 +19,21 @@ export function parseAskUser(text: string): string[] {
 }
 export const stripAskUser = (text: string) => text.replace(ASK_USER_MARKER, "").replace(/\n{3,}/g, "\n\n").trim();
 
+/** Standing owner authorization for small live AI validation costs; this is prompt guidance, not billing enforcement. */
+export const AI_COST_POLICY = `Live AI API calls needed to implement, test, or capture evidence are pre-authorized when their combined additional cost for this task is conservatively estimated to stay below USD 1.00. Do not ask the owner to approve a few cents or any other amount within this allowance. Count all planned calls, retries, and earlier calls for this task together; never split calls into separate allowances. Bound requests and output tokens, track the estimate in the task's local notes, and stop before the total could reach USD 1.00. Ask on Slack if the total may reach USD 1.00 or cannot be conservatively bounded.
+For these sub-dollar calls, you may read an existing required API key from the repository-root env file and copy only that named variable into the worktree's appropriate ignored env file without another confirmation. Preserve unrelated settings. Never print, log, screenshot, post, or commit the secret. This does not authorize purchases, plan upgrades, production data access, or changing a material business/security requirement. If the key is missing, ask the owner to add it to the root env file; never request its value in Slack.`;
+
 /** appended to every headless /ship turn */
 export const HEADLESS_RULES = `## Headless run: nobody is watching this chat live
 
 Consort is running this feature unattended on a server. There is no user in the chat; the person who owns the ticket is reachable only through Slack, and only for questions that matter.
+
+${AI_COST_POLICY}
+
 - Decide anything straightforward yourself: naming, file placement, which existing pattern to follow, test shape, obvious defaults. Record each such decision as one line under "Assumptions" in ${"`"}.consort/ship/GRILLING.md${"`"} and in the spec, so a reader can overturn it later.
 - If the business purpose, acceptance criteria, or design is materially unclear, ask the owner before building or changing behavior.
-- Ask only when the answer changes scope, cost, data, security, or user-facing behaviour in a way the ticket does not settle and the code does not imply. Put each such question on its own line as ${"`"}[ask-user: <the question, with your recommended answer>]${"`"}, then end your turn. Consort relays them over Slack and sends the answers back as the next message. Never block on anything you did not mark this way.
+- Ask only when the answer changes scope, cost outside the pre-authorized AI allowance, data, security, or user-facing behaviour in a way the ticket does not settle and the code does not imply. Put each such question on its own line as ${"`"}[ask-user: <the question, with your recommended answer>]${"`"}, then end your turn. Consort relays them over Slack and sends the answers back as the next message. Never block on anything you did not mark this way.
+- A question is read on a phone: one line, under 200 characters, plain words, no background, no narration of what you did or will do, the recommended answer at the end ("… — recommend: yes"). Ask one thing per marker.
 - Where a handler tells you to ask the user for a go-ahead, confirmation, or to "present and wait", proceed instead, noting what you would have asked.
 - Never argue with a human reviewer on the PR. Apply what is clearly right; where you disagree or the request conflicts with the ticket, say so neutrally in one reply on the thread and raise it with ${"`"}[ask-user: …]${"`"}. The owner decides.
 - Never merge. Never force-push. Never amend a pushed commit.
@@ -181,16 +189,48 @@ export function replyAfter(messages: { ts: string; user?: string; text?: string;
 }
 
 /** the one-line Slack messages the pipeline posts */
+/**
+ * Every line the worker posts to Slack. House style: short, bullets, plain words. One bold lead
+ * when the owner has to act; otherwise one bullet. No narration, no hedging, no "I will".
+ */
 export const slackLines = {
-  claimed: (title: string, url: string, branch: string) => `Picked up *${title}* (<${url}|ticket>). Working on branch \`${branch}\`.`,
-  stage: (stage: string, note?: string) => `→ *${stage}*${note ? ` — ${note}` : ""}`,
-  question: (qs: string[], url: string) => `I need you on ${qs.length === 1 ? "one thing" : `${qs.length} things`} (<${url}|ticket>). Reply in this thread; one message answering all of them is fine.\n${qs.map((q, i) => `${i + 1}. ${q}`).join("\n")}`,
-  pr: (url: string) => `Draft PR open: ${url}`,
-  review: (round: number, model: string, findings: number) => `Review round ${round} on \`${model}\`: ${findings} finding${findings === 1 ? "" : "s"}, fixing the real ones.`,
-  reviewers: (logins: string[]) => `Asked ${logins.map((l) => `@${l}`).join(", ")} to review.`,
-  ready: (url: string) => `*Ready to merge.* Both requested reviewers approved, no open threads, CI green: ${url}\nI will not merge; that is yours.`,
-  stuck: (why: string) => `I am stuck: ${why}. Reply here with what to do, or release the ticket with \`consort-cli tasks release\`.`,
+  claimed: (title: string, url: string, branch: string) => `*Picked up:* <${url}|${title}>\n• branch \`${branch}\``,
+  stage: (stage: string, note?: string) => `• *${stage}*${note ? ` · ${brief(note, 160)}` : ""}`,
+  question: (qs: string[], url: string) => `*Need you* (<${url}|ticket>)\n${qs.map((q, i) => `${qs.length > 1 ? `${i + 1}. ` : "• "}${brief(q, 600)}`).join("\n")}\n_Reply in this thread._`,
+  pr: (url: string) => `• Draft PR: ${url}`,
+  review: (round: number, model: string, findings: number) => `• Review ${round} on \`${model}\`: ${findings} finding${findings === 1 ? "" : "s"}${findings ? ", fixing" : ""}`,
+  reviewers: (logins: string[]) => `• Review requested: ${logins.map((l) => `@${l}`).join(", ")}`,
+  ready: (url: string) => `*Ready to merge:* ${url}\n• 2 approvals · no open threads · CI green\n• Merge is yours`,
+  stuck: (why: string) => `*Stuck:* ${brief(why, 300)}\n• Reply here with what to do, or \`consort-cli tasks release <ticket>\``,
+  env: (ports: string) => `• Environment ready on ports ${ports}`,
+  evidence: (items: number, images: number, cost?: string) => `• Evidence posted to the PR and the ticket: ${items} item${items === 1 ? "" : "s"}, ${images} image${images === 1 ? "" : "s"}${cost ? `\n• Cost so far: ${cost}` : ""}`,
+  evidenceBlocked: (blockers: string[], envFile: string) => `*Evidence blocked.* Not handing off the PR.\n${blockers.map((b) => `• ${b}`).join("\n")}\n_What should I do? If a key is missing: add it to \`${envFile}\` on this machine, then reply "done". No secrets in Slack._`,
+  watching: (minutes: number) => `• Watching the PR (every ${minutes}m). I answer review comments and ping you when it is mergeable`,
+  answered: (n: number, open: number) => `• Answered ${n} review comment${n === 1 ? "" : "s"}${open ? `; ${open} still open` : ""}`,
+  reviewerPick: (logins: string[]) => `• Reviewers from the changed files' contributors: ${logins.map((l) => `@${l}`).join(", ")}`,
+  prClosed: (state: string) => `• PR ${state}. Done`,
 };
+/** one line, cut at a sentence end where possible */
+export const brief = (text: string, max: number): string => {
+  const one = text.replace(/\s+/g, " ").trim();
+  if (one.length <= max) return one;
+  const cut = one.slice(0, max);
+  const end = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("; "));
+  return `${end > max / 2 ? cut.slice(0, end + 1) : cut.trimEnd()}…`;
+};
+/**
+ * The verifier's "why not" as a few bullets: markers and filler dropped, one sentence per line,
+ * the first few kept. The owner reads this on a phone.
+ */
+export function blockerBullets(text: string, max = 5): string[] {
+  const clean = text.replace(/\[evidence-approved\]/g, "").replace(/^Evidence inspection did not pass:\s*/i, "").replace(/\s+/g, " ").trim();
+  const parts = clean.split(/(?<=[.!?])\s+(?=[A-Z0-9`(])/).map((p) => p.trim()).filter((p) => p.length > 3);
+  const keep = parts.filter((p) => !/^(I'll|I will|Let me|Now |Next,?)/i.test(p));
+  const out = (keep.length ? keep : parts).slice(0, max).map((p) => brief(p, 200));
+  return out.length ? out : [brief(clean, 300) || "No reason given."];
+}
+/** the verifier approved when its reply carries the marker, even with prose around it */
+export const evidenceApproved = (text: string) => /\[evidence-approved\]/.test(text);
 
 /**
  * The account pool. A task sticks to one account per provider until that account hits a usage
@@ -268,8 +308,60 @@ export function taskHealth(
   return { label: "RUNNING", tone: "ok" };
 }
 
-/** the dashboard keeps finished tasks on screen for a while, then drops them */
-export const VIEW_RETENTION_MS = 2 * 60 * 60_000;
+/**
+ * What a task has spent so far: tokens summed over every agent turn, and dollars. The dollars are
+ * an estimate: Claude Code reports its own per-turn estimate (costUSD per model), which is used as
+ * is; Codex reports tokens only, priced here from PRICES. A model missing from PRICES counts its
+ * tokens but adds no dollars, so the number can be low, never made up.
+ */
+export type TokenUsage = { input: number; output: number; cacheRead: number; cacheWrite: number };
+export type TaskCost = { usd: number; tokens: TokenUsage; turns: number; /** models seen with no price, so the owner knows the dollars are short */ unpriced?: string[] };
+export type TurnUsage = { model: string; tokens: TokenUsage; usd?: number };
+/** USD per million tokens: input, output, cache read, cache write. Anthropic list prices (2026-10); OpenAI prices approximate. */
+export const PRICES: Record<string, [input: number, output: number, cacheRead: number, cacheWrite: number]> = {
+  "claude-fable-5-1": [10, 50, 0.25, 12.5], "claude-fable-5": [10, 50, 1, 12.5], "claude-mythos-5-1": [10, 50, 0.25, 12.5],
+  "claude-opus-5-5": [4, 20, 0.2, 5], "claude-opus-5": [5, 25, 0.5, 6.25], "claude-opus-4-8": [5, 25, 0.5, 6.25], "claude-opus-4-7": [5, 25, 0.5, 6.25], "claude-opus-4-6": [5, 25, 0.5, 6.25],
+  "claude-sonnet-5-5": [2, 10, 0.2, 2.5], "claude-sonnet-5": [2, 10, 0.2, 2.5], "claude-sonnet-4-6": [3, 15, 0.3, 3.75],
+  "claude-haiku-5-5": [0.1, 0.5, 0.01, 0.125], "claude-haiku-4-5": [1, 5, 0.1, 1.25],
+  "gpt-5": [1.25, 10, 0.125, 1.25], "gpt-5-codex": [1.25, 10, 0.125, 1.25], "gpt-5-mini": [0.25, 2, 0.025, 0.25], "gpt-5-nano": [0.05, 0.4, 0.005, 0.05],
+};
+/** the price row for a model id, tolerating date stamps and variants ("claude-opus-5-5-20260401", "gpt-5.1-codex-max" → gpt-5-codex) */
+export function priceFor(model: string): [number, number, number, number] | undefined {
+  const m = model.toLowerCase().replace(/-\d{8}$/, "").replace(/^(us|eu|apac)\./, "").replace(/^anthropic\./, "");
+  if (PRICES[m]) return PRICES[m];
+  const family = /^(claude-(?:fable|mythos|opus|sonnet|haiku)-\d(?:-\d)?)/.exec(m)?.[1];
+  if (family && PRICES[family]) return PRICES[family];
+  if (/^gpt-5/.test(m)) return PRICES[/mini/.test(m) ? "gpt-5-mini" : /nano/.test(m) ? "gpt-5-nano" : /codex/.test(m) ? "gpt-5-codex" : "gpt-5"];
+  return undefined;
+}
+export const ZERO_TOKENS: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+export function usdFor(model: string, t: TokenUsage): number | undefined {
+  const p = priceFor(model);
+  return p ? (t.input * p[0] + t.output * p[1] + t.cacheRead * p[2] + t.cacheWrite * p[3]) / 1e6 : undefined;
+}
+/** the task's running total after one more turn */
+export function addTurnCost(prev: TaskCost | undefined, turns: TurnUsage[]): TaskCost {
+  const c: TaskCost = prev ? { ...prev, tokens: { ...prev.tokens }, unpriced: prev.unpriced ? [...prev.unpriced] : undefined } : { usd: 0, tokens: { ...ZERO_TOKENS }, turns: 0 };
+  for (const u of turns) {
+    for (const k of Object.keys(ZERO_TOKENS) as (keyof TokenUsage)[]) c.tokens[k] += u.tokens[k] || 0;
+    const usd = u.usd ?? usdFor(u.model, u.tokens);
+    if (usd === undefined) { if (!c.unpriced?.includes(u.model)) c.unpriced = [...(c.unpriced ?? []), u.model]; } else c.usd += usd;
+  }
+  c.turns += 1;
+  return c;
+}
+export const totalTokens = (t: TokenUsage) => t.input + t.output + t.cacheRead + t.cacheWrite;
+/** "1.2M", "340k", "900" */
+export const shortTokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+/** "$1.23" (under $10 to the cent, then to the dime); "~" in front when some model had no price */
+export const shortUsd = (c: TaskCost) => `${c.unpriced?.length ? "~" : ""}$${c.usd < 10 ? c.usd.toFixed(2) : c.usd.toFixed(1)}`;
+/** the dashboard cell: "$1.23 · 340k" */
+export const costCell = (c?: TaskCost) => (c ? `${shortUsd(c)} ${shortTokens(totalTokens(c.tokens))}` : "");
+/** the line that goes on the PR and the ticket with the evidence */
+export const costLine = (c?: TaskCost) => c ? `Agent cost: ${shortUsd(c)} (est.) over ${c.turns} turn${c.turns === 1 ? "" : "s"} and ${shortTokens(totalTokens(c.tokens))} tokens (${shortTokens(c.tokens.input + c.tokens.cacheRead + c.tokens.cacheWrite)} in, ${shortTokens(c.tokens.output)} out${c.tokens.cacheRead ? `, ${Math.round((100 * c.tokens.cacheRead) / Math.max(1, c.tokens.input + c.tokens.cacheRead + c.tokens.cacheWrite))}% from cache` : ""})${c.unpriced?.length ? `; no price known for ${c.unpriced.join(", ")}, so the dollars are low` : ""}.` : "";
+
+/** the dashboard keeps finished tasks on screen for a day, then drops them */
+export const VIEW_RETENTION_MS = 24 * 60 * 60_000;
 export const FINISHED: readonly string[] = ["ready", "done", "failed", "released"];
 export function visibleTasks<T extends { status: string; finishedAt?: number; updatedAt: number }>(tasks: T[], now: number, retention = VIEW_RETENTION_MS): T[] {
   return tasks.filter((t) => !FINISHED.includes(t.status) || now - (t.finishedAt ?? t.updatedAt) < retention);
@@ -362,7 +454,9 @@ The PR has been through Consort's review rounds. Before it goes to human reviewe
 
 Evidence must demonstrate that the requested feature actually works, including every acceptance criterion in SPEC.md and TICKET.md. An error page, unavailable map tiles, missing API key, broken dependency, or partially working flow is a blocker, never successful evidence. Inspect every screenshot with your image-viewing tool and read every command's output. Fix what you can and capture the successful result again. Preserve diagnostics locally, but exclude failed captures from the successful manifest.
 
-If blocked, stop and ask the owner with [ask-user: <specific blocker and what you need>]. Do not claim success or invent a workaround that changes the business requirement. For a missing credential, determine its exact env variable and the app's env-file convention from the repo. Ask the owner to add that variable to ${i.repoRoot ?? "the repository root on the Consort machine"}/.env (or the repository's documented root env file), then confirm in Slack. Never ask for a secret in Slack. Only after that confirmation, copy the required named variable from the root env file into the worktree's appropriate ignored env file, preserve unrelated settings, restart the app, and rerun the blocked flow. Never print, post, screenshot, or commit env values, and never copy the entire root env file. Do not copy production secrets that the local feature does not require.
+If blocked, stop and ask the owner with [ask-user: <specific blocker and what you need>]. Do not claim success or invent a workaround that changes the business requirement. ${AI_COST_POLICY}
+
+An existing required key covered by the sub-dollar allowance can be used without asking again. For a missing credential, determine its exact env variable and the app's env-file convention from the repo. Ask the owner to add that variable to ${i.repoRoot ?? "the repository root on the Consort machine"}/.env (or the repository's documented root env file), then confirm in Slack. Never ask for a secret in Slack. Only after that confirmation, copy the required named variable from the root env file into the worktree's appropriate ignored env file, preserve unrelated settings, restart the app, and rerun the blocked flow. Never print, post, screenshot, or commit env values, and never copy the entire root env file. Do not copy production secrets that the local feature does not require.
 
 Decide from SPEC.md and the diff whether a frontend is involved.
 - **Frontend involved:** seed a local database with data that exercises the feature (use the repo's own seed or fixture scripts, migrations and docker-compose if it has them; invent plausible data where it has none), start the app locally, and take screenshots of the feature in use: the before state where it helps, each step, the result. Take them with the helper: \`node ${i.helper} <url> [width height]\` captures a page to a PNG and prints its path; move or copy each PNG into ${EVIDENCE_DIR}/ with a descriptive file name. Stop the app and any containers when done.
@@ -379,8 +473,8 @@ Rules: set status to passed only when all acceptance checks passed and blockers 
 export const VERIFY_EVIDENCE_PROMPT = `Independently verify ${EVIDENCE_MANIFEST} against .consort/ship/SPEC.md, TICKET.md, the diff, and the actual evidence files. Read every image using image tools and inspect command output. Do not trust manifest.status or prose claiming success. Require proof for every acceptance criterion, successful end-to-end behavior, and working external dependencies. API KEY REQUIRED tiles, error pages, missing credentials, failed checks, placeholder output, or unproven criteria mean evidence is blocked. Failure diagnostics do not prove a working feature. Do not edit the manifest or publish anything. If all criteria are proven, reply with exactly [evidence-approved]. Otherwise explain the concrete blockers, naming any required env variable without its value. Consort will ask the owner on Slack and retry; never waive a requirement.`;
 
 /** the evidence as a GitHub comment: images inline, text as code blocks, the ticket linked */
-export function evidenceMarkdownForPr(m: EvidenceManifest, images: Record<string, string>, ticketUrl: string, ticketRefText: string): string {
-  const out = [`## Evidence`, "", m.summary || "Proof the feature works, gathered by Consort before handing the PR to reviewers.", "", `Ticket: ${ticketRefText} (${ticketUrl})${m.seeded ? `\nLocal data: ${m.seeded}` : ""}`, ""];
+export function evidenceMarkdownForPr(m: EvidenceManifest, images: Record<string, string>, ticketUrl: string, ticketRefText: string, cost?: TaskCost): string {
+  const out = [`## Evidence`, "", m.summary || "Proof the feature works, gathered by Consort before handing the PR to reviewers.", "", `Ticket: ${ticketRefText} (${ticketUrl})${m.seeded ? `\nLocal data: ${m.seeded}` : ""}${cost ? `\n${costLine(cost)}` : ""}`, ""];
   m.items.forEach((it, n) => {
     out.push(`### ${n + 1}. ${it.title}`);
     if (it.note) out.push(it.note);
@@ -394,8 +488,8 @@ export function evidenceMarkdownForPr(m: EvidenceManifest, images: Record<string
 }
 
 /** the evidence as a ticket comment: plain text, image links listed, the PR linked */
-export function evidenceTextForTicket(m: EvidenceManifest, images: Record<string, string>, prUrl: string): string {
-  const out = [`Evidence the feature works (gathered by Consort before handing the PR to reviewers)`, "", m.summary, "", `PR: ${prUrl}`, m.seeded ? `Local data: ${m.seeded}` : "", ""];
+export function evidenceTextForTicket(m: EvidenceManifest, images: Record<string, string>, prUrl: string, cost?: TaskCost): string {
+  const out = [`Evidence the feature works (gathered by Consort before handing the PR to reviewers)`, "", m.summary, "", `PR: ${prUrl}`, m.seeded ? `Local data: ${m.seeded}` : "", cost ? costLine(cost) : "", ""];
   m.items.forEach((it, n) => {
     out.push(`${n + 1}. ${it.title}${it.note ? ` — ${it.note}` : ""}`);
     if (it.command) out.push(`   $ ${it.command}`);
