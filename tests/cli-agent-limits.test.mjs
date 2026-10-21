@@ -4,12 +4,13 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import ts from 'typescript';
 import * as seatPool from '../src/shared/seatPool.ts';
-import { slackMessage, slackStatus } from '../src/shared/headless.ts';
+import * as headless from '../src/shared/headless.ts';
+const { slackMessage, slackStatus } = headless;
 const require = createRequire(import.meta.url);
 const code = ts.transpileModule(readFileSync(new URL('../src/cli/agent.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText.replace(/import\.meta\.url/g, '"file:///virtual/cli/agent.js"');
 function load(runStreamed) {
   const mocks = {
-    './state': { HOME: '/virtual' }, '../shared/seatPool.ts': seatPool,
+    './state': { HOME: '/virtual' }, '../shared/seatPool.ts': seatPool, '../shared/headless.ts': headless,
     '../main/cliRuntime': { cliBinary: () => '/virtual/codex' },
     '@openai/codex-sdk': { Codex: class { startThread() { return { runStreamed }; } } },
   };

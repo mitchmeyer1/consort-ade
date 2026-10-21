@@ -550,3 +550,41 @@ test('both grilling handlers run the impact check and ask before breaking a live
     assert.match(p, /Impact check/);
   }
 });
+
+test('a resumed turn costs only itself: Claude Code 2.1.296 reports the session so far, 2.1.273 the turn alone (numbers from real runs)', async () => {
+  const { turnSpend, addTurnCost } = await import('../src/shared/headless.ts');
+  const u = (model, input, output, cacheRead, cacheWrite, usd) => ({ model, tokens: { input, output, cacheRead, cacheWrite }, usd });
+  // 2.1.296: turn 2's modelUsage is turn 1 plus turn 2's own result.usage
+  const t1 = [u('claude-haiku-5-5', 1173, 17, 0, 17002, 0.0035262)];
+  const t2 = [u('claude-haiku-5-5', 1175, 20, 11542, 22498, 0.00474252)];
+  const own2 = { input: 2, output: 3, cacheRead: 11542, cacheWrite: 5496 };
+  const spent = turnSpend(t2, t1, own2);
+  assert.deepEqual(spent.map((s) => s.tokens), [{ input: 2, output: 3, cacheRead: 11542, cacheWrite: 5496 }]);
+  assert.equal(Math.round(spent[0].usd * 1e8) / 1e8, 0.00121632);
+  let c = addTurnCost(addTurnCost(undefined, turnSpend(t1, undefined, undefined)), spent);
+  assert.equal(c.tokens.cacheWrite, 22498, 'the task total equals the session total, not the sum of running totals');
+  // 2.1.273: turn 2 reports itself (with a subagent and side calls the main loop's usage leaves out); kept as is
+  const o1 = [u('claude-haiku-4-5', 907, 59, 0, 15287, 0.031776)];
+  const o2 = [u('claude-haiku-4-5', 28, 674, 30697, 14448, 0.02580195)];
+  assert.deepEqual(turnSpend(o2, o1, { input: 18, output: 633, cacheRead: 30697, cacheWrite: 1699 }), o2);
+  // a model only this turn used is all this turn's; a fresh session has nothing to subtract
+  const withSub = [...t2, u('claude-opus-5', 10, 20, 30, 40, 0.01)];
+  assert.deepEqual(turnSpend(withSub, t1, own2).map((s) => s.model), ['claude-haiku-5-5', 'claude-opus-5']);
+  assert.equal(turnSpend(withSub, t1, own2)[1].tokens.cacheWrite, 40);
+  assert.equal(turnSpend(t2, undefined, own2), t2);
+});
+
+test('each ship stage runs in its own session, answers stay where they were asked, and the next stage gets a handoff', async () => {
+  const { continuesSession, handoffPreamble, HANDOFF_FILE, HEADLESS_RULES } = await import('../src/shared/headless.ts');
+  assert.equal(continuesSession('Grilling', 'Grilling', false), true);
+  assert.equal(continuesSession('Grilling', "Spec'd", false), false);
+  assert.equal(continuesSession('Grilling', "Spec'd", true), true, 'the owner answering a question goes back to the session that asked');
+  assert.equal(continuesSession(undefined, 'Implementing', false), true, 'a task saved before stages were recorded keeps resuming');
+  const p = handoffPreamble('Implementing', 'Spec written. [ship-stage: Spec\'d | done] [ask-user: ok? — recommend: yes]\nNext: build.');
+  assert.match(p, /^## New session for Implementing/);
+  assert.ok(p.includes(HANDOFF_FILE));
+  assert.match(p, /> Spec written\. Next: build\.$/);
+  assert.doesNotMatch(p, /ship-stage|ask-user/);
+  assert.doesNotMatch(handoffPreamble('Implementing'), /The last stage ended/);
+  assert.ok(HEADLESS_RULES.includes(HANDOFF_FILE), 'every headless turn is told to write the handoff when it moves the stage');
+});

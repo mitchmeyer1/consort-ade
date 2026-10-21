@@ -4,7 +4,7 @@ import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import type { Provider } from "../shared/types";
 import type { ReviewPick, SourceFilters, TaskCost } from "../shared/headless";
-import type { ShipFeature, ShipTicket } from "../shared/ship";
+import type { ShipFeature, ShipStage, ShipTicket } from "../shared/ship";
 
 /**
  * consort-cli's state: one JSON file under ~/.consort-cli (or $CONSORT_CLI_HOME), mode 0600
@@ -89,6 +89,12 @@ export type Task = {
   slackStatusAfterTs?: string;
   /** agent session ids by provider, so a task keeps one conversation per provider */
   sessions: Partial<Record<Provider, string>>;
+  /** the ship stage each session in `sessions` belongs to; a new stage starts a new session from a handoff. Absent on tasks from before this, which keep resuming */
+  sessionStages?: Partial<Record<Provider, ShipStage>>;
+  /** Claude Code's last per-model report for each session, a running total on newer releases (see turnSpend) */
+  sessionReports?: Partial<Record<Provider, { session: string; usage: import("../shared/headless.ts").TurnUsage[] }>>;
+  /** the builder's last reply, quoted to the next stage's fresh session */
+  lastReply?: string;
   accountIds: Partial<Record<Provider, string>>;
   /** provider executing the current turn, including a fallback from the builder's provider */
   activeProvider?: Provider;

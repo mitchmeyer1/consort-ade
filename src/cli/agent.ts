@@ -6,7 +6,7 @@ import { cliBinary, type Deps as RuntimeDeps } from "../main/cliRuntime";
 import type { Provider } from "../shared/types";
 import { HOME, type Account } from "./state";
 import { isCodexLimitText, isUsageLimitText, limitFromRateEvent, type LimitHit } from "../shared/seatPool.ts";
-import type { TurnUsage } from "../shared/headless.ts";
+import { turnSpend, type TurnUsage } from "../shared/headless.ts";
 
 /**
  * One agent turn, headless: Claude Code through the agent SDK, Codex through its SDK, each on the
@@ -36,8 +36,8 @@ export const binaryFor = (provider: Provider): string => {
   return bin;
 };
 
-export type TurnOptions = { cwd: string; prompt: string; model: string; account: Account; resume?: string; maxTurns?: number; onText?: (t: string) => void; /** the task's own ports and Docker names, on top of the process env */ env?: Record<string, string> };
-export type Turn = { text: string; sessionId?: string; error?: string; limit?: LimitHit; /** what the turn spent, per model (Claude Code prices its own; Codex gives tokens only) */ usage?: TurnUsage[] };
+export type TurnOptions = { cwd: string; prompt: string; model: string; account: Account; resume?: string; maxTurns?: number; onText?: (t: string) => void; /** the task's own ports and Docker names, on top of the process env */ env?: Record<string, string>; /** what Claude Code last reported for the session in `resume` (Turn.reported), so a running total is turned back into this turn's spend */ reportedBefore?: TurnUsage[] };
+export type Turn = { text: string; sessionId?: string; error?: string; limit?: LimitHit; /** what the turn spent, per model (Claude Code prices its own; Codex gives tokens only) */ usage?: TurnUsage[]; /** Claude Code's per-model report as it came, a running total on newer releases; the next resume's reportedBefore */ reported?: TurnUsage[] };
 
 export const envFor = (account: Account, extra: Record<string, string> = {}): Record<string, string | undefined> => {
   const env: Record<string, string | undefined> = { ...process.env, ...extra };
@@ -63,6 +63,7 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
   let limitText: string | undefined;
   let rejected: LimitHit | undefined;
   let usage: TurnUsage[] | undefined;
+  let reported: TurnUsage[] | undefined;
   const ac = new AbortController();
   const stop = () => { ac.abort(); try { (q as any).close?.(); } catch {} };
   inFlight.add(stop);
@@ -87,10 +88,15 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
       if ((m.error === "rate_limit" || m.error === "billing_error") && isUsageLimitText(said)) limitText = said;
       else for (const b of m.message?.content ?? []) if (b.type === "text" && b.text) { chunks.push(b.text); o.onText?.(b.text); }
     } else if (m.type === "result") {
-      // one query() is one turn here, so its per-model totals are this turn's spend
+      // per-model totals, which on a resumed session can be the session's so far (see turnSpend); `usage` is this turn's main loop
       const mu = m.modelUsage as Record<string, { inputTokens?: number; outputTokens?: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number; costUSD?: number }> | undefined;
-      if (mu && Object.keys(mu).length) usage = Object.entries(mu).map(([model, u]) => ({ model, tokens: { input: u.inputTokens ?? 0, output: u.outputTokens ?? 0, cacheRead: u.cacheReadInputTokens ?? 0, cacheWrite: u.cacheCreationInputTokens ?? 0 }, usd: typeof u.costUSD === "number" ? u.costUSD : undefined }));
-      else if (m.usage) usage = [{ model: o.model, tokens: { input: m.usage.input_tokens ?? 0, output: m.usage.output_tokens ?? 0, cacheRead: m.usage.cache_read_input_tokens ?? 0, cacheWrite: m.usage.cache_creation_input_tokens ?? 0 }, usd: typeof m.total_cost_usd === "number" ? m.total_cost_usd : undefined }];
+      const own = m.usage ? { input: m.usage.input_tokens ?? 0, output: m.usage.output_tokens ?? 0, cacheRead: m.usage.cache_read_input_tokens ?? 0, cacheWrite: m.usage.cache_creation_input_tokens ?? 0 } : undefined;
+      if (mu && Object.keys(mu).length) {
+        reported = Object.entries(mu).map(([model, u]) => ({ model, tokens: { input: u.inputTokens ?? 0, output: u.outputTokens ?? 0, cacheRead: u.cacheReadInputTokens ?? 0, cacheWrite: u.cacheCreationInputTokens ?? 0 }, usd: typeof u.costUSD === "number" ? u.costUSD : undefined }));
+        usage = turnSpend(reported, o.resume ? o.reportedBefore : undefined, own);
+      }
+      // priced from PRICES: total_cost_usd has the same running-total problem
+      else if (own) usage = [{ model: o.model, tokens: own }];
       // a usage limit ends the turn as a "success" flagged is_error, with the limit notice as its result
       const said = [m.result, ...(m.errors ?? [])].find(isUsageLimitText);
       if (said) limitText = said;
@@ -105,7 +111,7 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
     else error = `${(e as Error).message}${said ? `: ${said.split("\n").filter(Boolean).slice(-3).join(" | ").slice(0, 300)}` : ""}`;
   } finally { inFlight.delete(stop); }
   const limit = limitText || rejected ? { text: limitText ?? "usage limit", window: rejected?.window, resetsAt: rejected?.resetsAt } : undefined;
-  return { text: chunks.join("\n"), sessionId, error, limit, usage };
+  return { text: chunks.join("\n"), sessionId, error, limit, usage, reported };
 }
 
 async function runCodex(o: TurnOptions): Promise<Turn> {
