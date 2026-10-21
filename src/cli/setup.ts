@@ -75,6 +75,7 @@ const SLACK_SCOPES: readonly [scope: string, reason: string][] = [
   ["chat:write", "post progress and questions as the bot"],
   ["im:write", "open the DM with you"],
   ["im:history", "read your replies in the DM thread; without it the bot can post but never hear you"],
+  ["files:read", "download documents you attach to a task update in the thread"],
   ["channels:history", "only if you point it at a public channel instead of the DM (groups:history for a private one)"],
 ];
 const slackScopeLines = () => SLACK_SCOPES.map(([scope, reason]) => `${scope.padEnd(17)} ${reason}`);

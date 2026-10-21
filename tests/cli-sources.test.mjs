@@ -100,7 +100,7 @@ test('a space scanner lists the space\'s lists for the wizard, but scans with on
   const tickets = await src.scan();
   assert.deepEqual(tickets.map((x) => x.id), ['a', 'b'], 'two pages, one task repeated, counted once');
   const search = calls.find((p) => p.startsWith('/team/77/task?'));
-  assert.ok(search.includes('space_ids[]=9') && search.includes('tags[]=ai-handle') && search.includes('subtasks=false'), search);
+  assert.ok(search.includes('space_ids[]=9') && search.includes('tags[]=ai-handle') && search.includes('subtasks=true'), search);
   assert.ok(!calls.some((p) => p.startsWith('/list/')), 'no per-list reads');
 });
 
@@ -118,4 +118,10 @@ test('a Slack call with no fields sends no body at all; Slack hangs on an empty 
   const slack = new Slack({ botToken: 'xoxb-1', userId: 'U1' });
   await slack.test(); await slack.channel();
   assert.deepEqual(bodies, [['auth.test', undefined], ['conversations.open', 'users=U1']]);
+});
+
+test('a ClickUp owner update replaces the description with Markdown', async (t) => {
+  const calls = fakeClickup(t);
+  await clickupSource('k', job).updateBody('a1', '## Goal\n- Export CSV');
+  assert.deepEqual(calls.at(-1), { path: '/task/a1', method: 'PUT', body: { markdown_content: '## Goal\n- Export CSV' } });
 });

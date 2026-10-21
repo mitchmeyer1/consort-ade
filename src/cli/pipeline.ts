@@ -4,30 +4,35 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { applyShipChange, newShipFeature, parseShipMarkers, prNumberFromUrl, shipBranch, shipFolder, shipSlug, stripShipMarkers, type ShipFeature, type ShipTicket } from "../shared/ship.ts";
 import { shipPrompt } from "../shared/shipPrompt.ts";
-import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUsd, DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, VERIFY_EVIDENCE_PROMPT, parseAskUser, parseReviewerReply, observeReviewBatch, pickTurnAccount, prReadiness, ProblemError, problemOf, REBOOT_PROMPT, RESPOND_TO_REVIEW, REVIEW_QUIET_MS, reviewRotation, reviewersWithoutApproval, reviewWaitMessage, seedModels, slackLines, slackMessage, slackStatus, stripAskUser, type Problem } from "../shared/headless.ts";
+import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUsd, DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, VERIFY_EVIDENCE_PROMPT, parseAskUser, parseReviewerReply, observeReviewBatch, pickTurnAccount, prReadiness, ProblemError, problemOf, REBOOT_PROMPT, RESPOND_TO_REVIEW, REVIEW_QUIET_MS, cliReviewRotation, reviewersWithoutApproval, reviewWaitMessage, seedModels, slackLines, slackMessage, slackStatus, stripAskUser, type Problem } from "../shared/headless.ts";
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
-import { modelTiers } from "../shared/modelTiers.ts";
+import { selectCliModel, type CliModelRole } from "../shared/cliModels.ts";
+import { MODEL_ROLE_RULES, parseModelEscalation, stageModelRole } from "../shared/cliTurnPolicy.ts";
+import { AccountUnavailableError, withAgentTurn, withEnvironmentSlot } from "./capacity";
+import { prepareResearchTasks, readImplementationTasks, recoverImplementation, runImplementation, runResearch, type ParallelRun } from "./parallel";
 import { excludeConsortDir, fetchTicket, writeTicketFile } from "../main/ship";
 import { addWorktree } from "../main/git";
 import type { Provider } from "../shared/types";
-import { runTurn, packageRoot, stopAgents } from "./agent";
+import { runTurn, packageRoot } from "./agent";
 import { readPr, requestReviewers, reviewerSuggestions, validateReviewers, whoAmI } from "./prmonitor";
 import { findBrowser, publishEvidence, validateEvidence, writeScreenshotHelper } from "./evidence";
-import { allocateEnvironment, cleanupEnvironment } from "./environment";
+import { allocateEnvironment, cleanupEnvironment, withChildEnvironment } from "./environment";
 import { flushTaskNotifications, notifyTask } from "./lifecycle";
 import { readUsage } from "./usage";
+import type { TaskEnv } from "../shared/headless.ts";
 import { usageBlock } from "../shared/usage.ts";
 import { statusEvent } from "./statusLog";
 import { Slack } from "./slack";
 import { ensureSlackIdentity } from "./slackIdentity";
 import { taskSlackLinks } from "./slackLinks";
+import { ownerUpdatePrompt, parseUpdateSummary, updateDir } from "./ownerUpdates";
 import { sourceFor, type Source } from "./sources";
 import { blockAccount, loadState, touchAccount, updateTask, WORK_DIR, type Account, type Job, type Task } from "./state";
 
 /**
  * One ticket, start to ready-to-merge, with nobody watching: the /ship stages in a worktree of
- * their own, questions relayed over Slack, three review rounds on rotating models, then a watch
+ * their own, questions relayed over Slack, one review per configured provider, then a watch
  * on the PR that answers human reviewers and pings the owner when it is ready. This is the
  * body of `consort-cli work <task>`; the daemon runs one process per task.
  */
@@ -53,14 +58,10 @@ export async function workTask(taskId: string): Promise<void> {
   const builderProvider: Provider | undefined = have.claude ? "claude" : have.codex ? "codex" : undefined;
   if (!builderProvider) throw new Error("No AI accounts: run `consort-cli accounts add` first.");
   const models = seedModels();
-  // two tiers: the strongest model (Fable, Astra) plans, specs, reviews and judges; the tier below it
-  // (Opus, Sol) does the build and every routine turn (environment, fixes, review replies, CI repairs),
-  // which is nearly all of the tokens. shared/modelTiers.ts picks both off what the provider offers.
-  const builderModel = modelTiers(builderProvider, models[builderProvider]).orchestrator;
-  const workerModel = modelTiers(builderProvider, models[builderProvider]).delegate;
-  /** the stages where the agent is executing a settled plan, so the worker tier is enough */
-  const EXECUTION_STAGES: readonly string[] = ["Implementing", "Ready to Test", "Revising"];
-  const rotation = job.reviewModels?.length ? Array.from({ length: 3 }, (_, i) => job.reviewModels![i % job.reviewModels!.length]) : reviewRotation({ claude: have.claude ? models.claude : undefined, codex: have.codex ? models.codex : undefined });
+  const modelFor = (provider: Provider, role: CliModelRole) => selectCliModel(provider, models[provider], role, job.modelPolicy);
+  const builderModel = modelFor(builderProvider, "planning");
+  const workerModel = modelFor(builderProvider, "implementation");
+  const rotation = cliReviewRotation({ claude: have.claude ? models.claude : undefined, codex: have.codex ? models.codex : undefined }, job.reviewModels);
 
   updateTask(task.id, { pid: process.pid, activity: "starting" });
   task = loadState().tasks.find((t) => t.id === taskId)!;
@@ -79,7 +80,7 @@ export async function workTask(taskId: string): Promise<void> {
     await say(slackLines.working(clean));
   };
   // the task's own ports and Docker names, on every turn from here on
-  const env = await allocateEnvironment(task!);
+  const env = await withEnvironmentSlot(taskId, () => allocateEnvironment(task!));
   task = loadState().tasks.find((t) => t.id === taskId)!;
   log(task, `environment ${env.CONSORT_RUN} on ports ${env.CONSORT_PORT_RANGE}`);
 
@@ -91,7 +92,7 @@ export async function workTask(taskId: string): Promise<void> {
   }
   await excludeConsortDir(task.worktree).catch(() => {});
   const fetched = await fetchTicket(task.ticket, { repoPath: job.repo, clickupKey: state.clickupKey });
-  const ticketBody = writeTicketFile(task.worktree, task.ticket, fetched);
+  let ticketBody = writeTicketFile(task.worktree, task.ticket, fetched);
 
   await ensureSlackIdentity(taskId);
   task = loadState().tasks.find(t => t.id === taskId)!;
@@ -108,6 +109,7 @@ export async function workTask(taskId: string): Promise<void> {
     updateTask(task.id, { status, note, finishedAt: Date.now(), activity: note ?? status });
     await notifyTask(taskId, status === "ready" ? "completed" : "stopped", note ?? status);
     await cleanupEnvironment(env.CONSORT_RUN).then((r) => { if (r.containers || r.networks || r.volumes) log(task, `removed ${r.containers} container(s), ${r.networks} network(s), ${r.volumes} volume(s)`); });
+    updateTask(taskId, { portBase: undefined, envReadyAt: undefined });
   };
   const tell = async (text: string) => { await say(text); await source.comment(task.ticket.id, text.replace(/<([^|>]+)\|([^>]+)>/g, "$2 ($1)")).catch((e) => log(task, `ticket comment failed: ${e.message}`)); };
 
@@ -145,16 +147,30 @@ export async function workTask(taskId: string): Promise<void> {
   let feature: ShipFeature = task.feature;
   let pendingUser: string | undefined;
   let idle = 0;
-  const crashes = new Map<string, number>(); // consecutive failed turns per account
-  let lastCrash: string | undefined; // the newest turn failure, account and error, for the stop report
-  let failedTurns = 0;
-  const turn = async (prompt: string | ((provider: Provider) => string), provider: Provider = builderProvider, model = builderModel, resume = true, timeoutMs?: number): Promise<string> => {
+  const turn = async (prompt: string | ((provider: Provider) => string), provider: Provider = builderProvider, role: CliModelRole = "planning", resume = true, timeoutMs?: number, cwd = task.worktree, fixedModel?: string, turnEnv: TaskEnv = env): Promise<string> => {
+    const crashes = new Map<string, number>(); // failures in unrelated parallel jobs never combine
+    let lastCrash: string | undefined;
+    let failedTurns = 0;
+    let model = fixedModel ?? modelFor(provider, role);
+    const readOnly = role === "reader";
+    const managesSession = cwd === task.worktree && !fixedModel && !readOnly;
+    let roleFailures = 0;
+    let escalationReason: string | undefined;
+    const ordinaryRole = role;
+    const escalate = (reason: string) => {
+      role = "frontier";
+      model = modelFor(provider, role);
+      escalationReason = reason;
+      roleFailures = 0;
+      resume = false;
+      log(task, `escalating ${ordinaryRole} to ${model}: ${reason}`);
+    };
     for (let attempt = 0; attempt < 12;) {
       const live = loadState();
       const cur = live.tasks.find((t) => t.id === taskId)!;
-      const who = pickTurnAccount(live.accounts, provider, Date.now(), cur.accountIds);
+      const who = pickTurnAccount(fixedModel ? live.accounts.filter(a => a.provider === provider) : live.accounts, provider, Date.now(), cur.accountIds);
       if (!who) {
-        const resets = (["claude", "codex"] as const).map((p) => earliestUnblock(live.accounts, p, Date.now())).filter((t): t is number => t !== undefined);
+        const resets = (fixedModel ? [provider] : ["claude", "codex"] as const).map((p) => earliestUnblock(live.accounts, p, Date.now())).filter((t): t is number => t !== undefined);
         const until = resets.length ? Math.min(...resets) : Date.now() + DEFAULT_BLOCK_MS;
         const waiting = `All AI accounts reached their usage limit until ${resetLabel(until)}. Consort retries every 30s. Your action: none; work resumes when credits reset.`;
         updateTask(taskId, { status: "waiting", note: waiting, activity: waiting });
@@ -169,19 +185,22 @@ export async function workTask(taskId: string): Promise<void> {
       updateTask(taskId, { status: "working", note: undefined });
       attempt++;
       if (who.provider !== provider) {
-        // keep the tier when the provider changes: a worker turn stays on the other provider's worker model
-        const wasWorker = model === modelTiers(provider, models[provider]).delegate;
-        log(task, `No usable ${provider} account; continuing on ${who.provider} (${who.name})`);
+        log(task, `No usable ${provider} account; continuing ${role} on ${who.provider} (${who.name})`);
         provider = who.provider;
-        model = modelTiers(provider, models[provider])[wasWorker ? "delegate" : "orchestrator"];
+        model = modelFor(provider, role);
       }
-      updateTask(task.id, (t) => ({ activeProvider: provider, accountIds: { ...t.accountIds, [provider]: who.id }, activity: `${turnTag}running ${provider} ${model} on ${who.name}` }));
+      updateTask(task.id, (t) => ({ activeProvider: provider,
+        ...(managesSession ? { accountIds: { ...t.accountIds, [provider]: who.id }, sessions: { ...t.sessions, [provider]: t.accountIds[provider] === who.id ? t.sessions[provider] : undefined } } : {}),
+        activity: `${turnTag}running ${provider} ${model} on ${who.name}` }));
       touchAccount(who.id);
-      const session = resume && cur.accountIds[provider] === who.id ? cur.sessions[provider] : undefined;
+      const reviewUnits = fixedModel ? Math.min(2, job.maxParallel ?? 2, who.maxActiveTurns ?? 2, live.capacity?.maxActiveTurns ?? 4) : 1;
+      const delegation = reviewUnits > 1 ? "You may run ONE foreground review reader at a time, on the supplied reader model. Never spawn nested agents or background agents. This overrides any larger wave in the skill." : "Do not dispatch agents. Consort has reserved only your turn; inspect the review evidence yourself. This overrides the skill's delegation instructions.";
+      const session = resume && managesSession && cur.accountIds[provider] === who.id ? cur.sessions[provider] : undefined;
+      const abort = new AbortController();
       let usageLimit: ReturnType<typeof usageBlock>;
       let checking = false;
       let active = true;
-      const usageTimer = setInterval(async () => {
+      const checkUsage = async () => {
         if (checking) return;
         checking = true;
         try {
@@ -189,30 +208,46 @@ export async function workTask(taskId: string): Promise<void> {
           const block = usageBlock(await readUsage(who), Date.now());
           if (!active) return;
           usageLimit = block;
-          if (usageLimit) { blockAccount(who.id, usageLimit.until, usageLimit.reason); stopAgents(); }
+          if (usageLimit) { blockAccount(who.id, usageLimit.until, usageLimit.reason); abort.abort(); }
         } catch (e) { log(task, `usage check failed: ${String(e)}`); }
         finally { checking = false; }
-      }, 60_000);
+      };
       let timedOut = false;
-      const deadline = timeoutMs ? setTimeout(() => { timedOut = true; stopAgents(); }, timeoutMs) : undefined;
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      let usageTimer: ReturnType<typeof setInterval> | undefined;
       let res;
       recent.length = 0;
-      try { res = await runTurn({ cwd: task.worktree, prompt: `${HEADLESS_RULES}\n\n${typeof prompt === "function" ? prompt(provider) : prompt}\n\n${ENVIRONMENT_RULES(env)}`, model, account: who, resume: session, env, onText: (t) => { const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } }); }
-      finally { active = false; clearInterval(usageTimer); if (deadline) clearTimeout(deadline); }
+      let startedAt = Date.now();
+      try { res = await withAgentTurn(taskId, who.id, () => {
+        startedAt = Date.now();
+        usageTimer = setInterval(checkUsage, 60_000);
+        deadline = timeoutMs ? setTimeout(() => { timedOut = true; abort.abort(); }, timeoutMs) : undefined;
+        return runTurn({ cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}\n\n${ENVIRONMENT_RULES(turnEnv)}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: turnEnv, signal: abort.signal, readOnly, effort: role === "reader" ? "low" : role === "frontier" ? "high" : "medium", delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
+      }, reviewUnits); }
+      catch (e) { if (e instanceof AccountUnavailableError) { continue; } throw e; }
+      finally { active = false; if (usageTimer) clearInterval(usageTimer); if (deadline) clearTimeout(deadline); }
+      if (usageLimit) res.limit = { text: usageLimit.reason, resetsAt: usageLimit.until };
+      updateTask(taskId, t => ({
+        ...(res.usage?.length ? { cost: addTurnCost(t.cost, res.usage) } : {}),
+        turnHistory: [...(t.turnHistory ?? []), { at: startedAt, stage: feature.stage, role, provider, model, durationMs: Date.now() - startedAt, usage: res.usage, error: timedOut ? `Timed out after ${timeoutMs}ms` : res.error ?? res.limit?.text, escalated: !!escalationReason, escalationReason }],
+      }));
       if (timedOut) {
         const minutes = Math.round(timeoutMs! / 60_000);
         throw new ProblemError({ where: "", what: `The agent exceeded ${minutes} minutes on one turn and was stopped`, recent: [...recent], tried: recent.length ? undefined : `${minutes} minutes with no progress lines from the agent`, error: res?.error });
       }
-      if (usageLimit) res.limit = { text: usageLimit.reason, resetsAt: usageLimit.until };
       if (res.limit) {
         blockAccount(who.id, res.limit.resetsAt, res.limit.text);
-        updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: undefined } }));
+        if (managesSession) updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: undefined } }));
         log(task, `${who.name} hit its ${describeLimit(res.limit)}${res.limit.resetsAt ? ` (resets ${resetLabel(res.limit.resetsAt)})` : ""}; moving to another ${provider} account.`);
         continue;
       }
-      if (res.usage?.length) updateTask(task.id, (t) => ({ cost: addTurnCost(t.cost, res.usage!) }));
-      if (res.sessionId && resume) updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: res.sessionId } }));
+      if (res.sessionId && managesSession) updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: res.sessionId } }));
       if (res.error) {
+        roleFailures++;
+        if (roleFailures >= (job.maxModelAttempts ?? 2)) {
+          if (role !== "frontier") { escalate(res.error); continue; }
+          throw new ProblemError({ where: feature.stage, what: `The ${role} model failed ${roleFailures} attempts`, error: res.error });
+        }
         crashes.set(who.id, (crashes.get(who.id) ?? 0) + 1);
         const n = crashes.get(who.id)!;
         lastCrash = `${who.name} (${provider} ${model}): ${res.error}`;
@@ -221,7 +256,7 @@ export async function workTask(taskId: string): Promise<void> {
         if (n >= 2) {
           // two crashes in a row on one account: park it for a while (a limit the CLI did not name, most likely) and use another
           blockAccount(who.id, Date.now() + 15 * 60_000, `crashed twice: ${res.error.slice(0, 80)}`);
-          updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: undefined } }));
+          if (managesSession) updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: undefined } }));
           crashes.delete(who.id);
           log(task, `${who.name} failed twice (${res.error.split(":")[0]}); parking it for 15 minutes and continuing on another ${provider} account.`);
           continue;
@@ -231,6 +266,11 @@ export async function workTask(taskId: string): Promise<void> {
         continue;
       }
       crashes.delete(who.id);
+      const requested = parseModelEscalation(res.text);
+      if (requested && !parseAskUser(res.text).length) {
+        if (role !== "frontier") { escalate(requested); continue; }
+        throw new ProblemError({ where: feature.stage, what: "The frontier model could not resolve the task", why: [requested] });
+      }
       return res.text;
     }
     throw new ProblemError({ where: "", what: `Gave up after ${failedTurns} failed agent turns on ${provider}`, recent: [...recent], tried: "each account twice, 20s apart; crashed accounts parked for 15 minutes", error: lastCrash });
@@ -255,14 +295,60 @@ export async function workTask(taskId: string): Promise<void> {
     return false;
   };
 
-  const completeReply = async (text: string, timeoutMs?: number, model = builderModel) => {
+  const completeReply = async (text: string, timeoutMs?: number, role: CliModelRole = "planning", provider: Provider = builderProvider, fixedModel?: string) => {
     await applyReply(text);
     while (pendingUser) {
       const prompt = pendingUser;
       pendingUser = undefined;
-      await applyReply(await turn(prompt, builderProvider, model, true, timeoutMs));
+      await applyReply(await turn(prompt, provider, role, !fixedModel, timeoutMs, task.worktree, fixedModel));
     }
   };
+  /**
+   * Owner updates the daemon queued from the Slack thread (cli/ownerUpdates.ts): one agent turn
+   * revises the ticket and the code, then the revised description and the files go to the ticket.
+   */
+  const applyOwnerUpdates = async (): Promise<boolean> => {
+    const updates = loadState().tasks.find((t) => t.id === taskId)?.ownerUpdates ?? [];
+    if (!updates.length) return false;
+    const ticketFile = `${updateDir(updates.at(-1)!.ts)}/ticket.md`;
+    mkdirSync(join(task.worktree, ticketFile, ".."), { recursive: true });
+    rmSync(join(task.worktree, ticketFile), { force: true });
+    activity(`applying ${updates.length} owner update${updates.length === 1 ? "" : "s"} from Slack`);
+    const text = await turn(ownerUpdatePrompt(updates, { stage: feature.stage, built: !!feature.built, prUrl: feature.prs.at(-1), ticketFile }), builderProvider, "implementation");
+    await completeReply(text, undefined, "implementation");
+    const applied = new Set(updates.map((u) => u.ts));
+    updateTask(taskId, (t) => ({ ownerUpdates: (t.ownerUpdates ?? []).filter((u) => !applied.has(u.ts)) }));
+    const summary = parseUpdateSummary(text) ?? brief(stripAskUser(stripShipMarkers(text)), 200);
+    const notes: string[] = [];
+    let revised: string | undefined;
+    try { revised = readFileSync(join(task.worktree, ticketFile), "utf8").trim(); } catch { notes.push("Ticket description unchanged: the agent wrote no revised ticket"); }
+    if (revised && revised !== (ticketBody ?? "").trim()) {
+      try {
+        await source.updateBody(task.ticket.id, revised);
+        ticketBody = writeTicketFile(task.worktree, task.ticket, await fetchTicket(task.ticket, { repoPath: job.repo, clickupKey: state.clickupKey }).catch(() => undefined) ?? { body: revised });
+        notes.push("Ticket description updated");
+      } catch (e) { notes.push(`Ticket description not updated: ${(e as Error).message}`); }
+    } else if (revised) notes.push("Ticket description already matched");
+    const files = updates.flatMap((u) => u.files);
+    const attached: string[] = [];
+    for (const file of files) {
+      try { if (await source.attach(task.ticket.id, join(task.worktree, file))) attached.push(file); }
+      catch (e) { notes.push(`Could not attach ${file.split("/").pop()}: ${(e as Error).message}`); }
+    }
+    const names = (list: string[]) => list.map((f) => f.split("/").pop()).join(", ");
+    if (attached.length) notes.push(`Attached to the ticket: ${names(attached)}`);
+    const comment = `Updated from Slack by the owner: ${summary}${files.length ? `\nFiles: ${names(files)}` : ""}`;
+    await source.comment(task.ticket.id, comment).catch((e) => notes.push(`Ticket comment failed: ${(e as Error).message}`));
+    await say(slackMessage("update", `Applied your update: ${summary}${notes.map((n) => `\n• ${n}`).join("")}`));
+    return true;
+  };
+  // waits between PR checks end early when the owner posts an update
+  const nap = (ms: number) => new Promise<void>((resolve) => {
+    const check = setInterval(() => { if (loadState().tasks.find((t) => t.id === taskId)?.ownerUpdates?.length) done(); }, 15_000);
+    const done = () => { clearInterval(check); resolve(); };
+    setTimeout(done, ms);
+  });
+
   log(task, `models: planning, spec and judgement on ${builderModel}; build and routine turns on ${workerModel}`);
   if (task.rebootedAt) {
     // `consort-cli reboot`: the owner stopped the last worker; open by working out where it got to
@@ -291,20 +377,57 @@ export async function workTask(taskId: string): Promise<void> {
   // ── the environment: what running this repo takes, on this task's ports ────────────────
   if (!task.envReadyAt) {
     activity("setting up the local environment");
-    const text = await turn(ENVIRONMENT_PROMPT(env), builderProvider, workerModel);
-    await completeReply(text, undefined, workerModel);
+    const text = await turn(ENVIRONMENT_PROMPT(env), builderProvider, "implementation");
+    await completeReply(text, undefined, "implementation");
     updateTask(task.id, { envReadyAt: Date.now() });
     await say(slackLines.env(env.CONSORT_PORT_RANGE));
   }
+  await applyOwnerUpdates();
+
+  const parallelDirectory = join(task.worktree, ".consort", "ship", "parallel");
+  const parallelRun: ParallelRun = async child => {
+    const execute = async (childEnv: TaskEnv) => ({ text: await turn(child.prompt, builderProvider, child.kind === "research" ? "reader" : "implementation", false, 15 * 60_000, child.cwd, undefined, childEnv) });
+    return child.kind === "implementation" ? withChildEnvironment(taskId, child.id, execute) : execute(env);
+  };
+  let sharedResearch = "";
+  let parallelGuidance = "";
 
   // ── the stages, Grilling through In Review ──────────────────────────────────────────────
   for (let n = 0; feature.stage !== "In Review" && feature.stage !== "Merged" && feature.stage !== "Closed"; n++) {
+    if (await applyOwnerUpdates()) continue;
+    if (feature.stage === "Grilling") {
+      activity("researching business flows, tests and integrations");
+      try {
+        const research = await runResearch({ cwd: task.worktree, directory: parallelDirectory, tasks: await prepareResearchTasks(task.worktree, ticketBody ?? task.ticket.title), concurrency: job.parallelResearch ?? 2, run: parallelRun });
+        sharedResearch = research.summary;
+        log(task, research.reused ? "reusing unchanged task research" : "parallel research complete");
+      } catch (e) {
+        // The coordinator can still do serial research, retaining any real owner questions.
+        parallelGuidance = `Research collection needs follow-up: ${(e as Error).message}. Complete the missing research before the spec, and relay any owner decision with [ask-user: ...].`;
+        log(task, parallelGuidance);
+      }
+    }
+    if (["Spec'd", "Implementing"].includes(feature.stage) && !feature.built) {
+      try {
+        await recoverImplementation(task.worktree, parallelDirectory);
+        const wave = await runImplementation({ cwd: task.worktree, directory: parallelDirectory, tasks: await readImplementationTasks(task.worktree), concurrency: job.parallelImplementation ?? 2, run: parallelRun, check: async () => {
+          const checked = await turn("The coordinator integrated parallel ticket commits. Read repository setup and each completed ticket. Run the relevant tests and typecheck together, fix any failures, and commit fixes. Do not push or move the ship stage. Return [parallel-check: pass] only after all required checks pass; include the commands and their results. If a real owner decision blocks verification, return [ask-user: ...].", builderProvider, "implementation", true, 15 * 60_000);
+          if (!/\[parallel-check: pass\]/.test(checked) || parseAskUser(checked).length) throw new Error(checked || "Parallel implementation checks did not return passing proof");
+        } });
+        if (wave.completed.length) log(task, `integrated and checked ${wave.completed.join(", ")}`);
+      } catch (e) {
+        parallelGuidance = `Parallel implementation needs follow-up: ${(e as Error).message}. Read the journal and ticket status files. Repair integrated work and rerun checks; do not rebuild completed tickets. Relay owner questions before continuing.`;
+        log(task, parallelGuidance);
+      }
+    }
     const form = feature.stage === "Ready to Test" ? "approve" as const : "resume" as const;
-    const prompt = pendingUser ?? shipPrompt({ feature, form: { form }, worktree: task.worktree, branch: task.branch, base: `origin/${job.base}`, ticketBody, headless: true });
+    const stagePrompt = pendingUser ?? shipPrompt({ feature, form: { form }, worktree: task.worktree, branch: task.branch, base: `origin/${job.base}`, ticketBody, headless: true, runtimeParallel: true });
+    const prompt = `${stagePrompt}\n\n${sharedResearch ? `## Shared research (verify changed code before relying on it)\n${sharedResearch}\n` : ""}${parallelGuidance}`;
     pendingUser = undefined;
-    const model = EXECUTION_STAGES.includes(feature.stage) ? workerModel : builderModel;
+    parallelGuidance = "";
+    const role = stageModelRole(feature.stage, idle);
     turnTag = `t${n + 1} · `; activity(`${turnTag}starting`);
-    const text = await turn(prompt, builderProvider, model);
+    const text = await turn(prompt, builderProvider, role);
     log(task, `turn ${n + 1} at ${feature.stage}: ${stripAskUser(stripShipMarkers(text)).slice(0, 300).replace(/\n/g, " ")}`);
     await applyReply(text);
     if (idle >= STUCK_AFTER) {
@@ -318,16 +441,17 @@ export async function workTask(taskId: string): Promise<void> {
   const pr = prUrl ? prNumberFromUrl(prUrl) : undefined;
   if (!pr) { await finish("failed", "In Review without a PR"); await say(slackLines.stuck("the feature reached In Review without a PR")); return; }
 
-  // ── three review rounds on rotating models, each followed by a fix turn ───────────────────
+  // ── one review per configured provider, each followed by a fix turn ───────────────────
   for (let round = task.reviewsDone + 1; round <= rotation.length; round++) {
+    await applyOwnerUpdates();
     const pick = rotation[round - 1];
     const provider: Provider = have[pick.provider] ? pick.provider : builderProvider;
     const model = have[pick.provider] ? pick.model : builderModel;
     log(task, `review round ${round} on ${provider}:${model}`);
     activity(`review round ${round} on ${model}`);
     rmSync(join(task.worktree, ".consort", "pr-review", `pr-${pr}.review.json`), { force: true });
-    const reviewText = await turn((active) => reviewSkillPrompt(task.worktree, pr, modelTiers(active, models[active]).delegate), provider, model, false);
-    await completeReply(reviewText);
+    const reviewText = await turn((active) => reviewSkillPrompt(task.worktree, pr, modelFor(active, "reader")), provider, "frontier", false, undefined, task.worktree, model);
+    await completeReply(reviewText, undefined, "frontier", provider, model);
     const summary = reviewSummaryOf(pr);
     if (!summary) throw new Error(`Review round ${round} did not write a valid review report`);
     await say(slackLines.review(round, model, summary.total));
@@ -335,8 +459,8 @@ export async function workTask(taskId: string): Promise<void> {
     updateTask(task.id, { feature });
     if (summary.total === 0) { updateTask(task.id, { reviewsDone: round }); continue; }
     activity(`fixing round ${round} findings (${summary.total})`);
-    const fix = await turn(shipPrompt({ feature, form: { form: "pr-loop" }, worktree: task.worktree, branch: task.branch, base: `origin/${job.base}`, review: { running: false, summary }, headless: true }), builderProvider, workerModel);
-    await completeReply(fix, undefined, workerModel);
+    const fix = await turn(shipPrompt({ feature, form: { form: "pr-loop" }, worktree: task.worktree, branch: task.branch, base: `origin/${job.base}`, review: { running: false, summary }, headless: true, runtimeParallel: true }), builderProvider, "implementation");
+    await completeReply(fix, undefined, "implementation");
     updateTask(task.id, { reviewsDone: round });
   }
 
@@ -353,11 +477,11 @@ export async function workTask(taskId: string): Promise<void> {
         const browser = await findBrowser();
         const helper = browser ? writeScreenshotHelper(task.worktree, browser) : undefined;
         const prompt = EVIDENCE_PROMPT({ helper: helper ?? "(no browser installed: backend output may be text; frontend screenshots require a browser)", ticketUrl: task.ticket.url, prUrl: prUrl!, worktree: task.worktree, repoRoot: job.repo });
-        const text = await turn(`${prompt}\n\n${guidance}`, builderProvider, workerModel, true, 15 * 60_000);
-        await completeReply(text, 15 * 60_000, workerModel);
+        const text = await turn(`${prompt}\n\n${guidance}`, builderProvider, "implementation", true, 15 * 60_000);
+        await completeReply(text, 15 * 60_000, "implementation");
         validateEvidence(task.worktree);
         activity("checking evidence against acceptance criteria");
-        const verification = await turn(VERIFY_EVIDENCE_PROMPT, builderProvider, builderModel, false, 15 * 60_000);
+        const verification = await turn(VERIFY_EVIDENCE_PROMPT, builderProvider, "coordination", false, 15 * 60_000);
         if (!evidenceApproved(verification)) throw new ProblemError({ where: "evidence", what: "The evidence check did not pass", why: blockerBullets(stripAskUser(verification) || parseAskUser(verification).join(" ") || "No approval was returned.") });
         const cost = loadState().tasks.find((t) => t.id === taskId)?.cost;
         const published = await publishEvidence({ worktree: task.worktree, repo: job.repo, ticket: task.ticket, pr, prUrl: prUrl!, source, clickupKey: state.clickupKey, cost, timing: { startedAt: task.startedAt, endedAt: Date.now() } });
@@ -425,6 +549,7 @@ export async function workTask(taskId: string): Promise<void> {
         recoveryGuidance = undefined;
         continue;
       }
+      if (state.state === "OPEN" && await applyOwnerUpdates()) continue;
       if (state.state !== "OPEN") { await tell(slackLines.prClosed(state.state.toLowerCase())); await finish("done", `PR ${state.state.toLowerCase()}`); if (state.state === "MERGED") await source.setStatus(task.ticket.id, "done").catch(() => {}); return; }
       const seen = new Set(loadState().tasks.find((t) => t.id === taskId)?.threadsSeen ?? []);
       const fresh = [...state.unresolved, ...(state.feedback ?? [])].filter((t) => (!!t.threadId || !seen.has(t.id)) && t.author && t.author !== me && !/\[bot\]$/.test(t.author));
@@ -443,14 +568,14 @@ export async function workTask(taskId: string): Promise<void> {
         }
         // poll faster while collecting, so the fix starts soon after the quiet period ends rather than up to a poll later
         const remaining = REVIEW_QUIET_MS - (Date.now() - (observed.batch?.stableSince ?? Date.now()));
-        await new Promise((r) => setTimeout(r, Math.max(30_000, Math.min(PR_POLL_MS, remaining + 5_000))));
+        await nap(Math.max(30_000, Math.min(PR_POLL_MS, remaining + 5_000)));
         continue;
       }
       if (fresh.length) {
         log(task, `${fresh.length} new review thread(s)`);
         activity(`answering ${fresh.length} review thread${fresh.length === 1 ? "" : "s"}`);
-        const text = await turn(RESPOND_TO_REVIEW(fresh), builderProvider, workerModel);
-        await completeReply(text, undefined, workerModel);
+        const text = await turn(RESPOND_TO_REVIEW(fresh), builderProvider, "implementation");
+        await completeReply(text, undefined, "implementation");
         const afterFix = await readPr(job.repo, pr);
         const remaining = new Set(afterFix.unresolved.map((t) => t.threadId).filter(Boolean));
         const addressed = fresh.filter((t) => !t.threadId || !remaining.has(t.threadId));
@@ -468,19 +593,19 @@ export async function workTask(taskId: string): Promise<void> {
         if (conflictFixes > 3) throw new ProblemError({ where: "PR watch", what: `Still conflicting with ${job.base} after ${conflictFixes - 1} merge attempts`, why: ["Each attempt merged the base, resolved, and pushed; GitHub still reports conflicts"], ask: "Resolve by hand, or reply with how to resolve the conflicting files." });
         await say(slackLines.conflicts(job.base, conflictFixes));
         activity(`resolving merge conflicts with ${job.base}`);
-        const answer = await turn(`PR ${prUrl} has merge conflicts with origin/${job.base}, so it cannot be merged. In this worktree: git fetch origin ${job.base}, then git merge origin/${job.base} into the branch. Resolve every conflict keeping both the branch's intent and the base's changes; never drop either side blindly. For generated files, regenerate rather than hand-edit. Run the relevant checks, commit the merge, and push. If a conflict needs a business or design decision, ask the owner. Never merge the PR itself.`, builderProvider, workerModel);
-        await completeReply(answer, undefined, workerModel);
+        const answer = await turn(`PR ${prUrl} has merge conflicts with origin/${job.base}, so it cannot be merged. In this worktree: git fetch origin ${job.base}, then git merge origin/${job.base} into the branch. Resolve every conflict keeping both the branch's intent and the base's changes; never drop either side blindly. For generated files, regenerate rather than hand-edit. Run the relevant checks, commit the merge, and push. If a conflict needs a business or design decision, ask the owner. Never merge the PR itself.`, builderProvider, "implementation");
+        await completeReply(answer, undefined, "implementation");
         await notifyTask(taskId, "monitoring", `Merge conflicts with ${job.base} resolved and pushed; waiting for GitHub to re-check and CI to run. Next check in 3m. Your action: none.`);
         updateTask(taskId, { status: "monitoring" });
-        await new Promise((r) => setTimeout(r, PR_POLL_MS));
+        await nap(PR_POLL_MS);
         continue;
       }
       if (state.ci === "fail") {
-        const answer = await turn(`PR ${prUrl} has failing CI. Read gh pr checks and the failed job logs, fix the failures in this branch, run relevant checks, commit and push. If a failure needs a business or design decision, ask the owner. Never merge.`, builderProvider, workerModel);
-        await completeReply(answer, undefined, workerModel);
+        const answer = await turn(`PR ${prUrl} has failing CI. Read gh pr checks and the failed job logs, fix the failures in this branch, run relevant checks, commit and push. If a failure needs a business or design decision, ask the owner. Never merge.`, builderProvider, "implementation");
+        await completeReply(answer, undefined, "implementation");
         await notifyTask(taskId, "monitoring", "CI repair pushed; waiting for GitHub checks on the repair. Consort will fix another failure automatically. Next check in 3m. Your action: none.");
         updateTask(taskId, { status: "monitoring" });
-        await new Promise((r) => setTimeout(r, PR_POLL_MS));
+        await nap(PR_POLL_MS);
         continue;
       }
       const ready = prReadiness(state, [me], requested);
@@ -509,7 +634,7 @@ export async function workTask(taskId: string): Promise<void> {
         recoveryGuidance = `The owner answered on Slack: ${answer}\nRecover the PR review/CI loop using this guidance. Fix and push what is needed; never merge.`;
       }
     }
-    await new Promise((r) => setTimeout(r, PR_POLL_MS));
+    await nap(PR_POLL_MS);
   }
 }
 
@@ -521,7 +646,7 @@ export function reviewSkillPrompt(worktree: string, pr: number, delegateModel?: 
   const reviewDir = join(worktree, ".consort", "pr-review");
   mkdirSync(join(reviewDir, "agents"), { recursive: true });
   writeFileSync(join(reviewDir, "categories.md"), categories);
-  const tier = delegateModel ? `You are the orchestrator. Dispatch every delegated agent on \`${delegateModel}\`.\n\n` : "";
+  const tier = delegateModel ? `You are the orchestrator. Dispatch every delegated agent on \`${delegateModel}\`; at most one delegated reader may run at once.\n\n` : "";
   return `${tier}Nobody is watching this chat; keep updates to one line per phase. Dispatch review agents with \`run_in_background: false\`, a whole wave in one message. Shared context goes in .consort/pr-review/brief.md once; the agent brief is at .consort/pr-review/categories.md. Each agent writes its report to .consort/pr-review/agents/<slug>.md.
 
 Run the following skill with argument: ${pr} in ${worktree}. Its sibling files live in ${dir}.

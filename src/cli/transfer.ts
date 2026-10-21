@@ -13,9 +13,9 @@ const run = promisify(execFile);
  * other box can clone it. `import` reads that file into a fresh or existing install. Tasks in
  * flight are not moved: their worktrees live on the box that started them.
  */
-export type BundleAccount = { name: string; provider: Account["provider"]; auth: Account["auth"]; apiKey?: string; credentials?: { file: string; content: string } };
+export type BundleAccount = { name: string; provider: Account["provider"]; auth: Account["auth"]; apiKey?: string; maxActiveTurns?: number; credentials?: { file: string; content: string } };
 export type BundleScanner = Omit<Job, "id" | "lastScanAt" | "scanStartedAt" | "repo"> & { repoPath: string; repoRemote?: string };
-export type Bundle = { kind: "consort-cli-bundle"; version: 1; exportedAt: number; host: string; clickupKey?: string; slack?: CliState["slack"]; branchPrefix?: string; accounts: BundleAccount[]; scanners: BundleScanner[] };
+export type Bundle = { kind: "consort-cli-bundle"; version: 1; exportedAt: number; host: string; capacity?: CliState["capacity"]; clickupKey?: string; slack?: CliState["slack"]; branchPrefix?: string; accounts: BundleAccount[]; scanners: BundleScanner[] };
 
 /** the credential file a login keeps in its own directory (Claude Code on macOS keeps it in the Keychain instead, so there may be none) */
 export const credentialFile = (provider: Account["provider"]) => (provider === "claude" ? ".credentials.json" : "auth.json");
@@ -25,14 +25,14 @@ export async function buildBundle(s: CliState, opts: { only?: string[]; readFile
   const remoteOf = opts.remoteOf ?? ((repo: string) => run("git", ["-C", repo, "remote", "get-url", "origin"], { timeout: 15_000 }).then((r) => r.stdout.trim() || undefined, () => undefined));
   const accounts: BundleAccount[] = s.accounts.map((a) => {
     const content = a.auth === "login" && a.configDir ? readFile(join(a.configDir, credentialFile(a.provider))) : undefined;
-    return { name: a.name, provider: a.provider, auth: a.auth, ...(a.apiKey ? { apiKey: a.apiKey } : {}), ...(content ? { credentials: { file: credentialFile(a.provider), content } } : {}) };
+    return { name: a.name, provider: a.provider, auth: a.auth, ...(a.maxActiveTurns ? { maxActiveTurns: a.maxActiveTurns } : {}), ...(a.apiKey ? { apiKey: a.apiKey } : {}), ...(content ? { credentials: { file: credentialFile(a.provider), content } } : {}) };
   });
   const scanners: BundleScanner[] = [];
   for (const j of s.jobs.filter((j) => !opts.only?.length || opts.only.includes(j.id) || opts.only.includes(j.name))) {
     const { id: _id, lastScanAt: _l, scanStartedAt: _scan, repo, ...rest } = j;
     scanners.push({ ...rest, repoPath: repo, repoRemote: await remoteOf(repo) });
   }
-  return { kind: "consort-cli-bundle", version: 1, exportedAt: Date.now(), host: host(), clickupKey: s.clickupKey, slack: s.slack, branchPrefix: s.branchPrefix, accounts, scanners };
+  return { kind: "consort-cli-bundle", version: 1, exportedAt: Date.now(), host: s.hostId ?? host(), capacity: s.capacity, clickupKey: s.clickupKey, slack: s.slack, branchPrefix: s.branchPrefix, accounts, scanners };
 }
 
 export type ImportReport = { added: string[]; kept: string[]; needLogin: string[]; cloned: string[] };
@@ -52,9 +52,11 @@ export async function applyBundle(s: CliState, b: Bundle, opts: { repoDir?: stri
   const r: ImportReport = { added: [], kept: [], needLogin: [], cloned: [] };
   const take = (k: "clickupKey" | "slack" | "branchPrefix") => { if (b[k] && (opts.replace || !s[k])) { (s as Record<string, unknown>)[k] = b[k]; r.added.push(k === "clickupKey" ? "ClickUp token" : k === "slack" ? "Slack" : "branch prefix"); } else if (b[k]) r.kept.push(k === "clickupKey" ? "ClickUp token" : k === "slack" ? "Slack" : "branch prefix"); };
   take("clickupKey"); take("slack"); take("branchPrefix");
+  if (b.capacity && (opts.replace || !s.capacity)) s.capacity = b.capacity;
   for (const a of b.accounts) {
     if (s.accounts.some((x) => x.provider === a.provider && x.name === a.name)) { r.kept.push(`account ${a.name}`); continue; }
     const acc = create(s, a.provider, a.name, a.apiKey);
+    if (a.maxActiveTurns) acc.maxActiveTurns = a.maxActiveTurns;
     r.added.push(`account ${a.name}`);
     if (acc.auth === "login") { if (a.credentials && acc.configDir) writeCred(join(acc.configDir, a.credentials.file), a.credentials.content); else r.needLogin.push(acc.id); }
   }

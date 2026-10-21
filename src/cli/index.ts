@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { availableTaskSlots } from "./capacity";
 import { spawn } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
@@ -63,13 +64,16 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   scanners add --name <n> --source clickup --list|--folder|--space <id> --repo <path> --base main [--tag ai-handle] [--status "to do"]
            [--name-includes <s>] [--name-excludes <s>] [--assignee <who>] [--every 1] [--max-parallel 2]
            [--status-progress "in progress"] [--status-review "in review"] [--status-done complete]
-           [--review-models claude:claude-fable-5-1,codex:gpt-6-astra,claude:claude-opus-5]
+           [--review-models claude:claude-fable-5-1,codex:gpt-6-astra]
   scanners add --name <n> --source github --repo <path> --base main [--tag ai-handle] …
   scanners add --name <n> --source sentry --repo <shared-checkout> --sentry-org <org> --sentry-project <slug> --workspace <id> --list <id> --tag <tag>
            [--sentry-host https://sentry.io] [--environment production] [--query is:unresolved] [--create-status "to do"]
            reads SENTRY_AUTH_TOKEN from the environment; creates ClickUp tickets without starting workers
   scanners list | scanners remove <id> | scanners enable|disable <id> | scanners scan <id>   (scan: dry run)
                                                                           a scanner watches one place for tickets and hands each match to a worker agent
+  scanners configure <id> [--max-parallel N] [--max-open-tasks N] [--max-environments N] [--planning-model provider:model] [--implementation-model provider:model] [--coordination-model provider:model] [--reader-model provider:model] [--frontier-model provider:model] [--parallel-research N] [--parallel-implementation N] [--max-model-attempts N]
+  capacity configure [--max-active-turns N] [--max-open-tasks N] [--max-environments N]
+  accounts configure <id> --max-active-turns N
   run [-d]                                                                the daemon: scan, claim, dispatch, watch; -d runs it in the background
   stop [--all]                                                            stop the daemon; --all stops the agents too (they resume on the next run)
   view [--once] [--width N] [--no-usage]                                  live table of agents, what they are doing, and each account's plan usage
@@ -191,6 +195,37 @@ async function main(argv: string[]) {
       }
       if (!s.jobs.length) console.log("No scanners."); return;
     }
+    case "capacity configure": {
+      for (const [flag, field] of [["max-active-turns", "maxActiveTurns"], ["max-open-tasks", "maxOpenTasks"], ["max-environments", "maxEnvironments"]] as const) {
+        const raw = str(a, flag); if (raw === undefined) continue;
+        const value = Number(raw); if (!Number.isInteger(value) || value < 1) fail(`--${flag} must be a positive integer`);
+        (s.capacity ??= {})[field] = value;
+      }
+      saveState(s); console.log("Updated installation capacity."); return;
+    }
+    case "scanners configure": {
+      const job = s.jobs.find(j => j.id === rest[0]) ?? fail("no such scanner");
+      for (const [flag, field] of [["max-parallel", "maxParallel"], ["max-open-tasks", "maxOpenTasks"], ["max-environments", "maxEnvironments"], ["parallel-research", "parallelResearch"], ["parallel-implementation", "parallelImplementation"], ["max-model-attempts", "maxModelAttempts"]] as const) {
+        const raw = str(a, flag); if (raw === undefined) continue;
+        const value = Number(raw); if (!Number.isInteger(value) || value < 1) fail(`--${flag} must be a positive integer`);
+        job[field] = value;
+      }
+      for (const role of ["planning", "implementation", "coordination", "reader", "frontier"] as const) {
+        for (const raw of list(a, `${role}-model`)) {
+          const colon = raw.indexOf(":"); const provider = raw.slice(0, colon); const model = raw.slice(colon + 1);
+          if (colon < 1 || !model || (provider !== "claude" && provider !== "codex")) fail(`--${role}-model must be claude:model or codex:model`);
+          if ((provider === "claude" && !model.startsWith("claude-")) || (provider === "codex" && !model.startsWith("gpt-"))) fail(`--${role}-model names a model for the wrong provider`);
+          job.modelPolicy = { ...job.modelPolicy, [role]: { ...job.modelPolicy?.[role], [provider]: model } };
+        }
+      }
+      saveState(s); console.log(`Updated scanner ${job.name}.`); return;
+    }
+    case "accounts configure": {
+      const account = s.accounts.find(account => account.id === rest[0]) ?? fail("no such account");
+      const value = Number(need(a, "max-active-turns"));
+      if (!Number.isInteger(value) || value < 1) fail("--max-active-turns must be a positive integer");
+      account.maxActiveTurns = value; saveState(s); console.log(`Updated account ${account.name}.`); return;
+    }
     case "scanners remove": { s.jobs = s.jobs.filter((j) => j.id !== rest[0]); saveState(s); console.log("Removed."); return; }
     case "scanners enable": case "scanners disable": { const j = s.jobs.find((x) => x.id === rest[0]) ?? fail("no such scanner"); j!.enabled = sub === "enable"; saveState(s); console.log(`${j!.name}: ${j!.enabled ? "on" : "off"}`); return; }
     case "scanners scan": {
@@ -255,6 +290,8 @@ async function main(argv: string[]) {
       if (t!.pid) { try { process.kill(t!.pid); } catch {} }
       updateTask(t!.id, { status: "released", pid: undefined, finishedAt: Date.now() });
       if (t!.runCode) { const r = await cleanupEnvironment(t!.runCode); console.log(`Removed ${r.containers} container(s), ${r.networks} network(s), ${r.volumes} volume(s) of ${t!.runCode}.`); }
+      for (const child of loadState().tasks.find(task => task.id === t!.id)?.childEnvironments ?? []) await cleanupEnvironment(child.runCode);
+      updateTask(t!.id, { portBase: undefined, envReadyAt: undefined, environmentReservation: undefined, childEnvironments: [] });
       console.log(`Released ${t!.ticket.id}; the worktree ${t!.worktree} is left in place.`); return;
     }
     case "tasks retry": {
@@ -369,8 +406,7 @@ async function daemon() {
         const source = sourceFor(job, s.clickupKey);
         const tickets = await source.scan();
         const live = loadState();
-        const running = live.tasks.filter((t) => t.jobId === job.id && ["working", "waiting", "monitoring"].includes(t.status)).length;
-        let slots = Math.max(0, job.maxParallel - running);
+        let slots = availableTaskSlots(live, job);
         const availableSlots = slots;
         const candidates = tickets.filter((t) => !live.tasks.some((old) => old.status !== "released" && old.ticket.id === t.id) && matchesFilters(t, job.filters)).length;
         let claimed = 0;

@@ -7,6 +7,7 @@ import type { Provider } from "../shared/types";
 import { HOME, type Account } from "./state";
 import { isCodexLimitText, isUsageLimitText, limitFromRateEvent, type LimitHit } from "../shared/seatPool.ts";
 import type { TurnUsage } from "../shared/headless.ts";
+import type { HookCallback } from "@anthropic-ai/claude-agent-sdk";
 
 /**
  * One agent turn, headless: Claude Code through the agent SDK, Codex through its SDK, each on the
@@ -36,7 +37,7 @@ export const binaryFor = (provider: Provider): string => {
   return bin;
 };
 
-export type TurnOptions = { cwd: string; prompt: string; model: string; account: Account; resume?: string; maxTurns?: number; onText?: (t: string) => void; /** the task's own ports and Docker names, on top of the process env */ env?: Record<string, string> };
+export type TurnOptions = { cwd: string; prompt: string; model: string; account: Account; resume?: string; maxTurns?: number; onText?: (t: string) => void; signal?: AbortSignal; readOnly?: boolean; effort?: "low" | "medium" | "high"; delegateModel?: string; maxDelegates?: number; /** the task's own ports and Docker names, on top of the process env */ env?: Record<string, string> };
 export type Turn = { text: string; sessionId?: string; error?: string; limit?: LimitHit; /** what the turn spent, per model (Claude Code prices its own; Codex gives tokens only) */ usage?: TurnUsage[] };
 
 export const envFor = (account: Account, extra: Record<string, string> = {}): Record<string, string | undefined> => {
@@ -55,6 +56,23 @@ export async function runTurn(o: TurnOptions): Promise<Turn> {
   return o.account.provider === "claude" ? runClaude(o) : runCodex(o);
 }
 
+/** A review reserves one extra capacity unit; its reader must remain in the foreground. */
+export function delegateBudget(max: number) {
+  const running = new Set<string>();
+  const before: HookCallback = async (input, id) => {
+    if (input.hook_event_name !== "PreToolUse") return {};
+    const args = input.tool_input as Record<string, unknown>;
+    if (!id || args.run_in_background || running.size >= max) return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "Consort permits only the reserved foreground review reader. Finish it before starting another." } };
+    running.add(id); return {};
+  };
+  const after: HookCallback = async (_, id) => { if (id) running.delete(id); return {}; };
+  return {
+    PreToolUse: [{ matcher: "^(Agent|Task)$", hooks: [before] }],
+    PostToolUse: [{ matcher: "^(Agent|Task)$", hooks: [after] }],
+    PostToolUseFailure: [{ matcher: "^(Agent|Task)$", hooks: [after] }],
+  };
+}
+
 async function runClaude(o: TurnOptions): Promise<Turn> {
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
   const chunks: string[] = [];
@@ -64,21 +82,27 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
   let rejected: LimitHit | undefined;
   let usage: TurnUsage[] | undefined;
   const ac = new AbortController();
-  const stop = () => { ac.abort(); try { (q as any).close?.(); } catch {} };
+  let q: ReturnType<typeof query> | undefined;
+  const stop = () => { ac.abort(); try { q?.close?.(); } catch {} };
+  const abort = () => ac.abort();
+  o.signal?.addEventListener("abort", abort, { once: true });
+  if (o.signal?.aborted) ac.abort();
   inFlight.add(stop);
   let stderr = ""; // the CLI's own complaints: a usage limit or a crash arrives here, not in the message stream
-  const q = query({
+  const flat = (content: unknown) => Array.isArray(content) ? content.map((b: any) => (b?.type === "text" ? b.text : "")).join("") : typeof content === "string" ? content : "";
+  try {
+  q = query({
     prompt: o.prompt,
     options: {
       cwd: o.cwd, model: o.model, resume: o.resume, pathToClaudeCodeExecutable: binaryFor("claude"), abortController: ac,
       stderr: (d: string) => { stderr = (stderr + d).slice(-4000); },
-      env: envFor(o.account, o.env), settingSources: ["user", "project", "local"],
-      permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true,
+      env: envFor(o.account, { ...o.env, ...(o.delegateModel ? { CLAUDE_CODE_SUBAGENT_MODEL: o.delegateModel } : {}) }), settingSources: ["user", "project", "local"],
+      permissionMode: o.readOnly ? "plan" : "bypassPermissions", allowDangerouslySkipPermissions: !o.readOnly,
+      ...((o.maxDelegates ?? 0) > 0 ? { hooks: delegateBudget(1) } : { disallowedTools: ["Agent", "Task"] }),
+      ...(o.effort ? { effort: o.effort } : {}),
       ...(o.maxTurns ? { maxTurns: o.maxTurns } : {}),
     },
   });
-  const flat = (content: unknown) => Array.isArray(content) ? content.map((b: any) => (b?.type === "text" ? b.text : "")).join("") : typeof content === "string" ? content : "";
-  try {
   for await (const m of q as AsyncIterable<any>) {
     if (m.type === "system" && m.subtype === "init") sessionId = m.session_id;
     else if (m.type === "rate_limit_event") rejected = limitFromRateEvent(m.rate_limit_info) ?? rejected;
@@ -103,16 +127,16 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
     const looksLikeLimit: boolean = isUsageLimitText(said as unknown) || /usage limit|rate.?limit|\b429\b|overloaded/i.test(said);
     if (looksLikeLimit) limitText = said.split("\n").find((l) => /limit|429|overloaded/i.test(l)) ?? said.slice(0, 200);
     else error = `${(e as Error).message}${said ? `: ${said.split("\n").filter(Boolean).slice(-3).join(" | ").slice(0, 300)}` : ""}`;
-  } finally { inFlight.delete(stop); }
+  } finally { inFlight.delete(stop); o.signal?.removeEventListener("abort", abort); }
   const limit = limitText || rejected ? { text: limitText ?? "usage limit", window: rejected?.window, resetsAt: rejected?.resetsAt } : undefined;
   return { text: chunks.join("\n"), sessionId, error, limit, usage };
 }
 
 async function runCodex(o: TurnOptions): Promise<Turn> {
   const { Codex } = await import("@openai/codex-sdk");
-  const codex = new Codex({ ...(o.account.auth === "key" && o.account.apiKey ? { apiKey: o.account.apiKey } : {}), codexPathOverride: binaryFor("codex"), env: envFor(o.account, o.env) as Record<string, string> });
+  const codex = new Codex({ ...(o.account.auth === "key" && o.account.apiKey ? { apiKey: o.account.apiKey } : {}), codexPathOverride: binaryFor("codex"), env: envFor(o.account, o.env) as Record<string, string>, config: { agents: { enabled: (o.maxDelegates ?? 0) > 0, max_concurrent_threads_per_session: 1, ...(o.delegateModel ? { default_subagent_model: o.delegateModel, default_subagent_reasoning_effort: "low" } : {}) } } });
   // unattended: no approvals, full access on this box, and the web for research
-  const opts = { model: o.model, workingDirectory: o.cwd, skipGitRepoCheck: true, sandboxMode: "danger-full-access" as const, networkAccessEnabled: true, approvalPolicy: "never" as const, webSearchEnabled: true, webSearchMode: "live" as const };
+  const opts = { model: o.model, workingDirectory: o.cwd, skipGitRepoCheck: true, sandboxMode: o.readOnly ? "read-only" as const : "danger-full-access" as const, networkAccessEnabled: true, approvalPolicy: "never" as const, webSearchEnabled: true, webSearchMode: "live" as const, ...(o.effort ? { modelReasoningEffort: o.effort } : {}) };
   const thread = o.resume ? codex.resumeThread(o.resume, opts) : codex.startThread(opts);
   const texts: string[] = [];
   let sessionId = o.resume;
@@ -121,6 +145,8 @@ async function runCodex(o: TurnOptions): Promise<Turn> {
   let usage: TurnUsage[] | undefined;
   const ac = new AbortController();
   const stop = () => ac.abort();
+  o.signal?.addEventListener("abort", stop, { once: true });
+  if (o.signal?.aborted) ac.abort();
   inFlight.add(stop);
   const fail = (message: string) => { if (isCodexLimitText(message)) limit = { text: message }; else error = message; };
   try {
@@ -135,6 +161,7 @@ async function runCodex(o: TurnOptions): Promise<Turn> {
     }
   } catch (e) { fail(String((e as Error).message ?? e)); }
   inFlight.delete(stop);
+  o.signal?.removeEventListener("abort", stop);
   return { text: texts.join("\n"), sessionId, error, limit, usage };
 }
 

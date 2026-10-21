@@ -41,7 +41,7 @@ consort-cli accounts add --provider codex --name work
 consort-cli accounts add --provider claude --name billing --api-key sk-ant-…
 consort-cli accounts list
 
-# 3. Slack: a bot token (xoxb-…) with chat:write, im:write and im:history (channels:history if you use --channel); reinstall the app after adding a scope. And your member id.
+# 3. Slack: a bot token (xoxb-…) with chat:write, im:write, im:history and files:read (channels:history if you use --channel); reinstall the app after adding a scope. And your member id.
 consort-cli slack set --bot-token xoxb-… --user U0123ABC
 consort-cli slack test                      # posts a hello into your DM
 
@@ -56,7 +56,7 @@ consort-cli scanners add --name roster --source clickup --space 90131945617 \   
 consort-cli scanners scan <scanner id>      # dry run: which tickets would be taken
 ```
 
-A ClickUp scanner watches one list, a folder, or a whole space (every list in it, folderless and in folders); paste the sidebar URL into the wizard (`/v/li/…`, `/v/f/…`, `/v/s/…`) and it works out which. A space or folder is scanned with one workspace-wide search (the tag filter applied by ClickUp), so a space of hundreds of lists costs a few requests a minute, not hundreds; ClickUp allows 100. Tasks are matched by tag, status and title across all those lists, and each task's status moves within its own list's statuses. GitHub issues work the same with `--source github` and no list; filters apply to labels and the issue title. Every filter must hold: `--tag` (any of), `--status` (any of), `--name-includes` (all), `--name-excludes`, `--assignee`.
+A ClickUp scanner watches one list, a folder, or a whole space (every list in it, folderless and in folders); paste the sidebar URL into the wizard (`/v/li/…`, `/v/f/…`, `/v/s/…`) and it works out which. A space or folder is scanned with one workspace-wide search (the tag filter applied by ClickUp), so a space of hundreds of lists costs a few requests a minute, not hundreds; ClickUp allows 100. Tasks are matched by tag, status and title across all those lists, and each task's status moves within its own list's statuses. Subtasks are scanned too, so a tag on a subtask alone picks up that subtask. To change a scanner's filters later, edit `~/.consort-cli/state.json` (the `jobs[].filters` block) while the daemon is stopped, then start it again; no need to run setup again. GitHub issues work the same with `--source github` and no list; filters apply to labels and the issue title. Every filter must hold: `--tag` (any of), `--status` (any of), `--name-includes` (all), `--name-excludes`, `--assignee`.
 
 ## Run
 
@@ -67,7 +67,7 @@ consort-cli stop          # the daemon; agents keep working and the next run ado
 consort-cli stop --all    # the daemon and every agent; their tasks resume on the next run
 ```
 
-For a daemon that survives reboots, run it under `systemd` or `launchd`. Every `--every` minutes (1 by default) it runs each scanner, skips tickets another consort-cli has claimed, claims up to `--max-parallel` new ones, and starts a worker process per ticket. Workers that die are restarted at the next pass; `consort-cli status` shows them, `consort-cli tasks logs <task>` shows a worker's log.
+For a daemon that survives reboots, run it under `systemd` or `launchd`. Every `--every` minutes (1 by default) it runs each scanner, skips tickets another consort-cli has claimed, claims up to the open-task limit, and starts a worker process per ticket. `--max-parallel` limits active AI work; Slack waits and GitHub monitoring do not hold an AI slot. Separate account, installation, and environment limits bound resource use. Workers that die are restarted at the next pass; `consort-cli status` shows them, `consort-cli tasks logs <task>` shows a worker's log.
 
 ## What a worker does
 
@@ -75,7 +75,7 @@ For a daemon that survives reboots, run it under `systemd` or `launchd`. Every `
 1. **Its own environment.** The task gets a Docker run code (`consort-<task>`, used as the compose project name, container name prefix and `io.consort.run` label) and a block of 100 ports no other live task on the box holds: the app on the first, Postgres at +10, Redis at +11, Mongo at +12, MySQL at +13, and so on. Every agent turn runs with these in its shell and is told the rules: only these ports and names, never the defaults, overrides in `.consort/env/.env.consort` rather than tracked files. The first turn works out what running the repo locally takes (compose files, Dockerfile, env examples, scripts, migrations, seeds), writes `.consort/ship/ENV.md` with the real commands on this task's ports, plus `.consort/env/up.sh` and `down.sh`, and proves they work. The test session and the evidence step use them. When the task ends, everything Docker holds under the code is removed (`tasks release` does the same).
 2. **Grilling, headless.** The agent reads the ticket and the code, decides everything straightforward itself and lists those as Assumptions in the spec. Only material open questions reach you: a Slack message in the thread, numbered, each with a recommended answer. Reply in the thread; one message is enough. The worker waits as long as it takes. Before the spec is written the agent runs an impact check: it traces what the change touches and, if it would break an existing flow that still serves a business purpose, asks "We can do this, but it would break <flow>. Proceed?" with a recommendation, and waits for your answer. The outcome lands under "Impact check" in the spec.
 3. **Implementing.** Tickets from the spec, built, committed, pushed; a draft PR. Then the test session proves every story and writes the report. The worker approves on your behalf and marks the PR ready.
-4. **Three review rounds.** Consort's own PR review, each round on a different model: Codex's strongest, then Claude's strongest, then the next Claude family down (configurable with `--review-models`). After each round the builder fixes what is real and pushes.
+4. **One review per provider.** With both providers configured: one Fable review followed by fixes, then one Astra review followed by fixes. With only one provider: one review. A review waits for its own provider when credits are exhausted. Legacy `--review-models` can select an offered release within the Fable/Astra family; it cannot add an Opus round. Review readers use the cheap reader model; each review reserves capacity for its one foreground reader. With capacity of one, the reviewer reads directly.
 5. **Evidence.** Before anyone is asked to review, the agent proves the feature works and Consort posts the proof on the PR and on the ticket, each linking to the other. A feature with a frontend gets a local database seeded with data that exercises it, the app started, and screenshots of the feature in use (via headless Chrome; `consort-cli setup` checks for one, or set `CONSORT_CHROME`). Anything else gets the commands, database queries and API calls that prove it, kept as text and rendered as terminal images too. Images are hosted as ClickUp task attachments when the ticket is a ClickUp task, else on an orphan `consort-evidence` branch in the repo (they render inline on public repos; on private ones the links open for people with access).
 6. **Reviewers.** The people who touched the changed files most are requested on the PR.
 7. **The watch.** Every three minutes the worker reads the PR. New review threads from humans are answered: clear requests are fixed, pushed, replied to and resolved; proven incorrect, stale, or already satisfied requests receive an evidence-backed reply and are resolved without a Slack question; real ambiguity or decisions get a Slack question. CI and approvals are read each pass.
@@ -91,17 +91,58 @@ Starts, stops, pauses, resumes, and completion are posted only inside the existi
 
 ## Which model does what
 
-Two tiers per provider, read off what the provider offers (`src/shared/modelTiers.ts`). The strongest model (Claude Fable, Codex Astra) does the thinking: grilling, the spec, the review rounds, and the check that the evidence proves the acceptance criteria. The tier below it (Claude Opus, Codex Sol) does the execution, which is nearly all of the tokens: the local environment, the build (Implementing, Ready to Test, Revising), the fixes after each review round, the evidence gathering, review-comment replies and CI repairs. When a turn falls over to the other provider it keeps its tier. The task log's first lines name both models.
+CLI models are selected by job role in `src/shared/cliModels.ts`; desktop model tiers are separate. Codex delegate models and limits use the [official agents configuration settings](https://learn.chatgpt.com/docs/config-file/config-reference).
+
+| Role | Default | Work |
+| --- | --- | --- |
+| planning | Sonnet / Sol | Grilling, spec, recovery |
+| implementation | Sonnet / Sol | Environment, build, repairs, evidence gathering |
+| coordination | Sonnet / Sol | Independent evidence inspection |
+| reader | Haiku / Luna | Scoped research and review reading |
+| frontier | Fable / Astra | Required PR reviews and escalated analysis |
+
+Defaults select matching models from the CLI seed catalog. A configured role can name a supported newer release explicitly; account access must exist. Provider fallback preserves the job role. An agent can request frontier analysis with `[model-escalate: reason]`; two failed ordinary attempts also escalate by default. Owner decisions still use Slack questions. Frontier failures stop for recovery rather than retrying without a bound. Every attempted turn records its role, model, elapsed execution time, usage, error and escalation reason in `tasks[].turnHistory`; limit attempts retain returned usage. Estimated API cost is separate from subscription quota. Unknown model prices remain visibly unpriced.
+
+Configure existing scanners without setup:
+
+```sh
+consort-cli scanners configure <scanner-id> \
+  --planning-model claude:claude-sonnet-5 \
+  --planning-model codex:gpt-6.1-sol \
+  --implementation-model codex:gpt-6.1-sol \
+  --reader-model codex:gpt-6-luna \
+  --max-model-attempts 2 \
+  --parallel-research 2 --parallel-implementation 2 \
+  --max-parallel 2 --max-open-tasks 8 --max-environments 8
+consort-cli accounts configure <account-id> --max-active-turns 2
+consort-cli capacity configure --max-active-turns 4 --max-open-tasks 32 --max-environments 16
+```
+
+Use the supported model IDs available to the configured accounts. Omitted settings retain their defaults. Repeating a role flag configures both providers. All capacity values must be positive integers. Parallel readers/writers are capped at two; selecting one runs research serially and keeps implementation on the coordinator path.
+
+## Parallel research and implementation
+
+During grilling, Consort schedules business-flow tracing, test discovery, and integration/schema research through the same capacity gates as every other turn. Readers use isolated worktrees and read-only model permissions. Reports live under `.consort/ship/parallel/`; reuse requires matching task prompts and file revisions, including changes outside each reader's assigned scope. The planning model combines reports and asks business-impact questions before the spec.
+
+The CLI yields after creating the ticket breakdown so the runtime can schedule ready tickets. Every parallel ticket needs explicit `Files`, `Blocked by`, and `Status` fields. At most two ready tickets with disjoint files and satisfied dependencies run together, including within one package. Each writer gets a detached worktree, its own ports and Docker code, the spec and owner decisions, and local dependency setup. The coordinator validates file ownership, integrates commits, and runs checks. A journal records landed commits so a restarted worker does not rebuild finished tickets. Writers never share the coordinator's session or index. Work without safe scopes stays serial; a full environment limit also falls back to serial work.
+
+Defaults allow two active AI units per scanner and per account, four installation-wide, eight open tasks per scanner (or four times its active limit if larger), 32 installation-wide open tasks, and 16 installation-wide environments. A scanner's environment limit defaults to its open-task limit. Parent and writer environments both count. Waiting tasks keep their environment until cleanup, but consume no AI unit. State updates use a cross-process lock and merge unrelated stale-snapshot edits so parallel workers retain each other's changes. Crashed AI leases are reclaimed; child Docker resources are cleaned on completion or recovery.
+
+Slack headings use a local formatter, so naming a task consumes no model call. Export/import preserves role and capacity settings. Building the CLI updates the bundle for new workers; an existing daemon must restart to use the new scanner scheduler, and an already running worker retains its loaded code.
 
 ## Slack messages you will see
 
 - `Picked up <title>. Working on branch …` — the thread opens.
 - `→ Spec'd — Spec written headless in 1 round.` — a stage moved.
 - `I need you on 2 things …` — answer in the thread.
-- `Review round 2 on claude-fable-5-1: 4 findings, fixing the real ones.`
+- `Review round 2 on gpt-6-astra: 4 findings, fixing the real ones.`
 - `Asked @ada, @grace to review.`
 - `Ready to merge. Approved, no open threads, CI green: <PR>` — done.
 - `❌ Stuck at <stage>` / `❌ Evidence blocked. PR not handed off` — the stop report. Every stop (a turn past its time limit, three turns without progress, a failed evidence check, a crash, a broken PR watch) posts the same shape: one line on what went wrong, the reasons as bullets, the agent's last lines (`Last seen`, `Before that`), what was already retried, the raw error in a code block, and one line on how to reply. Reply in the thread; the task stays open. `consort-cli tasks logs <task>` has the full log.
+
+### Updates from the Slack thread
+
+Anything you post in a task's Slack thread that is not a status question, a "thanks", or the answer to a pending question becomes an update. The daemon saves the text and any attached files (needs the `files:read` scope) under `.consort/ship/updates/<ts>/` in the worktree. Between steps the worker runs one agent turn that rewrites the ticket and changes the code to match. It then replaces the ClickUp or GitHub issue description, attaches the files, comments on the ticket, and replies in Slack. Posting an update on a finished task reopens it while its PR is still open.
 
 ## Commands
 

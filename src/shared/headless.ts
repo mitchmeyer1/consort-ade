@@ -1,5 +1,6 @@
 import { MODELS, type Provider } from "./types.ts";
 import { byCapability, rankModel } from "./modelTiers.ts";
+import { cliModelsByCapability } from "./cliModels.ts";
 
 /**
  * Rules for running /ship with nobody at the keyboard (consort-cli). The agent decides the
@@ -145,6 +146,19 @@ export function reviewRotation(available: Partial<Record<Provider, string[]>>, r
   return out;
 }
 export const seedModels = (): Record<Provider, string[]> => ({ claude: [...MODELS.claude], codex: [...MODELS.codex] });
+
+/** CLI reviews are bounded: one Fable and one Astra, or one available provider round.
+ * Legacy custom rotations can choose a release within the review family, never extra rounds.
+ */
+export function cliReviewRotation(available: Partial<Record<Provider, string[]>>, preferred: ReviewPick[] = []): ReviewPick[] {
+  return (["claude", "codex"] as const).flatMap((provider) => {
+    const ranked = cliModelsByCapability(available[provider] ?? []);
+    if (!ranked.length) return [];
+    const family = provider === "claude" ? /fable/ : /astra/;
+    const configured = preferred.find((p) => p.provider === provider && family.test(p.model) && ranked.includes(p.model));
+    return [{ provider, model: configured?.model ?? ranked.find((m) => family.test(m)) ?? ranked[0] }];
+  });
+}
 
 /** the PR as the monitor reads it */
 export type PrState = {
@@ -487,18 +501,26 @@ export function taskHealth(
 export type TokenUsage = { input: number; output: number; cacheRead: number; cacheWrite: number };
 export type TaskCost = { usd: number; tokens: TokenUsage; turns: number; /** models seen with no price, so the owner knows the dollars are short */ unpriced?: string[] };
 export type TurnUsage = { model: string; tokens: TokenUsage; usd?: number };
-/** USD per million tokens: input, output, cache read, cache write. Anthropic list prices (2026-10); OpenAI prices approximate. */
+/** USD per million tokens: input, output, cache read, cache write.
+ * OpenAI additions verified 2026-10-21 against https://developers.openai.com/api/docs/pricing:
+ * standard short-context processing, 30-minute cache writes. Older Anthropic entries retained.
+ * Estimates do not account for long context, processing-tier or regional surcharges.
+ */
 export const PRICES: Record<string, [input: number, output: number, cacheRead: number, cacheWrite: number]> = {
   "claude-fable-5-1": [10, 50, 0.25, 12.5], "claude-fable-5": [10, 50, 1, 12.5], "claude-mythos-5-1": [10, 50, 0.25, 12.5],
   "claude-opus-5-5": [4, 20, 0.2, 5], "claude-opus-5": [5, 25, 0.5, 6.25], "claude-opus-4-8": [5, 25, 0.5, 6.25], "claude-opus-4-7": [5, 25, 0.5, 6.25], "claude-opus-4-6": [5, 25, 0.5, 6.25],
   "claude-sonnet-5-5": [2, 10, 0.2, 2.5], "claude-sonnet-5": [2, 10, 0.2, 2.5], "claude-sonnet-4-6": [3, 15, 0.3, 3.75],
   "claude-haiku-5-5": [0.1, 0.5, 0.01, 0.125], "claude-haiku-4-5": [1, 5, 0.1, 1.25],
   "gpt-5": [1.25, 10, 0.125, 1.25], "gpt-5-codex": [1.25, 10, 0.125, 1.25], "gpt-5-mini": [0.25, 2, 0.025, 0.25], "gpt-5-nano": [0.05, 0.4, 0.005, 0.05],
+  "gpt-6-astra": [10, 50, 1, 12.5], "gpt-6.1-sol": [2, 10, 0.1, 2.5], "gpt-6-luna": [0.1, 0.5, 0.01, 0.125],
+  "gpt-5.6-sol": [4, 20, 0.4, 5],
 };
 /** the price row for a model id, tolerating date stamps and variants ("claude-opus-5-5-20260401", "gpt-5.1-codex-max" → gpt-5-codex) */
 export function priceFor(model: string): [number, number, number, number] | undefined {
   const m = model.toLowerCase().replace(/-\d{8}$/, "").replace(/^(us|eu|apac)\./, "").replace(/^anthropic\./, "");
   if (PRICES[m]) return PRICES[m];
+  const openai = /^(gpt-\d+(?:\.\d+)?-(?:astra|sol|terra|luna))(?:-|$)/.exec(m)?.[1];
+  if (openai) return PRICES[openai]; // Unknown family releases must not inherit generic GPT-5 prices.
   const family = /^(claude-(?:fable|mythos|opus|sonnet|haiku)-\d(?:-\d)?)/.exec(m)?.[1];
   if (family && PRICES[family]) return PRICES[family];
   if (/^gpt-5/.test(m)) return PRICES[/mini/.test(m) ? "gpt-5-mini" : /nano/.test(m) ? "gpt-5-nano" : /codex/.test(m) ? "gpt-5-codex" : "gpt-5"];

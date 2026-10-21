@@ -2,7 +2,8 @@ import { execFile } from "node:child_process";
 import { createServer } from "node:net";
 import { promisify } from "node:util";
 import { allocatePortBase, PORT_BLOCK, taskEnv, type TaskEnv } from "../shared/headless.ts";
-import { loadState, updateTask, type Task } from "./state";
+import { environmentLimit } from "./capacity";
+import { loadState, mutateState, processAlive, type Task } from "./state";
 
 /**
  * The per-task environment on this box (shared/headless.ts): a run code for Docker names and
@@ -27,17 +28,26 @@ const free = (port: number) => new Promise<boolean>((resolve) => {
 const KEY_OFFSETS = [0, 1, 2, 10, 11, 12, 13];
 
 export async function allocateEnvironment(task: Task): Promise<TaskEnv> {
-  if (task.portBase) return taskEnv(task.runCode ?? runCodeFor(task), task.portBase);
-  const live = loadState().tasks.filter((t) => t.id !== task.id && t.portBase && !["done", "released", "failed", "ready"].includes(t.status)).map((t) => t.portBase!);
-  let floor = allocatePortBase(live);
+  const current = loadState().tasks.find(t => t.id === task.id);
+  if (current?.portBase) return taskEnv(current.runCode ?? runCodeFor(task), current.portBase);
+  let floor: number | undefined;
   for (let tries = 0; tries < 200; tries++) {
-    const checks = await Promise.all(KEY_OFFSETS.map((o) => free(floor + o)));
-    if (checks.every(Boolean)) break;
-    floor = allocatePortBase([...live, floor], floor + PORT_BLOCK);
+    const used = loadState().tasks.flatMap(t => [...(t.id !== task.id && t.portBase ? [t.portBase] : []), ...(t.childEnvironments ?? []).map(child => child.portBase)]);
+    const candidate = allocatePortBase(used, floor);
+    const checks = await Promise.all(KEY_OFFSETS.map(offset => free(candidate + offset)));
+    if (!checks.every(Boolean)) { floor = candidate + PORT_BLOCK; continue; }
+    const reserved = mutateState(state => {
+      const latest = state.tasks.find(t => t.id === task.id);
+      if (!latest) throw new Error(`Task ${task.id} is not in the state file.`);
+      if (latest.portBase) return { code: latest.runCode ?? runCodeFor(latest), base: latest.portBase };
+      if (state.tasks.some(t => (t.id !== task.id && t.portBase === candidate) || t.childEnvironments?.some(child => child.portBase === candidate))) return undefined;
+      latest.portBase = candidate;
+      latest.runCode = runCodeFor(latest);
+      return { code: latest.runCode, base: candidate };
+    });
+    if (reserved) return taskEnv(reserved.code, reserved.base);
   }
-  const code = runCodeFor(task);
-  updateTask(task.id, { portBase: floor, runCode: code });
-  return taskEnv(code, floor);
+  throw new Error(`No free port block found for task ${task.id} after 200 probes.`);
 }
 
 export const environmentFor = (task: Task): TaskEnv | undefined => task.portBase ? taskEnv(task.runCode ?? runCodeFor(task), task.portBase) : undefined;
@@ -55,4 +65,53 @@ export async function cleanupEnvironment(code: string): Promise<{ containers: nu
     const v = await ids("volume", label); if (v.length) { await docker(["volume", "rm", "-f", ...v]); out.volumes += v.length; }
   }
   return out;
+}
+
+
+export class EnvironmentCapacityError extends Error {
+  constructor(taskId: string) { super(`No writer environment capacity for task ${taskId}; run its implementation serially.`); this.name = "EnvironmentCapacityError"; }
+}
+
+/** Writers in separate worktrees also need separate Docker names and port blocks. */
+export async function withChildEnvironment<T>(taskId: string, childId: string, action: (env: TaskEnv) => Promise<T>): Promise<T> {
+  const task = loadState().tasks.find(t => t.id === taskId);
+  if (!task) throw new Error(`Task ${taskId} is not in the state file.`);
+  // A restarted worker removes resources left by its crashed writer before reserving more.
+  for (const child of task.childEnvironments ?? []) if (!processAlive(child.pid)) {
+    await cleanupEnvironment(child.runCode);
+    mutateState(s => { const t = s.tasks.find(t => t.id === taskId); if (t) t.childEnvironments = t.childEnvironments?.filter(c => c.id !== child.id); });
+  }
+  const id = `${childId}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const code = `${runCodeFor(task)}-${id.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`;
+  let portBase: number | undefined;
+  let floor: number | undefined;
+  for (let probes = 0; !portBase; ) {
+    const latest = loadState();
+    const used = latest.tasks.flatMap(t => [...(t.portBase ? [t.portBase] : []), ...(t.childEnvironments ?? []).map(c => c.portBase)]);
+    const candidate = allocatePortBase(used, floor);
+    const checks = await Promise.all(KEY_OFFSETS.map(offset => free(candidate + offset)));
+    if (!checks.every(Boolean)) {
+      if (++probes >= 200) throw new Error(`No free port block found for writer ${childId} after 200 probes.`);
+      floor = candidate + PORT_BLOCK; continue;
+    }
+    const result = mutateState(s => {
+      const parent = s.tasks.find(t => t.id === taskId);
+      if (!parent || !["working", "waiting", "monitoring"].includes(parent.status)) throw new Error(`Task ${taskId} cannot start writer ${childId}.`);
+      const job = s.jobs.find(j => j.id === parent.jobId);
+      if (!job) throw new Error(`Missing job for task ${taskId}.`);
+      const count = (tasks: Task[]) => tasks.reduce((n,t) => n + (t.portBase || t.envReadyAt || t.environmentReservation ? 1 : 0) + (t.childEnvironments?.length ?? 0), 0);
+      if (count(s.tasks.filter(t => t.jobId === job.id)) >= environmentLimit(job) || count(s.tasks) >= (s.capacity?.maxEnvironments ?? 16)) return "full";
+      if (s.tasks.some(t => t.portBase === candidate || t.childEnvironments?.some(c => c.portBase === candidate))) return "collision";
+      (parent.childEnvironments ??= []).push({ id, portBase: candidate, runCode: code, pid: process.pid });
+      return "reserved";
+    });
+    if (result === "full") throw new EnvironmentCapacityError(taskId);
+    if (result === "reserved") portBase = candidate;
+    else { if (result === "collision" && ++probes >= 200) throw new Error(`Port reservation contention for writer ${childId}.`); await new Promise(resolve => setTimeout(resolve, 250)); }
+  }
+  try { return await action(taskEnv(code, portBase)); }
+  finally {
+    try { await cleanupEnvironment(code); }
+    finally { mutateState(s => { const t = s.tasks.find(t => t.id === taskId); if (t) t.childEnvironments = t.childEnvironments?.filter(c => c.id !== id); }); }
+  }
 }

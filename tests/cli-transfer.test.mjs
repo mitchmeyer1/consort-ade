@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { buildBundle, applyBundle } from '../src/cli/transfer.ts';
 
 const state = () => ({
-  version: 1, tasks: [], clickupKey: 'pk_1', branchPrefix: 'bot', slack: { botToken: 'xoxb-1', userId: 'U1' }, setupCompletedAt: 1,
+  version: 1, hostId: 'test-host', tasks: [], clickupKey: 'pk_1', branchPrefix: 'bot', slack: { botToken: 'xoxb-1', userId: 'U1' }, setupCompletedAt: 1,
   accounts: [
     { id: 'codex_1', name: 'work', provider: 'codex', auth: 'login', configDir: '/logins/codex_1', createdAt: 1 },
     { id: 'claude_1', name: 'mac', provider: 'claude', auth: 'login', configDir: '/logins/claude_1', createdAt: 1 },
@@ -62,4 +62,20 @@ test('Sentry producer routing and credentials survive export/import without live
   await applyBundle(fresh, { ...bundle, accounts: [] }, { exists: () => true, create() { throw new Error('not needed'); } });
   assert.equal(fresh.jobs[0].source, 'sentry');
   assert.equal(fresh.jobs[0].sentry.tag, 'sentry');
+});
+
+
+test('model roles and capacity settings survive export and import', async () => {
+  const s = state();
+  s.capacity = { maxActiveTurns: 3, maxOpenTasks: 10, maxEnvironments: 6 };
+  s.accounts[0].maxActiveTurns = 1;
+  Object.assign(s.jobs[0], { modelPolicy: { planning: { codex: 'gpt-6.1-sol' }, reader: { claude: 'claude-haiku-4-5-20251001' } }, parallelResearch: 2, parallelImplementation: 2, maxOpenTasks: 5, maxEnvironments: 4 });
+  const b = await buildBundle(s, { readFile: () => undefined, remoteOf: async () => undefined });
+  const fresh = { version: 1, tasks: [], accounts: [], jobs: [] };
+  await applyBundle(fresh, b, { exists: () => true, create: (st, provider, name) => { const account = { id: name, name, provider, auth: 'key', createdAt: 1 }; st.accounts.push(account); return account; } });
+  assert.deepEqual(fresh.capacity, s.capacity);
+  assert.equal(fresh.accounts[0].maxActiveTurns, 1);
+  assert.deepEqual(fresh.jobs[0].modelPolicy, s.jobs[0].modelPolicy);
+  assert.equal(fresh.jobs[0].parallelImplementation, 2);
+  assert.equal(fresh.jobs[0].maxOpenTasks, 5);
 });

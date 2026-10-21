@@ -5,7 +5,8 @@ import { createRequire } from 'node:module';
 import ts from 'typescript';
 import * as headless from '../src/shared/headless.ts';
 import * as seatPool from '../src/shared/seatPool.ts';
-import { modelTiers } from '../src/shared/modelTiers.ts';
+import * as cliModels from '../src/shared/cliModels.ts';
+import * as cliTurnPolicy from '../src/shared/cliTurnPolicy.ts';
 
 const require = createRequire(import.meta.url);
 const compiled = ts.transpileModule(readFileSync(new URL('../src/cli/pipeline.ts', import.meta.url), 'utf8'), {
@@ -25,7 +26,9 @@ for (const blockedAtStart of [true, false]) {
       'node:fs': { existsSync: () => true },
       '../shared/headless.ts': headless,
       '../shared/seatPool.ts': seatPool,
-      '../shared/modelTiers.ts': { modelTiers },
+      '../shared/cliModels.ts': cliModels, '../shared/cliTurnPolicy.ts': cliTurnPolicy,
+      './capacity': { AccountUnavailableError: class extends Error {}, withAgentTurn: async (_, __, fn) => fn(), withEnvironmentSlot: async (_, fn) => fn() },
+      './parallel': { prepareResearchTasks: async () => [], recoverImplementation: async () => [], readImplementationTasks: async () => [], runImplementation: async () => ({ completed: [], commits: [] }), runResearch: async () => ({ summary: 'No conflicting flows found', results: [], reused: false }) },
       '../main/ship': { excludeConsortDir: async () => {}, fetchTicket: async () => ({}), writeTicketFile: () => '' },
       './slackIdentity': { ensureSlackIdentity: async () => {} },
       './lifecycle': { notifyTask: async () => {} },
@@ -52,7 +55,7 @@ for (const blockedAtStart of [true, false]) {
     const codex = calls.at(-1);
     assert.equal(codex.account.id, 'x');
     // the first turn is the environment setup, a routine turn, so it lands on Codex's worker tier (Sol, not Astra)
-    assert.equal(codex.model, modelTiers('codex', headless.seedModels().codex).delegate);
+    assert.equal(codex.model, cliModels.selectCliModel('codex', headless.seedModels().codex, 'implementation'));
     assert.equal(codex.resume, undefined, 'Claude session must never be passed to Codex');
     assert.equal(task.activeProvider, 'codex');
     assert.equal(task.accountIds.codex, 'x');

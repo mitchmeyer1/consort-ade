@@ -6,8 +6,10 @@ import ts from 'typescript';
 import * as headless from '../src/shared/headless.ts';
 import * as seatPool from '../src/shared/seatPool.ts';
 import * as ship from '../src/shared/ship.ts';
-import { modelTiers } from '../src/shared/modelTiers.ts';
+import * as cliModels from '../src/shared/cliModels.ts';
+import * as cliTurnPolicy from '../src/shared/cliTurnPolicy.ts';
 import { usageBlock } from '../src/shared/usage.ts';
+import * as ownerUpdates from '../src/cli/ownerUpdates.ts';
 
 const require = createRequire(import.meta.url);
 const compile = file => ts.transpileModule(readFileSync(new URL(`../src/cli/${file}.ts`, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -24,14 +26,17 @@ function harness(opts = {}) {
   const basePr = { state: 'OPEN', isDraft: false, reviewDecision: '', approvals: [], unresolved: [], requestedReviewers: [], ci: 'pass', url: 'https://github.com/a/b/pull/1' };
   let reads = 0;
   const mocks = {
-    'node:fs': { existsSync: () => true, readFileSync: () => '', mkdirSync() {}, writeFileSync() {}, rmSync() {} },
+    'node:fs': { existsSync: () => true, readFileSync: f => opts.readFile?.(f) ?? '', mkdirSync() {}, writeFileSync() {}, rmSync() {} },
     'node:util': { promisify: () => async (cmd, args) => { events.push(args.join(' ')); return { stdout: '' }; } },
     '../shared/headless.ts': headless, '../shared/seatPool.ts': seatPool, '../shared/ship.ts': ship,
-    '../shared/modelTiers.ts': { modelTiers }, '../shared/usage.ts': { usageBlock },
-    '../shared/shipPrompt.ts': { shipPrompt: () => 'fix findings' },
+    '../shared/cliModels.ts': cliModels, '../shared/cliTurnPolicy.ts': cliTurnPolicy,
+      './capacity': { AccountUnavailableError: class extends Error {}, withAgentTurn: async (_, __, fn) => fn(), withEnvironmentSlot: async (_, fn) => fn() },
+      './parallel': { prepareResearchTasks: async () => [], recoverImplementation: async () => [], readImplementationTasks: async () => [], runImplementation: async o => opts.runImplementation?.(o) ?? ({ completed: [], commits: [] }), runResearch: async o => opts.runResearch?.(o) ?? ({ summary: 'No conflicting flows found', results: [], reused: false }) }, '../shared/usage.ts': { usageBlock },
+    '../shared/shipPrompt.ts': { shipPrompt: o => opts.shipPrompt?.(o) ?? 'fix findings' },
     '../shared/review.ts': { parseReview: () => ({}), reviewSummary: () => opts.missingReport ? undefined : opts.summary ?? { total: 0 } },
     '../main/ship': { excludeConsortDir: async () => {}, fetchTicket: async () => ({}), writeTicketFile: () => '' },
     './slackIdentity': { ensureSlackIdentity: async () => {} },
+    './ownerUpdates': ownerUpdates,
     './slackLinks': { taskSlackLinks: async t => ({ ticket: t.ticket.url, github: t.feature?.prs?.at(-1) ?? 'https://github.com/a/b/tree/feature' }) },
     './statusLog': { statusEvent: (tone, text) => events.push(`status:${tone}:${text}`) },
     './state': {
@@ -39,9 +44,9 @@ function harness(opts = {}) {
       updateTask: (id, patch) => Object.assign(task, typeof patch === 'function' ? patch(task) : patch),
       touchAccount() {}, blockAccount: (id, until, reason) => Object.assign(accounts.find(a => a.id === id), { blockedUntil: until ?? Date.now() + 60000, blockedWhy: reason }),
     },
-    './sources': { sourceFor: () => ({ comment: async () => {}, setStatus: async () => {} }) },
+    './sources': { sourceFor: () => ({ comment: async (_, text) => events.push(`ticket comment:${text}`), setStatus: async () => {}, updateBody: async (id, body) => events.push(`ticket body:${id}:${body}`), attach: async (id, file) => { events.push(`attach:${file}`); return true; } }) },
     './evidence': { findBrowser: async () => '/browser', writeScreenshotHelper: () => '/helper', validateEvidence: () => { events.push('validate evidence'); return opts.validateEvidence?.(); }, publishEvidence: async () => { events.push('publish evidence'); return opts.publishEvidence?.() ?? { items: 1, images: 1, prComment: true, ticketComment: true }; } },
-    './environment': { allocateEnvironment: async () => ({}), cleanupEnvironment: async () => ({}) },
+    './environment': { withChildEnvironment: async (_, id, fn) => fn({ CONSORT_RUN: `child-${id}` }), allocateEnvironment: async () => ({}), cleanupEnvironment: async () => ({}) },
     './slack': { Slack: class { async post(text, thread, broadcast) { if (opts.failPost?.(text)) throw new Error('Slack unavailable'); messages.push({ text, thread, broadcast }); return String(messages.length); } async waitForReply(thread, ts, options) { options?.onCheck?.('answer'); events.push('owner reply'); opts.onReply?.(task); return opts.reply ?? 'Proceed'; } } },
     './usage': { readUsage: async a => opts.usage?.(a) ?? ({ at: Date.now(), windows: [] }) },
     './agent': { packageRoot: () => '/package', stopAgents: () => events.push('abort agent'), runTurn: async o => { events.push(`turn:${o.account.provider}`); return opts.turn?.(o, task, interval, deadline) ?? { text: o.prompt.includes(headless.VERIFY_EVIDENCE_PROMPT) ? '[evidence-approved]' : '' }; } },
@@ -98,10 +103,9 @@ test('usage exhaustion during a turn aborts the stalled agent and pauses', async
   let checks = 0;
   const h = harness({ accounts: [{ id: 'x', provider: 'codex', name: 'Codex' }],
     usage: () => ({ at: Date.now(), windows: [], ...(checks++ ? { blocked: '5-hour window exhausted' } : {}) }),
-    turn: async (_, __, tick) => { await tick(); return { text: '', error: 'aborted' }; },
+    turn: async (o, __, tick) => { await tick(); assert.equal(o.signal.aborted, true); return { text: '', error: 'aborted' }; },
   });
   await assert.rejects(h.work(), e => e === halt);
-  assert.ok(h.events.includes('abort agent'));
   assert.equal(h.task.status, 'waiting');
 });
 
@@ -122,16 +126,16 @@ test('restart waits for the original unanswered Slack question', async () => {
   assert.equal(h.messages.filter(m => /I need you/.test(m.text)).length, 0);
 });
 
-test('three internal rounds precede two reviewer requests; human feedback resumes then pauses until approval', async () => {
+test('two internal rounds precede two reviewer requests; human feedback resumes then pauses until approval', async () => {
   const h = harness({
     readPr: (n, pr) => n === 1 ? { ...pr, isDraft: true } : n === 2 ? pr : n === 3 || n === 4 ? { ...pr, unresolved: [{ id: 'thread:1', author: 'ada', body: 'Fix label', url: 'url' }] } : { ...pr, approvals: ['ada', 'bob'], reviewDecision: 'APPROVED' },
     sleep: () => {},
   });
   await h.work();
   const reviewers = h.events.indexOf('reviewers:ada,bob');
-  assert.equal(h.events.slice(0, reviewers).filter(e => e.startsWith('turn:')).length, 3);
+  assert.equal(h.events.slice(0, reviewers).filter(e => e.startsWith('turn:')).length, 2);
   assert.ok(h.events.indexOf('pr ready 1') < reviewers);
-  assert.equal(h.task.reviewsDone, 3);
+  assert.equal(h.task.reviewsDone, 2);
   assert.equal(h.task.status, 'ready');
   assert.equal(h.task.lifecycle, 'completed');
   assert.ok(h.messages.some(m => /Running:/.test(m.text) && /STATUS: RUNNING$/.test(m.text)));
@@ -244,7 +248,6 @@ test('evidence publication failure pauses instead of marking evidence complete',
 test('a stalled capture is aborted and asks Slack for help after fifteen minutes', async () => {
   const h = harness({ task: { reviewsDone: 3, evidenceValidatedAt: undefined }, turn: (o, _, __, deadline) => { o.onText('CI shard 4 failed on the pushed commit'); o.onText('Rerunning that job and finishing the manifest'); deadline(); return { text: '', error: 'aborted' }; }, onReply: () => { throw halt; } });
   await assert.rejects(h.work(), e => e === halt);
-  assert.ok(h.events.includes('abort agent'));
   const report = h.messages.find(m => /exceeded 15 minutes/.test(m.text));
   assert.ok(report, 'the timeout is reported');
   // the owner sees what the agent was doing when it was stopped, newest first, and the raw error
@@ -339,10 +342,10 @@ test('intentional worker shutdown does not ask Slack to recover an aborted turn'
   assert.ok(!h.events.includes('owner reply'));
 });
 
-test('planning turns run on the strongest model; build, environment, fix and review-reply turns run one tier down', async () => {
-  const tiers = modelTiers('claude');
+test('routine planning and implementation use configured Sol or Sonnet models', async () => {
+  const routine = cliModels.selectCliModel('claude', headless.seedModels().claude, 'implementation');
   const seen = [];
-  // environment (worker) → Grilling (orchestrator) → Implementing (worker): the turn text moves the stage along
+  // Environment, Grilling, Spec'd and Implementing all use ordinary model roles.
   let n = 0;
   const h = harness({ task: { envReadyAt: undefined, feature: { stage: 'Grilling', prs: [], history: [] } }, turn: (o) => {
     seen.push({ model: o.model, prompt: o.prompt });
@@ -353,21 +356,21 @@ test('planning turns run on the strongest model; build, environment, fix and rev
     throw halt;
   } });
   await assert.rejects(h.work(), e => e === halt);
-  assert.equal(seen[0].model, tiers.delegate, 'environment setup is routine');
-  assert.equal(seen[1].model, tiers.orchestrator, 'grilling needs judgement');
-  assert.equal(seen[2].model, tiers.orchestrator, "spec'd still plans");
-  assert.equal(seen[3].model, tiers.delegate, 'implementing executes a settled plan');
-  assert.notEqual(tiers.delegate, tiers.orchestrator);
-  assert.match(h.task.activity, new RegExp(`running claude ${tiers.delegate}`));
+  assert.equal(seen[0].model, routine, 'environment setup is routine');
+  assert.equal(seen[1].model, routine, 'grilling uses Sonnet by default');
+  assert.equal(seen[2].model, routine, "spec'd still plans");
+  assert.equal(seen[3].model, routine, 'implementing executes a settled plan');
+  assert.notEqual(routine, cliModels.selectCliModel('claude', headless.seedModels().claude, 'frontier'));
+  assert.match(h.task.activity, new RegExp(`running claude ${routine}`));
 });
 
-test('a CI repair on the watch runs one tier down', async () => {
-  const tiers = modelTiers('claude');
+test('a CI repair on the watch uses the implementation model', async () => {
+  const routine = cliModels.selectCliModel('claude', headless.seedModels().claude, 'implementation');
   const seen = [];
   const h = harness({ task: { reviewsDone: 3 }, readPr: (n, base) => ({ ...base, ci: 'fail' }),
     turn: (o) => { seen.push(o.model); if (seen.length >= 1) throw halt; } });
   await assert.rejects(h.work(), e => e === halt);
-  assert.equal(seen[0], tiers.delegate);
+  assert.equal(seen[0], routine);
 });
 
 test('a saved question that was really an approval is dropped on restart instead of re-asked', async () => {
@@ -514,4 +517,195 @@ test('feedback resolution does not request a reviewer who already approved',asyn
   await h.work();assert.equal(h.task.status,'ready');
   assert.ok(!h.events.some(e=>e.startsWith('reviewers:')));
   assert.ok(!h.messages.some(m=>/Re-requested review/.test(m.text)));
+});
+
+test('a requested model escalation reruns the job on frontier without resuming the ordinary session', async () => {
+  const seen = [];
+  const h = harness({ task: { envReadyAt: undefined, accountIds: { claude: 'c' }, sessions: { claude: 'ordinary-session' } }, turn: o => {
+    seen.push(o);
+    if (seen.length === 1) return { text: '[model-escalate: Security permission inheritance is uncertain]' };
+    if (seen.length === 2) return { text: 'Resolved permission inheritance from repository callers' };
+    throw halt;
+  } });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.deepEqual(seen.slice(0, 2).map(o => o.model), ['claude-sonnet-5', 'claude-fable-5-1']);
+  assert.equal(seen[1].resume, undefined);
+  assert.match(seen[1].prompt, /Security permission inheritance is uncertain/);
+  assert.equal(h.task.turnHistory[0].role, 'implementation');
+  assert.equal(h.task.turnHistory[1].escalationReason, 'Security permission inheritance is uncertain');
+});
+
+test('two ordinary model SDK errors escalate once rather than retrying indefinitely', async () => {
+  const models = [];
+  const h = harness({ task: { envReadyAt: undefined }, sleep() {}, turn: o => {
+    models.push(o.model);
+    if (models.length <= 2) return { text: '', error: 'SDK transport failure' };
+    throw halt;
+  } });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.deepEqual(models, ['claude-sonnet-5', 'claude-sonnet-5', 'claude-fable-5-1']);
+  assert.equal(h.task.turnHistory.length, 2);
+  assert.ok(h.task.turnHistory.every(turn => turn.error === 'SDK transport failure'));
+});
+
+test('a limited attempt records consumed tokens and dollars before provider fallback', async () => {
+  const h = harness({ task: { envReadyAt: undefined }, turn: o => {
+    if (o.account.provider === 'claude') return { text: '', limit: { text: 'quota exhausted' }, usage: [{ model: o.model, tokens: { input: 123, output: 45, cacheRead: 6, cacheWrite: 7 }, usd: 0.21 }] };
+    throw halt;
+  } });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.equal(h.task.cost.usd, 0.21);
+  assert.deepEqual(h.task.cost.tokens, { input: 123, output: 45, cacheRead: 6, cacheWrite: 7 });
+  assert.equal(h.task.cost.turns, 1);
+  assert.equal(h.task.turnHistory[0].error, 'quota exhausted');
+  assert.equal(h.task.activeProvider, 'codex');
+});
+
+test('Fable review waits for Claude credits rather than replacing it with another Astra review', async () => {
+  const seen = [];
+  let blocked = false, waits = 0;
+  const h = harness({ sleep: (_, accounts) => {
+    waits++;
+    accounts.find(a => a.provider === 'claude').blockedUntil = 0;
+  }, turn: o => {
+    seen.push(o.model);
+    if (o.model === 'claude-fable-5-1' && !blocked) { blocked = true; return { text: '', limit: { text: 'quota exhausted' } }; }
+    return { text: '' };
+  } });
+  await h.work();
+  assert.equal(waits, 1);
+  assert.deepEqual(seen, ['claude-fable-5-1', 'claude-fable-5-1', 'gpt-6-astra']);
+  assert.equal(h.task.reviewsDone, 2);
+});
+
+test('stage runtime schedules isolated readers and writers then passes shared research to its coordinator', async () => {
+  const seen = [], forms = [];
+  const h = harness({ task: { feature: { stage: 'Grilling', prs: [], history: [] }, accountIds: { claude: 'c' }, sessions: { claude: 'parent-session' } },
+    runResearch: async o => {
+      await Promise.all(['flows', 'tests'].map(id => o.run({ id, cwd: `/read/${id}`, prompt: `Read ${id}`, kind: 'research' })));
+      return { summary: 'Flow export preserves archived records', reused: false, results: [] };
+    },
+    runImplementation: async o => {
+      await Promise.all(['frontend', 'backend'].map(id => o.run({ id, cwd: `/write/${id}`, prompt: `Write ${id}`, kind: 'implementation' })));
+      await o.check('/virtual');
+      return { completed: ['frontend', 'backend'], commits: ['a', 'b'] };
+    },
+    shipPrompt: o => { forms.push(o); return 'coordinate stage'; },
+    turn: o => {
+      seen.push(o);
+      if (o.cwd !== '/virtual') return { text: 'Child report', sessionId: `child-${o.cwd}` };
+      if (o.prompt.includes('integrated parallel ticket commits')) return { text: '[parallel-check: pass]' };
+      if (o.prompt.includes('coordinate stage') && forms.length === 1) return { text: "[ship-stage: Spec'd | research complete]" };
+      throw halt;
+    },
+  });
+  await assert.rejects(h.work(), e => e === halt);
+  const readers = seen.filter(o => o.cwd.startsWith('/read/'));
+  assert.equal(readers.length, 2);
+  assert.ok(readers.every(o => o.readOnly && o.model === 'claude-haiku-4-5-20251001' && o.effort === 'low' && !o.resume));
+  const writers = seen.filter(o => o.cwd.startsWith('/write/'));
+  assert.equal(writers.length, 2);
+  assert.ok(writers.every(o => !o.readOnly && o.model === 'claude-sonnet-5' && !o.resume));
+  assert.equal(new Set(writers.map(o => o.env.CONSORT_RUN)).size, 2);
+  assert.equal(new Set([...readers, ...writers].map(o => o.cwd)).size, 4);
+  assert.ok(seen.some(o => o.cwd === '/virtual' && /Flow export preserves archived records/.test(o.prompt)));
+  assert.equal(h.task.sessions.claude, 'parent-session');
+  assert.ok(forms.every(o => o.runtimeParallel === true));
+});
+
+test('an Astra review question continues on Astra without resuming the builder session', async () => {
+  const seen = [];
+  let asked = false;
+  const h = harness({ task: { accountIds: { claude: 'c', codex: 'x' }, sessions: { claude: 'builder-session', codex: 'old-codex-builder' } }, turn: o => {
+    seen.push(o);
+    if (o.model === 'gpt-6-astra' && !asked) { asked = true; return { text: '[ask-user: Should archived exports retain their existing permission check?]' }; }
+    return { text: '' };
+  } });
+  await h.work();
+  assert.deepEqual(seen.map(o => o.model), ['claude-fable-5-1', 'gpt-6-astra', 'gpt-6-astra']);
+  assert.equal(seen[2].account.provider, 'codex');
+  assert.equal(seen[2].resume, undefined);
+  assert.match(seen[2].prompt, /owner answered on Slack/i);
+  assert.equal(h.task.reviewsDone, 2);
+});
+
+test('separate parallel readers each retry one SDK error without blocking their shared account', async () => {
+  const calls = [], attempts = new Map();
+  const h = harness({ task: { feature: { stage: 'Grilling', prs: [], history: [] } }, sleep() {},
+    runResearch: async o => {
+      await Promise.all(['flows', 'tests'].map(id => o.run({ id, cwd: `/read/${id}`, prompt: `Read ${id}`, kind: 'research' })));
+      return { summary: 'Both readers completed', reused: false, results: [] };
+    },
+    turn: o => {
+      if (o.cwd === '/virtual') throw halt;
+      calls.push(o);
+      const n = (attempts.get(o.cwd) ?? 0) + 1;
+      attempts.set(o.cwd, n);
+      return n === 1 ? { text: '', error: 'Independent SDK transient error' } : { text: 'Read completed' };
+    },
+  });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.equal(calls.length, 4);
+  assert.ok(calls.every(o => o.account.provider === 'claude' && o.model === 'claude-haiku-4-5-20251001'));
+  assert.equal(h.accounts.find(a => a.provider === 'claude').blockedUntil, undefined);
+  assert.deepEqual([...attempts.values()], [2, 2]);
+});
+
+test('a limited child reader changes accounts without changing coordinator session ownership', async () => {
+  const seen = [];
+  const h = harness({
+    accounts: [{ id: 'c', provider: 'claude', name: 'Coordinator account' }, { id: 'c2', provider: 'claude', name: 'Reader alternative' }],
+    task: { feature: { stage: 'Grilling', prs: [], history: [] }, accountIds: { claude: 'c' }, sessions: { claude: 'coordinator-session' } },
+    runResearch: async o => {
+      await o.run({ id: 'flows', cwd: '/read/flows', prompt: 'Read callers', kind: 'research' });
+      assert.equal(h.task.accountIds.claude, 'c');
+      assert.equal(h.task.sessions.claude, 'coordinator-session');
+      return { summary: 'Read complete', reused: false, results: [] };
+    },
+    shipPrompt: () => { throw halt; },
+    turn: o => {
+      seen.push(o);
+      return o.account.id === 'c' ? { text: '', limit: { text: 'Reader quota exhausted' } } : { text: 'Callers traced', sessionId: 'reader-session' };
+    },
+  });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.deepEqual(seen.map(o => o.account.id), ['c', 'c2']);
+  assert.ok(seen.every(o => o.resume === undefined));
+  assert.deepEqual(h.task.accountIds, { claude: 'c' });
+  assert.deepEqual(h.task.sessions, { claude: 'coordinator-session' });
+});
+
+test('an alternate Claude review account leaves coordinator account and session ownership unchanged', async () => {
+  const seen = [];
+  const h = harness({
+    accounts: [{ id: 'c', provider: 'claude', name: 'Builder account' }, { id: 'c2', provider: 'claude', name: 'Review alternative' }, { id: 'x', provider: 'codex', name: 'Codex' }],
+    task: { accountIds: { claude: 'c', codex: 'x' }, sessions: { claude: 'builder-session', codex: 'codex-session' } },
+    turn: o => {
+      seen.push(o);
+      return o.account.id === 'c' ? { text: '', limit: { text: 'Review quota exhausted' } } : { text: '', sessionId: 'review-session' };
+    },
+  });
+  await h.work();
+  assert.deepEqual(seen.map(o => o.account.id), ['c', 'c2', 'x']);
+  assert.ok(seen.every(o => o.resume === undefined));
+  assert.deepEqual(h.task.accountIds, { claude: 'c', codex: 'x' });
+  assert.deepEqual(h.task.sessions, { claude: 'builder-session', codex: 'codex-session' });
+});
+
+test('a queued Slack update revises the ticket, attaches its files, and reports back before the task continues', async () => {
+  const prompts = [];
+  const h = harness({
+    task: { ownerUpdates: [{ ts: '9', text: 'Add a CSV export', files: ['.consort/ship/updates/9/spec.pdf'], at: 0 }] },
+    readFile: f => String(f).endsWith('updates/9/ticket.md') ? '## Goal\n- CSV export\n' : undefined,
+    turn: o => { prompts.push(o.prompt); return { text: o.prompt.includes('Add a CSV export') ? 'Done.\n[update-summary: Added CSV export to ticket and code]' : o.prompt.includes(headless.VERIFY_EVIDENCE_PROMPT) ? '[evidence-approved]' : '' }; },
+  });
+  await h.work();
+  assert.ok(prompts.some(p => /Add a CSV export[\s\S]*spec\.pdf[\s\S]*updates\/9\/ticket\.md[\s\S]*pull\/1 is open: push/.test(p)));
+  assert.ok(h.events.includes('ticket body:T1:## Goal\n- CSV export'));
+  assert.ok(h.events.includes('attach:/virtual/.consort/ship/updates/9/spec.pdf'));
+  assert.ok(h.events.some(e => e.startsWith('ticket comment:Updated from Slack by the owner: Added CSV export to ticket and code')));
+  const applied = h.messages.find(m => /Applied your update/.test(m.text));
+  assert.match(applied.text, /Added CSV export to ticket and code[\s\S]*Ticket description updated[\s\S]*Attached to the ticket: spec\.pdf/);
+  assert.deepEqual(h.task.ownerUpdates, []);
+  assert.equal(h.task.status, 'ready');
 });

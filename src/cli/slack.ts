@@ -1,5 +1,8 @@
 import { replyAfter, slackMessage, slackStatus } from "../shared/headless.ts";
 import type { SlackConfig } from "./state";
+import type { SlackFile } from "./ownerUpdates";
+
+export type SlackThreadMessage = { ts: string; user?: string; text?: string; bot_id?: string; files?: SlackFile[] };
 
 /**
  * The one channel to the owner: a Slack bot token posting into a DM with them (or a channel they
@@ -8,8 +11,9 @@ import type { SlackConfig } from "./state";
  * a reply, which is enough for questions that wait minutes or hours.
  *
  * Scopes the bot token needs: chat:write (post), im:write (open the DM), im:history (read replies in
- * the DM; channels:history or groups:history instead when pointed at a channel). Nothing else: no
- * users:read, files:write or incoming-webhook. The list the setup wizard shows is SLACK_SCOPES in setup.ts.
+ * the DM; channels:history or groups:history instead when pointed at a channel), files:read (download
+ * documents the owner attaches to an update). Nothing else: no users:read, files:write or
+ * incoming-webhook. The list the setup wizard shows is SLACK_SCOPES in setup.ts.
  */
 export class Slack {
   private cfg: SlackConfig;
@@ -51,8 +55,8 @@ export class Slack {
   }
 
   /** Read all newer replies, including long-running ticket threads with multiple pages. */
-  async threadMessages(thread: string, afterTs: string): Promise<{ ts: string; user?: string; text?: string; bot_id?: string }[]> {
-    const messages: { ts: string; user?: string; text?: string; bot_id?: string }[] = [];
+  async threadMessages(thread: string, afterTs: string): Promise<SlackThreadMessage[]> {
+    const messages: SlackThreadMessage[] = [];
     let cursor: string | undefined;
     do {
       const j = await this.api("conversations.replies", { channel: await this.channel(), ts: thread, oldest: afterTs, limit: 100, ...(cursor ? { cursor } : {}) });

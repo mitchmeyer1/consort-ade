@@ -102,9 +102,9 @@ export function validateEvidence(worktree: string): EvidenceManifest {
 }
 
 /** upload one file as a ClickUp task attachment; resolves to its public URL */
-export async function uploadClickupAttachment(key: string, taskId: string, file: string): Promise<string> {
+export async function uploadClickupAttachment(key: string, taskId: string, file: string, type = "image/png"): Promise<string> {
   const form = new FormData();
-  form.append("attachment", new Blob([readFileSync(file)], { type: "image/png" }), basename(file));
+  form.append("attachment", new Blob([readFileSync(file)], { type }), basename(file));
   const res = await fetch(`https://api.clickup.com/api/v2/task/${encodeURIComponent(taskId)}/attachment`, { method: "POST", headers: { Authorization: key }, body: form, signal: AbortSignal.timeout(60_000) });
   const text = await res.text();
   if (!res.ok) throw new Error(`ClickUp attachment: ${res.status} ${text.slice(0, 200)}`);

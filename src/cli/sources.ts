@@ -4,6 +4,7 @@ import { claimComment, type ClickupScope, type ScannedTicket } from "../shared/h
 export type { ClickupScope } from "../shared/headless.ts";
 import type { ShipTicket } from "../shared/ship";
 import type { Job, StatusNames } from "./state";
+import { uploadClickupAttachment } from "./evidence.ts";
 
 /**
  * Where tickets come from and how the pipeline writes back: a ClickUp list, or a GitHub repo's
@@ -19,6 +20,10 @@ export type Source = {
   setStatus(id: string, which: keyof StatusNames): Promise<void>;
   comment(id: string, text: string): Promise<void>;
   ticket(id: string): Promise<ShipTicket & { body: string; status?: string }>;
+  /** replace the ticket description with Markdown */
+  updateBody(id: string, body: string): Promise<void>;
+  /** attach a file to the ticket; false when the source cannot hold files */
+  attach(id: string, file: string): Promise<boolean>;
 };
 
 const run = promisify(execFile);
@@ -89,10 +94,10 @@ export function clickupSource(key: string, job: Job): Source {
       // call for everything inside it (per-list reads would be hundreds of requests against a 100/min limit).
       // The tag filter goes to the server too (ClickUp keeps tags lowercase); statuses are matched here.
       let base: string;
-      if (scope.kind === "list") base = `/list/${encodeURIComponent(scope.id)}/task?include_closed=false&subtasks=false`;
+      if (scope.kind === "list") base = `/list/${encodeURIComponent(scope.id)}/task?include_closed=false&subtasks=true`;
       else {
         const team = await clickupTeamFor(key, scope);
-        const q = new URLSearchParams({ include_closed: "false", subtasks: "false" });
+        const q = new URLSearchParams({ include_closed: "false", subtasks: "true" });
         q.append(scope.kind === "space" ? "space_ids[]" : "project_ids[]", scope.id);
         for (const t of job.filters.tags ?? []) q.append("tags[]", t.toLowerCase());
         base = `/team/${encodeURIComponent(team)}/task?${q}`;
@@ -136,6 +141,10 @@ export function clickupSource(key: string, job: Job): Source {
       const t = await clickup(key, `/task/${encodeURIComponent(id)}?include_markdown_description=true`);
       return { source: "clickup", id: String(t.id), url: t.url ?? `https://app.clickup.com/t/${t.id}`, title: t.name ?? String(t.id), body: t.markdown_description ?? t.description ?? "", status: t.status?.status };
     },
+    async updateBody(id, body) {
+      await clickup(key, `/task/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ markdown_content: body }) });
+    },
+    async attach(id, file) { await uploadClickupAttachment(key, id, file, "application/octet-stream"); return true; },
   };
 }
 
@@ -172,6 +181,9 @@ export function githubSource(job: Job): Source {
       const repo = /github\.com\/([^/]+\/[^/]+)\//.exec(j.url ?? "")?.[1];
       return { source: "github", id: String(j.number), url: j.url, title: j.title ?? `#${id}`, repo, body: j.body ?? "", status: String(j.state ?? "").toLowerCase() };
     },
+    async updateBody(id, body) { await gh(job.repo, ["issue", "edit", id, "--body", body]); },
+    // GitHub's API has no issue attachment upload; the comment names the files instead
+    async attach() { return false; },
   };
 }
 

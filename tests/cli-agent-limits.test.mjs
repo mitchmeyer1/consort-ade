@@ -7,11 +7,11 @@ import * as seatPool from '../src/shared/seatPool.ts';
 import { slackMessage, slackStatus } from '../src/shared/headless.ts';
 const require = createRequire(import.meta.url);
 const code = ts.transpileModule(readFileSync(new URL('../src/cli/agent.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText.replace(/import\.meta\.url/g, '"file:///virtual/cli/agent.js"');
-function load(runStreamed) {
+function load(runStreamed, onStart = () => {}, onNew = () => {}) {
   const mocks = {
     './state': { HOME: '/virtual' }, '../shared/seatPool.ts': seatPool,
     '../main/cliRuntime': { cliBinary: () => '/virtual/codex' },
-    '@openai/codex-sdk': { Codex: class { startThread() { return { runStreamed }; } } },
+    '@openai/codex-sdk': { Codex: class { constructor(o) { onNew(o); } startThread(o) { onStart(o); return { runStreamed }; } } },
   };
   const mod = { exports: {} };
   new Function('require', 'module', 'exports', code)(n => mocks[n] ?? require(n), mod, mod.exports);
@@ -69,4 +69,65 @@ test('Slack replies always stay inside the ticket thread', async () => {
   assert.equal(body.get('text'), '✅ Picked up a ticket\n\nSTATUS: RUNNING');
   assert.equal(body.has('thread_ts'), false);
   assert.equal(body.has('reply_broadcast'), false);
+});
+
+
+test('reader turns set read-only sandbox and explicit effort', async () => {
+  let options;
+  const agent = load(async () => ({ events: (async function* () { yield { type: 'turn.completed', usage: {} }; })() }), o => { options = o; });
+  await agent.runTurn({ ...opts, readOnly: true, effort: 'low' });
+  assert.equal(options.sandboxMode, 'read-only');
+  assert.equal(options.modelReasoningEffort, 'low');
+  assert.equal(options.approvalPolicy, 'never');
+});
+
+test('cancelling one parallel turn leaves the other running', async () => {
+  let ready, finish;
+  const started = new Promise(r => { ready = r; });
+  const release = new Promise(r => { finish = r; });
+  const signals = [];
+  const agent = load(async (_, { signal }) => ({ events: (async function* () {
+    signals.push(signal);
+    if (signals.length === 2) ready();
+    await Promise.race([release, new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }))]);
+    yield { type: 'turn.completed', usage: {} };
+  })() }));
+  const first = new AbortController();
+  const a = agent.runTurn({ ...opts, signal: first.signal });
+  const b = agent.runTurn(opts);
+  try {
+    await started;
+    first.abort();
+    assert.equal((await a).error, 'aborted');
+    assert.equal(signals[1].aborted, false);
+    finish();
+    assert.equal((await b).error, undefined);
+  } finally { finish(); agent.stopAgents(); await Promise.allSettled([a, b]); }
+});
+
+test('review SDK configuration pins a cheap reader and limits spawned agents', async () => {
+  let config;
+  const agent = load(async () => ({ events: (async function* () {})() }), () => {}, o => { config = o.config; });
+  await agent.runTurn({ ...opts, maxDelegates: 1, delegateModel: 'gpt-5.6-luna' });
+  assert.equal(config.agents.enabled, true);
+  assert.equal(config.agents.max_concurrent_threads_per_session, 1);
+  assert.equal(config.agents.default_subagent_model, 'gpt-5.6-luna');
+  assert.equal(config.agents.default_subagent_reasoning_effort, 'low');
+  await agent.runTurn(opts);
+  assert.equal(config.agents.enabled, false);
+});
+
+test('Claude reader budget denies background and overlapping delegates and releases failed readers', async () => {
+  const { delegateBudget } = load(async () => ({}));
+  const hooks = delegateBudget(1);
+  const before = hooks.PreToolUse[0].hooks[0];
+  const after = hooks.PostToolUseFailure[0].hooks[0];
+  const event = { hook_event_name: 'PreToolUse', tool_input: {} };
+  assert.deepEqual(await before(event, 'first', {}), {});
+  assert.equal((await before(event, 'second', {})).hookSpecificOutput.permissionDecision, 'deny');
+  await after({}, 'first', {});
+  assert.deepEqual(await before(event, 'second', {}), {});
+  await after({}, 'second', {});
+  assert.equal((await before({ ...event, tool_input: { run_in_background: true } }, 'background', {})).hookSpecificOutput.permissionDecision, 'deny');
+  assert.equal((await delegateBudget(0).PreToolUse[0].hooks[0](event, 'none', {})).hookSpecificOutput.permissionDecision, 'deny');
 });

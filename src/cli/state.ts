@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, openSync, closeSync, unlinkSync, statSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
@@ -9,9 +9,8 @@ import type { ShipFeature, ShipTicket } from "../shared/ship";
 /**
  * consort-cli's state: one JSON file under ~/.consort-cli (or $CONSORT_CLI_HOME), mode 0600
  * because it holds API keys. There is no keychain on a server. The daemon and each worker
- * process read and write it; writes are whole-file and atomic (rename), and a worker only ever
- * patches its own task, so the race window is a scan loop and a worker saving in the same
- * instant, which loses nothing worse than one timestamp.
+ * process read and write it. A cross-process lock serializes mutations; stale snapshots
+ * merge their changed fields into the latest file rather than replacing other workers' work.
  */
 
 export const HOME = process.env.CONSORT_CLI_HOME ?? join(homedir(), ".consort-cli");
@@ -26,13 +25,18 @@ export const WORK_DIR = join(HOME, "worktrees");
  */
 export const host = (): string => {
   if (process.env.CONSORT_CLI_HOST) return process.env.CONSORT_CLI_HOST;
-  const s = loadState();
-  if (!s.hostId) { s.hostId = `${hostname().replace(/\.local$/, "").replace(/[^\w.-]+/g, "-")}-${randomBytes(2).toString("hex")}`; saveState(s); }
-  return s.hostId;
+  const known = loadState().hostId;
+  if (known) return known;
+  return mutateState(s => {
+    if (!s.hostId) s.hostId = `${hostname().replace(/\.local$/, "").replace(/[^\w.-]+/g, "-")}-${randomBytes(2).toString("hex")}`;
+    return s.hostId;
+  });
 };
 
 export type Account = {
   id: string; name: string; provider: Provider; auth: "login" | "key"; configDir?: string; apiKey?: string; createdAt: number;
+  /** Maximum simultaneous requests using this provider account; defaults to two. */
+  maxActiveTurns?: number;
   /** set when the account hit a usage limit; the pool skips it until then (shared/headless.ts pickAccount) */
   blockedUntil?: number; blockedWhy?: string; lastUsedAt?: number;
 };
@@ -55,7 +59,14 @@ export type Job = {
   /** the tracker's own status names the pipeline moves tickets through */
   statuses: StatusNames;
   reviewModels?: ReviewPick[];
+  /** Active AI turns; waiting workers do not consume this limit. */
   maxParallel: number;
+  maxOpenTasks?: number;
+  maxEnvironments?: number;
+  modelPolicy?: import("../shared/cliModels.ts").CliModelPolicy;
+  parallelResearch?: number;
+  parallelImplementation?: number;
+  maxModelAttempts?: number;
   enabled: boolean;
   lastScanAt?: number;
   scanStartedAt?: number;
@@ -87,11 +98,20 @@ export type Task = {
   slackIdentity?: import("../shared/headless.ts").SlackIdentity;
   /** Last thread message inspected by the daemon status responder. */
   slackStatusAfterTs?: string;
+  /** owner messages from the Slack thread, waiting for the worker to apply (cli/ownerUpdates.ts) */
+  ownerUpdates?: import("./ownerUpdates").OwnerUpdate[];
+  /** Slack message ts values the daemon saw as answers to pending questions, so they are not queued as updates */
+  answeredTs?: string[];
   /** agent session ids by provider, so a task keeps one conversation per provider */
   sessions: Partial<Record<Provider, string>>;
   accountIds: Partial<Record<Provider, string>>;
   /** provider executing the current turn, including a fallback from the builder's provider */
+  turnHistory?: { at: number; stage: string; role: string; provider: Provider; model: string; durationMs: number; usage?: import("../shared/headless.ts").TurnUsage[]; error?: string; escalated?: boolean; escalationReason?: string }[];
+  riskReason?: string;
   activeProvider?: Provider;
+  activeTurns?: { id: string; pid: number; accountId: string; startedAt: number; units?: number }[];
+  childEnvironments?: { id: string; portBase: number; runCode: string; pid: number }[];
+  environmentReservation?: { pid: number; at: number };
   reviewsDone: number;
   /** review thread ids already answered */
   threadsSeen: string[];
@@ -111,7 +131,7 @@ export type Task = {
   /** tokens and estimated dollars over every agent turn so far (shared/headless.ts addTurnCost) */
   cost?: TaskCost;
 };
-export type CliState = { version: 1; accounts: Account[]; slack?: SlackConfig; clickupKey?: string; branchPrefix?: string; jobs: Job[]; tasks: Task[];
+export type CliState = { capacity?: { maxActiveTurns?: number; maxOpenTasks?: number; maxEnvironments?: number }; version: 1; accounts: Account[]; slack?: SlackConfig; clickupKey?: string; branchPrefix?: string; jobs: Job[]; tasks: Task[];
   /** set by `consort-cli setup` at the end of the walk-through; every other command checks it */
   setupCompletedAt?: number;
   /** this install's claim name: hostname plus a random suffix, minted on first use */
@@ -120,28 +140,103 @@ export type CliState = { version: 1; accounts: Account[]; slack?: SlackConfig; c
 
 const empty = (): CliState => ({ version: 1, accounts: [], jobs: [], tasks: [] });
 
-export function loadState(): CliState {
+const snapshots = new WeakMap<CliState, CliState>();
+const copy = <T>(value: T): T => structuredClone(value);
+const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
+function readState(): CliState {
   if (!existsSync(STATE_FILE)) return empty();
   const raw = JSON.parse(readFileSync(STATE_FILE, "utf8")) as Partial<CliState>;
   return { ...empty(), ...raw, accounts: raw.accounts ?? [], jobs: raw.jobs ?? [], tasks: raw.tasks ?? [] };
 }
-
-export function saveState(s: CliState) {
-  mkdirSync(HOME, { recursive: true, mode: 0o700 });
-  const tmp = `${STATE_FILE}.${process.pid}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(s, null, 2)}\n`, { mode: 0o600 });
-  renameSync(tmp, STATE_FILE);
-  try { chmodSync(STATE_FILE, 0o600); } catch {}
+export function loadState(): CliState {
+  const state = readState();
+  snapshots.set(state, copy(state));
+  return state;
 }
 
-/** re-read, patch one task, write: the only way a worker touches the file */
+/** Apply only a caller's edits, including nested edits to id-addressed records. */
+function mergeEdits(before: any, edited: any, latest: any): any {
+  if (equal(before, edited)) return latest;
+  if (Array.isArray(before) && Array.isArray(edited) && [...before, ...edited].every(x => object(x) && typeof x.id === "string")) {
+    const old = new Map(before.map(x => [x.id, x]));
+    const next = new Map(edited.map(x => [x.id, x]));
+    const result = (Array.isArray(latest) ? latest : []).filter(x => !old.has(x.id) || next.has(x.id)).map(x => {
+      const changed = next.get(x.id);
+      return old.has(x.id) && changed ? mergeEdits(old.get(x.id), changed, x) : x;
+    });
+    for (const entry of edited) if (!old.has(entry.id) && !result.some(x => x.id === entry.id)) result.push(copy(entry));
+    return result;
+  }
+  if (object(before) && object(edited)) {
+    const result = { ...(object(latest) ? latest : {}) };
+    for (const key of new Set([...Object.keys(before), ...Object.keys(edited)])) {
+      if (equal(before[key], edited[key])) continue;
+      if (!(key in edited) || edited[key] === undefined) delete result[key];
+      else result[key] = mergeEdits(before[key], edited[key], result[key]);
+    }
+    return result;
+  }
+  return copy(edited);
+}
+
+function writeState(s: CliState) {
+  const tmp = `${STATE_FILE}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  try {
+    writeFileSync(tmp, `${JSON.stringify(s, null, 2)}\n`, { mode: 0o600 });
+    renameSync(tmp, STATE_FILE);
+    try { chmodSync(STATE_FILE, 0o600); } catch {}
+  } finally { try { unlinkSync(tmp); } catch {} }
+}
+
+export const processAlive = (pid: number): boolean => {
+  try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; }
+};
+
+/** Synchronous critical sections contain no awaits and release the lock on every exit. */
+function locked<T>(action: () => T): T {
+  mkdirSync(HOME, { recursive: true, mode: 0o700 });
+  const lock = `${STATE_FILE}.lock`;
+  const deadline = Date.now() + 15_000;
+  let fd: number;
+  for (;;) {
+    try { fd = openSync(lock, "wx", 0o600); writeFileSync(fd, String(process.pid)); break; }
+    catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      try {
+        const pid = Number(readFileSync(lock, "utf8"));
+        if ((pid > 0 && !processAlive(pid)) || (!pid && Date.now() - statSync(lock).mtimeMs > 30_000)) { unlinkSync(lock); continue; }
+      } catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") continue; }
+      if (Date.now() >= deadline) throw new Error(`Timed out locking ${STATE_FILE}`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+  }
+  try { return action(); } finally { closeSync(fd); unlinkSync(lock); }
+}
+
+/** Atomic read/modify/write for counters, leases, and decisions using current state. */
+export function mutateState<T>(action: (state: CliState) => T): T {
+  return locked(() => { const state = readState(); const before = JSON.stringify(state); const result = action(state); if (JSON.stringify(state) !== before) writeState(state); return result; });
+}
+export function saveState(s: CliState) {
+  locked(() => {
+    const baseline = snapshots.get(s);
+    const merged = baseline ? mergeEdits(baseline, s, readState()) as CliState : mergeEdits(empty(), s, readState()) as CliState;
+    writeState(merged);
+    // Keep the caller's snapshot: refreshing its baseline to unseen fields would make its
+    // next save delete concurrent additions it never received.
+    snapshots.set(s, copy(s));
+  });
+}
+
 export function updateTask(id: string, patch: Partial<Task> | ((t: Task) => Partial<Task>), touch = true): Task {
-  const s = loadState();
-  const t = s.tasks.find((x) => x.id === id);
-  if (!t) throw new Error(`Task ${id} is not in the state file.`);
-  Object.assign(t, typeof patch === "function" ? patch(t) : patch, touch ? { updatedAt: Date.now() } : {});
-  saveState(s);
-  return t;
+  return mutateState(s => {
+    const t = s.tasks.find(x => x.id === id);
+    if (!t) throw new Error(`Task ${id} is not in the state file.`);
+    Object.assign(t, typeof patch === "function" ? patch(t) : patch, touch ? { updatedAt: Date.now() } : {});
+    return t;
+  });
 }
 
 export const newId = (prefix: string) => `${prefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -150,15 +245,13 @@ export const DEFAULT_STATUSES: StatusNames = { progress: "in progress", review: 
 
 /** block an account after a usage limit; `until` from the provider when it said, else an hour */
 export function blockAccount(id: string, until: number | undefined, why: string) {
-  const s = loadState();
-  const a = s.accounts.find((x) => x.id === id);
-  if (!a) return;
-  a.blockedUntil = until && until > Date.now() ? until : Date.now() + 60 * 60_000;
-  a.blockedWhy = why.slice(0, 200);
-  saveState(s);
+  mutateState(s => {
+    const a = s.accounts.find(x => x.id === id);
+    if (!a) return;
+    a.blockedUntil = until && until > Date.now() ? until : Date.now() + 60 * 60_000;
+    a.blockedWhy = why.slice(0, 200);
+  });
 }
 export function touchAccount(id: string) {
-  const s = loadState();
-  const a = s.accounts.find((x) => x.id === id);
-  if (a) { a.lastUsedAt = Date.now(); saveState(s); }
+  mutateState(s => { const a = s.accounts.find(x => x.id === id); if (a) a.lastUsedAt = Date.now(); });
 }

@@ -82,7 +82,7 @@ Consort fetches the ticket, its comments and one hop of linked tasks, issues and
 
 ## Unattended, on a server (consort-cli)
 
-The same /ship pipeline with no window. A daemon scans a ClickUp list or a repo's issues on a timer, claims what matches, ships each ticket in its own worktree, asks you on Slack only what matters, runs three review rounds on rotating models, answers human reviewers on the PR, and pings you when it is ready to merge. Setup and the full flow are in [CLI.md](CLI.md).
+The same /ship pipeline with no window. A daemon scans a ClickUp list or a repo's issues on a timer, claims what matches, ships each ticket in its own worktree, asks you on Slack only what matters, uses scoped parallel research and isolated implementation worktrees, runs one Fable review and one Astra review when both providers are configured (one review with a single provider), answers human reviewers on the PR, and pings you when it is ready to merge. Setup and the full flow are in [CLI.md](CLI.md).
 
 ## Multi-repo workspaces
 
