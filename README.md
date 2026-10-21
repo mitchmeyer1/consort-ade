@@ -13,7 +13,7 @@ Chats, terminals, diffs, commits, PR review and ticket-to-merge shipping, in one
   <a href="#what-you-get">Features</a> ·
   <a href="docs/FLOWS.md">Flows</a> ·
   <a href="docs/ship.md">/ship</a> ·
-  <a href="docs/CLI.md">consort-cli</a> ·
+  <a href="#run-consort-cli">CLI quick start</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
@@ -94,14 +94,34 @@ pnpm dev
 
 Sentry can also feed grouped, deduplicated issues into a chosen ClickUp list/tag for those workers: [Sentry scanner setup](docs/SENTRY-SCANNER.md).
 
-The headless CLI, for a server with no window (start with the [Linux worker setup checklist](docs/LINUX-SETUP.md); CLI reference: [docs/CLI.md](docs/CLI.md)):
+### Run Consort CLI
+
+The CLI runs without the desktop app on Linux or macOS. Install Node 22.12+, pnpm 9+, Git, and the GitHub CLI. On a new server, follow the [Linux worker setup checklist](docs/LINUX-SETUP.md) for Docker, browser screenshots, credentials, and reboot persistence.
+
+From this repository's root:
 
 ```bash
-pnpm install --ignore-scripts && pnpm build:cli
-node out/cli/index.js help
+pnpm install --frozen-lockfile --ignore-scripts
+pnpm build:cli
+gh auth login
+node out/cli/index.js setup
+node out/cli/index.js run -d
+node out/cli/index.js view
 ```
 
-Then, in the app: **Connect agents** (Settings › AI connectors, sign in to Claude Code or Codex, or paste an API key) and **Add projects**.
+Setup checks the machine, connects Claude Code/Codex accounts, configures ticket scanners and Slack, and verifies access. Keep the repositories you want agents to work on cloned on this machine. The daemon claims matching tickets, starts workers, and asks you questions in each ticket's Slack thread. It never merges PRs. Press `q` to leave the dashboard; the daemon and workers continue.
+
+Run these commands from this repository's root to check or stop Consort:
+
+```bash
+node out/cli/index.js status
+node out/cli/index.js stop        # Stop scanning; existing workers keep running.
+node out/cli/index.js stop --all  # Stop scanning and workers; progress is saved.
+```
+
+Start the daemon again with `node out/cli/index.js run -d` to resume saved tasks. Rebuild after pulling CLI changes; restart the daemon to load them. Existing workers load changes when restarted. See the [CLI reference](docs/CLI.md) for scanner filters, accounts, logs, and commands, and [Sentry scanner setup](docs/SENTRY-SCANNER.md) to feed Sentry issues into ClickUp.
+
+For the desktop app: **Connect agents** (Settings › AI connectors, sign in to Claude Code or Codex, or paste an API key) and **Add projects**.
 
 Optional: a ClickUp API key in Settings › Ship enables shipping and investigating ClickUp tasks; an OpenRouter key enables Autopilot's desktop navigator.
 
