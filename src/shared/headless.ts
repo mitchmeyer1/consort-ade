@@ -1,5 +1,6 @@
 import { MODELS, type Provider } from "./types.ts";
 import { byCapability, rankModel } from "./modelTiers.ts";
+import { stripShipMarkers } from "./ship.ts";
 
 /**
  * Rules for running /ship with nobody at the keyboard (consort-cli). The agent decides the
@@ -26,6 +27,30 @@ For these sub-dollar calls, you may read an existing required API key from the r
 /** Resolve factual mistakes independently; reserve owner decisions for genuine uncertainty. */
 export const REVIEW_DECISION_RULES = `Do not argue with reviewers. If a request is objectively incorrect, stale, or already satisfied, verify that against the current code and relevant executable checks, then reply once with the concrete evidence and resolve the thread without asking the owner. A generated routeCount of 350 must not be hand-edited to 3500 when the generator's routes.length and regeneration prove 350: cite the generator and result, leave the correct value, and resolve. No code change, commit, or push is required for a verified no-change resolution. If an earlier reply already explains the verified facts, do not leave the thread open or repeat the explanation: resolve that existing thread now. Re-read GitHub to confirm resolution. Confidence alone is not proof. If evidence is missing or conflicting, or intent, business requirements, design, security, or scope needs a decision, leave the thread open and raise [ask-user: …] quoting the reviewer. Do not resolve a request merely because you disagree or prefer another approach. Previously paused review questions must be reassessed under this rule; a verified factual mistake no longer needs an owner decision.`;
 
+/** where a stage leaves what the next stage's fresh session needs */
+export const HANDOFF_FILE = ".consort/ship/HANDOFF.md";
+/**
+ * Each ship stage runs in its own agent session: resuming one session for the whole feature re-reads
+ * every earlier file, log and tool result on every call (a no-op test ticket grew one to 257k tokens over
+ * 142 calls). The stage that ends hands over in a file instead.
+ */
+export const HANDOFF_RULE = `Each stage starts in a new session that does not see this conversation. Whenever you emit a ${"`"}[ship-stage: …]${"`"} marker, first rewrite ${"`"}${HANDOFF_FILE}${"`"} for the next stage, under 60 lines: where the work stands; decisions made and why, unless the spec or GRILLING.md already records them; what was tried and failed; the commands that work here (environment up and down, the exact checks to run); open problems. Point to files rather than copying them.`;
+/** the opening of a stage's first turn in a new session: what the last stage left, so the session can start from the files */
+export function handoffPreamble(stage: string, lastReply?: string): string {
+  const said = lastReply ? brief(stripAskUser(stripShipMarkers(lastReply)), 1500) : "";
+  return [
+    `## New session for ${stage}`,
+    `Earlier stages ran in other sessions; nothing of them is in this conversation. Before anything else read ${"`"}${HANDOFF_FILE}${"`"} if it exists, then the files it and the ship state point to (spec, tickets, test report). Trust the files and the repo over memory.`,
+    ...(said ? [`The last stage ended with:\n> ${said}`] : []),
+  ].join("\n\n");
+}
+/**
+ * Whether a turn continues the provider's saved session or starts a new one. It continues while the
+ * session belongs to the current stage, and always when the turn carries the owner's answer to a question
+ * that session asked. A session saved before stages were recorded keeps resuming.
+ */
+export const continuesSession = (sessionStage: string | undefined, stage: string, answering: boolean) => answering || sessionStage === undefined || sessionStage === stage;
+
 /** appended to every headless /ship turn */
 export const HEADLESS_RULES = `## Headless run: nobody is watching this chat live
 
@@ -43,7 +68,8 @@ ${AI_COST_POLICY}
 - Research is allowed and expected: search and read the web (WebSearch and WebFetch, or Codex's web search) for library docs, APIs, error messages and prior art whenever the repo does not answer. Cite what you relied on in the spec or the PR body.
 - Nothing will ever ask you for permission here; every tool call runs. Act with that care: no destructive git, no secrets in commits, no changes outside this worktree.
 - Never start something in the background and end your turn to wait for it. Nothing will notify you: when your turn ends every background process is killed, and the next turn has to start it over (a full test suite, three times, is how a 10-minute task takes an hour). Run long commands in the foreground with a generous timeout and read their result in the same turn. Run only the checks that prove the change: the touched packages' tests, typecheck, lint. Never run the whole repository's test suite; on a real codebase that is twenty minutes of database-backed tests, and the PR's CI runs it anyway (the readiness check waits for CI to be green, and the review rounds read its result).
-- Keep replies short and factual: what you did, what changed, what is next. The owner reads them as Slack messages.`;
+- Keep replies short and factual: what you did, what changed, what is next. The owner reads them as Slack messages.
+- ${HANDOFF_RULE}`;
 
 /** the impact check every Grilling runs before the spec: a change that breaks a live flow is the owner's call, not the agent's */
 export const BREAK_CHECK = `Before the spec, run the impact check. Trace what the change touches: callers, routes, jobs, integrations, data shapes and the tests that pin today's behaviour. List every existing flow that would stop working or give a different result. For each one that still serves a real business purpose, do not decide silently and do not route around it: ask the owner, one line, in this shape: "We can do this, but it would break <flow>: <what stops working for whom>. Proceed? — recommend: <yes or no, and the alternative if there is one>". Wait for the answer before writing the spec. Record the outcome under "## Impact check" in GRILLING.md and in the spec: either "No existing flow breaks" or, per flow, what breaks and the owner's decision.`;
@@ -508,6 +534,31 @@ export const ZERO_TOKENS: TokenUsage = { input: 0, output: 0, cacheRead: 0, cach
 export function usdFor(model: string, t: TokenUsage): number | undefined {
   const p = priceFor(model);
   return p ? (t.input * p[0] + t.output * p[1] + t.cacheRead * p[2] + t.cacheWrite * p[3]) / 1e6 : undefined;
+}
+const sumTokens = (us: TurnUsage[]) => us.reduce((n, u) => n + totalTokens(u.tokens), 0);
+/**
+ * What one turn spent, from Claude Code's result. Newer Claude Code (2.1.296 here) restores a session's
+ * cost on resume, so a resumed turn's modelUsage and costUSD are the session's running totals, not the
+ * turn's; older releases report the turn alone. `turn` is the result's own `usage` (this turn, the main
+ * loop only). The report is a running total exactly when it holds the last report for this session
+ * (`before`) and this turn on top: every model and count at least what it was, and the sum at least the
+ * previous sum plus `turn`. A per-turn report fails that unless this one turn outgrew the whole session
+ * so far in every count, and then at most `before` is missed.
+ */
+export function turnSpend(reported: TurnUsage[], before: TurnUsage[] | undefined, turn: TokenUsage | undefined): TurnUsage[] {
+  if (!before?.length) return reported;
+  const now = new Map(reported.map((u) => [u.model, u]));
+  const keys = Object.keys(ZERO_TOKENS) as (keyof TokenUsage)[];
+  const holds = before.every((b) => { const u = now.get(b.model); return !!u && keys.every((k) => u.tokens[k] >= b.tokens[k]); });
+  if (!holds || sumTokens(reported) < sumTokens(before) + (turn ? totalTokens(turn) : 0)) return reported;
+  const prev = new Map(before.map((b) => [b.model, b]));
+  return reported.flatMap((u) => {
+    const b = prev.get(u.model);
+    if (!b) return [u];
+    const tokens = Object.fromEntries(keys.map((k) => [k, u.tokens[k] - b.tokens[k]])) as TokenUsage;
+    const usd = u.usd !== undefined && b.usd !== undefined ? Math.max(0, u.usd - b.usd) : undefined;
+    return totalTokens(tokens) ? [{ model: u.model, tokens, usd }] : [];
+  });
 }
 /** the task's running total after one more turn */
 export function addTurnCost(prev: TaskCost | undefined, turns: TurnUsage[]): TaskCost {

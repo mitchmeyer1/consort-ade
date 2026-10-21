@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { applyShipChange, newShipFeature, parseShipMarkers, prNumberFromUrl, shipBranch, shipFolder, shipSlug, stripShipMarkers, type ShipFeature, type ShipTicket } from "../shared/ship.ts";
 import { shipPrompt } from "../shared/shipPrompt.ts";
-import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUsd, DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, VERIFY_EVIDENCE_PROMPT, parseAskUser, parseReviewerReply, observeReviewBatch, pickTurnAccount, prReadiness, ProblemError, problemOf, REBOOT_PROMPT, RESPOND_TO_REVIEW, REVIEW_QUIET_MS, reviewRotation, reviewersWithoutApproval, reviewWaitMessage, seedModels, slackLines, slackMessage, slackStatus, stripAskUser, type Problem } from "../shared/headless.ts";
+import { addTurnCost, blockerBullets, continuesSession, handoffPreamble, brief, costLine, evidenceApproved, shortUsd, DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, VERIFY_EVIDENCE_PROMPT, parseAskUser, parseReviewerReply, observeReviewBatch, pickTurnAccount, prReadiness, ProblemError, problemOf, REBOOT_PROMPT, RESPOND_TO_REVIEW, REVIEW_QUIET_MS, reviewRotation, reviewersWithoutApproval, reviewWaitMessage, seedModels, slackLines, slackMessage, slackStatus, stripAskUser, type Problem } from "../shared/headless.ts";
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { modelTiers } from "../shared/modelTiers.ts";
@@ -148,7 +148,7 @@ export async function workTask(taskId: string): Promise<void> {
   const crashes = new Map<string, number>(); // consecutive failed turns per account
   let lastCrash: string | undefined; // the newest turn failure, account and error, for the stop report
   let failedTurns = 0;
-  const turn = async (prompt: string | ((provider: Provider) => string), provider: Provider = builderProvider, model = builderModel, resume = true, timeoutMs?: number): Promise<string> => {
+  const turn = async (prompt: string | ((provider: Provider) => string), provider: Provider = builderProvider, model = builderModel, resume = true, timeoutMs?: number, answering = false): Promise<string> => {
     for (let attempt = 0; attempt < 12;) {
       const live = loadState();
       const cur = live.tasks.find((t) => t.id === taskId)!;
@@ -177,7 +177,11 @@ export async function workTask(taskId: string): Promise<void> {
       }
       updateTask(task.id, (t) => ({ activeProvider: provider, accountIds: { ...t.accountIds, [provider]: who.id }, activity: `${turnTag}running ${provider} ${model} on ${who.name}` }));
       touchAccount(who.id);
-      const session = resume && cur.accountIds[provider] === who.id ? cur.sessions[provider] : undefined;
+      // one session per stage: a new stage starts over from the handoff, except to answer what the old session asked
+      const stage = feature.stage;
+      const saved = cur.accountIds[provider] === who.id ? cur.sessions[provider] : undefined;
+      const session = resume && saved && continuesSession(cur.sessionStages?.[provider], stage, answering) ? saved : undefined;
+      const opening = resume && !session && (cur.sessions[provider] || cur.lastReply) ? `${handoffPreamble(stage, cur.lastReply)}\n\n` : "";
       let usageLimit: ReturnType<typeof usageBlock>;
       let checking = false;
       let active = true;
@@ -197,7 +201,8 @@ export async function workTask(taskId: string): Promise<void> {
       const deadline = timeoutMs ? setTimeout(() => { timedOut = true; stopAgents(); }, timeoutMs) : undefined;
       let res;
       recent.length = 0;
-      try { res = await runTurn({ cwd: task.worktree, prompt: `${HEADLESS_RULES}\n\n${typeof prompt === "function" ? prompt(provider) : prompt}\n\n${ENVIRONMENT_RULES(env)}`, model, account: who, resume: session, env, onText: (t) => { const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } }); }
+      const before = session && cur.sessionReports?.[provider]?.session === session ? cur.sessionReports[provider]!.usage : undefined;
+      try { res = await runTurn({ cwd: task.worktree, prompt: `${HEADLESS_RULES}\n\n${opening}${typeof prompt === "function" ? prompt(provider) : prompt}\n\n${ENVIRONMENT_RULES(env)}`, model, account: who, resume: session, reportedBefore: before, env, onText: (t) => { const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } }); }
       finally { active = false; clearInterval(usageTimer); if (deadline) clearTimeout(deadline); }
       if (timedOut) {
         const minutes = Math.round(timeoutMs! / 60_000);
@@ -211,7 +216,8 @@ export async function workTask(taskId: string): Promise<void> {
         continue;
       }
       if (res.usage?.length) updateTask(task.id, (t) => ({ cost: addTurnCost(t.cost, res.usage!) }));
-      if (res.sessionId && resume) updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: res.sessionId } }));
+      if (res.reported && res.sessionId && resume) updateTask(task.id, (t) => ({ sessionReports: { ...t.sessionReports, [provider]: { session: res.sessionId!, usage: res.reported! } } }));
+      if (res.sessionId && resume) updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: res.sessionId }, sessionStages: { ...t.sessionStages, [provider]: stage }, lastReply: res.text || t.lastReply }));
       if (res.error) {
         crashes.set(who.id, (crashes.get(who.id) ?? 0) + 1);
         const n = crashes.get(who.id)!;
@@ -260,7 +266,7 @@ export async function workTask(taskId: string): Promise<void> {
     while (pendingUser) {
       const prompt = pendingUser;
       pendingUser = undefined;
-      await applyReply(await turn(prompt, builderProvider, model, true, timeoutMs));
+      await applyReply(await turn(prompt, builderProvider, model, true, timeoutMs, true));
     }
   };
   log(task, `models: planning, spec and judgement on ${builderModel}; build and routine turns on ${workerModel}`);
@@ -273,7 +279,7 @@ export async function workTask(taskId: string): Promise<void> {
     updateTask(taskId, { rebootedAt: undefined });
   }
   if (task.recoveryGuidance) {
-    await completeReply(await turn(`The owner gave recovery guidance on Slack: ${task.recoveryGuidance}\nApply it and continue from the saved task state. Never merge.`));
+    await completeReply(await turn(`The owner gave recovery guidance on Slack: ${task.recoveryGuidance}\nApply it and continue from the saved task state. Never merge.`, builderProvider, builderModel, true, undefined, true));
     updateTask(taskId, { recoveryGuidance: undefined });
   }
   if (task.pendingQuestion && task.pendingQuestion.questions.some((q) => /Evidence inspection did not pass:/.test(q) && evidenceApproved(q))) {
@@ -285,7 +291,7 @@ export async function workTask(taskId: string): Promise<void> {
   }
   if (task.pendingQuestion) {
     const answer = await ask(task.pendingQuestion.questions);
-    await completeReply(await turn(`The owner answered on Slack:\n${answer}\nContinue from where you stopped.`));
+    await completeReply(await turn(`The owner answered on Slack:\n${answer}\nContinue from where you stopped.`, builderProvider, builderModel, true, undefined, true));
   }
 
   // ── the environment: what running this repo takes, on this task's ports ────────────────
@@ -300,11 +306,12 @@ export async function workTask(taskId: string): Promise<void> {
   // ── the stages, Grilling through In Review ──────────────────────────────────────────────
   for (let n = 0; feature.stage !== "In Review" && feature.stage !== "Merged" && feature.stage !== "Closed"; n++) {
     const form = feature.stage === "Ready to Test" ? "approve" as const : "resume" as const;
+    const answering = pendingUser !== undefined;
     const prompt = pendingUser ?? shipPrompt({ feature, form: { form }, worktree: task.worktree, branch: task.branch, base: `origin/${job.base}`, ticketBody, headless: true });
     pendingUser = undefined;
     const model = EXECUTION_STAGES.includes(feature.stage) ? workerModel : builderModel;
     turnTag = `t${n + 1} · `; activity(`${turnTag}starting`);
-    const text = await turn(prompt, builderProvider, model);
+    const text = await turn(prompt, builderProvider, model, true, undefined, answering);
     log(task, `turn ${n + 1} at ${feature.stage}: ${stripAskUser(stripShipMarkers(text)).slice(0, 300).replace(/\n/g, " ")}`);
     await applyReply(text);
     if (idle >= STUCK_AFTER) {
