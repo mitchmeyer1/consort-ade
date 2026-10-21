@@ -22,7 +22,7 @@ export async function answerTaskStatusQuestions(alive: (pid: number) => boolean)
           if (!current) break;
           const job = fresh.jobs.find(j => j.id === current.jobId);
           const health = taskHealth(current, fresh.accounts, { workerAlive: !!current.pid && alive(current.pid), logAgeMs: Date.now() - current.updatedAt }, Date.now());
-          const status = health.label === "COMPLETED" ? "COMPLETED" : ["WAITING", "LIMIT"].includes(health.label) ? "WAITING" : ["RUNNING", "STALLED"].includes(health.label) ? "RUNNING" : "STOPPED";
+          const status = health.label === "COMPLETED" ? "COMPLETED" : health.label === "WAITING" ? "WAITING" : ["RUNNING", "STALLED", "LIMIT"].includes(health.label) ? "RUNNING" : "STOPPED";
           const step = taskStep(current);
           const action = status === "COMPLETED" ? "Ready for you to merge; Consort will not merge." : (current.status === "monitoring" ? current.activity ?? health.note : health.note ?? current.activity) ?? current.note ?? "Preparing the task.";
           const text = slackMessage(status === "COMPLETED" ? "completed" : status === "RUNNING" ? "update" : status === "WAITING" ? "waiting" : "stopped",`Step ${step.n}/${step.total} (${step.name}): ${brief(action, 650).replace(/[.!?]+$/, "")}.`);

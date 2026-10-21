@@ -125,3 +125,40 @@ test('reviewer validation rejects unrelated accounts and request success require
   await assert.rejects(mod.exports.requestReviewers('/repo',1,['ada']),/did not record review requests/);
   pending=['ada'];await mod.exports.requestReviewers('/repo',1,['ada']);
 });
+
+test('git blame near changed lines outranks whole-file and repository contribution totals', async () => {
+  const calls=[];
+  const sha='a'.repeat(40), bob='b'.repeat(40), ada='c'.repeat(40);
+  const mocks={ '../shared/headless.ts':headless, 'node:child_process':{execFile(){}}, 'node:util':{promisify:()=>async(cmd,args)=>{
+    calls.push(args);
+    let stdout='';
+    if(cmd==='git') {
+      if(args[0]==='merge-base') stdout=sha;
+      else if(args[0]==='diff') stdout=args.includes('--unified=0')?'@@ -50 +50 @@\n-old\n+new\n':'src/map.ts\n';
+      else if(args[0]==='show') stdout=Array(100).fill('line').join('\n')+'\n';
+      else if(args[0]==='blame') stdout=`${bob} 30 30 1\nauthor-mail <bob@example.com>\n\tnearby\n${bob} 31 31 1\nauthor-mail <bob@example.com>\n\tnearby\n${ada} 32 32 1\nauthor-mail <1+ada@users.noreply.github.com>\n\tnearby\n`;
+      else if(args[0]==='shortlog') stdout=' 999 Ada <1+ada@users.noreply.github.com>\n 500 Carol <2+carol@users.noreply.github.com>\n';
+    } else if(args[0]==='repo') stdout='org/repo';
+    else if(args.includes('--jq')) stdout='bob';
+    else stdout=JSON.stringify([[{login:'carol',type:'User',contributions:10000},{login:'ada',type:'User',contributions:1000},{login:'bob',type:'User',contributions:2}]]);
+    return {stdout};
+  }}};
+  const mod={exports:{}};new Function('require','module','exports',code)(n=>mocks[n]??require(n),mod,mod.exports);
+  assert.deepEqual(await mod.exports.reviewerSuggestions('/repo','origin/main',[]),['bob','ada']);
+  assert.ok(calls.some(a=>a[0]==='blame'&&a.includes('30,70')&&a.includes(sha)),'blame must use merge-base lines around the hunk');
+  assert.ok(calls.some(a=>a[0]==='shortlog'&&a.includes('src')),'neighboring directory history supplies fallback reviewers');
+  assert.ok(calls.some(a=>a.includes(`repos/org/repo/commits/${bob}`)),'regular emails are mapped through GitHub commit authors');
+});
+
+test('request function never re-requests approved or dismissed reviewers after later changes',async()=>{
+  const calls=[];
+  const mocks={'../shared/headless.ts':headless,'node:child_process':{execFile(){}},'node:util':{promisify:()=>async(_,args)=>{
+    calls.push(args);
+    return {stdout:JSON.stringify(args.includes('reviews')?{reviews:[{author:{login:'ada'},state:'APPROVED'},{author:{login:'bob'},state:'DISMISSED'}]}:args[1]==='view'?{reviewRequests:[{login:'carol'}]}:{})};
+  }}};
+  const mod={exports:{}};new Function('require','module','exports',code)(n=>mocks[n]??require(n),mod,mod.exports);
+  assert.deepEqual(await mod.exports.requestReviewers('/repo',1,['ADA','bob']),[]);
+  assert.ok(!calls.some(a=>a[1]==='edit'));
+  assert.deepEqual(await mod.exports.requestReviewers('/repo',1,['ada','bob','carol']),['carol']);
+  assert.deepEqual(calls.filter(a=>a[1]==='edit').map(a=>a.at(-1)),['carol']);
+});

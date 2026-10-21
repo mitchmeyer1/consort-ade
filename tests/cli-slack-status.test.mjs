@@ -69,3 +69,9 @@ test('upgrading a daemon answers recent unanswered status questions', async () =
   h.messages([{ts:String(Date.now()/1000-60),user:'owner',text:'hows it going'}]);
   await h.run();assert.equal(h.replies.length,1);await h.run();assert.equal(h.replies.length,1);
 });
+
+test('status replies call automatic PR monitoring RUNNING',async()=>{
+  const h=harness();h.task.status='monitoring';h.task.activity='CI running; Consort checks again in 3m. Your action: none.';
+  h.messages([{ts:'2',user:'owner',text:'status'}]);await h.run();
+  assert.match(h.replies[0].text,/CI running[\s\S]*STATUS: RUNNING$/);
+});

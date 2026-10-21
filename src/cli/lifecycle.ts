@@ -22,7 +22,7 @@ async function deliver(taskId: string): Promise<void> {
     const links = await taskSlackLinks(task, state.jobs.find(j => j.id === task.jobId)?.repo);
     let thread = task.slackThread;
     if (!thread) {
-      thread = await slack.post(slackStatus(`*${task.ticket.title}* — ${task.ticket.url}`, task.lifecycle === "completed" ? "COMPLETED" : task.lifecycle === "stopped" ? "STOPPED" : task.lifecycle === "paused" ? "WAITING" : "RUNNING", links));
+      thread = await slack.post(slackStatus(`*${task.ticket.title}* — ${task.ticket.url}`, task.lifecycle === "completed" ? "COMPLETED" : task.lifecycle === "stopped" ? "STOPPED" : task.lifecycle === "paused" && task.status !== "monitoring" ? "WAITING" : "RUNNING", links));
       updateTask(taskId, { slackThread: thread });
     }
     for (const notification of task.notificationQueue) {
@@ -36,10 +36,10 @@ export async function notifyTask(taskId: string, activity: NonNullable<Task["lif
   const state = loadState();
   const task = state.tasks.find((t) => t.id === taskId);
   if (!task) return;
-  if (task.lifecycle !== activity || (activity === "paused" && task.pauseReason !== reason)) {
-    const verb = activity === "running" ? (task.lifecycle ? "Resumed" : "Started") : activity === "paused" ? "Paused" : activity === "completed" ? "Completed — ready for you to merge" : "Stopped";
-    const notification = { id: randomUUID(), text: slackStatus(slackMessage(activity === "completed" ? "completed" : activity === "running" ? "update" : activity === "paused" ? "waiting" : "stopped",`${verb}: ${task.ticket.title}\n${reason}`), activity === "paused" ? "WAITING" : activity === "running" ? "RUNNING" : activity === "completed" ? "COMPLETED" : "STOPPED") };
-    updateTask(taskId, (t) => ({ lifecycle: activity, pauseReason: activity === "paused" ? reason : undefined,
+  if (task.lifecycle !== activity || (["paused", "monitoring"].includes(activity) && task.pauseReason !== reason)) {
+    const verb = activity === "monitoring" ? "Running" : activity === "running" ? (task.lifecycle ? "Resumed" : "Started") : activity === "paused" ? "Paused" : activity === "completed" ? "Completed — ready for you to merge" : "Stopped";
+    const notification = { id: randomUUID(), text: slackStatus(slackMessage(activity === "completed" ? "completed" : ["running", "monitoring"].includes(activity) ? "update" : activity === "paused" ? "waiting" : "stopped",`${verb}: ${task.ticket.title}\n${reason}`), activity === "paused" ? "WAITING" : ["running", "monitoring"].includes(activity) ? "RUNNING" : activity === "completed" ? "COMPLETED" : "STOPPED") };
+    updateTask(taskId, (t) => ({ lifecycle: activity, pauseReason: ["paused", "monitoring"].includes(activity) ? reason : undefined,
       ...(state.slack ? { notificationQueue: [...(t.notificationQueue ?? []), notification] } : {}) }));
   }
   await flushTaskNotifications(taskId);

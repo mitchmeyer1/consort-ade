@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { applyShipChange, newShipFeature, parseShipMarkers, prNumberFromUrl, shipBranch, shipFolder, shipSlug, stripShipMarkers, type ShipFeature, type ShipTicket } from "../shared/ship.ts";
 import { shipPrompt } from "../shared/shipPrompt.ts";
-import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUsd, DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, VERIFY_EVIDENCE_PROMPT, parseAskUser, parseReviewerReply, observeReviewBatch, pickTurnAccount, prReadiness, ProblemError, problemOf, REBOOT_PROMPT, RESPOND_TO_REVIEW, reviewRotation, reviewWaitMessage, seedModels, slackLines, slackMessage, slackStatus, stripAskUser, type Problem } from "../shared/headless.ts";
+import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUsd, DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, VERIFY_EVIDENCE_PROMPT, parseAskUser, parseReviewerReply, observeReviewBatch, pickTurnAccount, prReadiness, ProblemError, problemOf, REBOOT_PROMPT, RESPOND_TO_REVIEW, REVIEW_QUIET_MS, reviewRotation, reviewersWithoutApproval, reviewWaitMessage, seedModels, slackLines, slackMessage, slackStatus, stripAskUser, type Problem } from "../shared/headless.ts";
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { modelTiers } from "../shared/modelTiers.ts";
@@ -158,7 +158,7 @@ export async function workTask(taskId: string): Promise<void> {
         const until = resets.length ? Math.min(...resets) : Date.now() + DEFAULT_BLOCK_MS;
         const waiting = `All AI accounts reached their usage limit until ${resetLabel(until)}. Consort retries every 30s. Your action: none; work resumes when credits reset.`;
         updateTask(taskId, { status: "waiting", note: waiting, activity: waiting });
-        await notifyTask(taskId, "paused", waiting);
+        await notifyTask(taskId, "monitoring", waiting);
         await new Promise((r) => setTimeout(r, Math.min(30_000, Math.max(1_000, until - Date.now()))));
         continue;
       }
@@ -403,16 +403,18 @@ export async function workTask(taskId: string): Promise<void> {
     const verified = await validateReviewers(job.repo, unique);
     if (verified.length !== 2) { requestError = "Those logins do not identify two people with repository access. Use two @GitHub logins."; continue; }
     if (candidates.length === 2 && !requestError) await say(slackLines.reviewerPick(candidates));
-    try { await requestReviewers(job.repo, pr, unique); }
+    let sent: string[];
+    try { sent = await requestReviewers(job.repo, pr, unique); }
     catch (e) { requestError = `GitHub rejected the review request: ${(e as Error).message}`; continue; }
     requested = verified;
     updateTask(taskId, { reviewersRequested: requested });
-    await say(slackLines.reviewers(requested));
+    if (sent.length) await say(slackLines.reviewers(sent));
   }
   updateTask(task.id, { status: "monitoring", activity: "watching the PR" });
   // Read GitHub first so the pause explains the real blockers.
 
   let recoveryGuidance: string | undefined;
+  let conflictFixes = 0; // merge-conflict repairs pushed on this watch; after a few the owner is asked
   for (;;) {
     const state = await readPr(job.repo, pr).catch((e) => { log(task, `pr read failed: ${e.message}`); return undefined; });
     updateTask(task.id, { lastPrCheckAt: Date.now() });
@@ -431,11 +433,17 @@ export async function workTask(taskId: string): Promise<void> {
       const previousBatch = currentTask.reviewBatch?.fingerprint;
       updateTask(taskId, { reviewBatch: observed.batch });
       if (fresh.length && !observed.ready) {
-        const note = `collecting ${fresh.length} review comments; waiting for 3 quiet minutes`;
+        // this is work in progress, not a pause: the agent is letting the reviewer finish, then fixes everything at once
+        const note = `collecting ${fresh.length} review comments; fixing them together after 3 quiet minutes`;
         updateTask(taskId, { status: "monitoring", activity: note });
-        if (previousBatch !== observed.batch?.fingerprint) statusEvent("info", `Ticket ${task.ticket.id}: ${note}`);
-        await notifyTask(taskId, "paused", `Collecting ${fresh.length} review comment(s) from ${[...new Set(fresh.map(t => "@" + t.author))].join(", ")}; Consort fixes the batch after 3 quiet minutes. Your action: none.`);
-        await new Promise((r) => setTimeout(r, PR_POLL_MS));
+        await notifyTask(taskId, "running", `Review comments arrived; collecting them.`);
+        if (previousBatch !== observed.batch?.fingerprint) {
+          statusEvent("info", `Ticket ${task.ticket.id}: ${note}`);
+          await say(slackLines.working(`Collecting ${fresh.length} review comment${fresh.length === 1 ? "" : "s"} from ${[...new Set(fresh.map(t => "@" + t.author))].join(", ")}; fixing them together once they stop for 3 minutes. Nothing needed from you`));
+        }
+        // poll faster while collecting, so the fix starts soon after the quiet period ends rather than up to a poll later
+        const remaining = REVIEW_QUIET_MS - (Date.now() - (observed.batch?.stableSince ?? Date.now()));
+        await new Promise((r) => setTimeout(r, Math.max(30_000, Math.min(PR_POLL_MS, remaining + 5_000))));
         continue;
       }
       if (fresh.length) {
@@ -447,17 +455,30 @@ export async function workTask(taskId: string): Promise<void> {
         const remaining = new Set(afterFix.unresolved.map((t) => t.threadId).filter(Boolean));
         const addressed = fresh.filter((t) => !t.threadId || !remaining.has(t.threadId));
         updateTask(task.id, (t) => ({ threadsSeen: [...t.threadsSeen, ...addressed.map((f) => f.id)], reviewBatch: undefined }));
-        await requestReviewers(job.repo, pr, requested);
+        const sent = await requestReviewers(job.repo, pr, reviewersWithoutApproval(requested, [...afterFix.approvals, ...(afterFix.previousApprovers ?? [])]));
         updateTask(taskId, { reviewRequestedHead: afterFix.headSha, reviewRequestedAt: Date.now(), reviewWaitSince: Date.now() });
-        await say(`✅ Re-requested review from ${requested.map(n => "@" + n).join(", ")} after addressing feedback. Your action: none now.`);
+        if (sent.length) await say(`✅ Re-requested review from ${sent.map(n => "@" + n).join(", ")} after addressing feedback. Your action: none now.`);
         statusEvent("success", `Ticket ${task.ticket.id}: handled a batch of ${fresh.length} review comments`);
         await say(slackLines.answered(fresh.length, fresh.length - addressed.length));
         continue; // re-read straight away
       }
+      if (state.mergeable === "CONFLICTING") {
+        // a PR that does not merge cleanly is never handed off: bring the base in, resolve, push, and let CI and GitHub re-check
+        conflictFixes++;
+        if (conflictFixes > 3) throw new ProblemError({ where: "PR watch", what: `Still conflicting with ${job.base} after ${conflictFixes - 1} merge attempts`, why: ["Each attempt merged the base, resolved, and pushed; GitHub still reports conflicts"], ask: "Resolve by hand, or reply with how to resolve the conflicting files." });
+        await say(slackLines.conflicts(job.base, conflictFixes));
+        activity(`resolving merge conflicts with ${job.base}`);
+        const answer = await turn(`PR ${prUrl} has merge conflicts with origin/${job.base}, so it cannot be merged. In this worktree: git fetch origin ${job.base}, then git merge origin/${job.base} into the branch. Resolve every conflict keeping both the branch's intent and the base's changes; never drop either side blindly. For generated files, regenerate rather than hand-edit. Run the relevant checks, commit the merge, and push. If a conflict needs a business or design decision, ask the owner. Never merge the PR itself.`, builderProvider, workerModel);
+        await completeReply(answer, undefined, workerModel);
+        await notifyTask(taskId, "monitoring", `Merge conflicts with ${job.base} resolved and pushed; waiting for GitHub to re-check and CI to run. Next check in 3m. Your action: none.`);
+        updateTask(taskId, { status: "monitoring" });
+        await new Promise((r) => setTimeout(r, PR_POLL_MS));
+        continue;
+      }
       if (state.ci === "fail") {
         const answer = await turn(`PR ${prUrl} has failing CI. Read gh pr checks and the failed job logs, fix the failures in this branch, run relevant checks, commit and push. If a failure needs a business or design decision, ask the owner. Never merge.`, builderProvider, workerModel);
         await completeReply(answer, undefined, workerModel);
-        await notifyTask(taskId, "paused", "CI repair pushed; waiting for GitHub checks on the repair. Consort will fix another failure automatically. Next check in 3m. Your action: none.");
+        await notifyTask(taskId, "monitoring", "CI repair pushed; waiting for GitHub checks on the repair. Consort will fix another failure automatically. Next check in 3m. Your action: none.");
         updateTask(taskId, { status: "monitoring" });
         await new Promise((r) => setTimeout(r, PR_POLL_MS));
         continue;
@@ -473,15 +494,15 @@ export async function workTask(taskId: string): Promise<void> {
       const waitSince = saved.reviewWaitSince ?? Date.now();
       const approved = new Set(state.approvals.map(n => n.toLowerCase()));
       const pending = new Set(state.requestedReviewers.map(n => n.toLowerCase()));
-      const needsRequest = [...new Set([...(state.changesRequestedBy ?? []), ...requested.filter(n => !approved.has(n.toLowerCase()))])].filter(n => !pending.has(n.toLowerCase()));
+      const needsRequest = reviewersWithoutApproval([...new Set([...(state.changesRequestedBy ?? []), ...requested.filter(n => !approved.has(n.toLowerCase()))])], [...state.approvals, ...(state.previousApprovers ?? [])]).filter(n => !pending.has(n.toLowerCase()));
       if (needsRequest.length && (!saved.reviewRequestedAt || saved.reviewRequestedHead !== state.headSha || Date.now() - saved.reviewRequestedAt >= 30 * 60_000)) {
-        await requestReviewers(job.repo, pr, needsRequest);
+        const sent = await requestReviewers(job.repo, pr, needsRequest);
         updateTask(taskId, { reviewRequestedHead: state.headSha, reviewRequestedAt: Date.now() });
-        await say(`✅ Re-requested review from ${needsRequest.map(n => "@" + n).join(", ")}; waiting for their GitHub review. Your action: none now.`);
+        if (sent.length) await say(`✅ Re-requested review from ${sent.map(n => "@" + n).join(", ")}; waiting for their GitHub review. Your action: none now.`);
       }
       const waiting = reviewWaitMessage(state, requested, Date.now() - waitSince >= 60 * 60_000);
       updateTask(taskId, { status: "monitoring", activity: waiting, reviewWaitSince: waitSince });
-      await notifyTask(taskId, "paused", waiting);
+      await notifyTask(taskId, "monitoring", waiting);
       } catch (e) {
         log(task, `Review loop needs help: ${(e as Error).message}`);
         const answer = await ask([slackLines.problem(problemOf(e, "PR watch", { recent: [...recent], ask: "Reply with what to do. The task stays open until a requested reviewer approves and CI passes." }), task.ticket.url)], true);

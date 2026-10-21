@@ -49,7 +49,7 @@ function harness(opts = {}) {
       validateReviewers: async (_, names) => names.filter(n => ['ada','bob'].includes(n)),
       reviewerSuggestions: async () => opts.suggestions ?? (opts.shortlog ? [] : ["ada", "bob"]),
       whoAmI: async () => 'me', shortlogForBranch: async () => opts.shortlog ?? ' 2 Ada <1+ada@users.noreply.github.com>\n 1 Bob <2+bob@users.noreply.github.com>',
-      requestReviewers: async (_, __, names) => events.push(`reviewers:${names.join(',')}`),
+      requestReviewers: async (_, __, names) => { if (names.length) events.push(`reviewers:${names.join(',')}`); return names; },
       readPr: async () => { events.push('read PR'); return opts.readPr?.(++reads, basePr, task) ?? { ...basePr, approvals: ['ada', 'bob'], reviewDecision: 'APPROVED' }; },
     },
   };
@@ -67,11 +67,11 @@ function harness(opts = {}) {
 test('all providers exhausted: one pause, then a separate resume after reset', async () => {
   let sleeps = 0;
   const h = harness({ accounts: [{ id: 'c', provider: 'claude', name: 'Claude', blockedUntil: Date.now() + 100000 }, { id: 'x', provider: 'codex', name: 'Codex', blockedUntil: Date.now() + 100000 }],
-    sleep: (task, accounts) => { assert.equal(task.status, 'waiting'); assert.equal(task.lifecycle, 'paused'); if (++sleeps === 2) accounts[1].blockedUntil = 0; },
+    sleep: (task, accounts) => { assert.equal(task.status, 'waiting'); assert.equal(task.lifecycle, 'monitoring'); if (++sleeps === 2) accounts[1].blockedUntil = 0; },
     turn: () => { throw halt; },
   });
   await assert.rejects(h.work(), e => e === halt);
-  assert.equal(h.messages.filter(m => /Paused:/.test(m.text)).length, 1);
+  assert.equal(h.messages.filter(m => /Running:/.test(m.text) && /usage limit/.test(m.text)).length, 1);
   assert.equal(h.messages.filter(m => /Resumed:/.test(m.text)).length, 1);
   assert.equal(h.task.status, 'working');
   assert.ok(h.messages.filter(m => /\*(Paused|Resumed):/.test(m.text)).every(m => m.thread && !m.broadcast));
@@ -91,7 +91,7 @@ test('usage probe prevents starting an exhausted Codex account even without a tu
   await assert.rejects(h.work(), e => e === halt);
   assert.equal(h.task.status, 'waiting');
   assert.equal(h.events.filter(e => e.startsWith('turn:')).length, 0);
-  assert.equal(h.messages.filter(m => /Paused:/.test(m.text)).length, 1);
+  assert.equal(h.messages.filter(m => /Running:/.test(m.text) && /usage limit/.test(m.text)).length, 1);
 });
 
 test('usage exhaustion during a turn aborts the stalled agent and pauses', async () => {
@@ -134,7 +134,8 @@ test('three internal rounds precede two reviewer requests; human feedback resume
   assert.equal(h.task.reviewsDone, 3);
   assert.equal(h.task.status, 'ready');
   assert.equal(h.task.lifecycle, 'completed');
-  assert.ok(h.messages.some(m => /Paused:/.test(m.text)));
+  assert.ok(h.messages.some(m => /Running:/.test(m.text) && /STATUS: RUNNING$/.test(m.text)));
+  assert.ok(!h.messages.some(m => /Paused:/.test(m.text)));
   assert.ok(h.messages.some(m => /Resumed:/.test(m.text)));
   assert.ok(!h.events.some(e => /pr merge/.test(e)));
 });
@@ -179,10 +180,10 @@ test('usage blocks respect all exhausted windows, reset times, staleness and mod
 test('failed Slack delivery is queued and retried without losing the pause', async () => {
   let fail = true;
   const h = harness({ failPost: () => fail });
-  await h.notify('t', 'paused', 'all accounts exhausted');
+  await h.notify('t', 'paused', 'Need your answer');
   assert.equal(h.task.notificationQueue.length, 1);
   fail = false;
-  await h.notify('t', 'paused', 'all accounts exhausted');
+  await h.notify('t', 'paused', 'Need your answer');
   assert.equal(h.task.notificationQueue.length, 0);
   assert.equal(h.messages.filter(m => /Paused:/.test(m.text)).length, 1);
 });
@@ -462,4 +463,55 @@ test('invalid saved reviewer words are replaced with validated contributors', as
   await h.work();assert.deepEqual(h.task.reviewersRequested,['ada','bob']);
   assert.ok(h.events.includes('reviewers:ada,bob'));
   assert.ok(!h.events.includes('reviewers:do,and'));
+});
+
+test('a PR with merge conflicts is never handed off: the base is merged in and pushed, and only a clean PR is ready', async () => {
+  const prompts = [];
+  const h = harness({ task: { reviewsDone: 3, reviewersRequested: ['ada', 'bob'] },
+    readPr: (n, pr) => n < 3 ? { ...pr, approvals: ['ada'], reviewDecision: 'APPROVED', mergeable: 'CONFLICTING' } : { ...pr, approvals: ['ada'], reviewDecision: 'APPROVED', mergeable: 'MERGEABLE' },
+    turn: o => { prompts.push(o.prompt); return { text: '' }; }, sleep() {} });
+  await h.work();
+  assert.equal(h.task.status, 'ready');
+  assert.ok(prompts.some(p => /merge conflicts with origin\/main/.test(p) && /git merge origin\/main/.test(p) && /Never merge the PR itself/.test(p)), 'a conflict-fix turn ran');
+  assert.ok(h.messages.some(m => /Merge conflicts with `main`/.test(m.text)));
+  const readyAt = h.messages.findIndex(m => /Ready to merge/.test(m.text));
+  const conflictAt = h.messages.findIndex(m => /Merge conflicts with/.test(m.text));
+  assert.ok(conflictAt >= 0 && readyAt > conflictAt, 'ready only after the conflict was handled');
+});
+
+test('still conflicting after three merge attempts asks the owner instead of looping', async () => {
+  const h = harness({ task: { reviewsDone: 3, reviewersRequested: ['ada', 'bob'] }, readPr: (n, pr) => ({ ...pr, approvals: ['ada'], reviewDecision: 'APPROVED', mergeable: 'CONFLICTING' }), turn: () => ({ text: '' }), sleep() {}, onReply: () => { throw halt; } });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.equal(h.messages.filter(m => /Merge conflicts with `main`/.test(m.text)).length, 3);
+  assert.ok(h.messages.some(m => /Stuck at PR watch/.test(m.text) && /Still conflicting with main after 3 merge attempts/.test(m.text)));
+  assert.ok(!h.messages.some(m => /Ready to merge/.test(m.text)));
+});
+
+test('collecting review comments reads as working, not paused: one Working note per batch, no pause alert, and the fix follows the quiet period', async () => {
+  const comment = { id: 'first', threadId: 'thread', author: 'ada', body: 'Fix label', url: 'url' };
+  const h = harness({ task: { reviewsDone: 3, reviewersRequested: ['ada', 'bob'] },
+    readPr: (n, pr) => n < 4 ? { ...pr, unresolved: [comment] } : { ...pr, approvals: ['ada'], reviewDecision: 'APPROVED' },
+    sleep() {}, turn: () => ({ text: '' }) });
+  await h.work();
+  assert.equal(h.messages.filter(m => /Working: Collecting 1 review comment from @ada/.test(m.text)).length, 1, 'said once per batch, not on every poll');
+  assert.ok(!h.messages.some(m => /Paused:/.test(m.text) && /Collecting/.test(m.text)), 'collecting is not a pause');
+  assert.ok(h.messages.every(m => !/Collecting/.test(m.text) || /STATUS: RUNNING$/.test(m.text)), 'the status footer says running');
+  assert.equal(h.task.status, 'ready');
+});
+
+test('automatic monitoring is RUNNING while a required owner answer is WAITING', async () => {
+  const h=harness();
+  await h.notify('t','monitoring','CI is running; next check in 3m. Your action: none.');
+  await h.notify('t','paused','Choose the design; reply here.');
+  const replies=h.messages.filter(m=>m.thread);
+  assert.match(replies[0].text,/Running:[\s\S]*STATUS: RUNNING$/);
+  assert.doesNotMatch(replies[0].text,/Paused:/);
+  assert.match(replies[1].text,/Paused:[\s\S]*STATUS: WAITING$/);
+});
+
+test('feedback resolution does not request a reviewer who already approved',async()=>{
+  const h=harness({task:{reviewsDone:3,reviewersRequested:['ada','bob']},readPr:(n,pr)=>({...pr,approvals:['ada','bob'],previousApprovers:['ada','bob'],reviewDecision:'APPROVED',unresolved:n<4?[{threadId:'thread',id:'thread:1',author:'ada',body:'Clarify this',url:'url'}]:[]}),sleep(){}});
+  await h.work();assert.equal(h.task.status,'ready');
+  assert.ok(!h.events.some(e=>e.startsWith('reviewers:')));
+  assert.ok(!h.messages.some(m=>/Re-requested review/.test(m.text)));
 });

@@ -68,7 +68,7 @@ export type Task = {
   worktree: string; branch: string;
   feature: ShipFeature;
   status: TaskStatus;
-  lifecycle?: "running" | "paused" | "stopped" | "completed";
+  lifecycle?: "running" | "monitoring" | "paused" | "stopped" | "completed";
   pauseReason?: string;
   notificationQueue?: { id: string; text: string }[];
   /** Persist unanswered questions across worker restarts. */

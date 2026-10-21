@@ -148,11 +148,14 @@ export type PrState = {
   isDraft: boolean;
   reviewDecision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | "";
   approvals: string[];
+  previousApprovers?: string[];
   changesRequestedBy?: string[];
   unresolved: { threadId?: string; author: string; path?: string; line?: number; body: string; url: string; id: string; createdAt: string }[];
   feedback?: PrState["unresolved"];
   ci: "pass" | "fail" | "pending" | "none";
   requestedReviewers: string[];
+  /** GitHub's own answer on whether the branch merges cleanly into the base; UNKNOWN while it is still computing */
+  mergeable?: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
 };
 export type Readiness = { ready: boolean; reasons: string[] };
 /** Ready only when a selected human approves, no threads remain, and CI passes. */
@@ -171,19 +174,27 @@ export function prReadiness(pr: PrState, botLogins: string[] = [], reviewers: st
   if (pr.ci === "fail") reasons.push("CI failing");
   if (pr.ci === "pending") reasons.push("CI still running");
   if (pr.ci === "none") reasons.push("no CI checks reported");
+  if (pr.mergeable === "CONFLICTING") reasons.push("merge conflicts with the base branch");
+  if (pr.mergeable === "UNKNOWN") reasons.push("GitHub has not finished checking for merge conflicts");
   return { ready: reasons.length === 0, reasons };
+}
+
+/** Never ask a previous approver again, regardless of later commits or review dismissal. */
+export function reviewersWithoutApproval(logins: string[], approved: string[]): string[] {
+  const prior = new Set(approved.map(n => n.toLowerCase()));
+  return [...new Set(logins)].filter(n => !prior.has(n.toLowerCase()));
 }
 
 /** Explain the actual GitHub blockers and the next human/worker action. */
 export function reviewWaitMessage(pr: PrState, reviewers: string[], nudge = false): string {
   const parts: string[] = [];
   const approved = new Set(pr.approvals.map(n => n.toLowerCase()));
-  const missing = reviewers.filter(n => !approved.has(n.toLowerCase()));
-  const changes = pr.changesRequestedBy ?? [];
+  const missing = reviewersWithoutApproval(reviewers, [...pr.approvals, ...(pr.previousApprovers ?? [])]);
+  const changes = reviewersWithoutApproval(pr.changesRequestedBy ?? [], pr.previousApprovers ?? []);
   const names = (logins: string[]) => logins.map(n => `@${n}`).join(" or ");
   if (changes.length) parts.push(`${names(changes)} must review again and clear their requested changes`);
   else if (pr.reviewDecision === "CHANGES_REQUESTED") parts.push("a reviewer must clear their requested changes");
-  if (!reviewers.some(n => approved.has(n.toLowerCase()))) parts.push(`need one approval from ${names(missing) || "a selected reviewer"}`);
+  if (!reviewers.some(n => approved.has(n.toLowerCase()))) parts.push(missing.length ? `need one approval from ${names(missing)}` : "GitHub no longer counts the previous approval; Consort will not re-request a previous approver");
   else if (pr.reviewDecision === "REVIEW_REQUIRED") parts.push("GitHub still requires an additional review");
   if (pr.unresolved.length) parts.push(`${pr.unresolved.length} review thread(s) remain open; Consort will address them`);
   parts.push(pr.ci === "pass" ? "CI is green" : pr.ci === "pending" ? "GitHub CI is still running" : pr.ci === "fail" ? "CI failed; Consort will fix it" : "GitHub has not reported CI checks yet");
@@ -315,6 +326,7 @@ export const slackLines = {
   prClosed: (state: string) => `✅ PR ${state}. Done`,
   rebooted: (stage: string) => `✅ Rebooted by you at *${stage}*. Checking where the last run got to, then continuing`,
   working: (line: string) => `✅ Working: ${brief(line, 200)}`,
+  conflicts: (base: string, attempt: number) => `✅ Merge conflicts with \`${base}\`${attempt > 1 ? ` (try ${attempt})` : ""}. Resolving them and pushing; not ready to merge until GitHub says clean`,
 };
 /** one line, cut at a sentence end where possible */
 export const brief = (text: string, max: number): string => {
@@ -453,9 +465,10 @@ export function taskHealth(
   if (t.status === "released") return { label: "RELEASED", tone: "off" };
   if (t.status === "failed") return { label: "STOPPED", tone: "bad", note: t.note };
   if (!live.workerAlive) return { label: "STOPPED", tone: "bad", note: t.note ?? "no worker process" };
-  if (t.status === "waiting" || t.status === "monitoring") return { label: "WAITING", tone: "warn", note: t.pauseReason ?? t.note ?? (t.status === "monitoring" ? "awaiting human review or CI" : "on your Slack reply") };
+  if (t.status === "monitoring") return { label: "RUNNING", tone: "ok", note: t.activity ?? t.pauseReason ?? "checking PR reviews and CI automatically" };
   const limited = accounts.length > 0 && accounts.every((a) => a.blockedUntil && a.blockedUntil > now);
   if (limited || /accounts? at (its|their) limit/i.test(t.activity ?? "")) return { label: "LIMIT", tone: "warn", note: "every account at its usage limit" };
+  if (t.status === "waiting") return { label: "WAITING", tone: "warn", note: t.pauseReason ?? t.note ?? "needs your Slack reply to continue" };
   if (live.logAgeMs !== undefined && live.logAgeMs > stalledAfterMs) return { label: "STALLED", tone: "warn", note: `quiet for ${Math.round(live.logAgeMs / 60_000)} min` };
   return { label: "RUNNING", tone: "ok" };
 }
