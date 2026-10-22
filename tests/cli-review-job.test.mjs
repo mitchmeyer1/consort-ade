@@ -60,11 +60,11 @@ test('the review file is the standard schema; Critical or High blocks approval; 
   assert.equal(blocking(r.findings).length, 0);
   assert.equal(countLine(r.findings), '1 medium');
   assert.equal(blocking([{ severity: 'high' }, { severity: 'low' }]).length, 1);
-  const q = approvalQuestion(target, r, 'https://github.com/acme/mono/pull/9#pullrequestreview-1');
-  assert.match(q, /^\*Approve PR #9\?\* Add CSV export by @dev/);
-  assert.match(q, /TL;DR: Adds a CSV export\./);
-  assert.match(q, /1 medium; nothing Critical or High\. Comments are posted/);
-  assert.match(q, /Reply \*yes\* to approve/);
+  const q = approvalQuestion(target, r, 'https://github.com/acme/mono/pull/9#pullrequestreview-1', ['Exporting a report now downloads a CSV.', 'The API streams rows.', 'a', 'b', 'too many']);
+  assert.match(q, /^Adds a CSV export\.\n• Exporting a report now downloads a CSV\.\n• The API streams rows\./);
+  assert.equal((q.match(/^• /gm) ?? []).length, 4, 'at most 4 flows');
+  assert.match(q, /Findings: 1 medium, nothing Critical or High · <https:\/\/github\.com\/acme\/mono\/pull\/9#pullrequestreview-1\|comments posted> · <.*\|PR #9> by @dev/);
+  assert.match(q, /\*Approve\?\* Reply \*yes\* to approve/);
   for (const y of ['yes', 'Yes please', 'approve', 'lgtm', 'ok']) assert.ok(saysYes(y), y);
   for (const n of ['no', 'wait', 'hold off', 'not yet']) assert.ok(!saysYes(n), n);
 });
@@ -120,7 +120,7 @@ async function flow(t, findings, extraJobs = []) {
     turns.push({ model: o.model, readOnly: o.readOnly, prompt: o.prompt });
     if (o.prompt.includes('step 1 of 3')) { await writeFile(join(wt, '.consort', 'review', 'plan.json'), JSON.stringify({ tldr: 'Adds a CSV export.', slices: [{ id: 's1', title: 'API', files: ['src/a.ts'] }, { id: 's2', title: 'UI', files: ['src/b.tsx'] }] })); return { text: 'written' }; }
     if (o.prompt.includes('Review one area')) return { text: `[review-findings]\n\`\`\`json\n${JSON.stringify(findings)}\n\`\`\`` };
-    if (o.prompt.includes('step 3 of 3')) return { text: `[review-final]\n\`\`\`json\n${JSON.stringify({ tldr: 'Adds a CSV export.', headline: 'ok', findings })}\n\`\`\`` };
+    if (o.prompt.includes('step 3 of 3')) return { text: `[review-final]\n\`\`\`json\n${JSON.stringify({ summary: 'Adds a CSV export.', flows: ['Exporting a report now downloads a CSV.'], headline: 'ok', findings })}\n\`\`\`` };
     return { text: 'done' };
   };
   const mocks = {
@@ -128,6 +128,7 @@ async function flow(t, findings, extraJobs = []) {
     './environment': { allocateEnvironment: async () => headless.taskEnv('consort-t', 20000), cleanupEnvironment: async () => ({}) },
     './oversight': { oversightModel: p => (p === 'claude' ? 'claude-opus-5' : 'gpt-5.6-sol') },
     './reviewPost': { postReview: async (r, f, event, body) => { posts.push({ event, n: f.length, body }); return { url: 'https://github.com/acme/mono/pull/9#review', event, inline: f.length, general: 0 }; } },
+    './slackIdentity': { slackIdentityFor: title => ({ emoji: '📊', title }) },
     './slack': { Slack: class { async post(text) { slackPosts.push(text); return String(slackPosts.length); } async waitForReply() { return 'yes'; } } },
     './state': { WORK_DIR: root, HOME: root, newId: () => 'x', loadState: () => state, updateTask: (id, patch) => Object.assign(task, typeof patch === 'function' ? patch(task) : patch), touchAccount() {}, blockAccount() {} },
     './usage': { usageFor: async accts => new Map(accts.map(a => [a.id, { keyId: a.id, at: Date.now(), windows: [{ id: '5h', label: '5h', percent: a.provider === 'claude' ? 90 : 10 }] }])) },
@@ -144,7 +145,7 @@ test('a clean review: frontier overview, swarm on Opus/Sol, frontier check, comm
   assert.ok(f.turns.filter(x => x.prompt.includes('Review one area')).every(x => x.readOnly && /opus|sol/.test(x.model)), 'swarm read-only on Opus/Sol');
   assert.ok(f.turns.at(-1).prompt.includes('step 3 of 3'));
   assert.deepEqual(f.posts.map(p => p.event), ['COMMENT', 'APPROVE']);
-  assert.ok(f.slackPosts.some(p => /Approve PR #9\?/.test(p)), 'asked on Slack first');
+  assert.ok(f.slackPosts.some(p => /\*Approve\?\*/.test(p) && /^📊 \*ADD CSV EXPORT\*\nAdds a CSV export\./.test(p) && /• Exporting a report now downloads a CSV\./.test(p) && !/✅/.test(p)), 'asked on Slack first');
   assert.equal(f.task.status, 'done'); assert.equal(f.task.note, 'approved');
   assert.equal(await readFile(join(f.wt, '.env'), 'utf8'), 'DB=local\n', 'root .env copied');
   await assert.rejects(readFile(join(f.wt, '.env.example')), 'templates are not copied');
@@ -154,7 +155,7 @@ test('a clean review: frontier overview, swarm on Opus/Sol, frontier check, comm
 test('a High finding requests changes and never asks to approve', async (t) => {
   const f = await flow(t, [{ severity: 'high', category: 'scaling', title: 'Unbounded query', file: 'src/a.ts', line: 3, comment: 'Paginate.' }]);
   assert.deepEqual(f.posts.map(p => p.event), ['REQUEST_CHANGES']);
-  assert.ok(!f.slackPosts.some(p => /Approve PR/.test(p)));
+  assert.ok(!f.slackPosts.some(p => /\*Approve\?\*/.test(p)));
   assert.match(f.task.note, /requested changes/);
 });
 

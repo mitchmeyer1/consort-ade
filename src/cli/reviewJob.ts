@@ -17,7 +17,7 @@ import { execFile } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { addTurnCost, ENVIRONMENT_RULES, HEADLESS_RULES, seedModels, slackMessage, slackStatus } from "../shared/headless.ts";
+import { addTurnCost, ENVIRONMENT_RULES, HEADLESS_RULES, seedModels, slackHeading, slackMessage, slackStatus } from "../shared/headless.ts";
 import { selectCliModel } from "../shared/cliModels.ts";
 import { modelBlock, modelLoad, usageBlock } from "../shared/usage.ts";
 import { parseReview, serializeReview, type Finding, type Review, type ReviewEvent } from "../shared/review.ts";
@@ -28,6 +28,7 @@ import { withAgentTurn } from "./capacity";
 import { allocateEnvironment, cleanupEnvironment } from "./environment";
 import { oversightModel } from "./oversight";
 import { postReview } from "./reviewPost";
+import { slackIdentityFor } from "./slackIdentity";
 import type { TurnTrace } from "./telemetry";
 import { environmentPrompt, saveRepoEnv } from "./repoEnv";
 import { Slack } from "./slack";
@@ -114,15 +115,18 @@ export const counts = (findings: Pick<Finding, "severity">[]) => SEVERITY.map((s
 export const countLine = (findings: Pick<Finding, "severity">[]) => counts(findings).map(([s, n]) => `${n} ${s}`).join(", ") || "no findings";
 export const saysYes = (reply: string) => /^\s*(?:y|yes|yep|yeah|approve|approved|ok|okay|lgtm|ship it|go|go ahead|do it|sure)\b/i.test(reply);
 
-export function approvalQuestion(t: ReviewTarget, review: Review, postedUrl: string | undefined): string {
-  const top = review.findings.slice(0, 5).map((f) => `• ${f.severity ?? "note"}: ${f.title}${f.file ? ` (\`${f.file}${f.line ? `:${f.line}` : ""}\`)` : ""}`).join("\n");
+/**
+ * The approval question, under the thread's emoji heading: what the PR does in 1-2 sentences, the
+ * flows it changes (1-4, one sentence each), then one line of findings and links and the question.
+ */
+export function approvalQuestion(t: ReviewTarget, review: Review, postedUrl: string | undefined, flows: string[] = []): string {
+  const summary = (review.whatItDoes ?? review.headline ?? t.title).trim();
   return [
-    `*Approve PR #${t.pr}?* ${t.title} by @${t.author}`,
-    `• TL;DR: ${review.whatItDoes ?? review.headline ?? "see the PR"}`,
-    `• Findings: ${countLine(review.findings)}; nothing Critical or High.${postedUrl ? ` Comments are posted: <${postedUrl}|review>.` : ""}`,
-    ...(top ? [top] : []),
-    `• PR: <${t.url}|#${t.pr}>`,
-    `Reply *yes* to approve, or anything else to leave it unapproved.`,
+    summary,
+    ...flows.slice(0, 4).map((f) => `• ${f.trim()}`),
+    "",
+    `Findings: ${countLine(review.findings)}, nothing Critical or High${postedUrl ? ` · <${postedUrl}|comments posted>` : ""} · <${t.url}|PR #${t.pr}> by @${t.author}`,
+    `*Approve?* Reply *yes* to approve, or anything else to leave it unapproved.`,
   ].join("\n");
 }
 
@@ -161,7 +165,7 @@ export const FINAL_PROMPT = (t: ReviewTarget, wt: string, reviewers: number) => 
 
 ${reviewers} reviewers' raw findings for PR #${t.pr} are in .consort/review/swarm.json. ${RULES_NOTE(wt)}
 For each finding, open the file at that line and check it is real at the PR head. Drop false positives and anything a linter catches; merge duplicates; move file/line to a changed line where you can; settle the severity (a rule in .ai-review-rules.md wins; otherwise critical = breaks production, data or security; high = a real bug or a scaling or convention problem that must be fixed before merge; medium = should fix; low = worth a mention); tighten each comment so it is ready to post.
-Reply with [review-final] followed by a \`\`\`json object: {"tldr": "<2-3 sentences: what the PR does>", "headline": "<one-line verdict>", "findings": [same shape as the raw findings]}.`;
+Reply with [review-final] followed by a \`\`\`json object: {"summary": "<1-2 plain sentences: the work this PR does>", "flows": ["<1 to 4 entries, one sentence each: a user or system flow this PR changes and what now happens in it>"], "headline": "<one-line verdict>", "findings": [same shape as the raw findings]}.`;
 
 // ── the worker ─────────────────────────────────────────────────────────────────────────────
 
@@ -178,12 +182,15 @@ export async function reviewTask(taskId: string): Promise<void> {
 
   // Slack: one thread per review
   const slack = state.slack ? new Slack(state.slack) : undefined;
-  const links = { ticket: t.url, github: t.url, heading: `🔎 PR #${t.pr} ${t.title}`.slice(0, 80) };
+  // the same generated emoji and short title build tasks get (cli/slackIdentity.ts)
+  const identity = task.slackIdentity ?? slackIdentityFor(t.title);
+  if (!task.slackIdentity) updateTask(taskId, { slackIdentity: identity });
+  const links = { ticket: t.url, github: t.url, heading: slackHeading(t.title, identity) };
   let thread = task.slackThread;
-  const say = async (text: string, status: "RUNNING" | "WAITING" | "COMPLETED" | "STOPPED" = "RUNNING") => {
+  const say = async (text: string, status: "RUNNING" | "WAITING" | "COMPLETED" | "STOPPED" = "RUNNING", plain = false) => {
     log(text.replace(/\n/g, " ⏎ "));
     if (!slack) return undefined;
-    const ts = await slack.post(slackStatus(slackMessage("update", text), status, links), thread).catch((e) => { log(`slack failed: ${e.message}`); return undefined; });
+    const ts = await slack.post(slackStatus(plain ? text : slackMessage("update", text), status, links), thread).catch((e) => { log(`slack failed: ${e.message}`); return undefined; });
     if (!thread && ts) { thread = ts; updateTask(taskId, { slackThread: ts }); }
     return ts;
   };
@@ -270,8 +277,9 @@ export async function reviewTask(taskId: string): Promise<void> {
     // 4. the frontier verification
     activity(`frontier model: verifying ${raw.length} findings`);
     const finalText = raw.length ? await turn("frontier", FINAL_PROMPT(t, wt, slices.length - failedAreas), true, 45 * 60_000, "verify findings") : "[review-final] {\"findings\": []}";
-    const final = jsonAfter(finalText, "[review-final]") as { tldr?: string; headline?: string } | undefined;
-    const review = buildReview(t, cleanFindings(final), { tldr: final?.tldr ?? plan.tldr, headline: final?.headline, at: new Date().toISOString() });
+    const final = jsonAfter(finalText, "[review-final]") as { summary?: string; tldr?: string; headline?: string; flows?: unknown } | undefined;
+    const flows = Array.isArray(final?.flows) ? final!.flows.filter((f): f is string => typeof f === "string" && !!f.trim()).slice(0, 4) : [];
+    const review = buildReview(t, cleanFindings(final), { tldr: final?.summary ?? final?.tldr ?? plan.tldr, headline: final?.headline, at: new Date().toISOString() });
     const reviewPath = join(wt, ".consort", "review", `pr-${t.pr}.review.json`);
     writeFileSync(reviewPath, serializeReview(review));
     mkdirSync(join(HOME, "reviews"), { recursive: true });
@@ -288,7 +296,7 @@ export async function reviewTask(taskId: string): Promise<void> {
     } else {
       const posted = review.findings.length ? await postReview(review, review.findings, "COMMENT", `Automatic review: ${countLine(review.findings)}; nothing Critical or High.`, wt) : undefined;
       activity("waiting for the owner's word to approve");
-      const ts = await say(approvalQuestion(t, review, posted?.url), "WAITING");
+      const ts = await say(approvalQuestion(t, review, posted?.url, flows), "WAITING", true);
       updateTask(taskId, { status: "waiting", pendingQuestion: { questions: [`Approve PR #${t.pr}?`], afterTs: ts ?? String(Date.now() / 1000) } });
       const answer = slack && thread && ts ? await slack.waitForReply(thread, ts, { pollMs: 15_000 }) : undefined;
       updateTask(taskId, { pendingQuestion: undefined, status: "working" });
