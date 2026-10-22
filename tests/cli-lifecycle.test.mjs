@@ -757,3 +757,15 @@ test('a build graph that is mostly a chain gets one re-split turn, then the plan
   assert.doesNotMatch(prompts[1], /RESPLIT THE GRAPH/);
   assert.ok(h.messages.some(m => /Build plan: 7 left in 3 waves\. Starting together: 11/.test(m.text)));
 });
+
+test('parallel tickets picking at the same moment spread across accounts with free slots', async () => {
+  const used = [];
+  const accounts = [{ id: 'c1', provider: 'claude', name: 'One', maxActiveTurns: 1 }, { id: 'c2', provider: 'claude', name: 'Two', maxActiveTurns: 1 }];
+  const h = harness({
+    accounts, task: { feature: { stage: 'Implementing', prs: [], history: [] }, accountIds: {}, sessions: {} },
+    runImplementation: async o => { await Promise.all(['08', '13'].map(id => o.run({ id, cwd: `/child/${id}`, prompt: id, kind: 'implementation' }))); return { completed: [], commits: [] }; },
+    turn: async o => { if (o.cwd === '/virtual') throw halt; used.push(o.account.id); await new Promise(r => setImmediate(r)); return { text: 'done' }; },
+  });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.deepEqual(used.sort(), ['c1', 'c2']);
+});

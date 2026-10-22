@@ -32,7 +32,7 @@ import { ensureSlackIdentity } from "./slackIdentity";
 import { taskSlackLinks } from "./slackLinks";
 import { ownerUpdatePrompt, parseUpdateSummary, updateDir } from "./ownerUpdates";
 import { sourceFor, type Source } from "./sources";
-import { blockAccount, loadState, touchAccount, updateTask, WORK_DIR, type Account, type Job, type Task } from "./state";
+import { blockAccount, loadState, processAlive, touchAccount, updateTask, WORK_DIR, type Account, type Job, type Task } from "./state";
 
 /**
  * One ticket, start to ready-to-merge, with nobody watching: the /ship stages in a worktree of
@@ -148,6 +148,8 @@ export async function workTask(taskId: string): Promise<void> {
    * same prompt goes again on the next account. When that provider is exhausted, try the other
    * provider with its own model and session. With neither usable, check again every 30 seconds.
    */
+  // turns this worker has handed an account but not finished, so parallel tickets picking at once spread out
+  const mine = new Map<string, number>();
   let feature: ShipFeature = task.feature;
   let pendingUser: string | undefined;
   let idle = 0;
@@ -176,10 +178,16 @@ export async function workTask(taskId: string): Promise<void> {
       const canResume = resume && managesSession && !!cur.sessions[provider] && !!cur.accountIds[provider];
       const pickFor = async (p: Provider, m: string) => {
         const usable = live.accounts.filter((a) => a.provider === p && !(a.blockedUntil && a.blockedUntil > Date.now()));
+        // the pick is counted the moment it is made (released when the turn ends), so tickets picking at once spread out
+        const reserve = (a: Account | undefined) => { if (a) mine.set(a.id, (mine.get(a.id) ?? 0) + 1); return a; };
         const sticky = canResume && p === provider ? usable.find((a) => a.id === cur.accountIds[p]) : undefined;
-        if (sticky || usable.length <= 1) return sticky ?? usable[0];
+        if (sticky || usable.length <= 1) return reserve(sticky ?? usable[0]);
         const usage = await usageFor(usable);
-        const pick = leastLoaded(usable, m, usage) ?? pickAccount(usable, p, Date.now());
+        // accounts already running as many turns as they allow would only queue; parallel tickets spread to the free ones
+        const running = (id: string) => (mine.get(id) ?? 0) + loadState().tasks.flatMap((t) => t.activeTurns ?? []).filter((a) => a.accountId === id && a.pid !== process.pid && processAlive(a.pid)).reduce((n, a) => n + (a.units ?? 1), 0);
+        const free = usable.filter((a) => running(a.id) < (a.maxActiveTurns ?? 2));
+        const pick = leastLoaded(free.length ? free : usable, m, usage) ?? pickAccount(usable, p, Date.now());
+        reserve(pick);
         log(task, `${m} on ${pick?.name ?? "none"}; ${p} use for this model: ${usable.map((a) => `${a.name} ${modelLoad(usage.get(a.id), m) ?? "?"}%`).join(", ")}`);
         return pick;
       };
@@ -196,7 +204,7 @@ export async function workTask(taskId: string): Promise<void> {
       }
       const usage = (await usageFor([who], 60_000)).get(who.id)!;
       const blocked = usageBlock(usage, Date.now());
-      if (blocked) { blockAccount(who.id, blocked.until, blocked.reason); continue; }
+      if (blocked) { mine.set(who.id, (mine.get(who.id) ?? 1) - 1); blockAccount(who.id, blocked.until, blocked.reason); continue; }
       await notifyTask(taskId, "running", `Continuing on ${who.provider} (${who.name}).`);
       updateTask(taskId, { status: "working", note: undefined });
       attempt++;
@@ -243,7 +251,7 @@ export async function workTask(taskId: string): Promise<void> {
         return runTurn({ cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}\n\n${ENVIRONMENT_RULES(turnEnv)}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: turnEnv, signal: abort.signal, readOnly, effort: role === "reader" ? "low" : role === "frontier" ? "high" : "medium", delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
       }, reviewUnits); }
       catch (e) { if (e instanceof AccountUnavailableError) { continue; } throw e; }
-      finally { active = false; if (usageTimer) clearInterval(usageTimer); if (deadline) clearTimeout(deadline); }
+      finally { active = false; mine.set(who.id, (mine.get(who.id) ?? 1) - 1); if (usageTimer) clearInterval(usageTimer); if (deadline) clearTimeout(deadline); }
       if (usageLimit) res.limit = { text: usageLimit.reason, resetsAt: usageLimit.until };
       updateTask(taskId, t => ({
         ...(res.usage?.length ? { cost: addTurnCost(t.cost, res.usage) } : {}),
