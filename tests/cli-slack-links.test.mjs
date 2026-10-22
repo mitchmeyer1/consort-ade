@@ -54,10 +54,10 @@ test('the thread card says at a glance: working, needs the owner, or done', asyn
   const { slackCard } = await import('../src/shared/headless.ts');
   const links = { ticket: 'https://t/1', github: 'https://github.com/a/b/pull/2', heading: '📦 Migrate Curation to Mono', progress: '✓ Env · ▸ *Build*' };
   const base = { status: 'working', envReadyAt: 1, reviewsDone: 0, feature: { stage: 'Spec\'d' } };
-  const working = slackCard(base, links, { ownerId: 'U1', at: 1_700_000_000_000 });
-  assert.equal(working.key, '📦 *MIGRATE CURATION TO MONO*\n🟢 *Working* · Step 3/9 Build\n✓ Env · ▸ *Build*\n<https://t/1|ticket> · <https://github.com/a/b/pull/2|github>');
+  const working = slackCard(base, links, { ownerId: 'U1', at: 1_700_000_000_000, byline: 'author: Mitch Meyer' });
+  assert.equal(working.key, '📦 *MIGRATE CURATION TO MONO*\n🟢 *Working* · Step 3/9 Build\n✓ Env · ▸ *Build*\n<https://t/1|ticket> · <https://github.com/a/b/pull/2|github> · author: Mitch Meyer');
   assert.match(working.text, /Step 3\/9 Build · <!date\^1700000000\^updated \{time\}\|updated \d\d:\d\d UTC>\n/);
-  assert.equal(slackCard(base, links, { at: 5 }).key, working.key, 'the time alone never edits the post');
+  assert.equal(slackCard(base, links, { at: 5, byline: 'author: Mitch Meyer' }).key, working.key, 'the time alone never edits the post');
   const asking = slackCard({ ...base, status: 'waiting', pendingQuestion: { questions: ['⚠️ *Need you* (<https://t/1|ticket>)\n• Which design? — recommend: A\n_Reply in this thread._'] } }, links, { ownerId: 'U1', at: 1 });
   assert.match(asking.key, /\n🟠 \*Needs <@U1>\* · Step 3\/9 Build\n_Which design\? — recommend: A_\n/);
   assert.match(slackCard({ ...base, status: 'ready' }, links, { at: 1 }).key, /\n✅ \*Ready to merge\*\n/);
@@ -68,5 +68,5 @@ test('the thread card says at a glance: working, needs the owner, or done', asyn
 test('a running task whose worker was restarted still reads as working', async () => {
   const { slackCard } = await import('../src/shared/headless.ts');
   const t = { status: 'working', lifecycle: 'stopped', kind: 'review', reviewStep: 3, reviewsDone: 0, feature: { stage: 'Grilling' } };
-  assert.match(slackCard(t, { ticket: 'https://github.com/a/b/pull/1', github: 'https://github.com/a/b/pull/1' }, { at: 1 }).key, /^🟢 \*Working\* · Step 3\/5 Reviewers\n<https:\/\/github.com\/a\/b\/pull\/1\|ticket>$/);
+  assert.match(slackCard(t, { ticket: 'https://github.com/a/b/pull/1', github: 'https://github.com/a/b/pull/1' }, { at: 1, byline: 'reviewing: Will Lerner' }).key, /^🟢 \*Working\* · Step 3\/5 Reviewers\n<https:\/\/github.com\/a\/b\/pull\/1\|github> · reviewing: Will Lerner$/);
 });

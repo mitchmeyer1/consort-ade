@@ -551,7 +551,7 @@ export function slackCardState(t: SlackCardTask, ownerId?: string, limited = fal
   if (t.status === "monitoring") return { badge: "🔵 *Waiting on PR reviews and CI*" };
   return { badge: "🟢 *Working*" };
 }
-export function slackCard(t: SlackCardTask, links: SlackTaskLinks, opts: { ownerId?: string; limited?: boolean; at: number }): { text: string; key: string } {
+export function slackCard(t: SlackCardTask, links: SlackTaskLinks, opts: { ownerId?: string; limited?: boolean; at: number; /** "author: Mitch Meyer", "reviewing: Will Lerner" */ byline?: string }): { text: string; key: string } {
   const { badge, detail } = slackCardState(t, opts.ownerId, opts.limited);
   const step = taskStep(t);
   const finished = ["ready", "done", "released"].includes(t.status);
@@ -563,13 +563,14 @@ export function slackCard(t: SlackCardTask, links: SlackTaskLinks, opts: { owner
     `${badge}${finished ? "" : ` · Step ${step.n}/${step.total} ${step.name}`}`,
     ...(detail ? [`_${brief(detail, 220).replace(/_/g, " ")}_`] : []),
     ...(links.progress ? [links.progress] : []),
-    ...(ticket ? [`<${ticket}|ticket>${github && github !== ticket ? ` · <${github}|github>` : ""}`] : []),
+    // a review has no ticket: its link is the PR
+    [t.kind === "review" ? (github ?? ticket) && `<${github ?? ticket}|github>` : ticket && `<${ticket}|ticket>${github && github !== ticket ? ` · <${github}|github>` : ""}`, opts.byline].filter(Boolean).join(" · "),
   ];
   // key: what the card says, without the time, so the daemon edits the post only when that changes
-  const key = body.join("\n");
+  const key = body.filter(Boolean).join("\n");
   const sec = Math.floor(opts.at / 1000);
   body[head ? 1 : 0] += ` · <!date^${sec}^updated {time}|updated ${new Date(opts.at).toISOString().slice(11, 16)} UTC>`;
-  return { text: body.join("\n"), key };
+  return { text: body.filter(Boolean).join("\n"), key };
 }
 
 /**
