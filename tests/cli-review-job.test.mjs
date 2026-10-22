@@ -145,7 +145,7 @@ test('a clean review: frontier overview, swarm on Opus/Sol, frontier check, comm
   assert.ok(f.turns.filter(x => x.prompt.includes('Review one area')).every(x => x.readOnly && /opus|sol/.test(x.model)), 'swarm read-only on Opus/Sol');
   assert.ok(f.turns.at(-1).prompt.includes('step 3 of 3'));
   assert.deepEqual(f.posts.map(p => p.event), ['COMMENT', 'APPROVE']);
-  assert.ok(f.slackPosts.some(p => /\*Approve\?\*/.test(p) && /^📊 \*ADD CSV EXPORT\*\nAdds a CSV export\./.test(p) && /• Exporting a report now downloads a CSV\./.test(p) && !/✅/.test(p)), 'asked on Slack first');
+  assert.ok(f.slackPosts.some(p => /\*Approve\?\*/.test(p) && /^📊 \*ADD CSV EXPORT\*\n⚠️ Adds a CSV export\./.test(p) && /• Exporting a report now downloads a CSV\./.test(p) && !/✅/.test(p)), 'asked on Slack first');
   assert.equal(f.task.status, 'done'); assert.equal(f.task.note, 'approved');
   assert.equal(await readFile(join(f.wt, '.env'), 'utf8'), 'DB=local\n', 'root .env copied');
   await assert.rejects(readFile(join(f.wt, '.env.example')), 'templates are not copied');

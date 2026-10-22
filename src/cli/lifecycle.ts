@@ -1,5 +1,5 @@
 /** Persist task activity transitions and retry Slack delivery without repeating pause alerts. */
-import { problemOf, slackLines, slackMessage, slackStatus } from "../shared/headless.ts";
+import { problemOf, slackAsk, slackLines, slackMessage, slackStatus } from "../shared/headless.ts";
 import { randomUUID } from "node:crypto";
 import { loadState, updateTask, type Task } from "./state";
 import { Slack } from "./slack";
@@ -85,7 +85,7 @@ async function askForRecovery(taskId: string, cause: unknown, tried?: string): P
       if (!thread) throw new Error("Waiting for the task's Slack thread.");
       const slack = new Slack(state.slack);
       const questions = task.pendingQuestion?.questions ?? [slackLines.problem(problem, task.ticket?.url)];
-      const ts = task.pendingQuestion?.afterTs ?? await slack.post(slackStatus(slackMessage("blocked", questions.join("\n")), "WAITING", await taskSlackLinks(task, state.jobs.find(j => j.id === task.jobId)?.repo)), thread);
+      const ts = task.pendingQuestion?.afterTs ?? await slack.post(slackStatus(slackAsk(questions.join("\n")), "WAITING", await taskSlackLinks(task, state.jobs.find(j => j.id === task.jobId)?.repo)), thread);
       updateTask(taskId, { pendingQuestion: { questions, afterTs: ts } });
       const answer = await slack.waitForReply(thread, ts, { onTick: () => { updateTask(taskId, {}); void flushTaskNotifications(taskId); } });
       if (!answer) continue;

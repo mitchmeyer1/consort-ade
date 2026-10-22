@@ -221,7 +221,7 @@ test('failed evidence pauses on Slack and cannot request reviewers or complete',
     throw halt;
   } });
   await assert.rejects(h.work(), e => e === halt);
-  assert.ok(h.messages.some(m => /^❌ \*Evidence blocked\. PR not handed off\*/.test(m.text) && /\n• Map tiles show API KEY REQUIRED/.test(m.text) && /\.env/.test(m.text)));
+  assert.ok(h.messages.some(m => /^⚠️ \*Evidence blocked\. PR not handed off\*/.test(m.text) && /\n• Map tiles show API KEY REQUIRED/.test(m.text) && /\.env/.test(m.text)));
   assert.ok(!h.events.includes('publish evidence'));
   assert.ok(!h.events.some(e => e.startsWith('reviewers:')));
 });
@@ -240,7 +240,7 @@ test('confirmed root env repair retries capture and inspection before publishing
 test('independent inspection rejects a passed manifest with broken screenshots', async () => {
   const h = harness({ task: { reviewsDone: 3, evidenceValidatedAt: undefined }, turn: o => ({ text: o.prompt.includes(headless.VERIFY_EVIDENCE_PROMPT) ? 'API KEY REQUIRED appears instead of the map.' : '' }), onReply: () => { throw halt; } });
   await assert.rejects(h.work(), e => e === halt);
-  assert.ok(h.messages.some(m => /^❌ \*Evidence blocked\./.test(m.text) && /\n• The evidence check did not pass\n• API KEY REQUIRED appears instead of the map\./.test(m.text)));
+  assert.ok(h.messages.some(m => /^⚠️ \*Evidence blocked\./.test(m.text) && /\n• The evidence check did not pass\n• API KEY REQUIRED appears instead of the map\./.test(m.text)));
   assert.ok(!h.events.includes('publish evidence'));
 });
 
@@ -258,7 +258,7 @@ test('a stalled capture is aborted and asks Slack for help after fifteen minutes
   const report = h.messages.find(m => /exceeded 15 minutes/.test(m.text));
   assert.ok(report, 'the timeout is reported');
   // the owner sees what the agent was doing when it was stopped, newest first, and the raw error
-  assert.match(report.text, /^❌ \*Evidence blocked\. PR not handed off\*/);
+  assert.match(report.text, /^⚠️ \*Evidence blocked\. PR not handed off\*/);
   assert.match(report.text, /\n• Last seen: Rerunning that job and finishing the manifest\n• Before that: CI shard 4 failed on the pushed commit\n/);
   assert.match(report.text, /```\naborted\n```/);
   assert.deepEqual(h.task.recent, ['CI shard 4 failed on the pushed commit', 'Rerunning that job and finishing the manifest']);
@@ -327,7 +327,7 @@ test('worker failure asks Slack and resumes rather than ending the task', async 
   assert.ok(h.events.includes('owner reply'));
   // the crash report names the stage, the error, the agent's last lines and the raw detail in a code block
   const report = h.messages.find(m => /Dependency unavailable/.test(m.text));
-  assert.match(report.text, /^❌ \*Stuck at Implementing\* \(<https:\/\/ticket\/1\|ticket>\)\n• Dependency unavailable\n• Last seen: Pushing the branch\n• Before that: Running the migration\n```\nECONNREFUSED 127\.0\.0\.1:5432\nexit 2\npsql: connection refused\n```\n_Reply with what to do; the task stays open\._\n\n<https:\/\/ticket\/1\|ticket> · <https:\/\/github.com\/a\/b\/tree\/feature\|github>\n\nSTATUS: WAITING$/);
+  assert.match(report.text, /^⚠️ \*Stuck at Implementing\* \(<https:\/\/ticket\/1\|ticket>\)\n• Dependency unavailable\n• Last seen: Pushing the branch\n• Before that: Running the migration\n```\nECONNREFUSED 127\.0\.0\.1:5432\nexit 2\npsql: connection refused\n```\n_Reply with what to do; the task stays open\._\n\n<https:\/\/ticket\/1\|ticket> · <https:\/\/github.com\/a\/b\/tree\/feature\|github>\n\nSTATUS: WAITING$/);
   assert.ok(h.messages.filter(m => !m.thread).length === 1);
   assert.equal(h.task.status, 'ready');
   assert.equal(h.task.recoveryGuidance, 'Proceed');

@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { applyShipChange, newShipFeature, parseShipMarkers, prNumberFromUrl, shipBranch, shipFolder, shipSlug, stripShipMarkers, type ShipFeature, type ShipTicket } from "../shared/ship.ts";
 import { shipPrompt } from "../shared/shipPrompt.ts";
-import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUsd, DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, VERIFY_EVIDENCE_PROMPT, parseAskUser, parseReviewerReply, observeReviewBatch, pickAccount, prReadiness, ProblemError, problemOf, REBOOT_PROMPT, RESPOND_TO_REVIEW, REVIEW_QUIET_MS, cliReviewRotation, reviewersWithoutApproval, reviewWaitMessage, seedModels, slackLines, slackMessage, slackStatus, stripAskUser, type Problem } from "../shared/headless.ts";
+import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUsd, DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, VERIFY_EVIDENCE_PROMPT, parseAskUser, parseReviewerReply, observeReviewBatch, pickAccount, prReadiness, ProblemError, problemOf, REBOOT_PROMPT, RESPOND_TO_REVIEW, REVIEW_QUIET_MS, cliReviewRotation, reviewersWithoutApproval, reviewWaitMessage, seedModels, SLACK_MARKER, slackAsk, slackLines, slackMessage, slackStatus, stripAskUser, type Problem } from "../shared/headless.ts";
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { selectCliModel, type CliModelRole } from "../shared/cliModels.ts";
@@ -142,10 +142,10 @@ export async function workTask(taskId: string): Promise<void> {
     updateTask(task.id, { status: "waiting", note: questions.join(" | "), activity: `waiting on Slack: ${questions[0].slice(0, 80)}` });
     if (!slack || !thread) throw new Error(`Needs the owner but Slack is not configured. Questions: ${questions.join(" | ")}`);
     const pending = loadState().tasks.find((t) => t.id === taskId)?.pendingQuestion;
-    const ts = pending?.afterTs ?? await slack.post(slackStatus(slackMessage("waiting", preformatted ? questions[0] : slackLines.question(questions, task.ticket.url)), "WAITING", await taskSlackLinks(loadState().tasks.find((t) => t.id === taskId)!, job.repo)), thread);
+    const ts = pending?.afterTs ?? await slack.post(slackStatus(slackAsk(preformatted ? questions[0] : slackLines.question(questions, task.ticket.url)), "WAITING", await taskSlackLinks(loadState().tasks.find((t) => t.id === taskId)!, job.repo)), thread);
     updateTask(taskId, { pendingQuestion: { questions, afterTs: ts } });
     // the pause reason carries the question itself: it shows in the Paused line, in status replies, and in the view
-    await notifyTask(taskId, "paused", `Waiting on you: ${brief(questions[0].split("\n").filter((l) => l.trim()).map((l) => l.replace(/^(?:❌|✅|⏳|❓|⏹️|🎉🍭🎊)?\s*[•\-\d.\s]*/u, "").replace(/\s*\(<[^>]*\|ticket>\)/, "").replace(/[*_`]/g, "")).join(" · "), 300)}`);
+    await notifyTask(taskId, "paused", `Waiting on you: ${brief(questions[0].split("\n").filter((l) => l.trim()).map((l) => l.replace(SLACK_MARKER, "").replace(/^[•\-\d.\s]*/u, "").replace(/\s*\(<[^>]*\|ticket>\)/, "").replace(/[*_`]/g, "")).join(" · "), 300)}`);
     log(task, `waiting on Slack for ${questions.length} answer(s)`);
     let lastEmptyLog = 0;
     let lastCheckResult: string | undefined;

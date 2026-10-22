@@ -261,16 +261,19 @@ export function replyAfter(messages: { ts: string; user?: string; text?: string;
  */
 /**
  * The marker in front of every Slack message, by what it means for the owner:
- * ✅ progress, ⏳ waiting (on you, reviews, CI, credits), ❓ a question for you, ⏹️ stopped on purpose,
- * ❌ something broke and needs a hand, 🎉🍭🎊 ready to merge. A text that already carries one keeps it.
+ * ✅ progress, ⏳ waiting (on reviews, CI, credits), ⚠️ waiting on your reply in Slack, ❓ a question for you,
+ * ⏹️ stopped on purpose, ❌ something broke, 🎉🍭🎊 ready to merge. A text that already carries one keeps it.
  */
-export const SLACK_MARKERS = { update: "✅", waiting: "⏳", question: "❓", stopped: "⏹️", blocked: "❌", completed: "🎉🍭🎊" } as const;
+export const SLACK_MARKERS = { update: "✅", waiting: "⏳", attention: "⚠️", question: "❓", stopped: "⏹️", blocked: "❌", completed: "🎉🍭🎊" } as const;
 export type SlackKind = keyof typeof SLACK_MARKERS;
-const MARKED = /^(?:❌|✅|⏳|❓|⏹️|🎉🍭🎊)/u;
+export const SLACK_MARKER = /^(?:⚠️|❌|✅|⏳|❓|⏹️|🎉🍭🎊)\s*/u;
+const MARKED = SLACK_MARKER;
 export function slackMessage(kind: SlackKind, text: string): string {
   if (MARKED.test(text.trimStart())) return text;
   return `${SLACK_MARKERS[kind]} ${text}`;
 }
+/** a post the owner must answer in the thread: always ⚠️, whatever marker the text came with */
+export const slackAsk = (text: string): string => `${SLACK_MARKERS.attention} ${text.trimStart().replace(SLACK_MARKER, "")}`;
 export type SlackTaskStatus = "RUNNING" | "WAITING" | "STOPPED" | "COMPLETED";
 /** Keep one final status line, including when a queued message is delivered again. */
 export type SlackIdentity = { emoji: string; title: string };
@@ -300,7 +303,7 @@ export const STATUS_TAIL = /\n\nSTATUS: (RUNNING|WAITING|STOPPED|COMPLETED)(?:\n
 export function slackStatus(text: string, status?: SlackTaskStatus, links?: SlackTaskLinks): string {
   const saved = text.match(STATUS_TAIL);
   const lead = text.trimStart();
-  const current = status ?? saved?.[1] ?? (lead.startsWith("🎉🍭🎊") ? "COMPLETED" : lead.startsWith("⏹️") ? "STOPPED" : /^(?:❌|⏳|❓)/u.test(lead) ? "WAITING" : "RUNNING");
+  const current = status ?? saved?.[1] ?? (lead.startsWith("🎉🍭🎊") ? "COMPLETED" : lead.startsWith("⏹️") ? "STOPPED" : /^(?:⚠️|❌|⏳|❓)/u.test(lead) ? "WAITING" : "RUNNING");
   let body = text.replace(STATUS_TAIL, "").trimEnd();
   if (links) {
     body = body.replace(/\n\n<[^>\n]+\|ticket>(?: · <[^>\n]+\|github>)?$/, "");

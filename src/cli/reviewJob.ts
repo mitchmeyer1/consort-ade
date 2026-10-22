@@ -17,7 +17,7 @@ import { execFile } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { addTurnCost, ENVIRONMENT_RULES, HEADLESS_RULES, seedModels, slackHeading, slackMessage, slackStatus } from "../shared/headless.ts";
+import { addTurnCost, ENVIRONMENT_RULES, HEADLESS_RULES, seedModels, slackAsk, slackHeading, slackMessage, slackStatus } from "../shared/headless.ts";
 import { selectCliModel } from "../shared/cliModels.ts";
 import { modelBlock, modelLoad, usageBlock } from "../shared/usage.ts";
 import { parseReview, serializeReview, type Finding, type Review, type ReviewEvent } from "../shared/review.ts";
@@ -296,7 +296,7 @@ export async function reviewTask(taskId: string): Promise<void> {
     } else {
       const posted = review.findings.length ? await postReview(review, review.findings, "COMMENT", `Automatic review: ${countLine(review.findings)}; nothing Critical or High.`, wt) : undefined;
       activity("waiting for the owner's word to approve");
-      const ts = await say(approvalQuestion(t, review, posted?.url, flows), "WAITING", true);
+      const ts = await say(slackAsk(approvalQuestion(t, review, posted?.url, flows)), "WAITING", true);
       updateTask(taskId, { status: "waiting", pendingQuestion: { questions: [`Approve PR #${t.pr}?`], afterTs: ts ?? String(Date.now() / 1000) } });
       const answer = slack && thread && ts ? await slack.waitForReply(thread, ts, { pollMs: 15_000 }) : undefined;
       updateTask(taskId, { pendingQuestion: undefined, status: "working" });

@@ -33,3 +33,11 @@ test('ticket links switch from origin branch to PR and retry failed remote looku
   assert.deepEqual(await mod.exports.taskSlackLinks(task, '/repo'), { ticket: task.ticket.url, github: task.feature.prs[0], heading: "📋 Map locations", progress: '▸ *Env* · ○ Grill · ○ Build · ○ Test · ○ Review · ○ Evidence · ○ PR' });
   assert.equal(calls, 2);
 });
+
+test('a post that needs the owner to reply leads with ⚠️ and reads as WAITING', async () => {
+  const { slackAsk, slackStatus } = await import('../src/shared/headless.ts');
+  assert.equal(slackAsk('❓ *Need you*'), '⚠️ *Need you*');
+  assert.equal(slackAsk('❌ *Stuck at build*'), '⚠️ *Stuck at build*');
+  assert.equal(slackAsk('Adds a CSV export.'), '⚠️ Adds a CSV export.');
+  assert.match(slackStatus(slackAsk('Approve?')), /STATUS: WAITING$/);
+});
