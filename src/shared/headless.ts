@@ -453,7 +453,15 @@ export const DEFAULT_BLOCK_MS = 60 * 60_000;
  * the watch on the PR. `reviews` is the rotation length (3 unless the scanner says otherwise).
  */
 export type TaskStep = { n: number; total: number; name: string; next: string };
-export function taskStep(t: { status: string; envReadyAt?: number; reviewsDone: number; feature: { stage: string; built?: boolean; evidenceAt?: number } }, reviews = 3): TaskStep {
+/** a review task's steps (cli/reviewJob.ts); the task records the one it is on in reviewStep, 1-based */
+export const REVIEW_STEPS = ["Setup", "Overview", "Reviewers", "Verify", "Approve"] as const;
+export function taskStep(t: { status: string; envReadyAt?: number; reviewsDone: number; kind?: string; reviewStep?: number; feature: { stage: string; built?: boolean; evidenceAt?: number } }, reviews = 3): TaskStep {
+  if (t.kind === "review") {
+    const total = REVIEW_STEPS.length;
+    if (t.status === "ready" || t.status === "done") return { n: total, total, name: "Done", next: "" };
+    const n = Math.min(Math.max(t.reviewStep ?? 1, 1), total);
+    return { n, total, name: REVIEW_STEPS[n - 1], next: n === total ? "Done" : REVIEW_STEPS[n] };
+  }
   const names = ["Environment", "Grilling", "Build", "Test", ...Array.from({ length: reviews }, (_, i) => `Review ${i + 1}`), "Evidence", "Watch PR"];
   const total = names.length;
   const stage = t.feature.stage;
@@ -481,6 +489,7 @@ export function taskStep(t: { status: string; envReadyAt?: number; reviewsDone: 
 export function slackProgress(t: Parameters<typeof taskStep>[0], build?: { done: number; total: number }, reviews = 3): string {
   const step = taskStep(t, reviews);
   const complete = t.status === "ready" || t.status === "done";
+  if (t.kind === "review") return REVIEW_STEPS.map((name, i) => (complete || i < step.n - 1 ? `✓ ${name}` : i === step.n - 1 ? `▸ *${name}*` : `○ ${name}`)).join(" · ");
   const short = ["Env", "Grill", "Build", "Test", "Review", "Evidence", "PR"];
   // taskStep's step number → position in the short list (the reviews share one slot)
   const at = complete ? short.length : step.n <= 4 ? step.n - 1 : step.n <= 4 + reviews ? 4 : step.n === 5 + reviews ? 5 : 6;

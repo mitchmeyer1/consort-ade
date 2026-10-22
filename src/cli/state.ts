@@ -118,6 +118,8 @@ export type Task = {
   /** a review task (from a review scanner) reviews someone else's PR instead of building a ticket */
   kind?: "build" | "review";
   review?: import("./reviewJob").ReviewTarget;
+  /** which of headless.ts REVIEW_STEPS a review task is on, 1-based */
+  reviewStep?: number;
   /** the build graph was re-split once for parallel work (cli/buildGraph.ts) */
   graphResplitAt?: number;
   /** `consort-cli tasks split`: re-split the unfinished build tickets on the next build step, chain or not */

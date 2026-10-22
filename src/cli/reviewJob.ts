@@ -17,7 +17,7 @@ import { execFile } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { addTurnCost, ENVIRONMENT_RULES, HEADLESS_RULES, seedModels, slackAsk, slackHeading, slackMessage, slackStatus } from "../shared/headless.ts";
+import { addTurnCost, ENVIRONMENT_RULES, HEADLESS_RULES, seedModels, slackAsk, slackHeading, slackMessage, slackProgress, slackStatus } from "../shared/headless.ts";
 import { selectCliModel } from "../shared/cliModels.ts";
 import { modelBlock, modelLoad, usageBlock } from "../shared/usage.ts";
 import { parseReview, serializeReview, type Finding, type Review, type ReviewEvent } from "../shared/review.ts";
@@ -177,7 +177,7 @@ export async function reviewTask(taskId: string): Promise<void> {
   if (!job) throw new Error(`Review task ${taskId} belongs to a scanner that no longer exists.`);
   const t = task.review;
   const log = (line: string) => console.log(`${new Date().toISOString()} [review #${t.pr}] ${line}`);
-  const activity = (line: string) => { log(line); updateTask(taskId, { activity: line, status: "working" }); };
+  const activity = (line: string, reviewStep?: number) => { log(line); updateTask(taskId, { activity: line, status: "working", ...(reviewStep ? { reviewStep } : {}) }); };
   updateTask(taskId, { pid: process.pid });
 
   // Slack: one thread per review
@@ -185,12 +185,12 @@ export async function reviewTask(taskId: string): Promise<void> {
   // the same generated emoji and short title build tasks get (cli/slackIdentity.ts)
   const identity = task.slackIdentity ?? slackIdentityFor(t.title);
   if (!task.slackIdentity) updateTask(taskId, { slackIdentity: identity });
-  const links = { ticket: t.url, github: t.url, heading: slackHeading(t.title, identity) };
+  const links = () => { const now = loadState().tasks.find((x) => x.id === taskId); return { ticket: t.url, github: t.url, heading: slackHeading(t.title, identity), ...(now ? { progress: slackProgress(now) } : {}) }; };
   let thread = task.slackThread;
   const say = async (text: string, status: "RUNNING" | "WAITING" | "COMPLETED" | "STOPPED" = "RUNNING", plain = false) => {
     log(text.replace(/\n/g, " ⏎ "));
     if (!slack) return undefined;
-    const ts = await slack.post(slackStatus(plain ? text : slackMessage("update", text), status, links), thread).catch((e) => { log(`slack failed: ${e.message}`); return undefined; });
+    const ts = await slack.post(slackStatus(plain ? text : slackMessage("update", text), status, links()), thread).catch((e) => { log(`slack failed: ${e.message}`); return undefined; });
     if (!thread && ts) { thread = ts; updateTask(taskId, { slackThread: ts }); }
     return ts;
   };
@@ -199,7 +199,7 @@ export async function reviewTask(taskId: string): Promise<void> {
   // 1. worktree at the PR head, the root .env files, the environment
   const wt = task.worktree;
   if (!existsSync(wt)) {
-    activity("checking out the PR head");
+    activity("checking out the PR head", 1);
     await sh("git", ["fetch", "origin", `pull/${t.pr}/head`, t.base], job.repo);
     await sh("git", ["worktree", "add", "--detach", wt, t.head], job.repo);
   }
@@ -243,7 +243,7 @@ export async function reviewTask(taskId: string): Promise<void> {
 
   try {
     if (!loadState().tasks.find((x) => x.id === taskId)?.envReadyAt) {
-      activity("setting up databases and services for the review");
+      activity("setting up databases and services for the review", 1);
       // the repo's setup is shared with its build tasks: start from it, and save what this review proves
       await turn("setup", environmentPrompt(job.repo, wt, env), false, 30 * 60_000, "environment setup")
         .then(() => { if (saveRepoEnv(job.repo, wt)) log("saved this repo's environment setup"); })
@@ -254,7 +254,7 @@ export async function reviewTask(taskId: string): Promise<void> {
     // 2. the frontier overview and plan
     const planFile = join(wt, ".consort", "review", "plan.json");
     if (!existsSync(planFile)) {
-      activity("frontier model: reading the repository and planning the review");
+      activity("frontier model: reading the repository and planning the review", 2);
       await turn("frontier", OVERVIEW_PROMPT(t, wt), false, 45 * 60_000, "overview and plan");
     }
     const plan = JSON.parse(readFileSync(planFile, "utf8")) as { tldr?: string; slices?: { id: string; title: string; files: string[]; related?: string[]; focus?: string }[] };
@@ -263,7 +263,7 @@ export async function reviewTask(taskId: string): Promise<void> {
     await say(`Plan: ${slices.length} areas, reviewed in parallel on Opus/Sol: ${slices.map((s) => s.title).join("; ")}`);
 
     // 3. the swarm, one read-only reviewer per area, as many at once as capacity allows
-    activity(`reviewer swarm: ${slices.length} areas in parallel`);
+    activity(`reviewer swarm: ${slices.length} areas in parallel`, 3);
     const raw: RawFinding[] = [];
     const results = await Promise.allSettled(slices.map(async (slice) => {
       const text = await turn("swarm", SLICE_PROMPT(t, wt, slice), true, 45 * 60_000, `review area ${slice.id} ${slice.title}`.slice(0, 80));
@@ -275,7 +275,7 @@ export async function reviewTask(taskId: string): Promise<void> {
     writeFileSync(join(wt, ".consort", "review", "swarm.json"), JSON.stringify(raw, null, 2));
 
     // 4. the frontier verification
-    activity(`frontier model: verifying ${raw.length} findings`);
+    activity(`frontier model: verifying ${raw.length} findings`, 4);
     const finalText = raw.length ? await turn("frontier", FINAL_PROMPT(t, wt, slices.length - failedAreas), true, 45 * 60_000, "verify findings") : "[review-final] {\"findings\": []}";
     const final = jsonAfter(finalText, "[review-final]") as { summary?: string; tldr?: string; headline?: string; flows?: unknown } | undefined;
     const flows = Array.isArray(final?.flows) ? final!.flows.filter((f): f is string => typeof f === "string" && !!f.trim()).slice(0, 4) : [];
@@ -289,13 +289,13 @@ export async function reviewTask(taskId: string): Promise<void> {
     const severe = blocking(review.findings);
     const summary = `${review.whatItDoes ?? plan.tldr ?? ""}`.trim();
     if (severe.length) {
-      activity(`posting ${review.findings.length} comments with Request changes`);
+      activity(`posting ${review.findings.length} comments with Request changes`, 5);
       const posted = await postReview(review, review.findings, "REQUEST_CHANGES", `Automatic review: ${countLine(review.findings)}. The Critical and High items need fixing before this merges.${summary ? `\n\n${summary}` : ""}`, wt);
       await say(`Requested changes on <${t.url}|PR #${t.pr}>: ${countLine(review.findings)}.\n${severe.slice(0, 5).map((f) => `• ${f.severity}: ${f.title}`).join("\n")}\n• Review: <${posted.url}|on GitHub>`, "COMPLETED");
       updateTask(taskId, { status: "done", finishedAt: Date.now(), note: `requested changes (${countLine(review.findings)})`, activity: "review posted: changes requested" });
     } else {
       const posted = review.findings.length ? await postReview(review, review.findings, "COMMENT", `Automatic review: ${countLine(review.findings)}; nothing Critical or High.`, wt) : undefined;
-      activity("waiting for the owner's word to approve");
+      activity("waiting for the owner's word to approve", 5);
       const ts = await say(slackAsk(approvalQuestion(t, review, posted?.url, flows)), "WAITING", true);
       updateTask(taskId, { status: "waiting", pendingQuestion: { questions: [`Approve PR #${t.pr}?`], afterTs: ts ?? String(Date.now() / 1000) } });
       const answer = slack && thread && ts ? await slack.waitForReply(thread, ts, { pollMs: 15_000 }) : undefined;

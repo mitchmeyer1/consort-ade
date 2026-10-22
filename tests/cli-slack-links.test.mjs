@@ -41,3 +41,11 @@ test('a post that needs the owner to reply leads with ⚠️ and reads as WAITIN
   assert.equal(slackAsk('Adds a CSV export.'), '⚠️ Adds a CSV export.');
   assert.match(slackStatus(slackAsk('Approve?')), /STATUS: WAITING$/);
 });
+
+test('a review task has its own five steps, not the build steps', async () => {
+  const { taskStep, slackProgress } = await import('../src/shared/headless.ts');
+  const t = { kind: 'review', status: 'working', reviewStep: 3, reviewsDone: 0, feature: { stage: 'Grilling' } };
+  assert.deepEqual(taskStep(t), { n: 3, total: 5, name: 'Reviewers', next: 'Verify' });
+  assert.equal(slackProgress(t), '✓ Setup · ✓ Overview · ▸ *Reviewers* · ○ Verify · ○ Approve');
+  assert.deepEqual(taskStep({ ...t, status: 'done' }), { n: 5, total: 5, name: 'Done', next: '' });
+});
