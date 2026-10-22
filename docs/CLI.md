@@ -144,6 +144,10 @@ Slack headings use a local formatter, so naming a task consumes no model call. E
 
 Each new agent (a fresh session, a review, a parallel worker, the oversight agent) goes to the account with the least usage for its model. Code reads each account's plan meters and decides; no AI is involved. A frontier call (Fable, Astra) compares the plan-wide windows plus that model's own window. Other calls (Opus, Sonnet, Sol) compare the plan-wide windows plus their model's window if the plan has one. Accounts whose model window is spent are skipped; ties go to the account used longest ago. A turn that resumes a session stays on that session's account. Usage is cached in `~/.consort-cli/usage-cache.json` for 2 minutes, shared by the view, the daemon and the workers. The worker log shows each choice, for example `claude-sonnet-5 on Idle; claude use for this model: Busy 85%, Idle 12%`.
 
+### Progress saved on GitHub
+
+After every step before the PR (each grilling, spec and build turn), the worker commits whatever the agent left uncommitted in the task's worktree and pushes the task branch to `origin`. Commit messages look like `Consort checkpoint: Implementing (Build 9/18)`. `.env`, `.pem` and `.key` files are never staged; `.consort/` is already excluded. Checkpoints skip git hooks so a slow pre-commit or pre-push check cannot stall the worker; the real checks still run before the PR. A failed push is logged and retried after the next step.
+
 ### Build progress
 
 The spec step splits the build into tickets under `.consort/ship/issues/`, each with a `Status:` line. While a task is building, `consort-cli view` and the Slack status line show how many are done, for example `Build 8/18`. Each task in `consort-cli view` takes three lines: the table row, what the worker is doing now at full width, and a blank line.

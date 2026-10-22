@@ -38,6 +38,8 @@ function harness(opts = {}) {
     '../main/ship': { excludeConsortDir: async () => {}, fetchTicket: async () => ({}), writeTicketFile: () => '' },
     './slackIdentity': { ensureSlackIdentity: async () => {} },
     './ownerUpdates': ownerUpdates,
+    './checkpoint': { checkpoint: async (cwd, branch, message) => { events.push(`checkpoint:${message}`); return { committed: true, pushed: true }; } },
+    './buildProgress': { stepLabel: name => name },
     './slackLinks': { taskSlackLinks: async t => ({ ticket: t.ticket.url, github: t.feature?.prs?.at(-1) ?? 'https://github.com/a/b/tree/feature' }) },
     './statusLog': { statusEvent: (tone, text) => events.push(`status:${tone}:${text}`) },
     './state': {
@@ -723,4 +725,11 @@ test('a new agent goes to the least-used account; a resumed session stays on its
   const r = harness({ accounts, usage, task: { feature: { stage: 'Implementing', prs: [], history: [] }, accountIds: { claude: 'busy' }, sessions: { claude: 'live-session' } }, turn: o => { resumed.push([o.account.id, o.resume]); throw halt; } });
   await assert.rejects(r.work(), e => e === halt);
   assert.deepEqual(resumed, [['busy', 'live-session']]);
+});
+
+test('each step ends with a checkpoint commit and push of the task branch', async () => {
+  let turns = 0;
+  const h = harness({ task: { feature: { stage: 'Implementing', prs: [], history: [] } }, turn: () => { if (++turns === 2) throw halt; return { text: 'landed ticket 03' }; } });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.deepEqual(h.events.filter(e => e.startsWith('checkpoint:')), ['checkpoint:Consort checkpoint: Implementing']);
 });

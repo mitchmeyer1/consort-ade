@@ -20,6 +20,8 @@ import { findBrowser, publishEvidence, validateEvidence, writeScreenshotHelper }
 import { allocateEnvironment, cleanupEnvironment, withChildEnvironment } from "./environment";
 import { flushTaskNotifications, notifyTask } from "./lifecycle";
 import { readUsage, saveUsage, usageFor } from "./usage";
+import { checkpoint } from "./checkpoint";
+import { stepLabel } from "./buildProgress";
 import type { TaskEnv } from "../shared/headless.ts";
 import { leastLoaded, modelLoad, usageBlock } from "../shared/usage.ts";
 import { statusEvent } from "./statusLog";
@@ -356,6 +358,13 @@ export async function workTask(taskId: string): Promise<void> {
     await say(slackMessage("update", `Applied your update: ${summary}${notes.map((n) => `\n• ${n}`).join("")}`));
     return true;
   };
+  // after each step before the PR: commit what the turn left uncommitted and push the branch, so progress is on GitHub too
+  const saveProgress = async () => {
+    const step = stepLabel(feature.stage === "Implementing" ? "Build" : feature.stage, task.worktree);
+    const saved = await checkpoint(task.worktree, task.branch, `Consort checkpoint: ${feature.stage}${step.startsWith("Build ") ? ` (${step})` : ""}`);
+    if (saved.error) log(task, `checkpoint failed: ${saved.error}`);
+    else if (saved.committed || saved.pushed) log(task, `checkpoint${saved.committed ? " committed" : ""}${saved.pushed ? ` and pushed ${task.branch}` : ""}`);
+  };
   // waits between PR checks end early when the owner posts an update
   const nap = (ms: number) => new Promise<void>((resolve) => {
     const check = setInterval(() => { if (loadState().tasks.find((t) => t.id === taskId)?.ownerUpdates?.length) done(); }, 15_000);
@@ -444,6 +453,7 @@ export async function workTask(taskId: string): Promise<void> {
     const text = await turn(prompt, builderProvider, role);
     log(task, `turn ${n + 1} at ${feature.stage}: ${stripAskUser(stripShipMarkers(text)).slice(0, 300).replace(/\n/g, " ")}`);
     await applyReply(text);
+    await saveProgress();
     if (idle >= STUCK_AFTER) {
       const answer = await ask([slackLines.problem({ where: feature.stage, what: `${idle} turns in a row did not move the stage`, why: [`Last reply: ${brief(stripAskUser(stripShipMarkers(text)), 300)}`], recent: [...recent], ask: "Reply with what to do next." }, task.ticket.url)], true);
       pendingUser = `The owner says: ${answer}`;
