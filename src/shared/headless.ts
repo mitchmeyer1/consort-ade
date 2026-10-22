@@ -288,18 +288,20 @@ export function slackHeading(title: string, identity?: SlackIdentity): string {
   const clean = (identity?.title ?? title).replace(/[<>|*`\r\n]/g, " ").trim().split(/\s+/).slice(0, 5).join(" ").slice(0, 80);
   return `${identity?.emoji ?? "📋"} ${clean}`;
 }
-export type SlackTaskLinks = { ticket: string; github?: string; heading?: string };
+export type SlackTaskLinks = { ticket: string; github?: string; heading?: string; /** the one-line step tracker under STATUS (slackProgress) */ progress?: string };
 /** GitHub SSH and HTTPS remotes produce the same credential-free branch link. */
 export function githubBranchUrl(remote: string, branch: string): string | undefined {
   const match = remote.match(/^(?:https?:\/\/(?:[^/@]+@)?github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/\s]+)\/([^/\s]+?)\/?$/i);
   if (!match) return undefined;
   return `https://github.com/${match[1]}/${match[2].replace(/\.git$/, "")}/tree/${encodeURIComponent(branch)}`;
 }
+/** the end of a status-wrapped post: the STATUS line, then the step tracker if there is one */
+export const STATUS_TAIL = /\n\nSTATUS: (RUNNING|WAITING|STOPPED|COMPLETED)(?:\n([^\n]+))?\s*$/;
 export function slackStatus(text: string, status?: SlackTaskStatus, links?: SlackTaskLinks): string {
-  const saved = text.match(/\n\nSTATUS: (RUNNING|WAITING|STOPPED|COMPLETED)\s*$/);
+  const saved = text.match(STATUS_TAIL);
   const lead = text.trimStart();
   const current = status ?? saved?.[1] ?? (lead.startsWith("🎉🍭🎊") ? "COMPLETED" : lead.startsWith("⏹️") ? "STOPPED" : /^(?:❌|⏳|❓)/u.test(lead) ? "WAITING" : "RUNNING");
-  let body = text.replace(/\n\nSTATUS: (RUNNING|WAITING|STOPPED|COMPLETED)\s*$/, "").trimEnd();
+  let body = text.replace(STATUS_TAIL, "").trimEnd();
   if (links) {
     body = body.replace(/\n\n<[^>\n]+\|ticket>(?: · <[^>\n]+\|github>)?$/, "");
     const safe = (url: string) => /^https?:\/\//i.test(url) ? url.replace(/&/g, "&amp;").replace(/</g, "%3C").replace(/>/g, "%3E").replace(/\|/g, "%7C") : undefined;
@@ -311,7 +313,8 @@ export function slackStatus(text: string, status?: SlackTaskStatus, links?: Slac
     const head = links.heading.replace(/^(\S+)\s+(.+)$/u, (_m, emoji: string, title: string) => `${emoji} *${title.toUpperCase()}*`);
     if (!body.startsWith(`${head}\n`) && !body.startsWith(`${links.heading}\n`)) body = `${head}\n${body}`;
   }
-  return `${body}\n\nSTATUS: ${current}`;
+  const progress = links?.progress ?? saved?.[2];
+  return `${body}\n\nSTATUS: ${current}${progress ? `\n${progress}` : ""}`;
 }
 export const slackLines = {
   claimed: (title: string, url: string, branch: string) => `✅ *Picked up:* <${url}|${title}>\n• branch \`${branch}\``,
@@ -464,6 +467,28 @@ export function taskStep(t: { status: string; envReadyAt?: number; reviewsDone: 
   const name = n > total ? (t.status === "done" ? "Done" : "Ready to merge") : names[n - 1];
   const next = n > total ? "" : n === total ? "Ready to merge" : names[n];
   return { n: Math.min(n, total), total, name, next };
+}
+
+/**
+ * The step tracker under a Slack post's STATUS line, one compact line: done steps ticked, the
+ * current one bold with an arrow, the rest hollow. The build shows its tickets done and a ten-cell
+ * bar; the review rounds fold into one step.
+ *   ✓ Env · ✓ Grill · ▶ *Build 10/18* ▰▰▰▰▰▱▱▱▱▱ · ○ Test · ○ Review · ○ Evidence · ○ PR
+ */
+export function slackProgress(t: Parameters<typeof taskStep>[0], build?: { done: number; total: number }, reviews = 3): string {
+  const step = taskStep(t, reviews);
+  const complete = t.status === "ready" || t.status === "done";
+  const short = ["Env", "Grill", "Build", "Test", "Review", "Evidence", "PR"];
+  // taskStep's step number → position in the short list (the reviews share one slot)
+  const at = complete ? short.length : step.n <= 4 ? step.n - 1 : step.n <= 4 + reviews ? 4 : step.n === 5 + reviews ? 5 : 6;
+  const bar = (done: number, total: number) => { const filled = Math.round((10 * done) / Math.max(1, total)); return `${"▰".repeat(filled)}${"▱".repeat(10 - filled)}`; };
+  return short.map((name, i) => {
+    if (i < at) return `✓ ${name}`;
+    if (i > at) return `○ ${name}`;
+    if (name === "Build" && build?.total) return `▶ *Build ${build.done}/${build.total}* ${bar(build.done, build.total)}`;
+    if (name === "Review") return `▶ *Review ${Math.min(t.reviewsDone + 1, reviews)}/${reviews}*`;
+    return `▶ *${name}*`;
+  }).join(" · ");
 }
 
 /**

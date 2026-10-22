@@ -1,4 +1,4 @@
-import { replyAfter, slackMessage, slackStatus } from "../shared/headless.ts";
+import { replyAfter, slackMessage, slackStatus, STATUS_TAIL } from "../shared/headless.ts";
 import type { SlackConfig } from "./state";
 import type { SlackFile } from "./ownerUpdates";
 
@@ -50,7 +50,7 @@ export class Slack {
 
   /** post a message; in `thread` when given. Resolves to the message ts, which is also the thread id for replies. */
   async post(text: string, thread?: string): Promise<string> {
-    const j = await this.api("chat.postMessage", { channel: await this.channel(), text: slackStatus(/\n\nSTATUS: (RUNNING|WAITING|STOPPED|COMPLETED)\s*$/.test(text) ? text : slackMessage("update", text)), ...(thread ? { thread_ts: thread } : {}), unfurl_links: false });
+    const j = await this.api("chat.postMessage", { channel: await this.channel(), text: slackStatus(STATUS_TAIL.test(text) ? text : slackMessage("update", text)), ...(thread ? { thread_ts: thread } : {}), unfurl_links: false });
     return j.ts as string;
   }
 
