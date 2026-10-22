@@ -95,8 +95,8 @@ CLI models are selected by job role in `src/shared/cliModels.ts`; desktop model 
 
 | Role | Default | Work |
 | --- | --- | --- |
-| planning | Sonnet / Sol | Grilling, spec, recovery |
-| implementation | Sonnet / Sol | Environment, build, repairs, evidence gathering |
+| planning | Fable / Astra | Grilling, spec, recovery |
+| implementation | Opus / Sol | Environment, build, repairs, evidence gathering |
 | coordination | Sonnet / Sol | Independent evidence inspection |
 | reader | Haiku / Luna | Scoped research and review reading |
 | frontier | Fable / Astra | Required PR reviews and escalated analysis |

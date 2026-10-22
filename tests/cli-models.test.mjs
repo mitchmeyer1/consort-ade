@@ -8,11 +8,15 @@ const models = {
   claude: ['claude-fable-5-1', 'claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'],
 };
 
-test('routine CLI roles use Sol or Sonnet while bounded readers use Luna or Haiku', () => {
-  for (const role of ['planning', 'implementation', 'coordination']) {
-    assert.equal(selectCliModel('codex', models.codex, role), 'gpt-6.1-sol');
-    assert.equal(selectCliModel('claude', models.claude, role), 'claude-sonnet-5');
-  }
+test('planning runs on the strongest model, the build one tier below it, coordination on Sol or Sonnet, readers on Luna or Haiku', () => {
+  assert.equal(selectCliModel('codex', models.codex, 'planning'), 'gpt-6-astra');
+  assert.equal(selectCliModel('claude', models.claude, 'planning'), 'claude-fable-5-1');
+  assert.equal(selectCliModel('codex', models.codex, 'implementation'), 'gpt-6.1-sol');
+  assert.equal(selectCliModel('claude', models.claude, 'implementation'), 'claude-opus-5');
+  assert.equal(selectCliModel('codex', models.codex, 'coordination'), 'gpt-6.1-sol');
+  assert.equal(selectCliModel('claude', models.claude, 'coordination'), 'claude-sonnet-5');
+  assert.equal(selectCliModel('claude', ['claude-fable-5-1', 'claude-sonnet-5', 'claude-haiku-4-5'], 'implementation'), 'claude-sonnet-5');
+  assert.equal(selectCliModel('claude', ['claude-fable-5-1', 'claude-haiku-4-5'], 'implementation'), 'claude-fable-5-1');
   assert.equal(selectCliModel('codex', models.codex, 'reader'), 'gpt-6-luna');
   assert.equal(selectCliModel('claude', models.claude, 'reader'), 'claude-haiku-4-5-20251001');
   assert.equal(selectCliModel('codex', models.codex, 'frontier'), 'gpt-6-astra');
@@ -26,7 +30,7 @@ test('configured roles survive provider fallback and may name a newer model', ()
   assert.equal(selectCliModel('claude', models.claude, 'planning', policy), 'claude-sonnet-5');
   assert.throws(() => selectCliModel('codex', models.codex, 'reader', { reader: { codex: 'claude-haiku-5' } }), /does not belong/);
   assert.equal(selectCliModel('codex', ['gpt-5.6-sol', 'gpt-6-astra'], 'reader'), 'gpt-5.6-sol');
-  assert.equal(selectCliModel('claude', ['claude-fable-5-1', 'claude-opus-5', 'claude-haiku-4-5'], 'planning'), 'claude-opus-5');
+  assert.equal(selectCliModel('claude', ['claude-fable-5-1', 'claude-opus-5', 'claude-haiku-4-5'], 'coordination'), 'claude-opus-5');
   assert.equal(selectCliModel('claude', ['claude-fable-5-1'], 'reader'), 'claude-fable-5-1');
   assert.equal(selectCliModel('codex', [], 'planning'), '');
 });
