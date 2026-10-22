@@ -28,6 +28,7 @@ import { withAgentTurn } from "./capacity";
 import { allocateEnvironment, cleanupEnvironment } from "./environment";
 import { oversightModel } from "./oversight";
 import { postReview } from "./reviewPost";
+import type { TurnTrace } from "./telemetry";
 import { environmentPrompt, saveRepoEnv } from "./repoEnv";
 import { Slack } from "./slack";
 import { blockAccount, HOME, loadState, newId, touchAccount, updateTask, WORK_DIR, type Account, type Job, type Task } from "./state";
@@ -204,7 +205,7 @@ export async function reviewTask(taskId: string): Promise<void> {
   const models = seedModels();
   // model settings: the review scanner's own, else those of a build scanner on the same repository
   const policy = job.modelPolicy ?? state.jobs.find((j) => j.repo === job.repo && j.source !== "review" && j.modelPolicy)?.modelPolicy;
-  const turn = async (role: "frontier" | "swarm" | "setup", prompt: string, readOnly: boolean, timeoutMs: number): Promise<string> => {
+  const turn = async (role: "frontier" | "swarm" | "setup", prompt: string, readOnly: boolean, timeoutMs: number, step: string): Promise<string> => {
     const tried = new Set<string>();
     for (let attempt = 0; attempt < 8; attempt++) {
       const now = Date.now();
@@ -218,10 +219,11 @@ export async function reviewTask(taskId: string): Promise<void> {
       const model = modelOn(who);
       touchAccount(who.id);
       const abort = new AbortController();
-      const timer = setTimeout(() => abort.abort(), timeoutMs);
+      const trace: TurnTrace = { taskId, ticket: task.ticket?.id ?? `pr-${t.pr}`, title: t.title, scanner: job.name, kind: "review", stage: role, step, role };
+      const timer = setTimeout(() => { trace.reason = "timeout"; abort.abort(); }, timeoutMs);
       const started = Date.now();
       try {
-        const res = await withAgentTurn(taskId, who.id, () => runTurn({ cwd: wt, model, account: who, readOnly, signal: abort.signal, maxDelegates: 0, effort: role === "frontier" ? "high" : "medium", env: env as unknown as Record<string, string>,
+        const res = await withAgentTurn(taskId, who.id, () => runTurn({ trace, cwd: wt, model, account: who, readOnly, signal: abort.signal, maxDelegates: 0, effort: role === "frontier" ? "high" : "medium", env: env as unknown as Record<string, string>,
           prompt: `${HEADLESS_RULES}\n\n${prompt}\n\n${ENVIRONMENT_RULES(env)}` }));
         updateTask(taskId, (x) => ({ ...(res.usage?.length ? { cost: addTurnCost(x.cost, res.usage) } : {}), turnHistory: [...(x.turnHistory ?? []), { at: started, stage: `review ${role}`, role, provider: who.provider as Provider, model, durationMs: Date.now() - started, usage: res.usage, error: res.error ?? res.limit?.text }] }));
         if (res.limit) { blockAccount(who.id, res.limit.resetsAt, res.limit.text); tried.add(who.id); continue; }
@@ -236,7 +238,7 @@ export async function reviewTask(taskId: string): Promise<void> {
     if (!loadState().tasks.find((x) => x.id === taskId)?.envReadyAt) {
       activity("setting up databases and services for the review");
       // the repo's setup is shared with its build tasks: start from it, and save what this review proves
-      await turn("setup", environmentPrompt(job.repo, wt, env), false, 30 * 60_000)
+      await turn("setup", environmentPrompt(job.repo, wt, env), false, 30 * 60_000, "environment setup")
         .then(() => { if (saveRepoEnv(job.repo, wt)) log("saved this repo's environment setup"); })
         .catch((e) => log(`environment setup incomplete: ${(e as Error).message}`));
       updateTask(taskId, { envReadyAt: Date.now() });
@@ -246,7 +248,7 @@ export async function reviewTask(taskId: string): Promise<void> {
     const planFile = join(wt, ".consort", "review", "plan.json");
     if (!existsSync(planFile)) {
       activity("frontier model: reading the repository and planning the review");
-      await turn("frontier", OVERVIEW_PROMPT(t, wt), false, 45 * 60_000);
+      await turn("frontier", OVERVIEW_PROMPT(t, wt), false, 45 * 60_000, "overview and plan");
     }
     const plan = JSON.parse(readFileSync(planFile, "utf8")) as { tldr?: string; slices?: { id: string; title: string; files: string[]; related?: string[]; focus?: string }[] };
     const slices = (plan.slices ?? []).filter((s) => s && Array.isArray(s.files) && s.files.length);
@@ -257,7 +259,7 @@ export async function reviewTask(taskId: string): Promise<void> {
     activity(`reviewer swarm: ${slices.length} areas in parallel`);
     const raw: RawFinding[] = [];
     const results = await Promise.allSettled(slices.map(async (slice) => {
-      const text = await turn("swarm", SLICE_PROMPT(t, wt, slice), true, 45 * 60_000);
+      const text = await turn("swarm", SLICE_PROMPT(t, wt, slice), true, 45 * 60_000, `review area ${slice.id} ${slice.title}`.slice(0, 80));
       const found = cleanFindings(jsonAfter(text, "[review-findings]"));
       raw.push(...found);
       log(`area ${slice.id} (${slice.title}): ${found.length} findings`);
@@ -267,7 +269,7 @@ export async function reviewTask(taskId: string): Promise<void> {
 
     // 4. the frontier verification
     activity(`frontier model: verifying ${raw.length} findings`);
-    const finalText = raw.length ? await turn("frontier", FINAL_PROMPT(t, wt, slices.length - failedAreas), true, 45 * 60_000) : "[review-final] {\"findings\": []}";
+    const finalText = raw.length ? await turn("frontier", FINAL_PROMPT(t, wt, slices.length - failedAreas), true, 45 * 60_000, "verify findings") : "[review-final] {\"findings\": []}";
     const final = jsonAfter(finalText, "[review-final]") as { tldr?: string; headline?: string } | undefined;
     const review = buildReview(t, cleanFindings(final), { tldr: final?.tldr ?? plan.tldr, headline: final?.headline, at: new Date().toISOString() });
     const reviewPath = join(wt, ".consort", "review", `pr-${t.pr}.review.json`);

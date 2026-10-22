@@ -16,6 +16,7 @@ import { canStartWorker, handleWorkerExit, requestWorkerStop, workerStopMessage 
 import { answerTaskStatusQuestions } from "./slackStatus";
 import { saveLiveChildren } from "./parallel";
 import { refresh } from "./refresh";
+import { historyTurns, readTurns, renderReport, sinceMs } from "./telemetry";
 import { newReviewTask, reviewTask, scanReviews } from "./reviewJob";
 import { promisify } from "node:util";
 import { sourceFor } from "./sources";
@@ -27,7 +28,7 @@ import { cleanupEnvironment } from "./environment";
 import { alive, DAEMON_LOG, daemonPid, recordDaemon, startDetached, stopDaemon } from "./daemonctl";
 import { banner, cream, dim, mint, ok, bad } from "./theme";
 import { FINISHED, retainedTasks } from "../shared/headless.ts";
-import { DEFAULT_STATUSES, host, loadState, LOG_DIR, newId, saveState, updateTask, type Job, type Task } from "./state";
+import { DEFAULT_STATUSES, HOME, host, loadState, LOG_DIR, newId, saveState, updateTask, type Job, type Task } from "./state";
 
 /**
  * consort-cli: Consort's pipeline without the window. Add AI accounts, point it at Slack, add a
@@ -95,6 +96,8 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   work <taskId>                                                           one worker (the daemon runs this)
   tasks list                                                              every task: id, status, ticket, stage, branch, note
   tasks logs <task>                                                       what that agent has been doing              (task or ticket id)
+  report [<ticket>] [--since 7d] [--out <file>]                           post-mortem from the agent log: time, tokens and cost by stage, model, account and
+                                                                          parallel ticket; how parallel it was; failed turns; the slowest turns
   tasks reboot <task> | reboot --all                                      stop that agent (or every live one) and start it again; it works out where the last run got to
   tasks split <task>                                                      stop that agent, re-split its unfinished build tickets into parallel work, and continue
                                                                           (reboot and split wait for a running parallel wave unless --force)
@@ -112,7 +115,7 @@ async function main(argv: string[]) {
   const [cmd, sub, ...rest] = a._;
   const s = loadState();
   // commands whose first word is a value, not a subcommand: import <file>, work <task>, reboot <task>
-  const key = cmd === "import" || cmd === "work" || cmd === "reboot" ? cmd : `${cmd === "jobs" ? "scanners" : cmd ?? "help"} ${sub ?? ""}`.trim(); // "jobs" was the first name for scanners
+  const key = cmd === "import" || cmd === "work" || cmd === "reboot" || cmd === "report" ? cmd : `${cmd === "jobs" ? "scanners" : cmd ?? "help"} ${sub ?? ""}`.trim(); // "jobs" was the first name for scanners
   // everything that touches tickets, accounts or agents waits for the walk-through
   const open = ["help", "--help", "-h", "setup", "status", "cli status", "cli update", "import"];
   if (!open.includes(key) && !setupDone(s)) fail("not set up yet. Run `consort-cli setup` first; it checks the tools, adds your issue sources, AI accounts and Slack, and tests each one.");
@@ -386,6 +389,24 @@ async function main(argv: string[]) {
         ? `${task.ticket.id} stopped; the worker restarts within 15 seconds${daemonPid() ? "" : " once the daemon runs (consort-cli run -d)"}, re-splits the unfinished build tickets into parallel work, then builds them in waves.`
         : `${task.ticket.id} rebooted at ${task.feature.stage}; the worker picks up after the last run within 15 seconds${daemonPid() ? "" : " once the daemon runs (consort-cli run -d)"}.`);
       }
+      return;
+    }
+    case "report": {
+      // a post-mortem from the telemetry log: what each agent did, how long, tokens and dollars, and what was wasted
+      const want = sub;
+      const since = sinceMs(str(a, "since"));
+      if (str(a, "since") && !since) fail("--since takes a number and d, h or m, e.g. 7d");
+      const task = want ? s.tasks.find((x) => x.id === want || x.ticket.id === want) : undefined;
+      const ticket = task?.ticket.id ?? want;
+      let turns = readTurns(HOME, { ticket, since: since ? Date.now() - since : undefined });
+      if (task) turns = [...historyTurns(task, turns[0]?.at ?? Infinity), ...turns];
+      const title = ticket ? `Agent report: ${ticket}${task ? ` ${task.ticket.title}` : ""}` : `Agent report: every ticket${since ? ` (last ${str(a, "since")})` : ""}`;
+      const md = renderReport(title, turns);
+      const out = str(a, "out") ?? join(HOME, "reports", `${ticket ?? "all"}-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.md`);
+      mkdirSync(join(out, ".."), { recursive: true });
+      writeFileSync(out, md);
+      console.log(md);
+      console.log(dim(`saved to ${out}`));
       return;
     }
     case "tasks logs": {

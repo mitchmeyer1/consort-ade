@@ -21,6 +21,7 @@ import { allocateEnvironment, cleanupEnvironment, withChildEnvironment } from ".
 import { flushTaskNotifications, notifyTask } from "./lifecycle";
 import { readUsage, saveUsage, usageFor } from "./usage";
 import { checkpoint } from "./checkpoint";
+import type { TurnTrace } from "./telemetry";
 import { environmentPrompt, saveRepoEnv } from "./repoEnv";
 import { graphSummary, planWaves, readGraph, RESPLIT_PROMPT, tooSerial } from "./buildGraph";
 import { LINK_PROMPT, needsLinks, syncSubtaskProgress, writeSubtaskFile, type SubtaskState } from "./subtasks";
@@ -169,6 +170,9 @@ export async function workTask(taskId: string): Promise<void> {
    */
   // turns this worker has handed an account but not finished, so parallel tickets picking at once spread out
   const mine = new Map<string, number>();
+  // telemetry labels (cli/telemetry.ts): parallel children by worktree, one-off steps by the next turn they start
+  const childSteps = new Map<string, string>();
+  let nextStep: string | undefined;
   let feature: ShipFeature = task.feature;
   let pendingUser: string | undefined;
   let idle = 0;
@@ -177,6 +181,9 @@ export async function workTask(taskId: string): Promise<void> {
     // accounts that errored on this turn: the next attempt goes to a different account, on either provider
     const tried = new Set<string>();
     let silences = 0;
+    // this turn's telemetry label, taken once so every retry keeps it
+    const named = childSteps.get(cwd) ?? nextStep;
+    if (!childSteps.has(cwd)) nextStep = undefined;
     let lastCrash: string | undefined;
     let failedTurns = 0;
     let model = fixedModel ?? modelFor(provider, role);
@@ -248,6 +255,8 @@ export async function workTask(taskId: string): Promise<void> {
       const reviewUnits = fixedModel ? Math.min(2, job.maxParallel ?? 2, who.maxActiveTurns ?? 2, live.capacity?.maxActiveTurns ?? 4) : 1;
       const delegation = reviewUnits > 1 ? "You may run ONE foreground review reader at a time, on the supplied reader model. Never spawn nested agents or background agents. This overrides any larger wave in the skill." : "Do not dispatch agents. Consort has reserved only your turn; inspect the review evidence yourself. This overrides the skill's delegation instructions.";
       const session = resume && managesSession && cur.accountIds[provider] === who.id ? cur.sessions[provider] : undefined;
+      const step = named ?? (fixedModel ? `self-review on ${model}` : `${feature.stage}${turnTag ? ` ${turnTag.replace(/ · $/, "")}` : ""}`);
+      const trace: TurnTrace = { taskId, ticket: task.ticket.id, title: task.ticket.title, scanner: job.name, kind: "build", stage: feature.stage, step, role, escalated: !!escalationReason };
       const abort = new AbortController();
       let usageLimit: ReturnType<typeof usageBlock>;
       let checking = false;
@@ -256,7 +265,7 @@ export async function workTask(taskId: string): Promise<void> {
       let quietSince = Date.now();
       let silenced = false;
       const checkUsage = async () => {
-        if (active && Date.now() - quietSince > SILENCE_MS) { silenced = true; abort.abort(); return; }
+        if (active && Date.now() - quietSince > SILENCE_MS) { silenced = true; trace.reason = "silenced"; abort.abort(); return; }
         if (checking) return;
         checking = true;
         try {
@@ -280,8 +289,8 @@ export async function workTask(taskId: string): Promise<void> {
         startedAt = Date.now();
         quietSince = Date.now();
         usageTimer = setInterval(checkUsage, 60_000);
-        deadline = timeoutMs ? setTimeout(() => { timedOut = true; abort.abort(); }, timeoutMs) : undefined;
-        return runTurn({ cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}\n\n${ENVIRONMENT_RULES(turnEnv)}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: turnEnv, signal: abort.signal, readOnly, effort: role === "reader" ? "low" : role === "frontier" ? "high" : "medium", delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { quietSince = Date.now(); const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
+        deadline = timeoutMs ? setTimeout(() => { timedOut = true; trace.reason = "timeout"; abort.abort(); }, timeoutMs) : undefined;
+        return runTurn({ trace, cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}\n\n${ENVIRONMENT_RULES(turnEnv)}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: turnEnv, signal: abort.signal, readOnly, effort: role === "reader" ? "low" : role === "frontier" ? "high" : "medium", delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { quietSince = Date.now(); const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
       }, reviewUnits); }
       catch (e) { if (e instanceof AccountUnavailableError) { continue; } throw e; }
       finally { active = false; mine.set(who.id, (mine.get(who.id) ?? 1) - 1); if (usageTimer) clearInterval(usageTimer); if (deadline) clearTimeout(deadline); }
@@ -397,6 +406,7 @@ export async function workTask(taskId: string): Promise<void> {
     mkdirSync(join(task.worktree, ticketFile, ".."), { recursive: true });
     rmSync(join(task.worktree, ticketFile), { force: true });
     activity(`applying ${updates.length} owner update${updates.length === 1 ? "" : "s"} from Slack`);
+    nextStep = "owner update";
     const text = await turn(ownerUpdatePrompt(updates, { stage: feature.stage, built: !!feature.built, prUrl: feature.prs.at(-1), ticketFile }), builderProvider, "implementation");
     await completeReply(text, undefined, "implementation");
     const applied = new Set(updates.map((u) => u.ts));
@@ -464,6 +474,7 @@ export async function workTask(taskId: string): Promise<void> {
     log(task, "rebooted by the owner; picking up after the last run");
     await say(slackLines.rebooted(feature.stage));
     activity("rebooted: checking where the last run got to");
+    nextStep = "reboot pickup";
     await completeReply(await turn(REBOOT_PROMPT));
     updateTask(taskId, { rebootedAt: undefined });
   }
@@ -487,6 +498,7 @@ export async function workTask(taskId: string): Promise<void> {
   if (!task.envReadyAt) {
     activity("setting up the local environment");
     // start from what an earlier task on this repo worked out, and keep this one's for the next (cli/repoEnv.ts)
+    nextStep = "environment setup";
     const text = await turn(environmentPrompt(job.repo, task.worktree, env), builderProvider, "implementation");
     await completeReply(text, undefined, "implementation");
     if (saveRepoEnv(job.repo, task.worktree)) log(task, "saved this repo's environment setup for the next task");
@@ -499,6 +511,7 @@ export async function workTask(taskId: string): Promise<void> {
   const parallelDirectory = join(task.worktree, ".consort", "ship", "parallel");
   const parallelRun: ParallelRun = async child => {
     // a parallel ticket gets 90 minutes (saved every 5, so a timeout resumes); research stays short
+    childSteps.set(child.cwd, `parallel ${child.kind === "research" ? "research" : "ticket"} ${child.id}`);
     const execute = async (childEnv: TaskEnv) => ({ text: await turn(child.prompt, builderProvider, child.kind === "research" ? "reader" : "implementation", false, child.kind === "research" ? 15 * 60_000 : 90 * 60_000, child.cwd, undefined, childEnv) });
     return child.kind === "implementation" ? withChildEnvironment(taskId, child.id, execute) : execute(env);
   };
@@ -532,6 +545,7 @@ export async function workTask(taskId: string): Promise<void> {
           updateTask(taskId, { subtaskLinkTries: (current?.subtaskLinkTries ?? 0) + 1 });
           log(task, `linking ${tickets.length} build tickets to ${subtasks.length} ClickUp subtasks`);
           activity("linking build tickets to the ClickUp subtasks");
+          nextStep = "link ClickUp subtasks";
           await completeReply(await turn(LINK_PROMPT, builderProvider, "implementation"), undefined, "implementation");
           if (needsLinks(subtasks, await readGraph(task.worktree).catch(() => []))) log(task, "the link turn added no ClickUp lines");
           else await syncSubtaskStatus();
@@ -543,6 +557,7 @@ export async function workTask(taskId: string): Promise<void> {
           log(task, `${asked ? "owner asked to re-split the build" : "build graph is mostly a chain"} (${graphSummary(graph)}); re-splitting for parallel work`);
           activity("re-splitting the build into parallel tickets");
           if (asked) await say(slackMessage("update", `Re-splitting the remaining build for parallel work (${graphSummary(graph)} now)`));
+          nextStep = "re-split build plan";
           await completeReply(await turn(RESPLIT_PROMPT(graph, tickets, asked), builderProvider, "frontier"), undefined, "frontier");
           continue;
         }
@@ -554,6 +569,7 @@ export async function workTask(taskId: string): Promise<void> {
       try {
         await recoverImplementation(task.worktree, parallelDirectory);
         const wave = await runImplementation({ cwd: task.worktree, directory: parallelDirectory, tasks: await readImplementationTasks(task.worktree), onStart: async (ids) => { log(task, `wave started: ${ids.join(", ")}`); await say(slackMessage("update", `Building ${ids.length} tickets in parallel: ${ids.join(", ")}`)); await syncSubtaskStatus(); }, concurrency: job.parallelImplementation ?? job.maxParallel ?? 4, run: parallelRun, check: async () => {
+          nextStep = "wave check";
           const checked = await turn("The coordinator integrated parallel ticket commits. Read repository setup and each completed ticket. Run the relevant tests and typecheck together, fix any failures, and commit fixes. Do not push or move the ship stage. Return [parallel-check: pass] only after all required checks pass; include the commands and their results. If a real owner decision blocks verification, return [ask-user: ...].", builderProvider, "implementation", true, 45 * 60_000);
           if (!/\[parallel-check: pass\]/.test(checked) || parseAskUser(checked).length) throw new Error(checked || "Parallel implementation checks did not return passing proof");
         } });

@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url);
 const code = ts.transpileModule(readFileSync(new URL('../src/cli/agent.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText.replace(/import\.meta\.url/g, '"file:///virtual/cli/agent.js"');
 function load(runStreamed, onStart = () => {}, onNew = () => {}) {
   const mocks = {
-    './state': { HOME: '/virtual' }, '../shared/seatPool.ts': seatPool,
+    './state': { HOME: '/virtual' }, './telemetry': { recordTurn() {}, sumUsage: () => ({ usd: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }) }, '../shared/seatPool.ts': seatPool,
     '../main/cliRuntime': { cliBinary: () => '/virtual/codex' },
     '@openai/codex-sdk': { Codex: class { constructor(o) { onNew(o); } startThread(o) { onStart(o); return { runStreamed }; } } },
   };

@@ -200,6 +200,12 @@ It asks for the repository checkout, your GitHub login (your `gh` login is the d
 
 A review scanner reuses what the box already has: the Claude and Codex accounts (with the same usage balancing and turn limits), the Slack bot and thread handling (including the question-answering agent), the `gh` login (reviews post as that user; setup shows which), and the model settings of a build scanner on the same repository when the review scanner has none. Its environment turn starts from the repository's saved setup: after any task on a repository proves its environment, `ENV.md` and the scripts are kept under `~/.consort-cli/repo-env/` and the next build or review task adapts them to its own ports instead of re-reading the repository. Without Slack, reviews still comment and request changes but never approve; `scanners add` and `setup` say so.
 
+### Agent log and post-mortems
+
+Every agent turn (build stages, parallel tickets, self-reviews, environment setup, PR reviews, the Slack question agent, Sentry bundle planning) appends one line to `~/.consort-cli/telemetry/turns-YYYY-MM.jsonl`: ticket, scanner, step (for example `Implementing t4`, `parallel ticket 08`, `review area s3`), model, provider and account, start and duration, input/output/cache tokens and dollars, and the outcome (`ok`, `error`, `limit`, `timeout`, `silenced`, `aborted`) with its error. The log outlives the task.
+
+`consort-cli report <ticket>` turns it into a post-mortem: wall clock against total agent time (how parallel the build really was), cost and tokens by stage, model, account and parallel ticket, the turns that did not finish, and the slowest turns. `consort-cli report --since 7d` covers every ticket. Each report prints and is saved under `~/.consort-cli/reports/`. Turns from before the log existed come from the task's saved history (without the account).
+
 ## Commands
 
 | Command | Does |
