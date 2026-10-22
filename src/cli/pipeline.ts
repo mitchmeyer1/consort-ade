@@ -8,7 +8,7 @@ import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUs
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { selectCliModel, type CliModelRole } from "../shared/cliModels.ts";
-import { MODEL_ROLE_RULES, parseModelEscalation, roleEffort, stageModelRole } from "../shared/cliTurnPolicy.ts";
+import { MODEL_ROLE_RULES, parseBuildEffort, parseModelEscalation, PLANNER_ROLES, roleEffort, stageModelRole } from "../shared/cliTurnPolicy.ts";
 import { AccountUnavailableError, withAgentTurn, withEnvironmentSlot } from "./capacity";
 import { prepareResearchTasks, readImplementationTasks, recoverImplementation, runImplementation, runResearch, type ParallelRun } from "./parallel";
 import { excludeConsortDir, fetchTicket, writeTicketFile } from "../main/ship";
@@ -248,7 +248,7 @@ export async function workTask(taskId: string): Promise<void> {
         provider = who.provider;
         model = modelFor(provider, role);
       }
-      const effort = roleEffort(role, job.effortPolicy);
+      const effort = roleEffort(role, job.effortPolicy, loadState().tasks.find((t) => t.id === taskId)?.plannedEffort?.level);
       updateTask(task.id, (t) => ({ activeProvider: provider,
         ...(managesSession ? { accountIds: { ...t.accountIds, [provider]: who.id }, sessions: { ...t.sessions, [provider]: t.accountIds[provider] === who.id ? t.sessions[provider] : undefined } } : {}),
         activity: `${turnTag}running ${provider} ${model} on ${who.name}`, turn: { role, provider, model, effort, startedAt: Date.now() } }));
@@ -372,8 +372,10 @@ export async function workTask(taskId: string): Promise<void> {
     const file = join(task.worktree, ".consort", "pr-review", `pr-${pr}.review.json`);
     try { return reviewSummary(parseReview(readFileSync(file, "utf8"))); } catch { return undefined; }
   };
-  const applyReply = async (text: string) => {
+  const applyReply = async (text: string, role: CliModelRole) => {
     const change = parseShipMarkers(text);
+    const planned = PLANNER_ROLES.includes(role) ? parseBuildEffort(text) : undefined;
+    if (planned) { updateTask(task.id, { plannedEffort: { ...planned, at: Date.now() } }); await say(slackLines.buildEffort(planned.level, planned.reason)); }
     const before = feature;
     if (change) feature = applyShipChange(feature, change, Date.now());
     updateTask(task.id, { feature });
@@ -389,11 +391,11 @@ export async function workTask(taskId: string): Promise<void> {
   };
 
   const completeReply = async (text: string, timeoutMs?: number, role: CliModelRole = "planning", provider: Provider = builderProvider, fixedModel?: string) => {
-    await applyReply(text);
+    await applyReply(text, role);
     while (pendingUser) {
       const prompt = pendingUser;
       pendingUser = undefined;
-      await applyReply(await turn(prompt, provider, role, !fixedModel, timeoutMs, task.worktree, fixedModel));
+      await applyReply(await turn(prompt, provider, role, !fixedModel, timeoutMs, task.worktree, fixedModel), role);
     }
   };
   /**
@@ -469,7 +471,7 @@ export async function workTask(taskId: string): Promise<void> {
     setTimeout(done, ms);
   });
 
-  log(task, `models: planning, spec and judgement on ${builderModel} at ${roleEffort("planning", job.effortPolicy)} effort; build and routine turns on ${workerModel} at ${roleEffort("implementation", job.effortPolicy)} effort`);
+  log(task, `models: planning, spec and judgement on ${builderModel} at ${roleEffort("planning", job.effortPolicy)} effort; build and routine turns on ${workerModel} at ${roleEffort("implementation", job.effortPolicy, task.plannedEffort?.level)} effort`);
   if (task.rebootedAt) {
     // `consort-cli reboot`: the owner stopped the last worker; open by working out where it got to
     log(task, "rebooted by the owner; picking up after the last run");
@@ -595,7 +597,7 @@ export async function workTask(taskId: string): Promise<void> {
     turnTag = `t${n + 1} · `; activity(`${turnTag}starting`);
     const text = await turn(prompt, builderProvider, role);
     log(task, `turn ${n + 1} at ${feature.stage}: ${stripAskUser(stripShipMarkers(text)).slice(0, 300).replace(/\n/g, " ")}`);
-    await applyReply(text);
+    await applyReply(text, role);
     await saveProgress();
     if (idle >= STUCK_AFTER) {
       const answer = await ask([slackLines.problem({ where: feature.stage, what: `${idle} turns in a row did not move the stage`, why: [`Last reply: ${brief(stripAskUser(stripShipMarkers(text)), 300)}`], recent: [...recent], ask: "Reply with what to do next." }, task.ticket.url)], true);

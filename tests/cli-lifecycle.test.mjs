@@ -847,3 +847,32 @@ test('a turn that goes quiet for 25 minutes is stopped, reported in Slack, and r
   assert.equal(calls, 2, 'retried once, then gave up');
   assert.ok(h.messages.some(m => /went quiet for 25 min .*last: Dispatching reader 1 of 15.*Restarting this step/.test(m.text)), 'the first silence is posted');
 });
+
+test('the planner sets the build effort for the writers, and a scanner-level effort still wins', async () => {
+  for (const [policy, expected] of [[undefined, 'xhigh'], [{ implementation: 'low' }, 'low']]) {
+    const seen = [], forms = [];
+    const h = harness({ job: policy ? { effortPolicy: policy } : {}, task: { feature: { stage: 'Grilling', prs: [], history: [] }, accountIds: { claude: 'c' }, sessions: { claude: 'parent-session' } },
+      runResearch: async () => ({ summary: 'Flow export preserves archived records', reused: false, results: [] }),
+      runImplementation: async o => {
+        await Promise.all(['frontend', 'backend'].map(id => o.run({ id, cwd: `/write/${id}`, prompt: `Write ${id}`, kind: 'implementation' })));
+        await o.check('/virtual');
+        return { completed: ['frontend', 'backend'], commits: ['a', 'b'], failed: [] };
+      },
+      shipPrompt: o => { forms.push(o); return 'coordinate stage'; },
+      turn: o => {
+        seen.push(o);
+        if (o.cwd !== '/virtual') return { text: 'Child report', sessionId: `child-${o.cwd}` };
+        if (o.prompt.includes('integrated parallel ticket commits')) return { text: '[parallel-check: pass]' };
+        if (o.prompt.includes('coordinate stage') && forms.length === 1) return { text: "[ship-stage: Spec'd | research complete] [build-effort: xhigh — crosses billing and the warehouse sync]" };
+        throw halt;
+      },
+    });
+    await assert.rejects(h.work(), e => e === halt);
+    const writers = seen.filter(o => o.cwd.startsWith('/write/'));
+    assert.equal(writers.length, 2);
+    assert.ok(writers.every(o => o.effort === expected), `writers run at ${expected}`);
+    assert.equal(h.task.plannedEffort.level, 'xhigh');
+    assert.equal(h.task.plannedEffort.reason, 'crosses billing and the warehouse sync');
+    assert.ok(h.messages.some(m => /Build effort: xhigh/.test(m.text)), 'the thread names the planner\'s choice');
+  }
+});

@@ -115,6 +115,8 @@ export type Task = {
   riskReason?: string;
   /** the turn in flight, or the last one: the view shows its model and effort beside the account */
   turn?: { role: string; provider: Provider; model: string; effort: import("../shared/cliTurnPolicy.ts").EffortLevel; startedAt: number };
+  /** the planner's [build-effort] for this task: what the build and coordination turns run at unless the scanner pins a level */
+  plannedEffort?: { level: import("../shared/cliTurnPolicy.ts").EffortLevel; reason?: string; at: number };
   activeProvider?: Provider;
   activeTurns?: { id: string; pid: number; accountId: string; startedAt: number; units?: number }[];
   childEnvironments?: { id: string; portBase: number; runCode: string; pid: number }[];
