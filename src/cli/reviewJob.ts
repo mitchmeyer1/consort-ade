@@ -1,7 +1,6 @@
 /**
- * Automatic PR review. A review scanner (`--source review --reviewer <login>`) watches the
- * repository's open PRs that are assigned to that login or ask it for a review; each PR head gets
- * one review task. The worker for a review task:
+ * Automatic PR review for a reviewer. A review scanner (`scanners add review`) watches the
+ * repository's open PRs that request that login's review; each PR head gets one review task. The worker for a review task:
  *
  *  1. checks the PR head out in its own worktree, copies the repo root's .env files in, and sets up
  *     the databases and services the repo needs (the same environment turn build tasks run);
@@ -42,11 +41,12 @@ export type OpenPr = { number: number; title: string; url: string; headRefOid: s
 
 // ── scanning ───────────────────────────────────────────────────────────────────────────────
 
-/** PRs that want a review from `reviewer` and have no review task at their current head yet */
+/** PRs that request `reviewer`'s review and have no review task at their current head yet */
 export function reviewCandidates(prs: OpenPr[], reviewer: string, tasks: Task[]): OpenPr[] {
   const me = reviewer.toLowerCase();
   return prs.filter((p) => !p.isDraft
-    && (p.assignees ?? []).concat(p.reviewRequests ?? []).some((u) => u.login?.toLowerCase() === me)
+    // a reviewer's queue: PRs that request this login's review (being assigned to a PR is the author's side, not a review)
+    && (p.reviewRequests ?? []).some((u) => u.login?.toLowerCase() === me)
     && (p.author?.login ?? "").toLowerCase() !== me
     && !tasks.some((t) => t.kind === "review" && t.status !== "released" && t.review?.pr === p.number && (t.review.head === p.headRefOid || ["working", "waiting", "monitoring"].includes(t.status))));
 }

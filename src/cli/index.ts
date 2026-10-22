@@ -62,7 +62,7 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
 
   ${cream("Add a scanner")} ${dim("(step-by-step questions, the same as setup)")}
   ${mint("scanners add clickup")}                                                    build ClickUp tickets into PRs
-  ${mint("scanners add review")}                                                     review PRs assigned to you or asking you for review
+  ${mint("scanners add review")}                                                     review the PRs that request your review
   ${mint("scanners add sentry")}                                                     turn grouped Sentry issues into ClickUp tickets
 
   accounts add --provider claude|codex --name <label> [--api-key <key>]   add an AI account (a CLI login unless --api-key)
@@ -77,7 +77,7 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
            [--review-models claude:claude-fable-5-1,codex:gpt-6-astra]
   scanners add --name <n> --source github --repo <path> --base main [--tag ai-handle] …
   scanners add --name <n> --source review --repo <path> --reviewer <github-login> [--every 5] [--max-parallel 4]
-           reviews open PRs assigned to that login or asking it for a review: Fable/Astra overview, Opus/Sol swarm,
+           reviews open PRs that request that login's review: Fable/Astra overview, Opus/Sol swarm,
            Request changes on Critical/High, otherwise comments and a Slack yes before it approves
   scanners add --name <n> --source sentry --repo <shared-checkout> --sentry-org <org> --sentry-project <slug> --workspace <id> --list <id> --tag <tag>
            [--sentry-host https://sentry.io] [--environment production] [--query is:unresolved] [--create-status "to do"]

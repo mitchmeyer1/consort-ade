@@ -20,7 +20,7 @@ function load(name, extra = {}) {
 }
 const pr = (n, over = {}) => ({ number: n, title: `PR ${n}`, url: `https://github.com/acme/mono/pull/${n}`, headRefOid: `sha${n}`, baseRefName: 'development', isDraft: false, author: { login: 'dev' }, assignees: [], reviewRequests: [], ...over });
 
-test('picks PRs assigned to the reviewer or asking it for review; skips drafts, its own PRs and heads already reviewed', () => {
+test('picks only PRs that request the reviewer; being assigned does not count; skips drafts, its own PRs and heads already reviewed', () => {
   const tasks = [
     { kind: 'review', status: 'done', review: { pr: 3, head: 'sha3' } },
     { kind: 'review', status: 'done', review: { pr: 4, head: 'old' } },
@@ -28,9 +28,9 @@ test('picks PRs assigned to the reviewer or asking it for review; skips drafts, 
   ];
   const { reviewCandidates } = load('reviewJob', { tasks });
   const prs = [
-    pr(1, { assignees: [{ login: 'Mitch' }] }), pr(2, { reviewRequests: [{ login: 'mitch' }] }), pr(3, { assignees: [{ login: 'mitch' }] }),
-    pr(4, { assignees: [{ login: 'mitch' }] }), pr(5, { assignees: [{ login: 'mitch' }] }), pr(6, { isDraft: true, assignees: [{ login: 'mitch' }] }),
-    pr(7, { author: { login: 'mitch' }, assignees: [{ login: 'mitch' }] }), pr(8),
+    pr(1, { reviewRequests: [{ login: 'Mitch' }] }), pr(2, { reviewRequests: [{ login: 'mitch' }] }), pr(3, { reviewRequests: [{ login: 'mitch' }] }),
+    pr(4, { reviewRequests: [{ login: 'mitch' }] }), pr(5, { reviewRequests: [{ login: 'mitch' }] }), pr(6, { isDraft: true, reviewRequests: [{ login: 'mitch' }] }),
+    pr(7, { author: { login: 'mitch' }, reviewRequests: [{ login: 'mitch' }] }), pr(8), pr(9, { assignees: [{ login: 'mitch' }] }),
   ];
   assert.deepEqual(reviewCandidates(prs, 'mitch', tasks).map(p => p.number), [1, 2, 4], '4 has new commits; 5 is still being reviewed');
 });

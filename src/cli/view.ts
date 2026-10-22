@@ -157,7 +157,7 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   lines.push("");
   lines.push(`${cream(bold("Add a scanner"))} ${dim("· step-by-step questions")}`);
   lines.push(`  ${mint("consort-cli scanners add clickup")}         build ClickUp tickets into PRs`);
-  lines.push(`  ${mint("consort-cli scanners add review")}          review PRs assigned to you or asking you for review`);
+  lines.push(`  ${mint("consort-cli scanners add review")}          review the PRs that request your review`);
   lines.push(`  ${mint("consort-cli scanners add sentry")}          turn grouped Sentry issues into ClickUp tickets`);
   return lines.join("\n");
 }
