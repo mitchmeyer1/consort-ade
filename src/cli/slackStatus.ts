@@ -12,6 +12,7 @@ import { taskSlackLinks } from "./slackLinks";
 import { downloadSlackFiles, isAcknowledgement } from "./ownerUpdates";
 import { answerOwner, workerLogTail, type OversightContext, type OversightAnswer } from "./oversight";
 import { sourceFor } from "./sources";
+import { stepLabel } from "./buildProgress";
 import { existsSync } from "node:fs";
 
 export type ResponderDeps = { answer: (c: OversightContext) => Promise<OversightAnswer> };
@@ -95,7 +96,7 @@ function statusOf(state: CliState, taskId: string, alive: (pid: number) => boole
   const status: SlackTaskStatus = health.label === "COMPLETED" ? "COMPLETED" : health.label === "WAITING" ? "WAITING" : ["RUNNING", "STALLED", "LIMIT"].includes(health.label) ? "RUNNING" : "STOPPED";
   const step = taskStep(current);
   const action = status === "COMPLETED" ? "Ready for you to merge; Consort will not merge." : (current.status === "monitoring" ? current.activity ?? health.note : health.note ?? current.activity) ?? current.note ?? "Preparing the task.";
-  return { status, kind: status === "COMPLETED" ? "completed" : status === "RUNNING" ? "update" : status === "WAITING" ? "waiting" : "stopped", line: `Step ${step.n}/${step.total} (${step.name}): ${brief(action, 650).replace(/[.!?]+$/, "")}.` };
+  return { status, kind: status === "COMPLETED" ? "completed" : status === "RUNNING" ? "update" : status === "WAITING" ? "waiting" : "stopped", line: `Step ${step.n}/${step.total} (${stepLabel(step.name, current.worktree)}): ${brief(action, 650).replace(/[.!?]+$/, "")}.` };
 }
 
 async function post(slack: Slack, task: Task, text: string, links: Awaited<ReturnType<typeof taskSlackLinks>>, alive: (pid: number) => boolean) {

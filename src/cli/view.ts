@@ -8,11 +8,13 @@ import { readAllUsage } from "./usage";
 import { alive, daemonPid } from "./daemonctl";
 import { resetLabel } from "../shared/seatPool.ts";
 import { loadState, LOG_DIR, type Task } from "./state";
+import { stepLabel } from "./buildProgress";
 
 /**
  * `consort-cli view`: a terminal dashboard that redraws every couple of seconds from the state
- * file. One row per task: ticket, title, stage, status, the account it is on, what the worker
- * is doing right now, and how long it has run. Finished tasks stay for a day, then drop
+ * file. Three lines per task: a row with ticket, title, stage (with build progress, "Build 7/18"),
+ * status, the account it is on and how long it has run; then what the worker is doing right now,
+ * full width; then a blank line. Finished tasks stay for a day, then drop
  * off. Below the table: the accounts (and which are blocked until when) and the scanners with
  * their next scan. `q` quits.
  */
@@ -55,8 +57,7 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   const tasks = visibleTasks(s.tasks, now).sort((a, b) => (FINISHED.includes(a.status) ? 1 : 0) - (FINISHED.includes(b.status) ? 1 : 0) || b.updatedAt - a.updatedAt);
   const accountName = (id?: string) => s.accounts.find((a) => a.id === id)?.name ?? "";
   const cols = { ticket: 12, title: 26, step: 5, stage: 14, next: 14, status: 10, account: 12, cost: 12, ports: 12, age: 8, log: 5, diff: 14 };
-  const fixed = Object.values(cols).reduce((a, b) => a + b, 0) + 13 * 2;
-  const activityW = Math.max(20, width - fixed);
+  const activityW = Math.max(20, width - 4);
   const lines: string[] = [];
   const active = tasks.filter((t) => !FINISHED.includes(t.status)).length;
   const pid = daemonPid();
@@ -65,7 +66,8 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
     `${mint(`${active} active`)} ${dim(`· ${new Date(now).toLocaleTimeString()} · q to quit`)}`,
   ]));
   lines.push("");
-  lines.push(dim([pad("TICKET", cols.ticket), pad("TITLE", cols.title), pad("STEP", cols.step), pad("STAGE", cols.stage), pad("NEXT", cols.next), pad("STATUS", cols.status), pad("ACCOUNT", cols.account), pad("COST", cols.cost), pad("PORTS", cols.ports), pad("AGE", cols.age), pad("LOG", cols.log), pad("DIFF", cols.diff), "ACTIVITY"].join("  ")));
+  lines.push(dim([pad("TICKET", cols.ticket), pad("TITLE", cols.title), pad("STEP", cols.step), pad("STAGE", cols.stage), pad("NEXT", cols.next), pad("STATUS", cols.status), pad("ACCOUNT", cols.account), pad("COST", cols.cost), pad("PORTS", cols.ports), pad("AGE", cols.age), pad("LOG", cols.log), pad("DIFF", cols.diff)].join("  ")));
+  lines.push(dim("  ACTIVITY"));
   if (!tasks.length) lines.push(dim("  nothing in flight; the daemon claims tickets as scanners come due"));
   for (const t of tasks) {
     const acct = accountName(t.activeProvider ? t.accountIds[t.activeProvider] : t.accountIds.claude ?? t.accountIds.codex);
@@ -78,9 +80,11 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
     const finished = FINISHED.includes(t.status);
     const cell = (s: string, f: (x: string) => string) => (finished && t.status !== "failed" ? dim(s) : f(s));
     const step = taskStep(t, 3);
-    lines.push([cell(pad(t.ticket.id, cols.ticket), mint), cell(pad(t.ticket.title, cols.title), cream), cell(pad(`${step.n}/${step.total}`, cols.step), mint), cell(pad(step.name, cols.stage), (x) => x), cell(pad(step.next, cols.next), dim), healthPaint(pad(health.label, cols.status)), cell(pad(acct, cols.account), dim), cell(pad(costCell(t.cost), cols.cost), amber), cell(pad(t.portBase ? `${t.portBase}-${t.portBase + 99}` : "", cols.ports), dim), cell(pad(age, cols.age), dim), cell(pad(log.lines ? String(log.lines) : "", cols.log), dim), cell(pad(diff, cols.diff), (x) => (!diff || diff.startsWith("+0 −0") ? dim(x) : mint(x))), cell(pad(activity, activityW), (x) => x)].join("  "));
+    lines.push([cell(pad(t.ticket.id, cols.ticket), mint), cell(pad(t.ticket.title, cols.title), cream), cell(pad(`${step.n}/${step.total}`, cols.step), mint), cell(pad(finished ? step.name : stepLabel(step.name, t.worktree, now), cols.stage), (x) => x), cell(pad(step.next, cols.next), dim), healthPaint(pad(health.label, cols.status)), cell(pad(acct, cols.account), dim), cell(pad(costCell(t.cost), cols.cost), amber), cell(pad(t.portBase ? `${t.portBase}-${t.portBase + 99}` : "", cols.ports), dim), cell(pad(age, cols.age), dim), cell(pad(log.lines ? String(log.lines) : "", cols.log), dim), cell(pad(diff, cols.diff), (x) => (!diff || diff.startsWith("+0 −0") ? dim(x) : mint(x)))].join("  "));
+    lines.push(`  ${cell(pad(activity, activityW).trimEnd(), (x) => x)}`);
+    lines.push("");
   }
-  lines.push("");
+  if (!tasks.length) lines.push("");
   const readAt = usage ? Math.max(0, ...[...usage.values()].map((u) => u.at)) : 0;
   lines.push(`${cream(bold("Accounts"))} ${dim(usage ? (readAt ? `· usage read ${ago(now - readAt)} ago` : "· reading usage…") : "· usage: consort-cli view reads it once a minute")}`);
   if (!s.accounts.length) lines.push(dim("  none: consort-cli accounts add --provider claude --name work"));

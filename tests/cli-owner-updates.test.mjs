@@ -60,6 +60,7 @@ function daemon(worktree) {
     './ownerUpdates': { ...owner, downloadSlackFiles: async (token, files, wt, ts) => { downloads.push({ token, ts }); return { saved: files.map(f => `.consort/ship/updates/${ts}/${f.name}`), failed: [] }; } },
     'node:fs': { existsSync: () => true },
     './oversight': { workerLogTail: () => '' },
+    './buildProgress': { stepLabel: name => name },
     './sources': { sourceFor: () => ({ comments: async () => [] }) },
   };
   const mod = { exports: {} };
