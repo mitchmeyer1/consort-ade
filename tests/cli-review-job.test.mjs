@@ -107,7 +107,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-async function flow(t, findings, extraJobs = []) {
+async function flow(t, findings, extraJobs = [], resume) {
   const root = await mkdtemp(join(tmpdir(), 'consort-review-')); t.after(() => rm(root, { recursive: true, force: true }));
   const repo = join(root, 'repo'), wt = join(root, 'wt');
   await mkdir(repo); await mkdir(wt);
@@ -135,6 +135,11 @@ async function flow(t, findings, extraJobs = []) {
     'node:util': { promisify: () => async () => ({ stdout: '' }) },
   };
   const { reviewTask } = load('reviewJob', { mocks });
+  if (resume) {
+    await mkdir(join(wt, '.consort', 'review'), { recursive: true });
+    await writeFile(join(wt, '.consort', 'review', 'pr-9.review.json'), JSON.stringify({ repo: 'acme/mono', pr: 9, url: 'u', head: 'h', base: 'b', findings: [] }));
+    Object.assign(task, { slackThread: '1', pendingQuestion: { questions: ['Approve PR #9?'], afterTs: '5' } });
+  }
   await reviewTask('t');
   return { task, turns, posts, slackPosts, wt, root };
 }
@@ -163,4 +168,11 @@ test('a High finding requests changes and never asks to approve', async (t) => {
 test('a review uses the model settings of the build scanner on the same repository', async (t) => {
   const f = await flow(t, [], [{ id: 'b', source: 'clickup', modelPolicy: { frontier: { claude: 'claude-opus-5', codex: 'gpt-6-astra-pro' } } }]);
   assert.match(f.turns[0].model, /^(claude-opus-5|gpt-6-astra-pro)$/);
+});
+
+test('restarted while waiting for approval: waits for the answer again, never re-runs the review', async (t) => {
+  const f = await flow(t, [], [], true);
+  assert.equal(f.turns.length, 0, 'no agent turns');
+  assert.deepEqual(f.posts.map(p => p.event), ['APPROVE']);
+  assert.equal(f.task.status, 'done'); assert.equal(f.task.note, 'approved');
 });

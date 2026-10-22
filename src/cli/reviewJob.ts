@@ -196,6 +196,28 @@ export async function reviewTask(taskId: string): Promise<void> {
     if (!thread && ts) { thread = ts; updateTask(taskId, { slackThread: ts }); }
     return ts;
   };
+  /** wait for the owner's word on Slack, then approve or leave it */
+  const awaitApproval = async (review: Review, ts: string | undefined) => {
+    const answer = slack && thread && ts ? await slack.waitForReply(thread, ts, { pollMs: 15_000 }) : undefined;
+    updateTask(taskId, { pendingQuestion: undefined, status: "working" });
+    if (answer && saysYes(answer)) {
+      const approved = await postReview(review, [], "APPROVE", `Approved after an automatic review (${countLine(review.findings)}) and the reviewer's confirmation.`, task.worktree);
+      await say(approved.event === "APPROVE" ? `Approved <${t.url}|PR #${t.pr}>.` : `Could not approve <${t.url}|PR #${t.pr}> (it is your own PR); posted the note as a comment.`, "COMPLETED");
+      updateTask(taskId, { status: "done", finishedAt: Date.now(), note: approved.event === "APPROVE" ? "approved" : "commented (own PR)", activity: "review done" });
+    } else {
+      await say(`Left <${t.url}|PR #${t.pr}> unapproved${answer ? ` (you said: ${answer.slice(0, 80)})` : ""}.`, "COMPLETED");
+      updateTask(taskId, { status: "done", finishedAt: Date.now(), note: slack ? "not approved" : "not approved: approval needs Slack (consort-cli slack set …)", activity: "review done, not approved" });
+    }
+  };
+  // restarted while the approval question was out: the review is posted; keep waiting for the answer, never review again
+  const savedReview = join(task.worktree, ".consort", "review", `pr-${t.pr}.review.json`);
+  if (task.pendingQuestion?.afterTs && existsSync(savedReview)) {
+    activity("waiting for the owner's word to approve", 5);
+    updateTask(taskId, { status: "waiting" });
+    try { await awaitApproval(parseReview(readFileSync(savedReview, "utf8")), task.pendingQuestion.afterTs); }
+    finally { if (loadState().tasks.find((x) => x.id === taskId)?.status === "done") await sh("git", ["worktree", "remove", "--force", task.worktree], job.repo).catch(() => undefined); }
+    return;
+  }
   if (!thread) await say(`Reviewing PR #${t.pr} by @${t.author} at \`${t.head.slice(0, 7)}\`: repo overview first, then a reviewer swarm`);
 
   // 1. worktree at the PR head, the root .env files, the environment
@@ -302,16 +324,7 @@ export async function reviewTask(taskId: string): Promise<void> {
       activity("waiting for the owner's word to approve", 5);
       const ts = await say(slackAsk(approvalQuestion(t, review, posted?.url, flows)), "WAITING", true);
       updateTask(taskId, { status: "waiting", pendingQuestion: { questions: [`Approve PR #${t.pr}?`], afterTs: ts ?? String(Date.now() / 1000) } });
-      const answer = slack && thread && ts ? await slack.waitForReply(thread, ts, { pollMs: 15_000 }) : undefined;
-      updateTask(taskId, { pendingQuestion: undefined, status: "working" });
-      if (answer && saysYes(answer)) {
-        const approved = await postReview(review, [], "APPROVE", `Approved after an automatic review (${countLine(review.findings)}) and the reviewer's confirmation.`, wt);
-        await say(approved.event === "APPROVE" ? `Approved <${t.url}|PR #${t.pr}>.` : `Could not approve <${t.url}|PR #${t.pr}> (it is your own PR); posted the note as a comment.`, "COMPLETED");
-        updateTask(taskId, { status: "done", finishedAt: Date.now(), note: approved.event === "APPROVE" ? "approved" : "commented (own PR)", activity: "review done" });
-      } else {
-        await say(`Left <${t.url}|PR #${t.pr}> unapproved${answer ? ` (you said: ${answer.slice(0, 80)})` : ""}.`, "COMPLETED");
-        updateTask(taskId, { status: "done", finishedAt: Date.now(), note: slack ? "not approved" : "not approved: approval needs Slack (consort-cli slack set …)", activity: "review done, not approved" });
-      }
+      await awaitApproval(review, ts);
     }
   } finally {
     await cleanupEnvironment(env.CONSORT_RUN).catch(() => undefined);
