@@ -56,7 +56,7 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   s.accounts = s.accounts.map((a) => { const u = usage?.get(a.id); const block = u && usageBlock(u, now); return block ? { ...a, blockedUntil: Math.max(a.blockedUntil ?? 0, block.until), blockedWhy: block.reason } : a; });
   const tasks = visibleTasks(s.tasks, now).sort((a, b) => (FINISHED.includes(a.status) ? 1 : 0) - (FINISHED.includes(b.status) ? 1 : 0) || b.updatedAt - a.updatedAt);
   const accountName = (id?: string) => s.accounts.find((a) => a.id === id)?.name ?? "";
-  const activityW = Math.max(20, width - 10);
+  const activityW = Math.max(20, width - 6);
   const lines: string[] = [];
   const active = tasks.filter((t) => !FINISHED.includes(t.status)).length;
   const pid = daemonPid();
@@ -66,8 +66,10 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   ]));
   lines.push("");
   lines.push(`${cream(bold("Tickets"))} ${dim(`· ${active} active${tasks.length > active ? `, ${tasks.length - active} finished` : ""}`)}`);
-  if (!tasks.length) lines.push(dim("  nothing in flight; the daemon claims tickets as scanners come due"));
-  // like an account: ticket, title and status on one line; the details and what it is doing indented under it
+  // one aligned row per ticket, coloured like the accounts list; what it is doing, dim, under it; then a blank line
+  const cols = { ticket: 12, title: 28, step: 5, stage: 12, next: 14, status: 9, account: 16, cost: 13, ports: 11, age: 12, log: 5 };
+  lines.push(dim(`  ${[pad("TICKET", cols.ticket), pad("TITLE", cols.title), pad("STEP", cols.step), pad("STAGE", cols.stage), pad("NEXT", cols.next), pad("STATUS", cols.status), pad("ACCOUNT", cols.account), pad("COST", cols.cost), pad("PORTS", cols.ports), pad("AGE", cols.age), pad("LOG", cols.log), "DIFF"].join("  ")}`));
+  if (!tasks.length) lines.push(dim("  nothing in flight; the daemon claims tickets as scanners come due"), "");
   for (const t of tasks) {
     const acct = accountName(t.activeProvider ? t.accountIds[t.activeProvider] : t.accountIds.claude ?? t.accountIds.codex);
     const log = logOf(t, now);
@@ -75,27 +77,30 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
     const healthPaint = (x: string) => (health.tone === "complete" ? blue(bold(x)) : health.tone === "ok" ? green(x) : health.tone === "warn" ? amber(x) : health.tone === "bad" ? red(x) : dim(x));
     const activity = (health.tone === "bad" || health.tone === "warn") && health.note ? `${health.note}${t.activity && t.activity !== health.note ? ` · ${t.activity}` : ""}` : t.activity || t.note || log.last || "";
     const changed = diffOf(t, s.jobs.find((j) => j.id === t.jobId)?.base, now);
-    const diff = changed && (changed.added || changed.removed) ? `+${changed.added} −${changed.removed} in ${changed.files} file${changed.files === 1 ? "" : "s"}` : "";
+    const diff = changed && (changed.added || changed.removed) ? `+${changed.added} −${changed.removed}` : "";
     const finished = FINISHED.includes(t.status);
-    const age = finished ? `done ${ago(now - (t.finishedAt ?? t.updatedAt))} ago` : `running ${ago(now - t.startedAt)}`;
+    const age = finished ? `done ${ago(now - (t.finishedAt ?? t.updatedAt))}` : ago(now - t.startedAt);
     const quiet = finished && t.status !== "failed";
     const paint = (x: string, f: (y: string) => string) => (quiet ? dim(x) : f(x));
     const step = taskStep(t, 3);
     const stage = finished ? step.name : stepLabel(step.name, t.worktree, now);
-    lines.push(`  ${paint(pad(t.ticket.id, 12), mint)} ${paint(pad(t.ticket.title, 34), (x) => cream(bold(x)))} ${healthPaint(health.label)}`);
-    const details = [
-      `${dim("step")} ${paint(`${step.n}/${step.total}`, mint)} ${paint(stage, (x) => bold(x))}${step.next && step.next !== stage ? dim(` → ${step.next}`) : ""}`,
-      acct ? paint(pad(acct, 22).trimEnd(), dim) : "",
-      t.cost ? paint(costCell(t.cost), amber) : "",
-      t.portBase ? `${dim("ports")} ${paint(`${t.portBase}-${t.portBase + 99}`, dim)}` : "",
-      dim(age),
-      log.lines ? dim(`${log.lines} log lines`) : "",
-      diff ? paint(diff, mint) : "",
-    ].filter(Boolean);
-    lines.push(`          ${details.join(dim("  ·  "))}`);
-    if (activity) lines.push(`          ${paint(pad(activity, activityW).trimEnd(), (x) => (health.tone === "bad" ? red(x) : health.tone === "warn" ? amber(x) : dim(x)))}`);
+    lines.push(`  ${[
+      paint(pad(t.ticket.id, cols.ticket), mint),
+      paint(pad(t.ticket.title, cols.title), (x) => cream(bold(x))),
+      paint(pad(`${step.n}/${step.total}`, cols.step), mint),
+      paint(pad(stage, cols.stage), bold),
+      dim(pad(step.next, cols.next)),
+      healthPaint(pad(health.label, cols.status)),
+      dim(pad(acct, cols.account)),
+      paint(pad(costCell(t.cost), cols.cost), amber),
+      dim(pad(t.portBase ? `${t.portBase}-${t.portBase + 99}` : "", cols.ports)),
+      dim(pad(age, cols.age)),
+      dim(pad(log.lines ? String(log.lines) : "", cols.log)),
+      paint(diff, mint),
+    ].join("  ").trimEnd()}`);
+    if (activity) lines.push(`    ${pad(activity, activityW).trimEnd().replace(/.+/, (x) => (health.tone === "bad" ? red(x) : health.tone === "warn" ? amber(x) : dim(x)))}`);
+    lines.push("");
   }
-  lines.push("");
   const readAt = usage ? Math.max(0, ...[...usage.values()].map((u) => u.at)) : 0;
   lines.push(`${cream(bold("Accounts"))} ${dim(usage ? (readAt ? `· usage read ${ago(now - readAt)} ago` : "· reading usage…") : "· usage: consort-cli view reads it once a minute")}`);
   if (!s.accounts.length) lines.push(dim("  none: consort-cli accounts add --provider claude --name work"));
