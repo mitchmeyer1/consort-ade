@@ -129,9 +129,14 @@ async function testOpenAiKey(key: string): Promise<boolean> {
   return !!res?.ok;
 }
 
-async function repoChecks(ask: Ask): Promise<{ repo: string; base: string } | undefined> {
+async function repoChecks(ask: Ask, purpose: "build" | "review" = "build"): Promise<{ repo: string; base: string } | undefined> {
   for (;;) {
-    why("Repository checkout", {
+    why("Repository checkout", purpose === "review" ? {
+      for: "the repository whose PRs you review; each review checks the PR head out in its own worktree beside it, never inside your checkout.",
+      where: "an existing `git clone` on this machine with a remote named origin that `gh` can see.",
+      can: "fetch PR heads, and post reviews and comments through your `gh` login.",
+      not: "push to anyone's branch or merge; approving waits for your yes on Slack.",
+    } : {
       for: "the base every feature branch is cut from; worktrees are made beside it, never inside your checkout.",
       where: "an existing `git clone` on this machine, on its base branch, with a remote named origin that `gh` can see.",
       can: "fetch, create branches, push them and open PRs through your `gh` login.",
@@ -140,7 +145,8 @@ async function repoChecks(ask: Ask): Promise<{ repo: string; base: string } | un
     const repo = resolve(await ask("Path of the repository checkout on this machine"));
     if (!existsSync(join(repo, ".git"))) { console.log(bad(`${repo} has no .git; clone it first`)); if (!(await yes(ask, "Try another path?"))) return undefined; continue; }
     const current = (await run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repo }).catch(() => ({ stdout: "" }))).stdout.trim();
-    const base = await ask("Base branch features are cut from and PRs target", { default: current && current !== "HEAD" ? current : "main" });
+    // a review uses each PR's own target branch, so there is nothing to ask
+    const base = purpose === "review" ? (current && current !== "HEAD" ? current : "main") : await ask("Base branch features are cut from and PRs target", { default: current && current !== "HEAD" ? current : "main" });
     const remote = await run("git", ["ls-remote", "--heads", "origin", base], { cwd: repo, timeout: 60_000 }).then((r) => r.stdout.trim(), () => "");
     console.log(remote ? ok(`origin/${base} exists`) : bad(`origin has no branch ${base}; check the name`));
     const ghRepo = await run("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], { cwd: repo, timeout: 30_000 }).then((r) => r.stdout.trim(), () => "");
@@ -173,10 +179,11 @@ async function addScanners(ask: Ask, first?: string): Promise<void> {
     first = undefined;
     if (kind !== "clickup" && kind !== "github" && kind !== "sentry" && kind !== "review") { console.log(bad("type clickup, github, sentry or review")); continue; }
     if (kind === "review") {
-      console.log(dim("A review scanner watches a repository's open PRs that are assigned to a GitHub login or ask it for a review. Each one gets a full review (Fable/Astra overview, an Opus/Sol reviewer swarm, verified findings posted as one GitHub review). Critical or High findings request changes; otherwise it asks you on Slack before approving."));
-      const repo = await repoChecks(ask);
+      console.log(dim("A review scanner does your reviews: it watches a repository's open PRs that request your review, and gives each one a full review (Fable/Astra overview, an Opus/Sol reviewer swarm, verified findings posted as one GitHub review). Critical or High findings request changes; otherwise it asks you on Slack before approving."));
+      const repo = await repoChecks(ask, "review");
       if (!repo) continue;
-      const login = (await ask("GitHub login whose PRs to review (assigned or review requested)")).trim().replace(/^@/, "");
+      const me = await run("gh", ["api", "user", "--jq", ".login"], { cwd: repo.repo, timeout: 30_000 }).then((r) => r.stdout.trim(), () => "");
+      const login = (await ask("Your GitHub login (it reviews PRs that request your review)", me ? { default: me } : {})).trim().replace(/^@/, "");
       if (!login) { console.log(bad("a GitHub login is required")); continue; }
       s = loadState();
       const name = await ask("Name this scanner", { default: `reviews for @${login}` });

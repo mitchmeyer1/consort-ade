@@ -20,7 +20,7 @@ function load(name, extra = {}) {
 }
 const pr = (n, over = {}) => ({ number: n, title: `PR ${n}`, url: `https://github.com/acme/mono/pull/${n}`, headRefOid: `sha${n}`, baseRefName: 'development', isDraft: false, author: { login: 'dev' }, assignees: [], reviewRequests: [], ...over });
 
-test('picks PRs assigned to the reviewer or asking it for review; skips drafts, its own PRs and heads already reviewed', () => {
+test('picks only PRs that request the reviewer; being assigned does not count; skips drafts, its own PRs and heads already reviewed', () => {
   const tasks = [
     { kind: 'review', status: 'done', review: { pr: 3, head: 'sha3' } },
     { kind: 'review', status: 'done', review: { pr: 4, head: 'old' } },
@@ -28,9 +28,9 @@ test('picks PRs assigned to the reviewer or asking it for review; skips drafts, 
   ];
   const { reviewCandidates } = load('reviewJob', { tasks });
   const prs = [
-    pr(1, { assignees: [{ login: 'Mitch' }] }), pr(2, { reviewRequests: [{ login: 'mitch' }] }), pr(3, { assignees: [{ login: 'mitch' }] }),
-    pr(4, { assignees: [{ login: 'mitch' }] }), pr(5, { assignees: [{ login: 'mitch' }] }), pr(6, { isDraft: true, assignees: [{ login: 'mitch' }] }),
-    pr(7, { author: { login: 'mitch' }, assignees: [{ login: 'mitch' }] }), pr(8),
+    pr(1, { reviewRequests: [{ login: 'Mitch' }] }), pr(2, { reviewRequests: [{ login: 'mitch' }] }), pr(3, { reviewRequests: [{ login: 'mitch' }] }),
+    pr(4, { reviewRequests: [{ login: 'mitch' }] }), pr(5, { reviewRequests: [{ login: 'mitch' }] }), pr(6, { isDraft: true, reviewRequests: [{ login: 'mitch' }] }),
+    pr(7, { author: { login: 'mitch' }, reviewRequests: [{ login: 'mitch' }] }), pr(8), pr(9, { assignees: [{ login: 'mitch' }] }),
   ];
   assert.deepEqual(reviewCandidates(prs, 'mitch', tasks).map(p => p.number), [1, 2, 4], '4 has new commits; 5 is still being reviewed');
 });
@@ -60,11 +60,11 @@ test('the review file is the standard schema; Critical or High blocks approval; 
   assert.equal(blocking(r.findings).length, 0);
   assert.equal(countLine(r.findings), '1 medium');
   assert.equal(blocking([{ severity: 'high' }, { severity: 'low' }]).length, 1);
-  const q = approvalQuestion(target, r, 'https://github.com/acme/mono/pull/9#pullrequestreview-1');
-  assert.match(q, /^\*Approve PR #9\?\* Add CSV export by @dev/);
-  assert.match(q, /TL;DR: Adds a CSV export\./);
-  assert.match(q, /1 medium; nothing Critical or High\. Comments are posted/);
-  assert.match(q, /Reply \*yes\* to approve/);
+  const q = approvalQuestion(target, r, 'https://github.com/acme/mono/pull/9#pullrequestreview-1', ['Exporting a report now downloads a CSV.', 'The API streams rows.', 'a', 'b', 'too many']);
+  assert.match(q, /^Adds a CSV export\.\n• Exporting a report now downloads a CSV\.\n• The API streams rows\./);
+  assert.equal((q.match(/^• /gm) ?? []).length, 4, 'at most 4 flows');
+  assert.match(q, /Findings: 1 medium, nothing Critical or High · <https:\/\/github\.com\/acme\/mono\/pull\/9#pullrequestreview-1\|comments posted> · <.*\|PR #9> by @dev/);
+  assert.match(q, /\*Approve\?\* Reply \*yes\* to approve/);
   for (const y of ['yes', 'Yes please', 'approve', 'lgtm', 'ok']) assert.ok(saysYes(y), y);
   for (const n of ['no', 'wait', 'hold off', 'not yet']) assert.ok(!saysYes(n), n);
 });
@@ -107,7 +107,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-async function flow(t, findings, extraJobs = []) {
+async function flow(t, findings, extraJobs = [], resume) {
   const root = await mkdtemp(join(tmpdir(), 'consort-review-')); t.after(() => rm(root, { recursive: true, force: true }));
   const repo = join(root, 'repo'), wt = join(root, 'wt');
   await mkdir(repo); await mkdir(wt);
@@ -118,9 +118,9 @@ async function flow(t, findings, extraJobs = []) {
   const turns = [], posts = [], slackPosts = [];
   const runTurn = async o => {
     turns.push({ model: o.model, readOnly: o.readOnly, prompt: o.prompt });
-    if (o.prompt.includes('step 1 of 3')) { await writeFile(join(wt, '.consort', 'review', 'plan.json'), JSON.stringify({ tldr: 'Adds a CSV export.', slices: [{ id: 's1', title: 'API', files: ['src/a.ts'] }, { id: 's2', title: 'UI', files: ['src/b.tsx'] }] })); return { text: 'written' }; }
+    if (o.prompt.includes('step 1 of 3')) { await writeFile(join(wt, '.consort', 'review', 'plan.json'), JSON.stringify({ tldr: 'Adds a CSV export.', emoji: '📤', title: 'CSV report export', slices: [{ id: 's1', title: 'API', files: ['src/a.ts'] }, { id: 's2', title: 'UI', files: ['src/b.tsx'] }] })); return { text: 'written' }; }
     if (o.prompt.includes('Review one area')) return { text: `[review-findings]\n\`\`\`json\n${JSON.stringify(findings)}\n\`\`\`` };
-    if (o.prompt.includes('step 3 of 3')) return { text: `[review-final]\n\`\`\`json\n${JSON.stringify({ tldr: 'Adds a CSV export.', headline: 'ok', findings })}\n\`\`\`` };
+    if (o.prompt.includes('step 3 of 3')) return { text: `[review-final]\n\`\`\`json\n${JSON.stringify({ summary: 'Adds a CSV export.', flows: ['Exporting a report now downloads a CSV.'], headline: 'ok', findings })}\n\`\`\`` };
     return { text: 'done' };
   };
   const mocks = {
@@ -128,12 +128,18 @@ async function flow(t, findings, extraJobs = []) {
     './environment': { allocateEnvironment: async () => headless.taskEnv('consort-t', 20000), cleanupEnvironment: async () => ({}) },
     './oversight': { oversightModel: p => (p === 'claude' ? 'claude-opus-5' : 'gpt-5.6-sol') },
     './reviewPost': { postReview: async (r, f, event, body) => { posts.push({ event, n: f.length, body }); return { url: 'https://github.com/acme/mono/pull/9#review', event, inline: f.length, general: 0 }; } },
+    './slackIdentity': { slackIdentityFor: title => ({ emoji: '📊', title }), takenEmojis: () => [] },
     './slack': { Slack: class { async post(text) { slackPosts.push(text); return String(slackPosts.length); } async waitForReply() { return 'yes'; } } },
     './state': { WORK_DIR: root, HOME: root, newId: () => 'x', loadState: () => state, updateTask: (id, patch) => Object.assign(task, typeof patch === 'function' ? patch(task) : patch), touchAccount() {}, blockAccount() {} },
     './usage': { usageFor: async accts => new Map(accts.map(a => [a.id, { keyId: a.id, at: Date.now(), windows: [{ id: '5h', label: '5h', percent: a.provider === 'claude' ? 90 : 10 }] }])) },
     'node:util': { promisify: () => async () => ({ stdout: '' }) },
   };
   const { reviewTask } = load('reviewJob', { mocks });
+  if (resume) {
+    await mkdir(join(wt, '.consort', 'review'), { recursive: true });
+    await writeFile(join(wt, '.consort', 'review', 'pr-9.review.json'), JSON.stringify({ repo: 'acme/mono', pr: 9, url: 'u', head: 'h', base: 'b', findings: [] }));
+    Object.assign(task, { slackThread: '1', pendingQuestion: { questions: ['Approve PR #9?'], afterTs: '5' } });
+  }
   await reviewTask('t');
   return { task, turns, posts, slackPosts, wt, root };
 }
@@ -144,7 +150,8 @@ test('a clean review: frontier overview, swarm on Opus/Sol, frontier check, comm
   assert.ok(f.turns.filter(x => x.prompt.includes('Review one area')).every(x => x.readOnly && /opus|sol/.test(x.model)), 'swarm read-only on Opus/Sol');
   assert.ok(f.turns.at(-1).prompt.includes('step 3 of 3'));
   assert.deepEqual(f.posts.map(p => p.event), ['COMMENT', 'APPROVE']);
-  assert.ok(f.slackPosts.some(p => /Approve PR #9\?/.test(p)), 'asked on Slack first');
+  assert.ok(f.slackPosts.some(p => /\*Approve\?\*/.test(p) && /^📤 \*CSV REPORT EXPORT\*\n⚠️ Adds a CSV export\./.test(p) && /• Exporting a report now downloads a CSV\./.test(p) && !/✅/.test(p)), 'asked on Slack first');
+  assert.deepEqual(f.task.slackIdentity, { emoji: '📤', title: 'CSV report export' }, 'the overview picks the emoji');
   assert.equal(f.task.status, 'done'); assert.equal(f.task.note, 'approved');
   assert.equal(await readFile(join(f.wt, '.env'), 'utf8'), 'DB=local\n', 'root .env copied');
   await assert.rejects(readFile(join(f.wt, '.env.example')), 'templates are not copied');
@@ -154,11 +161,18 @@ test('a clean review: frontier overview, swarm on Opus/Sol, frontier check, comm
 test('a High finding requests changes and never asks to approve', async (t) => {
   const f = await flow(t, [{ severity: 'high', category: 'scaling', title: 'Unbounded query', file: 'src/a.ts', line: 3, comment: 'Paginate.' }]);
   assert.deepEqual(f.posts.map(p => p.event), ['REQUEST_CHANGES']);
-  assert.ok(!f.slackPosts.some(p => /Approve PR/.test(p)));
+  assert.ok(!f.slackPosts.some(p => /\*Approve\?\*/.test(p)));
   assert.match(f.task.note, /requested changes/);
 });
 
 test('a review uses the model settings of the build scanner on the same repository', async (t) => {
   const f = await flow(t, [], [{ id: 'b', source: 'clickup', modelPolicy: { frontier: { claude: 'claude-opus-5', codex: 'gpt-6-astra-pro' } } }]);
   assert.match(f.turns[0].model, /^(claude-opus-5|gpt-6-astra-pro)$/);
+});
+
+test('restarted while waiting for approval: waits for the answer again, never re-runs the review', async (t) => {
+  const f = await flow(t, [], [], true);
+  assert.equal(f.turns.length, 0, 'no agent turns');
+  assert.deepEqual(f.posts.map(p => p.event), ['APPROVE']);
+  assert.equal(f.task.status, 'done'); assert.equal(f.task.note, 'approved');
 });

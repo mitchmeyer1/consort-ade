@@ -261,16 +261,19 @@ export function replyAfter(messages: { ts: string; user?: string; text?: string;
  */
 /**
  * The marker in front of every Slack message, by what it means for the owner:
- * ✅ progress, ⏳ waiting (on you, reviews, CI, credits), ❓ a question for you, ⏹️ stopped on purpose,
- * ❌ something broke and needs a hand, 🎉🍭🎊 ready to merge. A text that already carries one keeps it.
+ * ✅ progress, ⏳ waiting (on reviews, CI, credits), ⚠️ waiting on your reply in Slack, ❓ a question for you,
+ * ⏹️ stopped on purpose, ❌ something broke, 🎉🍭🎊 ready to merge. A text that already carries one keeps it.
  */
-export const SLACK_MARKERS = { update: "✅", waiting: "⏳", question: "❓", stopped: "⏹️", blocked: "❌", completed: "🎉🍭🎊" } as const;
+export const SLACK_MARKERS = { update: "✅", waiting: "⏳", attention: "⚠️", question: "❓", stopped: "⏹️", blocked: "❌", completed: "🎉🍭🎊" } as const;
 export type SlackKind = keyof typeof SLACK_MARKERS;
-const MARKED = /^(?:❌|✅|⏳|❓|⏹️|🎉🍭🎊)/u;
+export const SLACK_MARKER = /^(?:⚠️|❌|✅|⏳|❓|⏹️|🎉🍭🎊)\s*/u;
+const MARKED = SLACK_MARKER;
 export function slackMessage(kind: SlackKind, text: string): string {
   if (MARKED.test(text.trimStart())) return text;
   return `${SLACK_MARKERS[kind]} ${text}`;
 }
+/** a post the owner must answer in the thread: always ⚠️, whatever marker the text came with */
+export const slackAsk = (text: string): string => `${SLACK_MARKERS.attention} ${text.trimStart().replace(SLACK_MARKER, "")}`;
 export type SlackTaskStatus = "RUNNING" | "WAITING" | "STOPPED" | "COMPLETED";
 /** Keep one final status line, including when a queued message is delivered again. */
 export type SlackIdentity = { emoji: string; title: string };
@@ -300,7 +303,7 @@ export const STATUS_TAIL = /\n\nSTATUS: (RUNNING|WAITING|STOPPED|COMPLETED)(?:\n
 export function slackStatus(text: string, status?: SlackTaskStatus, links?: SlackTaskLinks): string {
   const saved = text.match(STATUS_TAIL);
   const lead = text.trimStart();
-  const current = status ?? saved?.[1] ?? (lead.startsWith("🎉🍭🎊") ? "COMPLETED" : lead.startsWith("⏹️") ? "STOPPED" : /^(?:❌|⏳|❓)/u.test(lead) ? "WAITING" : "RUNNING");
+  const current = status ?? saved?.[1] ?? (lead.startsWith("🎉🍭🎊") ? "COMPLETED" : lead.startsWith("⏹️") ? "STOPPED" : /^(?:⚠️|❌|⏳|❓)/u.test(lead) ? "WAITING" : "RUNNING");
   let body = text.replace(STATUS_TAIL, "").trimEnd();
   if (links) {
     body = body.replace(/\n\n<[^>\n]+\|ticket>(?: · <[^>\n]+\|github>)?$/, "");
@@ -450,7 +453,15 @@ export const DEFAULT_BLOCK_MS = 60 * 60_000;
  * the watch on the PR. `reviews` is the rotation length (3 unless the scanner says otherwise).
  */
 export type TaskStep = { n: number; total: number; name: string; next: string };
-export function taskStep(t: { status: string; envReadyAt?: number; reviewsDone: number; feature: { stage: string; built?: boolean; evidenceAt?: number } }, reviews = 3): TaskStep {
+/** a review task's steps (cli/reviewJob.ts); the task records the one it is on in reviewStep, 1-based */
+export const REVIEW_STEPS = ["Setup", "Overview", "Reviewers", "Verify", "Approve"] as const;
+export function taskStep(t: { status: string; envReadyAt?: number; reviewsDone: number; kind?: string; reviewStep?: number; feature: { stage: string; built?: boolean; evidenceAt?: number } }, reviews = 3): TaskStep {
+  if (t.kind === "review") {
+    const total = REVIEW_STEPS.length;
+    if (t.status === "ready" || t.status === "done") return { n: total, total, name: "Done", next: "" };
+    const n = Math.min(Math.max(t.reviewStep ?? 1, 1), total);
+    return { n, total, name: REVIEW_STEPS[n - 1], next: n === total ? "Done" : REVIEW_STEPS[n] };
+  }
   const names = ["Environment", "Grilling", "Build", "Test", ...Array.from({ length: reviews }, (_, i) => `Review ${i + 1}`), "Evidence", "Watch PR"];
   const total = names.length;
   const stage = t.feature.stage;
@@ -478,6 +489,7 @@ export function taskStep(t: { status: string; envReadyAt?: number; reviewsDone: 
 export function slackProgress(t: Parameters<typeof taskStep>[0], build?: { done: number; total: number }, reviews = 3): string {
   const step = taskStep(t, reviews);
   const complete = t.status === "ready" || t.status === "done";
+  if (t.kind === "review") return REVIEW_STEPS.map((name, i) => (complete || i < step.n - 1 ? `✓ ${name}` : i === step.n - 1 ? `▸ *${name}*` : `○ ${name}`)).join(" · ");
   const short = ["Env", "Grill", "Build", "Test", "Review", "Evidence", "PR"];
   // taskStep's step number → position in the short list (the reviews share one slot)
   const at = complete ? short.length : step.n <= 4 ? step.n - 1 : step.n <= 4 + reviews ? 4 : step.n === 5 + reviews ? 5 : 6;
@@ -515,6 +527,49 @@ export function taskHealth(
   if (t.status === "waiting") return { label: "WAITING", tone: "warn", note: t.pauseReason ?? t.note ?? "needs your Slack reply to continue" };
   if (live.logAgeMs !== undefined && live.logAgeMs > stalledAfterMs) return { label: "STALLED", tone: "warn", note: `quiet for ${Math.round(live.logAgeMs / 60_000)} min` };
   return { label: "RUNNING", tone: "ok" };
+}
+
+/**
+ * The thread's first post, kept current by the daemon (cli/slackCard.ts): the emoji heading, then
+ * one line that says at a glance whether the task is working, needs the owner, or is done, the
+ * step it is on, and when that last changed. Details and questions stay in the thread.
+ *   📦 *MIGRATE CURATION TO MONO*
+ *   🟠 *Needs @Mitch* · Step 5/9 Review 1 · updated 3:44 PM
+ *   _Which design?_
+ */
+export type SlackCardTask = Parameters<typeof taskStep>[0] & { kind?: string; lifecycle?: string; pauseReason?: string; note?: string; activity?: string; pendingQuestion?: { questions: string[] } };
+export function slackCardState(t: SlackCardTask, ownerId?: string, limited = false): { badge: string; detail?: string } {
+  const owner = ownerId ? `<@${ownerId}>` : "you";
+  const firstLine = (s?: string) => s?.split("\n").map((l) => l.replace(SLACK_MARKER, "").replace(/^[•\-\d.\s]*/u, "").replace(/\s*\(<[^>]*\|ticket>\)/, "").replace(/[*_`]/g, "").trim()).filter((l) => l && !/^(?:need you|reply in this thread\.?)$/i.test(l)).join(" · ");
+  if (t.status === "ready") return { badge: "✅ *Ready to merge*", detail: "Consort will not merge it." };
+  if (t.status === "done") return { badge: "✅ *Done*", detail: t.note };
+  if (t.status === "released") return { badge: "⏹️ *Released*", detail: t.note };
+  if (t.status === "failed") return { badge: "🔴 *Stopped*", detail: t.note };
+  if (t.status === "waiting" || t.pendingQuestion) return { badge: `🟠 *Needs ${owner}*`, detail: brief(firstLine(t.pendingQuestion?.questions[0]) || (t.pauseReason ?? t.note ?? "Reply in the thread").replace(/^Waiting on you:\s*/i, ""), 200) };
+  if (t.lifecycle === "paused") return { badge: "⏸️ *Paused*", detail: t.pauseReason ?? t.note };
+  if (limited) return { badge: "🟡 *Waiting for AI credits*", detail: "every account is at its usage limit" };
+  if (t.status === "monitoring") return { badge: "🔵 *Waiting on PR reviews and CI*" };
+  return { badge: "🟢 *Working*" };
+}
+export function slackCard(t: SlackCardTask, links: SlackTaskLinks, opts: { ownerId?: string; limited?: boolean; at: number }): { text: string; key: string } {
+  const { badge, detail } = slackCardState(t, opts.ownerId, opts.limited);
+  const step = taskStep(t);
+  const finished = ["ready", "done", "released"].includes(t.status);
+  const head = links.heading?.replace(/^(\S+)\s+(.+)$/u, (_m, emoji: string, title: string) => `${emoji} *${title.toUpperCase()}*`);
+  const safe = (url?: string) => url && /^https?:\/\//i.test(url) ? url.replace(/\|/g, "%7C").replace(/>/g, "%3E") : undefined;
+  const ticket = safe(links.ticket), github = safe(links.github);
+  const body = [
+    ...(head ? [head] : []),
+    `${badge}${finished ? "" : ` · Step ${step.n}/${step.total} ${step.name}`}`,
+    ...(detail ? [`_${brief(detail, 220).replace(/_/g, " ")}_`] : []),
+    ...(links.progress ? [links.progress] : []),
+    ...(ticket ? [`<${ticket}|ticket>${github && github !== ticket ? ` · <${github}|github>` : ""}`] : []),
+  ];
+  // key: what the card says, without the time, so the daemon edits the post only when that changes
+  const key = body.join("\n");
+  const sec = Math.floor(opts.at / 1000);
+  body[head ? 1 : 0] += ` · <!date^${sec}^updated {time}|updated ${new Date(opts.at).toISOString().slice(11, 16)} UTC>`;
+  return { text: body.join("\n"), key };
 }
 
 /**

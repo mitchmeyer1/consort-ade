@@ -193,7 +193,7 @@ A review scanner reviews other people's PRs:
 consort-cli scanners add review
 ```
 
-It asks for the repository checkout, its base branch, the GitHub login whose PRs to review, a name, and how many PRs to review at once (default 1). `consort-cli scanners add clickup` and `consort-cli scanners add sentry` ask the same questions `setup` does for those scanners. The `--source …` flags still work for scripts. Every 5 minutes it lists the repository's open PRs that are assigned to that login or ask it for a review; drafts and that login's own PRs are skipped. Each PR head gets one review task; new commits get a new review. The worker:
+It asks for the repository checkout, your GitHub login (your `gh` login is the default), a name, and how many PRs to review at once (default 1). `consort-cli scanners add clickup` and `consort-cli scanners add sentry` ask the same questions `setup` does for those scanners. The `--source …` flags still work for scripts. Every 5 minutes it lists the repository's open PRs that request that login's review; being assigned to a PR does not count, and drafts and that login's own PRs are skipped. GitHub drops the request once the review is posted, so a PR comes back for another review when the author asks you again. Each PR head gets one review task; new commits get a new review. The worker:
 
 1. checks the PR head out in its own worktree, copies the repo root's `.env` files in (not `.env.example`), and sets up databases and services like a build task;
 2. has Fable or Astra read the repository, its conventions, `.ai-review-rules.md` and the diff, and write `.consort/review/OVERVIEW.md` and a plan of review areas;
@@ -202,6 +202,12 @@ It asks for the repository checkout, its base branch, the GitHub login whose PRs
 5. posts one GitHub review. Any Critical or High finding: **Request changes**, done. Otherwise it posts the comments, then asks you in the review's Slack thread with a TL;DR, the findings and the link, and approves only when you reply yes.
 
 A review scanner reuses what the box already has: the Claude and Codex accounts (with the same usage balancing and turn limits), the Slack bot and thread handling (including the question-answering agent), the `gh` login (reviews post as that user; setup shows which), and the model settings of a build scanner on the same repository when the review scanner has none. Its environment turn starts from the repository's saved setup: after any task on a repository proves its environment, `ENV.md` and the scripts are kept under `~/.consort-cli/repo-env/` and the next build or review task adapts them to its own ports instead of re-reading the repository. Without Slack, reviews still comment and request changes but never approve; `scanners add` and `setup` say so.
+
+### Agent log and post-mortems
+
+Every agent turn (build stages, parallel tickets, self-reviews, environment setup, PR reviews, the Slack question agent, Sentry bundle planning) appends one line to `~/.consort-cli/telemetry/turns-YYYY-MM.jsonl`: ticket, scanner, step (for example `Implementing t4`, `parallel ticket 08`, `review area s3`), model, provider and account, start and duration, input/output/cache tokens and dollars, and the outcome (`ok`, `error`, `limit`, `timeout`, `silenced`, `aborted`) with its error. The log outlives the task.
+
+`consort-cli report <ticket>` turns it into a post-mortem: wall clock against total agent time (how parallel the build really was), cost and tokens by stage, model, account and parallel ticket, the turns that did not finish, and the slowest turns. `consort-cli report --since 7d` covers every ticket. Each report prints and is saved under `~/.consort-cli/reports/`. Turns from before the log existed come from the task's saved history (without the account).
 
 ## Commands
 

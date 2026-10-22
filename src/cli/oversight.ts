@@ -121,7 +121,7 @@ export async function answerOwner(c: OversightContext, runTurn: (o: TurnOptions)
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
     try {
-      const turn = await runTurn({ cwd: c.task.worktree, prompt: oversightPrompt(c), model, account, readOnly: true, maxTurns: 25, effort: "medium", maxDelegates: 0, signal: abort.signal });
+      const turn = await runTurn({ trace: { taskId: c.task.id, ticket: c.task.ticket.id, title: c.task.ticket.title, scanner: job?.name, kind: "oversight", stage: c.task.feature.stage, step: "answer the owner", role: "oversight" }, cwd: c.task.worktree, prompt: oversightPrompt(c), model, account, readOnly: true, maxTurns: 25, effort: "medium", maxDelegates: 0, signal: abort.signal });
       if (turn.limit || turn.error || !turn.text.trim()) { errors.push(`${account.name}: ${turn.error ?? (turn.limit ? "usage limit" : "empty reply")}`); continue; }
       return { ...parseOversight(turn.text), model };
     } catch (e) { errors.push(`${account.name}: ${(e as Error).message}`); }

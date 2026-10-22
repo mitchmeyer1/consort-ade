@@ -99,6 +99,8 @@ export type Task = {
   /** the Slack thread every message about this task goes to */
   slackThread?: string;
   slackIdentity?: import("../shared/headless.ts").SlackIdentity;
+  /** what the thread's first post says now (headless.ts slackCard key); the daemon edits the post when it changes */
+  slackCard?: string;
   /** Last thread message inspected by the daemon status responder. */
   slackStatusAfterTs?: string;
   /** owner messages from the Slack thread, waiting for the worker to apply (cli/ownerUpdates.ts) */
@@ -121,6 +123,8 @@ export type Task = {
   /** a review task (from a review scanner) reviews someone else's PR instead of building a ticket */
   kind?: "build" | "review";
   review?: import("./reviewJob").ReviewTarget;
+  /** which of headless.ts REVIEW_STEPS a review task is on, 1-based */
+  reviewStep?: number;
   /** the build graph was re-split once for parallel work (cli/buildGraph.ts) */
   graphResplitAt?: number;
   /** `consort-cli tasks split`: re-split the unfinished build tickets on the next build step, chain or not */

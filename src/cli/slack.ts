@@ -54,6 +54,11 @@ export class Slack {
     return j.ts as string;
   }
 
+  /** replace a posted message's text, e.g. the thread's first post (cli/slackCard.ts) */
+  async update(ts: string, text: string): Promise<void> {
+    await this.api("chat.update", { channel: await this.channel(), ts, text, unfurl_links: false });
+  }
+
   /** Read all newer replies, including long-running ticket threads with multiple pages. */
   async threadMessages(thread: string, afterTs: string): Promise<SlackThreadMessage[]> {
     const messages: SlackThreadMessage[] = [];

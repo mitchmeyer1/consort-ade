@@ -73,7 +73,7 @@ function harness(opts = {}) {
     return mod.exports;
   }
   mocks['./lifecycle'] = load(lifecycle);
-  return { task, accounts, events, messages, work: () => load(pipeline).workTask('t'), notify: mocks['./lifecycle'].notifyTask, run: (work, isStopping) => mocks['./lifecycle'].runTaskUntilFinished('t', work, () => events.push('stop agents'), isStopping) };
+  return { task, accounts, events, messages, advance: ms => { clock += ms; }, work: () => load(pipeline).workTask('t'), notify: mocks['./lifecycle'].notifyTask, run: (work, isStopping) => mocks['./lifecycle'].runTaskUntilFinished('t', work, () => events.push('stop agents'), isStopping) };
 }
 
 test('all providers exhausted: one pause, then a separate resume after reset', async () => {
@@ -221,7 +221,7 @@ test('failed evidence pauses on Slack and cannot request reviewers or complete',
     throw halt;
   } });
   await assert.rejects(h.work(), e => e === halt);
-  assert.ok(h.messages.some(m => /^❌ \*Evidence blocked\. PR not handed off\*/.test(m.text) && /\n• Map tiles show API KEY REQUIRED/.test(m.text) && /\.env/.test(m.text)));
+  assert.ok(h.messages.some(m => /^⚠️ \*Evidence blocked\. PR not handed off\*/.test(m.text) && /\n• Map tiles show API KEY REQUIRED/.test(m.text) && /\.env/.test(m.text)));
   assert.ok(!h.events.includes('publish evidence'));
   assert.ok(!h.events.some(e => e.startsWith('reviewers:')));
 });
@@ -240,7 +240,7 @@ test('confirmed root env repair retries capture and inspection before publishing
 test('independent inspection rejects a passed manifest with broken screenshots', async () => {
   const h = harness({ task: { reviewsDone: 3, evidenceValidatedAt: undefined }, turn: o => ({ text: o.prompt.includes(headless.VERIFY_EVIDENCE_PROMPT) ? 'API KEY REQUIRED appears instead of the map.' : '' }), onReply: () => { throw halt; } });
   await assert.rejects(h.work(), e => e === halt);
-  assert.ok(h.messages.some(m => /^❌ \*Evidence blocked\./.test(m.text) && /\n• The evidence check did not pass\n• API KEY REQUIRED appears instead of the map\./.test(m.text)));
+  assert.ok(h.messages.some(m => /^⚠️ \*Evidence blocked\./.test(m.text) && /\n• The evidence check did not pass\n• API KEY REQUIRED appears instead of the map\./.test(m.text)));
   assert.ok(!h.events.includes('publish evidence'));
 });
 
@@ -258,7 +258,7 @@ test('a stalled capture is aborted and asks Slack for help after fifteen minutes
   const report = h.messages.find(m => /exceeded 15 minutes/.test(m.text));
   assert.ok(report, 'the timeout is reported');
   // the owner sees what the agent was doing when it was stopped, newest first, and the raw error
-  assert.match(report.text, /^❌ \*Evidence blocked\. PR not handed off\*/);
+  assert.match(report.text, /^⚠️ \*Evidence blocked\. PR not handed off\*/);
   assert.match(report.text, /\n• Last seen: Rerunning that job and finishing the manifest\n• Before that: CI shard 4 failed on the pushed commit\n/);
   assert.match(report.text, /```\naborted\n```/);
   assert.deepEqual(h.task.recent, ['CI shard 4 failed on the pushed commit', 'Rerunning that job and finishing the manifest']);
@@ -327,7 +327,7 @@ test('worker failure asks Slack and resumes rather than ending the task', async 
   assert.ok(h.events.includes('owner reply'));
   // the crash report names the stage, the error, the agent's last lines and the raw detail in a code block
   const report = h.messages.find(m => /Dependency unavailable/.test(m.text));
-  assert.match(report.text, /^❌ \*Stuck at Implementing\* \(<https:\/\/ticket\/1\|ticket>\)\n• Dependency unavailable\n• Last seen: Pushing the branch\n• Before that: Running the migration\n```\nECONNREFUSED 127\.0\.0\.1:5432\nexit 2\npsql: connection refused\n```\n_Reply with what to do; the task stays open\._\n\n<https:\/\/ticket\/1\|ticket> · <https:\/\/github.com\/a\/b\/tree\/feature\|github>\n\nSTATUS: WAITING$/);
+  assert.match(report.text, /^⚠️ \*Stuck at Implementing\* \(<https:\/\/ticket\/1\|ticket>\)\n• Dependency unavailable\n• Last seen: Pushing the branch\n• Before that: Running the migration\n```\nECONNREFUSED 127\.0\.0\.1:5432\nexit 2\npsql: connection refused\n```\n_Reply with what to do; the task stays open\._\n\n<https:\/\/ticket\/1\|ticket> · <https:\/\/github.com\/a\/b\/tree\/feature\|github>\n\nSTATUS: WAITING$/);
   assert.ok(h.messages.filter(m => !m.thread).length === 1);
   assert.equal(h.task.status, 'ready');
   assert.equal(h.task.recoveryGuidance, 'Proceed');
@@ -831,4 +831,19 @@ test('a configured role effort reaches the turn and the task records it', async 
   assert.equal(h.task.turnHistory[0].effort, 'xhigh');
   assert.equal(h.task.turn.effort, 'low');
   assert.equal(h.task.turn.model, seen[1].model);
+});
+
+test('a turn that goes quiet for 25 minutes is stopped, reported in Slack, and retried; a second silence asks the owner', async () => {
+  let h, calls = 0;
+  const hang = (o, interval) => new Promise(resolve => {
+    o.signal.addEventListener('abort', () => resolve({ text: '', error: 'aborted' }), { once: true });
+    o.onText('Dispatching reader 1 of 15');
+    h.advance(26 * 60_000);
+    interval();
+  });
+  h = harness({ sleep() {}, turn: (o, _task, interval) => { calls++; return hang(o, interval); } });
+  // the second silence is a problem for the owner; the worker's wrapper turns it into the Slack question
+  await assert.rejects(h.work(), /went quiet for 25 minutes twice/);
+  assert.equal(calls, 2, 'retried once, then gave up');
+  assert.ok(h.messages.some(m => /went quiet for 25 min .*last: Dispatching reader 1 of 15.*Restarting this step/.test(m.text)), 'the first silence is posted');
 });

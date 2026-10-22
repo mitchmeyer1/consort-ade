@@ -1,7 +1,6 @@
 /**
- * Automatic PR review. A review scanner (`--source review --reviewer <login>`) watches the
- * repository's open PRs that are assigned to that login or ask it for a review; each PR head gets
- * one review task. The worker for a review task:
+ * Automatic PR review for a reviewer. A review scanner (`scanners add review`) watches the
+ * repository's open PRs that request that login's review; each PR head gets one review task. The worker for a review task:
  *
  *  1. checks the PR head out in its own worktree, copies the repo root's .env files in, and sets up
  *     the databases and services the repo needs (the same environment turn build tasks run);
@@ -18,7 +17,7 @@ import { execFile } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { addTurnCost, ENVIRONMENT_RULES, HEADLESS_RULES, seedModels, slackMessage, slackStatus } from "../shared/headless.ts";
+import { addTurnCost, ENVIRONMENT_RULES, HEADLESS_RULES, seedModels, parseSlackIdentity, slackAsk, slackHeading, slackMessage, slackProgress, slackStatus, type SlackIdentity } from "../shared/headless.ts";
 import { selectCliModel } from "../shared/cliModels.ts";
 import { modelBlock, modelLoad, usageBlock } from "../shared/usage.ts";
 import { parseReview, serializeReview, type Finding, type Review, type ReviewEvent } from "../shared/review.ts";
@@ -29,6 +28,8 @@ import { withAgentTurn } from "./capacity";
 import { allocateEnvironment, cleanupEnvironment } from "./environment";
 import { oversightModel } from "./oversight";
 import { postReview } from "./reviewPost";
+import { slackIdentityFor, takenEmojis } from "./slackIdentity";
+import type { TurnTrace } from "./telemetry";
 import { environmentPrompt, saveRepoEnv } from "./repoEnv";
 import { Slack } from "./slack";
 import { blockAccount, HOME, loadState, newId, touchAccount, updateTask, WORK_DIR, type Account, type Job, type Task } from "./state";
@@ -42,11 +43,12 @@ export type OpenPr = { number: number; title: string; url: string; headRefOid: s
 
 // ── scanning ───────────────────────────────────────────────────────────────────────────────
 
-/** PRs that want a review from `reviewer` and have no review task at their current head yet */
+/** PRs that request `reviewer`'s review and have no review task at their current head yet */
 export function reviewCandidates(prs: OpenPr[], reviewer: string, tasks: Task[]): OpenPr[] {
   const me = reviewer.toLowerCase();
   return prs.filter((p) => !p.isDraft
-    && (p.assignees ?? []).concat(p.reviewRequests ?? []).some((u) => u.login?.toLowerCase() === me)
+    // a reviewer's queue: PRs that request this login's review (being assigned to a PR is the author's side, not a review)
+    && (p.reviewRequests ?? []).some((u) => u.login?.toLowerCase() === me)
     && (p.author?.login ?? "").toLowerCase() !== me
     && !tasks.some((t) => t.kind === "review" && t.status !== "released" && t.review?.pr === p.number && (t.review.head === p.headRefOid || ["working", "waiting", "monitoring"].includes(t.status))));
 }
@@ -113,15 +115,18 @@ export const counts = (findings: Pick<Finding, "severity">[]) => SEVERITY.map((s
 export const countLine = (findings: Pick<Finding, "severity">[]) => counts(findings).map(([s, n]) => `${n} ${s}`).join(", ") || "no findings";
 export const saysYes = (reply: string) => /^\s*(?:y|yes|yep|yeah|approve|approved|ok|okay|lgtm|ship it|go|go ahead|do it|sure)\b/i.test(reply);
 
-export function approvalQuestion(t: ReviewTarget, review: Review, postedUrl: string | undefined): string {
-  const top = review.findings.slice(0, 5).map((f) => `• ${f.severity ?? "note"}: ${f.title}${f.file ? ` (\`${f.file}${f.line ? `:${f.line}` : ""}\`)` : ""}`).join("\n");
+/**
+ * The approval question, under the thread's emoji heading: what the PR does in 1-2 sentences, the
+ * flows it changes (1-4, one sentence each), then one line of findings and links and the question.
+ */
+export function approvalQuestion(t: ReviewTarget, review: Review, postedUrl: string | undefined, flows: string[] = []): string {
+  const summary = (review.whatItDoes ?? review.headline ?? t.title).trim();
   return [
-    `*Approve PR #${t.pr}?* ${t.title} by @${t.author}`,
-    `• TL;DR: ${review.whatItDoes ?? review.headline ?? "see the PR"}`,
-    `• Findings: ${countLine(review.findings)}; nothing Critical or High.${postedUrl ? ` Comments are posted: <${postedUrl}|review>.` : ""}`,
-    ...(top ? [top] : []),
-    `• PR: <${t.url}|#${t.pr}>`,
-    `Reply *yes* to approve, or anything else to leave it unapproved.`,
+    summary,
+    ...flows.slice(0, 4).map((f) => `• ${f.trim()}`),
+    "",
+    `Findings: ${countLine(review.findings)}, nothing Critical or High${postedUrl ? ` · <${postedUrl}|comments posted>` : ""} · <${t.url}|PR #${t.pr}> by @${t.author}`,
+    `*Approve?* Reply *yes* to approve, or anything else to leave it unapproved.`,
   ].join("\n");
 }
 
@@ -137,7 +142,7 @@ ${RULES_NOTE(wt)}
 1. Learn how this repository is built: its layout and layering, where each kind of code lives, naming, data access, error handling, config and secrets, background jobs, tests, and how existing features are organised so they scale. Read the docs and the existing modules closest to what the PR touches.
 2. Read the change: \`git diff origin/${t.base}...HEAD --stat\`, then the diff itself.
 3. Write .consort/review/OVERVIEW.md: a 2-3 sentence TL;DR of what the PR does; the conventions and rules that apply to it; where it could break at scale; the risky areas.
-4. Write .consort/review/plan.json: {"tldr": "<2-3 sentences>", "slices": [{"id": "s1", "title": "<area>", "files": ["<changed files in this area>"], "related": ["<callers, similar existing modules, schemas to compare against>"], "focus": "<what to check here>"}]}. 3 to 10 slices, together covering every changed file, each small enough for one reviewer to crawl thoroughly. Group by area of the code, not by commit.
+4. Write .consort/review/plan.json: {"tldr": "<2-3 sentences>", "emoji": "<one emoji that pictures what this PR changes, e.g. 🚀 for a deploy fix, 🧭 for navigation; never 🔎>", "title": "<2-5 plain words naming the change>", "slices": [{"id": "s1", "title": "<area>", "files": ["<changed files in this area>"], "related": ["<callers, similar existing modules, schemas to compare against>"], "focus": "<what to check here>"}]}. 3 to 10 slices, together covering every changed file, each small enough for one reviewer to crawl thoroughly. Group by area of the code, not by commit.
 Reply with one line when both files are written.`;
 
 export const SLICE_PROMPT = (t: ReviewTarget, wt: string, slice: { id: string; title: string; files: string[]; related?: string[]; focus?: string }) => `## Review one area of PR #${t.pr} "${t.title}"
@@ -160,7 +165,7 @@ export const FINAL_PROMPT = (t: ReviewTarget, wt: string, reviewers: number) => 
 
 ${reviewers} reviewers' raw findings for PR #${t.pr} are in .consort/review/swarm.json. ${RULES_NOTE(wt)}
 For each finding, open the file at that line and check it is real at the PR head. Drop false positives and anything a linter catches; merge duplicates; move file/line to a changed line where you can; settle the severity (a rule in .ai-review-rules.md wins; otherwise critical = breaks production, data or security; high = a real bug or a scaling or convention problem that must be fixed before merge; medium = should fix; low = worth a mention); tighten each comment so it is ready to post.
-Reply with [review-final] followed by a \`\`\`json object: {"tldr": "<2-3 sentences: what the PR does>", "headline": "<one-line verdict>", "findings": [same shape as the raw findings]}.`;
+Reply with [review-final] followed by a \`\`\`json object: {"summary": "<1-2 plain sentences: the work this PR does>", "flows": ["<1 to 4 entries, one sentence each: a user or system flow this PR changes and what now happens in it>"], "headline": "<one-line verdict>", "findings": [same shape as the raw findings]}.`;
 
 // ── the worker ─────────────────────────────────────────────────────────────────────────────
 
@@ -172,26 +177,53 @@ export async function reviewTask(taskId: string): Promise<void> {
   if (!job) throw new Error(`Review task ${taskId} belongs to a scanner that no longer exists.`);
   const t = task.review;
   const log = (line: string) => console.log(`${new Date().toISOString()} [review #${t.pr}] ${line}`);
-  const activity = (line: string) => { log(line); updateTask(taskId, { activity: line, status: "working" }); };
+  const activity = (line: string, reviewStep?: number) => { log(line); updateTask(taskId, { activity: line, status: "working", ...(reviewStep ? { reviewStep } : {}) }); };
   updateTask(taskId, { pid: process.pid });
 
   // Slack: one thread per review
   const slack = state.slack ? new Slack(state.slack) : undefined;
-  const links = { ticket: t.url, github: t.url, heading: `🔎 PR #${t.pr} ${t.title}`.slice(0, 80) };
+  // an emoji and short title of its own, so threads tell apart (cli/slackIdentity.ts); the overview replaces it with one from the PR's contents
+  let identity = task.slackIdentity && task.slackIdentity.title !== "Task" ? task.slackIdentity : slackIdentityFor(t.title, takenEmojis(taskId));
+  const links = () => { const now = loadState().tasks.find((x) => x.id === taskId); return { ticket: t.url, github: t.url, heading: slackHeading(t.title, identity), ...(now ? { progress: slackProgress(now) } : {}) }; };
   let thread = task.slackThread;
-  const say = async (text: string, status: "RUNNING" | "WAITING" | "COMPLETED" | "STOPPED" = "RUNNING") => {
+  /** the daemon's status card on the thread's first post picks the new identity up (cli/slackCard.ts) */
+  const setIdentity = async (next: SlackIdentity) => { identity = next; updateTask(taskId, { slackIdentity: next }); };
+  if (task.slackIdentity?.emoji !== identity.emoji || task.slackIdentity?.title !== identity.title) await setIdentity(identity);
+  const say = async (text: string, status: "RUNNING" | "WAITING" | "COMPLETED" | "STOPPED" = "RUNNING", plain = false) => {
     log(text.replace(/\n/g, " ⏎ "));
     if (!slack) return undefined;
-    const ts = await slack.post(slackStatus(slackMessage("update", text), status, links), thread).catch((e) => { log(`slack failed: ${e.message}`); return undefined; });
+    const ts = await slack.post(slackStatus(plain ? text : slackMessage("update", text), status, links()), thread).catch((e) => { log(`slack failed: ${e.message}`); return undefined; });
     if (!thread && ts) { thread = ts; updateTask(taskId, { slackThread: ts }); }
     return ts;
   };
+  /** wait for the owner's word on Slack, then approve or leave it */
+  const awaitApproval = async (review: Review, ts: string | undefined) => {
+    const answer = slack && thread && ts ? await slack.waitForReply(thread, ts, { pollMs: 15_000 }) : undefined;
+    updateTask(taskId, { pendingQuestion: undefined, status: "working" });
+    if (answer && saysYes(answer)) {
+      const approved = await postReview(review, [], "APPROVE", `Approved after an automatic review (${countLine(review.findings)}) and the reviewer's confirmation.`, task.worktree);
+      await say(approved.event === "APPROVE" ? `Approved <${t.url}|PR #${t.pr}>.` : `Could not approve <${t.url}|PR #${t.pr}> (it is your own PR); posted the note as a comment.`, "COMPLETED");
+      updateTask(taskId, { status: "done", finishedAt: Date.now(), note: approved.event === "APPROVE" ? "approved" : "commented (own PR)", activity: "review done" });
+    } else {
+      await say(`Left <${t.url}|PR #${t.pr}> unapproved${answer ? ` (you said: ${answer.slice(0, 80)})` : ""}.`, "COMPLETED");
+      updateTask(taskId, { status: "done", finishedAt: Date.now(), note: slack ? "not approved" : "not approved: approval needs Slack (consort-cli slack set …)", activity: "review done, not approved" });
+    }
+  };
+  // restarted while the approval question was out: the review is posted; keep waiting for the answer, never review again
+  const savedReview = join(task.worktree, ".consort", "review", `pr-${t.pr}.review.json`);
+  if (task.pendingQuestion?.afterTs && existsSync(savedReview)) {
+    activity("waiting for the owner's word to approve", 5);
+    updateTask(taskId, { status: "waiting" });
+    try { await awaitApproval(parseReview(readFileSync(savedReview, "utf8")), task.pendingQuestion.afterTs); }
+    finally { if (loadState().tasks.find((x) => x.id === taskId)?.status === "done") await sh("git", ["worktree", "remove", "--force", task.worktree], job.repo).catch(() => undefined); }
+    return;
+  }
   if (!thread) await say(`Reviewing PR #${t.pr} by @${t.author} at \`${t.head.slice(0, 7)}\`: repo overview first, then a reviewer swarm`);
 
   // 1. worktree at the PR head, the root .env files, the environment
   const wt = task.worktree;
   if (!existsSync(wt)) {
-    activity("checking out the PR head");
+    activity("checking out the PR head", 1);
     await sh("git", ["fetch", "origin", `pull/${t.pr}/head`, t.base], job.repo);
     await sh("git", ["worktree", "add", "--detach", wt, t.head], job.repo);
   }
@@ -204,7 +236,7 @@ export async function reviewTask(taskId: string): Promise<void> {
   const models = seedModels();
   // model settings: the review scanner's own, else those of a build scanner on the same repository
   const policy = job.modelPolicy ?? state.jobs.find((j) => j.repo === job.repo && j.source !== "review" && j.modelPolicy)?.modelPolicy;
-  const turn = async (role: "frontier" | "swarm" | "setup", prompt: string, readOnly: boolean, timeoutMs: number): Promise<string> => {
+  const turn = async (role: "frontier" | "swarm" | "setup", prompt: string, readOnly: boolean, timeoutMs: number, step: string): Promise<string> => {
     const tried = new Set<string>();
     for (let attempt = 0; attempt < 8; attempt++) {
       const now = Date.now();
@@ -218,10 +250,11 @@ export async function reviewTask(taskId: string): Promise<void> {
       const model = modelOn(who);
       touchAccount(who.id);
       const abort = new AbortController();
-      const timer = setTimeout(() => abort.abort(), timeoutMs);
+      const trace: TurnTrace = { taskId, ticket: task.ticket?.id ?? `pr-${t.pr}`, title: t.title, scanner: job.name, kind: "review", stage: role, step, role };
+      const timer = setTimeout(() => { trace.reason = "timeout"; abort.abort(); }, timeoutMs);
       const started = Date.now();
       try {
-        const res = await withAgentTurn(taskId, who.id, () => runTurn({ cwd: wt, model, account: who, readOnly, signal: abort.signal, maxDelegates: 0, effort: role === "frontier" ? "high" : "medium", env: env as unknown as Record<string, string>,
+        const res = await withAgentTurn(taskId, who.id, () => runTurn({ trace, cwd: wt, model, account: who, readOnly, signal: abort.signal, maxDelegates: 0, effort: role === "frontier" ? "high" : "medium", env: env as unknown as Record<string, string>,
           prompt: `${HEADLESS_RULES}\n\n${prompt}\n\n${ENVIRONMENT_RULES(env)}` }));
         updateTask(taskId, (x) => ({ ...(res.usage?.length ? { cost: addTurnCost(x.cost, res.usage) } : {}), turnHistory: [...(x.turnHistory ?? []), { at: started, stage: `review ${role}`, role, provider: who.provider as Provider, model, durationMs: Date.now() - started, usage: res.usage, error: res.error ?? res.limit?.text }] }));
         if (res.limit) { blockAccount(who.id, res.limit.resetsAt, res.limit.text); tried.add(who.id); continue; }
@@ -234,9 +267,9 @@ export async function reviewTask(taskId: string): Promise<void> {
 
   try {
     if (!loadState().tasks.find((x) => x.id === taskId)?.envReadyAt) {
-      activity("setting up databases and services for the review");
+      activity("setting up databases and services for the review", 1);
       // the repo's setup is shared with its build tasks: start from it, and save what this review proves
-      await turn("setup", environmentPrompt(job.repo, wt, env), false, 30 * 60_000)
+      await turn("setup", environmentPrompt(job.repo, wt, env), false, 30 * 60_000, "environment setup")
         .then(() => { if (saveRepoEnv(job.repo, wt)) log("saved this repo's environment setup"); })
         .catch((e) => log(`environment setup incomplete: ${(e as Error).message}`));
       updateTask(taskId, { envReadyAt: Date.now() });
@@ -245,19 +278,21 @@ export async function reviewTask(taskId: string): Promise<void> {
     // 2. the frontier overview and plan
     const planFile = join(wt, ".consort", "review", "plan.json");
     if (!existsSync(planFile)) {
-      activity("frontier model: reading the repository and planning the review");
-      await turn("frontier", OVERVIEW_PROMPT(t, wt), false, 45 * 60_000);
+      activity("frontier model: reading the repository and planning the review", 2);
+      await turn("frontier", OVERVIEW_PROMPT(t, wt), false, 45 * 60_000, "overview and plan");
     }
-    const plan = JSON.parse(readFileSync(planFile, "utf8")) as { tldr?: string; slices?: { id: string; title: string; files: string[]; related?: string[]; focus?: string }[] };
+    const plan = JSON.parse(readFileSync(planFile, "utf8")) as { tldr?: string; emoji?: string; title?: string; slices?: { id: string; title: string; files: string[]; related?: string[]; focus?: string }[] };
+    const picked = parseSlackIdentity(JSON.stringify({ emoji: plan.emoji ?? "", title: plan.title ?? "" }));
+    if (picked && picked.emoji !== "🔎" && (picked.emoji !== identity.emoji || picked.title !== identity.title)) await setIdentity(picked);
     const slices = (plan.slices ?? []).filter((s) => s && Array.isArray(s.files) && s.files.length);
     if (!slices.length) throw new Error("The overview wrote no review slices");
     await say(`Plan: ${slices.length} areas, reviewed in parallel on Opus/Sol: ${slices.map((s) => s.title).join("; ")}`);
 
     // 3. the swarm, one read-only reviewer per area, as many at once as capacity allows
-    activity(`reviewer swarm: ${slices.length} areas in parallel`);
+    activity(`reviewer swarm: ${slices.length} areas in parallel`, 3);
     const raw: RawFinding[] = [];
     const results = await Promise.allSettled(slices.map(async (slice) => {
-      const text = await turn("swarm", SLICE_PROMPT(t, wt, slice), true, 45 * 60_000);
+      const text = await turn("swarm", SLICE_PROMPT(t, wt, slice), true, 45 * 60_000, `review area ${slice.id} ${slice.title}`.slice(0, 80));
       const found = cleanFindings(jsonAfter(text, "[review-findings]"));
       raw.push(...found);
       log(`area ${slice.id} (${slice.title}): ${found.length} findings`);
@@ -266,10 +301,11 @@ export async function reviewTask(taskId: string): Promise<void> {
     writeFileSync(join(wt, ".consort", "review", "swarm.json"), JSON.stringify(raw, null, 2));
 
     // 4. the frontier verification
-    activity(`frontier model: verifying ${raw.length} findings`);
-    const finalText = raw.length ? await turn("frontier", FINAL_PROMPT(t, wt, slices.length - failedAreas), true, 45 * 60_000) : "[review-final] {\"findings\": []}";
-    const final = jsonAfter(finalText, "[review-final]") as { tldr?: string; headline?: string } | undefined;
-    const review = buildReview(t, cleanFindings(final), { tldr: final?.tldr ?? plan.tldr, headline: final?.headline, at: new Date().toISOString() });
+    activity(`frontier model: verifying ${raw.length} findings`, 4);
+    const finalText = raw.length ? await turn("frontier", FINAL_PROMPT(t, wt, slices.length - failedAreas), true, 45 * 60_000, "verify findings") : "[review-final] {\"findings\": []}";
+    const final = jsonAfter(finalText, "[review-final]") as { summary?: string; tldr?: string; headline?: string; flows?: unknown } | undefined;
+    const flows = Array.isArray(final?.flows) ? final!.flows.filter((f): f is string => typeof f === "string" && !!f.trim()).slice(0, 4) : [];
+    const review = buildReview(t, cleanFindings(final), { tldr: final?.summary ?? final?.tldr ?? plan.tldr, headline: final?.headline, at: new Date().toISOString() });
     const reviewPath = join(wt, ".consort", "review", `pr-${t.pr}.review.json`);
     writeFileSync(reviewPath, serializeReview(review));
     mkdirSync(join(HOME, "reviews"), { recursive: true });
@@ -279,25 +315,16 @@ export async function reviewTask(taskId: string): Promise<void> {
     const severe = blocking(review.findings);
     const summary = `${review.whatItDoes ?? plan.tldr ?? ""}`.trim();
     if (severe.length) {
-      activity(`posting ${review.findings.length} comments with Request changes`);
+      activity(`posting ${review.findings.length} comments with Request changes`, 5);
       const posted = await postReview(review, review.findings, "REQUEST_CHANGES", `Automatic review: ${countLine(review.findings)}. The Critical and High items need fixing before this merges.${summary ? `\n\n${summary}` : ""}`, wt);
       await say(`Requested changes on <${t.url}|PR #${t.pr}>: ${countLine(review.findings)}.\n${severe.slice(0, 5).map((f) => `• ${f.severity}: ${f.title}`).join("\n")}\n• Review: <${posted.url}|on GitHub>`, "COMPLETED");
       updateTask(taskId, { status: "done", finishedAt: Date.now(), note: `requested changes (${countLine(review.findings)})`, activity: "review posted: changes requested" });
     } else {
       const posted = review.findings.length ? await postReview(review, review.findings, "COMMENT", `Automatic review: ${countLine(review.findings)}; nothing Critical or High.`, wt) : undefined;
-      activity("waiting for the owner's word to approve");
-      const ts = await say(approvalQuestion(t, review, posted?.url), "WAITING");
+      activity("waiting for the owner's word to approve", 5);
+      const ts = await say(slackAsk(approvalQuestion(t, review, posted?.url, flows)), "WAITING", true);
       updateTask(taskId, { status: "waiting", pendingQuestion: { questions: [`Approve PR #${t.pr}?`], afterTs: ts ?? String(Date.now() / 1000) } });
-      const answer = slack && thread && ts ? await slack.waitForReply(thread, ts, { pollMs: 15_000 }) : undefined;
-      updateTask(taskId, { pendingQuestion: undefined, status: "working" });
-      if (answer && saysYes(answer)) {
-        const approved = await postReview(review, [], "APPROVE", `Approved after an automatic review (${countLine(review.findings)}) and the reviewer's confirmation.`, wt);
-        await say(approved.event === "APPROVE" ? `Approved <${t.url}|PR #${t.pr}>.` : `Could not approve <${t.url}|PR #${t.pr}> (it is your own PR); posted the note as a comment.`, "COMPLETED");
-        updateTask(taskId, { status: "done", finishedAt: Date.now(), note: approved.event === "APPROVE" ? "approved" : "commented (own PR)", activity: "review done" });
-      } else {
-        await say(`Left <${t.url}|PR #${t.pr}> unapproved${answer ? ` (you said: ${answer.slice(0, 80)})` : ""}.`, "COMPLETED");
-        updateTask(taskId, { status: "done", finishedAt: Date.now(), note: slack ? "not approved" : "not approved: approval needs Slack (consort-cli slack set …)", activity: "review done, not approved" });
-      }
+      await awaitApproval(review, ts);
     }
   } finally {
     await cleanupEnvironment(env.CONSORT_RUN).catch(() => undefined);

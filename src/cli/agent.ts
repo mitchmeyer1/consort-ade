@@ -5,6 +5,8 @@ import { promisify } from "node:util";
 import { cliBinary, type Deps as RuntimeDeps } from "../main/cliRuntime";
 import type { Provider } from "../shared/types";
 import { HOME, type Account } from "./state";
+import { recordTurn, sumUsage, type TurnOutcome, type TurnRecord, type TurnTrace } from "./telemetry";
+import { hostname } from "node:os";
 import { isCodexLimitText, isUsageLimitText, limitFromRateEvent, type LimitHit } from "../shared/seatPool.ts";
 import type { TurnUsage } from "../shared/headless.ts";
 import { codexEffort, type EffortLevel } from "../shared/cliTurnPolicy.ts";
@@ -38,7 +40,7 @@ export const binaryFor = (provider: Provider): string => {
   return bin;
 };
 
-export type TurnOptions = { cwd: string; prompt: string; model: string; account: Account; resume?: string; maxTurns?: number; onText?: (t: string) => void; signal?: AbortSignal; readOnly?: boolean; effort?: EffortLevel; delegateModel?: string; maxDelegates?: number; /** the task's own ports and Docker names, on top of the process env */ env?: Record<string, string> };
+export type TurnOptions = { /** labels for the telemetry log; without it the turn is not recorded */ trace?: TurnTrace; cwd: string; prompt: string; model: string; account: Account; resume?: string; maxTurns?: number; onText?: (t: string) => void; signal?: AbortSignal; readOnly?: boolean; effort?: EffortLevel; delegateModel?: string; maxDelegates?: number; /** the task's own ports and Docker names, on top of the process env */ env?: Record<string, string> };
 export type Turn = { text: string; sessionId?: string; error?: string; limit?: LimitHit; /** what the turn spent, per model (Claude Code prices its own; Codex gives tokens only) */ usage?: TurnUsage[] };
 
 export const envFor = (account: Account, extra: Record<string, string> = {}): Record<string, string | undefined> => {
@@ -54,7 +56,19 @@ const inFlight = new Set<() => void>();
 export const stopAgents = () => { for (const stop of inFlight) { try { stop(); } catch {} } inFlight.clear(); };
 
 export async function runTurn(o: TurnOptions): Promise<Turn> {
-  return o.account.provider === "claude" ? runClaude(o) : runCodex(o);
+  const at = Date.now();
+  let res: Turn | undefined;
+  try {
+    res = await (o.account.provider === "claude" ? runClaude(o) : runCodex(o));
+    return res;
+  } finally {
+    // every turn lands in the telemetry log, whatever happened to it (cli/telemetry.ts)
+    if (o.trace) {
+      const spent = sumUsage(res?.usage);
+      const outcome: TurnOutcome = res?.limit ? "limit" : o.signal?.aborted ? (o.trace.reason ?? "aborted") : !res ? "error" : res.error ? "error" : "ok";
+      recordTurn(HOME, { ...o.trace, reason: undefined, at, durationMs: Date.now() - at, provider: o.account.provider, account: o.account.name, model: o.model, resumed: !!o.resume, outcome, error: res?.error ?? res?.limit?.text ?? (res ? undefined : "the turn threw"), usd: spent.usd, tokens: spent.tokens, host: hostname() } as TurnRecord);
+    }
+  }
 }
 
 /** A review reserves one extra capacity unit; its reader must remain in the foreground. */

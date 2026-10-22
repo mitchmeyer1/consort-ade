@@ -22,7 +22,7 @@ test('headings need no model account and restarts preserve the first heading', a
 });
 test('task headings remove mentions and stay short', () => {
   const h = harness();
-  assert.deepEqual(h.identity('<@everyone> Fix broken auth'), { emoji: '🐛', title: 'Fix broken auth' });
+  assert.deepEqual(h.identity('<@everyone> Fix broken auth'), { emoji: '🔐', title: 'Fix broken auth' });
   assert.ok(h.identity('A '.repeat(100)).title.length <= 60);
   assert.equal(h.identity('   ').title, 'Task');
 });
@@ -33,4 +33,16 @@ test('headers stay first and preserve update emoji, compact links, and final sta
   assert.equal(headless.slackStatus(text,undefined,links),text);
   for(const emoji of ['map','🗺️🎉','<@everyone>']) assert.equal(headless.parseSlackIdentity(JSON.stringify({emoji,title:'Map'})),undefined);
   assert.equal(headless.parseSlackIdentity('{"emoji":"🗺️","title":"<@everyone>"}'),undefined);
+});
+
+test('review titles drop the prefix, stay 5 words, and each open task gets its own emoji', () => {
+  const h = harness();
+  const a = h.identity('Review: ci: honest deploy card when the run lists no deploy step');
+  assert.deepEqual(a, { emoji: '🚀', title: 'honest deploy card when the' });
+  assert.notEqual(h.identity('Review: ci: honest deploy card when the run lists no deploy step', ['🚀']).emoji, '🚀');
+  const b = h.identity('Review: chore(frontend): retire the DB Admin sidebar link; db-admin is deprecated');
+  assert.equal(b.title, 'retire the DB Admin sidebar');
+  assert.notEqual(b.emoji, '🛠️');
+  const taken = ['🦊', '🐙'];
+  assert.ok(!taken.includes(h.identity('Quarterly zebra work', taken).emoji), 'no word matches: a palette emoji nobody uses');
 });

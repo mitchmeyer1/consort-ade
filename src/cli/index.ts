@@ -15,8 +15,10 @@ import { scanSentry, validateSentryConfig } from "./sentry";
 import { Slack } from "./slack";
 import { canStartWorker, handleWorkerExit, requestWorkerStop, workerStopMessage } from "./workerControl";
 import { answerTaskStatusQuestions } from "./slackStatus";
+import { refreshSlackCards } from "./slackCard";
 import { saveLiveChildren } from "./parallel";
 import { refresh } from "./refresh";
+import { historyTurns, readTurns, renderReport, sinceMs } from "./telemetry";
 import { newReviewTask, reviewTask, scanReviews } from "./reviewJob";
 import { promisify } from "node:util";
 import { sourceFor } from "./sources";
@@ -28,7 +30,7 @@ import { cleanupEnvironment } from "./environment";
 import { alive, DAEMON_LOG, daemonPid, recordDaemon, startDetached, stopDaemon } from "./daemonctl";
 import { banner, cream, dim, mint, ok, bad } from "./theme";
 import { FINISHED, retainedTasks } from "../shared/headless.ts";
-import { DEFAULT_STATUSES, host, loadState, LOG_DIR, newId, saveState, updateTask, type Job, type Task } from "./state";
+import { DEFAULT_STATUSES, HOME, host, loadState, LOG_DIR, newId, saveState, updateTask, type Job, type Task } from "./state";
 
 /**
  * consort-cli: Consort's pipeline without the window. Add AI accounts, point it at Slack, add a
@@ -63,7 +65,7 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
 
   ${cream("Add a scanner")} ${dim("(step-by-step questions, the same as setup)")}
   ${mint("scanners add clickup")}                                                    build ClickUp tickets into PRs
-  ${mint("scanners add review")}                                                     review PRs assigned to you or asking you for review
+  ${mint("scanners add review")}                                                     review the PRs that request your review
   ${mint("scanners add sentry")}                                                     turn grouped Sentry issues into ClickUp tickets
 
   accounts add --provider claude|codex --name <label> [--api-key <key>]   add an AI account (a CLI login unless --api-key)
@@ -78,7 +80,7 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
            [--review-models claude:claude-fable-5-1,codex:gpt-6-astra]
   scanners add --name <n> --source github --repo <path> --base main [--tag ai-handle] …
   scanners add --name <n> --source review --repo <path> --reviewer <github-login> [--every 5] [--max-parallel 4]
-           reviews open PRs assigned to that login or asking it for a review: Fable/Astra overview, Opus/Sol swarm,
+           reviews open PRs that request that login's review: Fable/Astra overview, Opus/Sol swarm,
            Request changes on Critical/High, otherwise comments and a Slack yes before it approves
   scanners add --name <n> --source sentry --repo <shared-checkout> --sentry-org <org> --sentry-project <slug> --workspace <id> --list <id> --tag <tag>
            [--sentry-host https://sentry.io] [--environment production] [--query is:unresolved] [--create-status "to do"]
@@ -96,6 +98,8 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   work <taskId>                                                           one worker (the daemon runs this)
   tasks list                                                              every task: id, status, ticket, stage, branch, note
   tasks logs <task>                                                       what that agent has been doing              (task or ticket id)
+  report [<ticket>] [--since 7d] [--out <file>]                           post-mortem from the agent log: time, tokens and cost by stage, model, account and
+                                                                          parallel ticket; how parallel it was; failed turns; the slowest turns
   tasks reboot <task> | reboot --all                                      stop that agent (or every live one) and start it again; it works out where the last run got to
   tasks split <task>                                                      stop that agent, re-split its unfinished build tickets into parallel work, and continue
                                                                           (reboot and split wait for a running parallel wave unless --force)
@@ -113,7 +117,7 @@ async function main(argv: string[]) {
   const [cmd, sub, ...rest] = a._;
   const s = loadState();
   // commands whose first word is a value, not a subcommand: import <file>, work <task>, reboot <task>
-  const key = cmd === "import" || cmd === "work" || cmd === "reboot" ? cmd : `${cmd === "jobs" ? "scanners" : cmd ?? "help"} ${sub ?? ""}`.trim(); // "jobs" was the first name for scanners
+  const key = cmd === "import" || cmd === "work" || cmd === "reboot" || cmd === "report" ? cmd : `${cmd === "jobs" ? "scanners" : cmd ?? "help"} ${sub ?? ""}`.trim(); // "jobs" was the first name for scanners
   // everything that touches tickets, accounts or agents waits for the walk-through
   const open = ["help", "--help", "-h", "setup", "status", "cli status", "cli update", "import"];
   if (!open.includes(key) && !setupDone(s)) fail("not set up yet. Run `consort-cli setup` first; it checks the tools, adds your issue sources, AI accounts and Slack, and tests each one.");
@@ -394,6 +398,24 @@ async function main(argv: string[]) {
       }
       return;
     }
+    case "report": {
+      // a post-mortem from the telemetry log: what each agent did, how long, tokens and dollars, and what was wasted
+      const want = sub;
+      const since = sinceMs(str(a, "since"));
+      if (str(a, "since") && !since) fail("--since takes a number and d, h or m, e.g. 7d");
+      const task = want ? s.tasks.find((x) => x.id === want || x.ticket.id === want) : undefined;
+      const ticket = task?.ticket.id ?? want;
+      let turns = readTurns(HOME, { ticket, since: since ? Date.now() - since : undefined });
+      if (task) turns = [...historyTurns(task, turns[0]?.at ?? Infinity), ...turns];
+      const title = ticket ? `Agent report: ${ticket}${task ? ` ${task.ticket.title}` : ""}` : `Agent report: every ticket${since ? ` (last ${str(a, "since")})` : ""}`;
+      const md = renderReport(title, turns);
+      const out = str(a, "out") ?? join(HOME, "reports", `${ticket ?? "all"}-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.md`);
+      mkdirSync(join(out, ".."), { recursive: true });
+      writeFileSync(out, md);
+      console.log(md);
+      console.log(dim(`saved to ${out}`));
+      return;
+    }
     case "tasks logs": {
       const want = rest[0] ?? fail("task or ticket id required; see consort-cli view");
       const t = s.tasks.find((x) => x.id === want || x.ticket.id === want);
@@ -437,7 +459,10 @@ async function daemon() {
   };
   let statusCheck: Promise<void> | undefined;
   const checkStatusQuestions = () => {
-    if (!statusCheck) statusCheck = answerTaskStatusQuestions(alive).catch(e => console.error(`Slack status responder: ${e.message}`)).finally(() => { statusCheck = undefined; });
+    if (!statusCheck) statusCheck = Promise.all([
+      answerTaskStatusQuestions(alive).catch(e => console.error(`Slack status responder: ${e.message}`)),
+      refreshSlackCards().catch(e => console.error(`Slack status cards: ${e.message}`)),
+    ]).then(() => {}).finally(() => { statusCheck = undefined; });
   };
   checkStatusQuestions();
   setInterval(checkStatusQuestions, 15_000);
