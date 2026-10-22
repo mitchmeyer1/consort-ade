@@ -54,6 +54,16 @@ export class Slack {
     return j.ts as string;
   }
 
+  /** swap the first line (the emoji heading) of a posted message, e.g. a thread's parent */
+  async retitle(ts: string, heading: string): Promise<void> {
+    const j = await this.api("conversations.replies", { channel: await this.channel(), ts, limit: 1, inclusive: true });
+    const text: string | undefined = j.messages?.find((m: SlackThreadMessage) => m.ts === ts)?.text;
+    if (!text) return;
+    const [first, ...rest] = text.split("\n");
+    if (first === heading) return;
+    await this.api("chat.update", { channel: await this.channel(), ts, text: [heading, ...rest].join("\n") });
+  }
+
   /** Read all newer replies, including long-running ticket threads with multiple pages. */
   async threadMessages(thread: string, afterTs: string): Promise<SlackThreadMessage[]> {
     const messages: SlackThreadMessage[] = [];

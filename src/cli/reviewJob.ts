@@ -17,7 +17,7 @@ import { execFile } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { addTurnCost, ENVIRONMENT_RULES, HEADLESS_RULES, seedModels, slackAsk, slackHeading, slackMessage, slackProgress, slackStatus } from "../shared/headless.ts";
+import { addTurnCost, ENVIRONMENT_RULES, HEADLESS_RULES, seedModels, parseSlackIdentity, slackAsk, slackHeading, slackMessage, slackProgress, slackStatus, type SlackIdentity } from "../shared/headless.ts";
 import { selectCliModel } from "../shared/cliModels.ts";
 import { modelBlock, modelLoad, usageBlock } from "../shared/usage.ts";
 import { parseReview, serializeReview, type Finding, type Review, type ReviewEvent } from "../shared/review.ts";
@@ -28,7 +28,7 @@ import { withAgentTurn } from "./capacity";
 import { allocateEnvironment, cleanupEnvironment } from "./environment";
 import { oversightModel } from "./oversight";
 import { postReview } from "./reviewPost";
-import { slackIdentityFor } from "./slackIdentity";
+import { slackIdentityFor, takenEmojis } from "./slackIdentity";
 import type { TurnTrace } from "./telemetry";
 import { environmentPrompt, saveRepoEnv } from "./repoEnv";
 import { Slack } from "./slack";
@@ -142,7 +142,7 @@ ${RULES_NOTE(wt)}
 1. Learn how this repository is built: its layout and layering, where each kind of code lives, naming, data access, error handling, config and secrets, background jobs, tests, and how existing features are organised so they scale. Read the docs and the existing modules closest to what the PR touches.
 2. Read the change: \`git diff origin/${t.base}...HEAD --stat\`, then the diff itself.
 3. Write .consort/review/OVERVIEW.md: a 2-3 sentence TL;DR of what the PR does; the conventions and rules that apply to it; where it could break at scale; the risky areas.
-4. Write .consort/review/plan.json: {"tldr": "<2-3 sentences>", "slices": [{"id": "s1", "title": "<area>", "files": ["<changed files in this area>"], "related": ["<callers, similar existing modules, schemas to compare against>"], "focus": "<what to check here>"}]}. 3 to 10 slices, together covering every changed file, each small enough for one reviewer to crawl thoroughly. Group by area of the code, not by commit.
+4. Write .consort/review/plan.json: {"tldr": "<2-3 sentences>", "emoji": "<one emoji that pictures what this PR changes, e.g. 🚀 for a deploy fix, 🧭 for navigation; never 🔎>", "title": "<2-5 plain words naming the change>", "slices": [{"id": "s1", "title": "<area>", "files": ["<changed files in this area>"], "related": ["<callers, similar existing modules, schemas to compare against>"], "focus": "<what to check here>"}]}. 3 to 10 slices, together covering every changed file, each small enough for one reviewer to crawl thoroughly. Group by area of the code, not by commit.
 Reply with one line when both files are written.`;
 
 export const SLICE_PROMPT = (t: ReviewTarget, wt: string, slice: { id: string; title: string; files: string[]; related?: string[]; focus?: string }) => `## Review one area of PR #${t.pr} "${t.title}"
@@ -182,11 +182,18 @@ export async function reviewTask(taskId: string): Promise<void> {
 
   // Slack: one thread per review
   const slack = state.slack ? new Slack(state.slack) : undefined;
-  // the same generated emoji and short title build tasks get (cli/slackIdentity.ts)
-  const identity = task.slackIdentity ?? slackIdentityFor(t.title);
-  if (!task.slackIdentity) updateTask(taskId, { slackIdentity: identity });
+  // an emoji and short title of its own, so threads tell apart (cli/slackIdentity.ts); the overview replaces it with one from the PR's contents
+  let identity = task.slackIdentity && task.slackIdentity.title !== "Task" ? task.slackIdentity : slackIdentityFor(t.title, takenEmojis(taskId));
   const links = () => { const now = loadState().tasks.find((x) => x.id === taskId); return { ticket: t.url, github: t.url, heading: slackHeading(t.title, identity), ...(now ? { progress: slackProgress(now) } : {}) }; };
   let thread = task.slackThread;
+  /** keep the identity, and swap the heading on the thread's first post so the channel shows it too */
+  const setIdentity = async (next: SlackIdentity) => {
+    identity = next;
+    updateTask(taskId, { slackIdentity: next });
+    const head = links().heading.replace(/^(\S+)\s+(.+)$/u, (_m, e: string, title: string) => `${e} *${title.toUpperCase()}*`);
+    if (slack && thread) await slack.retitle(thread, head).catch((e) => log(`slack retitle failed: ${e.message}`));
+  };
+  if (task.slackIdentity?.emoji !== identity.emoji || task.slackIdentity?.title !== identity.title) await setIdentity(identity);
   const say = async (text: string, status: "RUNNING" | "WAITING" | "COMPLETED" | "STOPPED" = "RUNNING", plain = false) => {
     log(text.replace(/\n/g, " ⏎ "));
     if (!slack) return undefined;
@@ -257,7 +264,9 @@ export async function reviewTask(taskId: string): Promise<void> {
       activity("frontier model: reading the repository and planning the review", 2);
       await turn("frontier", OVERVIEW_PROMPT(t, wt), false, 45 * 60_000, "overview and plan");
     }
-    const plan = JSON.parse(readFileSync(planFile, "utf8")) as { tldr?: string; slices?: { id: string; title: string; files: string[]; related?: string[]; focus?: string }[] };
+    const plan = JSON.parse(readFileSync(planFile, "utf8")) as { tldr?: string; emoji?: string; title?: string; slices?: { id: string; title: string; files: string[]; related?: string[]; focus?: string }[] };
+    const picked = parseSlackIdentity(JSON.stringify({ emoji: plan.emoji ?? "", title: plan.title ?? "" }));
+    if (picked && picked.emoji !== "🔎" && (picked.emoji !== identity.emoji || picked.title !== identity.title)) await setIdentity(picked);
     const slices = (plan.slices ?? []).filter((s) => s && Array.isArray(s.files) && s.files.length);
     if (!slices.length) throw new Error("The overview wrote no review slices");
     await say(`Plan: ${slices.length} areas, reviewed in parallel on Opus/Sol: ${slices.map((s) => s.title).join("; ")}`);
