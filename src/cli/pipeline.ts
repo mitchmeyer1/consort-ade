@@ -455,7 +455,8 @@ export async function workTask(taskId: string): Promise<void> {
 
   const parallelDirectory = join(task.worktree, ".consort", "ship", "parallel");
   const parallelRun: ParallelRun = async child => {
-    const execute = async (childEnv: TaskEnv) => ({ text: await turn(child.prompt, builderProvider, child.kind === "research" ? "reader" : "implementation", false, 15 * 60_000, child.cwd, undefined, childEnv) });
+    // a parallel ticket gets 90 minutes (saved every 5, so a timeout resumes); research stays short
+    const execute = async (childEnv: TaskEnv) => ({ text: await turn(child.prompt, builderProvider, child.kind === "research" ? "reader" : "implementation", false, child.kind === "research" ? 15 * 60_000 : 90 * 60_000, child.cwd, undefined, childEnv) });
     return child.kind === "implementation" ? withChildEnvironment(taskId, child.id, execute) : execute(env);
   };
   let sharedResearch = "";
@@ -499,7 +500,7 @@ export async function workTask(taskId: string): Promise<void> {
           log(task, `${asked ? "owner asked to re-split the build" : "build graph is mostly a chain"} (${graphSummary(graph)}); re-splitting for parallel work`);
           activity("re-splitting the build into parallel tickets");
           if (asked) await say(slackMessage("update", `Re-splitting the remaining build for parallel work (${graphSummary(graph)} now)`));
-          await completeReply(await turn(RESPLIT_PROMPT(graph, tickets, asked), builderProvider, "planning"), undefined, "planning");
+          await completeReply(await turn(RESPLIT_PROMPT(graph, tickets, asked), builderProvider, "frontier"), undefined, "frontier");
           continue;
         }
         if (current?.buildPlanIds !== ids) {
@@ -509,11 +510,15 @@ export async function workTask(taskId: string): Promise<void> {
       }
       try {
         await recoverImplementation(task.worktree, parallelDirectory);
-        const wave = await runImplementation({ cwd: task.worktree, directory: parallelDirectory, tasks: await readImplementationTasks(task.worktree), concurrency: job.parallelImplementation ?? job.maxParallel ?? 4, run: parallelRun, check: async () => {
-          const checked = await turn("The coordinator integrated parallel ticket commits. Read repository setup and each completed ticket. Run the relevant tests and typecheck together, fix any failures, and commit fixes. Do not push or move the ship stage. Return [parallel-check: pass] only after all required checks pass; include the commands and their results. If a real owner decision blocks verification, return [ask-user: ...].", builderProvider, "implementation", true, 15 * 60_000);
+        const wave = await runImplementation({ cwd: task.worktree, directory: parallelDirectory, tasks: await readImplementationTasks(task.worktree), onStart: async (ids) => { log(task, `wave started: ${ids.join(", ")}`); await say(slackMessage("update", `Building ${ids.length} tickets in parallel: ${ids.join(", ")}`)); await syncSubtaskStatus(); }, concurrency: job.parallelImplementation ?? job.maxParallel ?? 4, run: parallelRun, check: async () => {
+          const checked = await turn("The coordinator integrated parallel ticket commits. Read repository setup and each completed ticket. Run the relevant tests and typecheck together, fix any failures, and commit fixes. Do not push or move the ship stage. Return [parallel-check: pass] only after all required checks pass; include the commands and their results. If a real owner decision blocks verification, return [ask-user: ...].", builderProvider, "implementation", true, 45 * 60_000);
           if (!/\[parallel-check: pass\]/.test(checked) || parseAskUser(checked).length) throw new Error(checked || "Parallel implementation checks did not return passing proof");
         } });
         if (wave.completed.length) log(task, `integrated and checked ${wave.completed.join(", ")}`);
+        if (wave.failed?.length) {
+          log(task, `wave tickets to retry: ${wave.failed.map((f) => `${f.id} (${f.error})`).join("; ")}`);
+          parallelGuidance = `These parallel tickets stopped before finishing and go back to ready; their work so far is saved and the next wave resumes from it: ${wave.failed.map((f) => `${f.id}: ${f.error}`).join("; ")}. Do not rebuild them yourself unless one cannot run in parallel.`;
+        }
       } catch (e) {
         parallelGuidance = `Parallel implementation needs follow-up: ${(e as Error).message}. Read the journal and ticket status files. Repair integrated work and rerun checks; do not rebuild completed tickets. Relay owner questions before continuing.`;
         log(task, parallelGuidance);
@@ -524,7 +529,9 @@ export async function workTask(taskId: string): Promise<void> {
     const prompt = `${stagePrompt}\n\n${sharedResearch ? `## Shared research (verify changed code before relying on it)\n${sharedResearch}\n` : ""}${parallelGuidance}`;
     pendingUser = undefined;
     parallelGuidance = "";
-    const role = stageModelRole(feature.stage, idle);
+    // writing the build plan (no tickets yet) is the turn that decides how parallel the build can be: Fable or Astra
+    const writesPlan = ["Spec'd", "Implementing"].includes(feature.stage) && !feature.built && !(await readGraph(task.worktree).catch(() => [])).length;
+    const role = writesPlan ? "frontier" : stageModelRole(feature.stage, idle);
     turnTag = `t${n + 1} · `; activity(`${turnTag}starting`);
     const text = await turn(prompt, builderProvider, role);
     log(task, `turn ${n + 1} at ${feature.stage}: ${stripAskUser(stripShipMarkers(text)).slice(0, 300).replace(/\n/g, " ")}`);

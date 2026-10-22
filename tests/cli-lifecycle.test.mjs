@@ -32,7 +32,7 @@ function harness(opts = {}) {
     '../shared/headless.ts': headless, '../shared/seatPool.ts': seatPool, '../shared/ship.ts': ship,
     '../shared/cliModels.ts': cliModels, '../shared/cliTurnPolicy.ts': cliTurnPolicy,
       './capacity': { AccountUnavailableError: class extends Error {}, withAgentTurn: async (_, __, fn) => fn(), withEnvironmentSlot: async (_, fn) => fn() },
-      './parallel': { prepareResearchTasks: async () => [], recoverImplementation: async () => [], readImplementationTasks: async () => [], runImplementation: async o => opts.runImplementation?.(o) ?? ({ completed: [], commits: [] }), runResearch: async o => opts.runResearch?.(o) ?? ({ summary: 'No conflicting flows found', results: [], reused: false }) }, '../shared/usage.ts': usageMod,
+      './parallel': { prepareResearchTasks: async () => [], recoverImplementation: async () => [], readImplementationTasks: async () => [], runImplementation: async o => opts.runImplementation?.(o) ?? ({ completed: [], commits: [], failed: [] }), runResearch: async o => opts.runResearch?.(o) ?? ({ summary: 'No conflicting flows found', results: [], reused: false }) }, '../shared/usage.ts': usageMod,
     '../shared/shipPrompt.ts': { shipPrompt: o => opts.shipPrompt?.(o) ?? 'fix findings' },
     '../shared/review.ts': { parseReview: () => ({}), reviewSummary: () => opts.missingReport ? undefined : opts.summary ?? { total: 0 } },
     '../main/ship': { excludeConsortDir: async () => {}, fetchTicket: async () => ({}), writeTicketFile: () => '' },
@@ -67,7 +67,7 @@ function harness(opts = {}) {
   function load(code) {
     const mod = { exports: {} };
     new Function('require', 'module', 'exports', 'setTimeout', 'setInterval', 'clearInterval', 'Date', code)(name => mocks[name] ?? (name.startsWith('.') ? {} : require(name)), mod, mod.exports,
-      (fn, ms) => { if (ms === 15 * 60000) { deadline = fn; return 1; } clock += ms ?? 0; events.push('sleep'); opts.sleep?.(task, accounts); if (!opts.sleep) throw halt; fn(); },
+      (fn, ms) => { if (ms >= 15 * 60000) { deadline = fn; return 1; } clock += ms ?? 0; events.push('sleep'); opts.sleep?.(task, accounts); if (!opts.sleep) throw halt; fn(); },
       fn => { interval = fn; return 1; }, () => {}, Clock);
     return mod.exports;
   }
@@ -364,10 +364,12 @@ test('routine planning and implementation use configured Sol or Sonnet models', 
   await assert.rejects(h.work(), e => e === halt);
   assert.equal(seen[0].model, routine, 'environment setup is routine');
   assert.equal(seen[1].model, routine, 'grilling uses Sonnet by default');
-  assert.equal(seen[2].model, routine, "spec'd still plans");
-  assert.equal(seen[3].model, routine, 'implementing executes a settled plan');
+  // until the build tickets exist, the turn writes the build plan: that decides how parallel the build is, so Fable or Astra
+  const frontier = cliModels.selectCliModel('claude', headless.seedModels().claude, 'frontier');
+  assert.equal(seen[2].model, frontier, "spec'd writes the build plan on the frontier model");
+  assert.equal(seen[3].model, frontier, 'still no tickets: still planning on the frontier model');
   assert.notEqual(routine, cliModels.selectCliModel('claude', headless.seedModels().claude, 'frontier'));
-  assert.match(h.task.activity, new RegExp(`running claude ${routine}`));
+  assert.match(h.task.activity, new RegExp(`running claude ${frontier}`));
 });
 
 test('a CI repair on the watch uses the implementation model', async () => {
@@ -594,7 +596,7 @@ test('stage runtime schedules isolated readers and writers then passes shared re
     runImplementation: async o => {
       await Promise.all(['frontend', 'backend'].map(id => o.run({ id, cwd: `/write/${id}`, prompt: `Write ${id}`, kind: 'implementation' })));
       await o.check('/virtual');
-      return { completed: ['frontend', 'backend'], commits: ['a', 'b'] };
+      return { completed: ['frontend', 'backend'], commits: ['a', 'b'], failed: [] };
     },
     shipPrompt: o => { forms.push(o); return 'coordinate stage'; },
     turn: o => {
@@ -764,7 +766,7 @@ test('parallel tickets picking at the same moment spread across accounts with fr
   const accounts = [{ id: 'c1', provider: 'claude', name: 'One', maxActiveTurns: 1 }, { id: 'c2', provider: 'claude', name: 'Two', maxActiveTurns: 1 }];
   const h = harness({
     accounts, task: { feature: { stage: 'Implementing', prs: [], history: [] }, accountIds: {}, sessions: {} },
-    runImplementation: async o => { await Promise.all(['08', '13'].map(id => o.run({ id, cwd: `/child/${id}`, prompt: id, kind: 'implementation' }))); return { completed: [], commits: [] }; },
+    runImplementation: async o => { await Promise.all(['08', '13'].map(id => o.run({ id, cwd: `/child/${id}`, prompt: id, kind: 'implementation' }))); return { completed: [], commits: [], failed: [] }; },
     turn: async o => { if (o.cwd === '/virtual') throw halt; used.push(o.account.id); await new Promise(r => setImmediate(r)); return { text: 'done' }; },
   });
   await assert.rejects(h.work(), e => e === halt);

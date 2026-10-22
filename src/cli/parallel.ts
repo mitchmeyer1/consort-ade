@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile, rm, copyFile, readdir, cp, rename, lstat, realpath } from "node:fs/promises";
 import { basename, dirname, join, resolve, relative } from "node:path";
 import { promisify } from "node:util";
+import { stageSafely } from "./checkpoint.ts";
 
 const exec = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) => (await exec("git", args, { cwd, maxBuffer: 16 << 20 })).stdout;
@@ -69,7 +70,7 @@ const markerOf = (cwd: string) => `${cwd}.json`;
 export async function saveChild(cwd: string, push = true): Promise<boolean> {
   const c = live.get(cwd);
   if (!c || c.finished) return false;
-  await git(cwd, "add", "-A", "--", ".", ":!.consort");
+  await stageSafely((args, dir) => git(dir, ...args), cwd);
   if ((await git(cwd, "diff", "--cached", "--name-only")).trim()) await git(cwd, "-c", "core.hooksPath=/dev/null", "commit", "-m", `Consort WIP: ${c.ticket}`);
   const head = (await git(cwd, "rev-parse", "HEAD")).trim();
   if (head === c.base) return false;
@@ -227,10 +228,10 @@ export async function recoverImplementation(cwd: string, directory: string): Pro
   }
 }
 
-export async function runImplementation(o: ParallelOptions & { check: (cwd: string) => Promise<void> }): Promise<{ completed: string[]; commits: string[] }> {
+export async function runImplementation(o: ParallelOptions & { check: (cwd: string) => Promise<void>; onStart?: (ids: string[]) => Promise<void> }): Promise<{ completed: string[]; commits: string[]; failed: { id: string; error: string }[] }> {
   const recovered = await recoverImplementation(o.cwd, o.directory);
   const selected = implementationFrontier(o.tasks.filter((t) => !recovered.includes(t.id)), o.concurrency);
-  if (selected.length < 2) return { completed: [], commits: [] };
+  if (selected.length < 2) return { completed: [], commits: [], failed: [] };
   if ((await git(o.cwd, "status", "--porcelain", "--untracked-files=no")).trim()) throw new Error("Commit coordinator changes before parallel implementation");
   const head = (await git(o.cwd, "rev-parse", "HEAD")).trim();
   const integrated: string[] = [];
@@ -239,7 +240,10 @@ export async function runImplementation(o: ParallelOptions & { check: (cwd: stri
   await saveWave(o.directory, wave);
   try {
     for (const task of selected) await ticketStatus(o.cwd, task.id, "in-progress");
-    const prepared = await bounded(selected, cap(o.concurrency), async (task) => isolated(o, task, async (cwd, base) => {
+    await o.onStart?.(selected.map((t) => t.id)).catch(() => undefined);
+    // one ticket failing does not sink the wave: the others are integrated; the failed one keeps its saved work and goes back to ready
+    const failed: { id: string; error: string }[] = [];
+    const attempts = await bounded(selected, cap(o.concurrency), async (task) => isolated(o, task, async (cwd, base) => {
       const resumed = await resumeSaved(o.cwd, cwd, task);
       const timer = setInterval(() => { void saveChild(cwd).catch(() => false); }, WIP_SAVE_MS);
       let result;
@@ -248,7 +252,7 @@ export async function runImplementation(o: ParallelOptions & { check: (cwd: stri
       } finally { clearInterval(timer); }
       if (result.error || result.limit || /\[ask-user:/i.test(result.text)) throw new Error(`Implementation ${task.id}: ${result.error ?? (result.limit ? "account limit" : result.text)}`);
       // Include both agent commits and working changes in a single coordinator-owned commit.
-      await git(cwd, "add", "-A", "--", ".", ":!.consort");
+      await stageSafely((args, dir) => git(dir, ...args), cwd);
       const changed = (await git(cwd, "diff", "--cached", "--name-only", "--no-renames", "-z", base)).split("\0").filter(Boolean);
       if (!changed.length) throw new Error(`Implementation ${task.id} produced no changes`);
       if (changed.some((f) => !task.files.some((scope) => within(f, scope)))) throw new Error(`Implementation ${task.id} edited files outside its scope`);
@@ -261,7 +265,9 @@ export async function runImplementation(o: ParallelOptions & { check: (cwd: stri
       await git(cwd, "update-ref", wipRef(task.id), commit);
       live.get(cwd)!.finished = true;
       return { id: task.id, ref, commit };
-    }, true));
+    }, true).catch((e) => { failed.push({ id: task.id, error: String((e as Error).message ?? e).split("\n")[0].slice(0, 300) }); return undefined; }));
+    const prepared = attempts.filter((r): r is { id: string; ref: string; commit: string } => !!r);
+    if (!prepared.length) throw new Error(`No ticket in the wave finished: ${failed.map((f) => `${f.id}: ${f.error}`).join("; ")}`);
     if ((await git(o.cwd, "rev-parse", "HEAD")).trim() !== head || (await git(o.cwd, "status", "--porcelain", "--untracked-files=no")).trim()) throw new Error("Coordinator changed during parallel implementation; refusing integration");
     wave.tasks = prepared;
     await saveWave(o.directory, wave);
@@ -275,7 +281,7 @@ export async function runImplementation(o: ParallelOptions & { check: (cwd: stri
     }
     await o.check(o.cwd);
     wave.checked = true; await saveWave(o.directory, wave);
-    return { completed: prepared.map((r) => r.id), commits: prepared.map((r) => r.commit) };
+    return { completed: prepared.map((r) => r.id), commits: prepared.map((r) => r.commit), failed };
   } finally {
     for (const task of selected) if (!integrated.includes(task.id) && await currentStatus(o.cwd, task.id) === "in-progress") await ticketStatus(o.cwd, task.id, "ready-for-agent");
     for (const ref of refs) await git(o.cwd, "update-ref", "-d", ref);

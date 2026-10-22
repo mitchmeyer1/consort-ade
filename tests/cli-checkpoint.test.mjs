@@ -53,3 +53,15 @@ test('a failed push is reported, not thrown', async (t) => {
   const r = await checkpoint(work, 'feature', 'x');
   assert.equal(r.committed, true); assert.equal(r.pushed, false); assert.ok(r.error);
 });
+
+test('checkpoints work when .env is gitignored, and never stage a new secret file', async (t) => {
+  const { remote, work } = await repo(t);
+  await writeFile(join(work, '.gitignore'), '.env\n.consort\n');
+  await writeFile(join(work, '.env'), 'SECRET=1\n');
+  await writeFile(join(work, 'deploy.key'), 'KEY\n');
+  await mkdir(join(work, '.consort'), { recursive: true }); await writeFile(join(work, '.consort', 'x'), 'x');
+  await writeFile(join(work, 'a.txt'), 'two\n');
+  const r = await checkpoint(work, 'feature', 'with ignored files');
+  assert.deepEqual(r, { committed: true, pushed: true });
+  assert.deepEqual(git(remote, 'show', '--name-only', '--format=', 'feature').split('\n').sort(), ['.gitignore', 'a.txt']);
+});

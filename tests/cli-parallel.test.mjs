@@ -58,12 +58,16 @@ test('independent writers run concurrently, coordinator integrates then checks',
   assert.equal(git(o.cwd, 'worktree', 'list', '--porcelain').split('worktree ').length - 1, 1);
 });
 
-test('out-of-scope edits reject the batch before integration and cleanup all writers', async (t) => {
+test('an out-of-scope ticket is held back while the rest of the wave lands; all out of scope rejects; writers are cleaned up', async (t) => {
   const o = await repository(t); const head = git(o.cwd, 'rev-parse', 'HEAD'); let checked = false;
-  await assert.rejects(runImplementation({ ...o, tasks, run: async ({ cwd, id }) => {
+  const r = await runImplementation({ ...o, tasks, run: async ({ cwd, id }) => {
     await writeFile(join(cwd, id === 'a' ? 'forbidden.txt' : 'b.txt'), 'oops'); return { text: 'done' };
-  }, check: async () => { checked = true; } }), /outside its scope/);
-  assert.equal(git(o.cwd, 'rev-parse', 'HEAD'), head); assert.equal(checked, false);
+  }, check: async () => { checked = true; } });
+  assert.deepEqual(r.completed, ['b']); assert.match(r.failed[0].error, /outside its scope/); assert.equal(checked, true);
+  assert.ok(!git(o.cwd, 'ls-files').includes('forbidden.txt'));
+  const o2 = await repository(t); const head2 = git(o2.cwd, 'rev-parse', 'HEAD');
+  await assert.rejects(runImplementation({ ...o2, tasks, run: async ({ cwd, id }) => { await writeFile(join(cwd, `forbidden-${id}.txt`), 'oops'); return { text: 'done' }; }, check: async () => {} }), /outside its scope/);
+  assert.equal(git(o2.cwd, 'rev-parse', 'HEAD'), head2);
   assert.equal(git(o.cwd, 'worktree', 'list', '--porcelain').split('worktree ').length - 1, 1);
 });
 
@@ -129,11 +133,11 @@ test('CLI coordinator yields after breakdown and each serial ticket; desktop kee
   const cli = shipPrompt({ ...input, headless: true, runtimeParallel: true });
   assert.match(cli, /write all ticket files with Status: ready-for-agent/);
   assert.match(cli, /END THE TURN before implementation/);
-  assert.match(cli, /implement at most ONE serial ticket/);
+  assert.match(cli, /implement at most ONE ticket, and only one that cannot run in parallel/);
   assert.match(cli, /Files:\*\* explicit comma-separated/);
   const desktop = shipPrompt(input);
   assert.match(desktop, /Breakdown proposed: <n> tickets/);
-  assert.doesNotMatch(desktop, /implement at most ONE serial ticket/);
+  assert.doesNotMatch(desktop, /implement at most ONE ticket, and only one that cannot run in parallel/);
 });
 
 test('startup recovery detects a landed cherry-pick and resets unfinished writers to ready', async (t) => {
@@ -251,4 +255,30 @@ test('stopping saves every running child, and cleanup after a crash salvages ins
   await recoverImplementation(o.cwd, o.directory);
   assert.match(git(o.cwd, 'show', 'refs/consort/wip/c:c.txt'), /c unsaved/);
   assert.equal(git(o.cwd, 'worktree', 'list').split('\n').length, 1);
+});
+
+test('one ticket failing does not sink the wave: the others are integrated, the failed one goes back to ready', async (t) => {
+  const o = await repository(t);
+  const issues = join(o.cwd, '.consort', 'ship', 'issues'); await mkdir(issues, { recursive: true });
+  for (const id of ['a', 'b']) await writeFile(join(issues, `${id}.md`), `# ${id}\n**Status:** ready-for-agent\n`);
+  const run = async ({ cwd, id }) => { await writeFile(join(cwd, `${id}.txt`), `${id} new\n`); if (id === 'b') throw new Error('The agent exceeded 90 minutes on one turn'); return { text: 'ok' }; };
+  let started;
+  const r = await runImplementation({ ...o, tasks, run, check: async () => {}, onStart: async ids => { started = ids; } });
+  assert.deepEqual(started, ['a', 'b']);
+  assert.deepEqual(r.completed, ['a']);
+  assert.deepEqual(r.failed.map(f => f.id), ['b']);
+  assert.match(r.failed[0].error, /90 minutes/);
+  assert.equal(await readFile(join(o.cwd, 'a.txt'), 'utf8'), 'a new\n');
+  assert.match(await readFile(join(issues, 'a.md'), 'utf8'), /Status:\*\* done/);
+  assert.match(await readFile(join(issues, 'b.md'), 'utf8'), /Status:\*\* ready-for-agent/);
+  assert.match(git(o.cwd, 'show', 'refs/consort/wip/b:b.txt'), /b new/, 'the failed ticket keeps its work');
+});
+
+test('a child commits even when .consort and .env are gitignored', async (t) => {
+  const o = await repository(t);
+  await writeFile(join(o.cwd, '.gitignore'), '.consort\n.env\n'); git(o.cwd, 'add', '.gitignore'); git(o.cwd, 'commit', '-m', 'ignore');
+  const run = async ({ cwd, id }) => { await writeFile(join(cwd, `${id}.txt`), `${id} ok\n`); await writeFile(join(cwd, '.env'), 'SECRET=1\n'); return { text: 'ok' }; };
+  const r = await runImplementation({ ...o, tasks, run, check: async () => {} });
+  assert.deepEqual(r.completed.sort(), ['a', 'b']);
+  assert.ok(!git(o.cwd, 'log', '--name-only', '--format=', '-2').includes('.env'));
 });
