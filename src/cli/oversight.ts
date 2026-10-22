@@ -10,6 +10,8 @@ import { seedModels, taskStep } from "../shared/headless.ts";
 import { selectCliModel } from "../shared/cliModels.ts";
 import type { Provider } from "../shared/types.ts";
 import { runTurn as realRunTurn, type Turn, type TurnOptions } from "./agent";
+import { usageFor } from "./usage";
+import { modelLoad, type ConnectorUsage } from "../shared/usage.ts";
 import { LOG_DIR, type Account, type CliState, type Task } from "./state";
 
 export type OversightContext = {
@@ -37,10 +39,12 @@ export function oversightModel(provider: Provider, policy?: CliState["jobs"][num
   return provider === "claude" ? models.find((m) => /opus/.test(m)) ?? selectCliModel(provider, models, "implementation") : selectCliModel(provider, models, "implementation");
 }
 
-/** usable accounts, Claude first, least recently used first */
-export const oversightAccounts = (accounts: Account[], now = Date.now()) =>
-  accounts.filter((a) => !a.blockedUntil || a.blockedUntil <= now)
-    .sort((a, b) => (a.provider === b.provider ? 0 : a.provider === "claude" ? -1 : 1) || (a.lastUsedAt ?? 0) - (b.lastUsedAt ?? 0));
+/** usable accounts, Claude first; within a provider the least used for the oversight model first, then least recently used */
+export const oversightAccounts = (accounts: Account[], now = Date.now(), usage = new Map<string, ConnectorUsage>(), policy?: CliState["jobs"][number]["modelPolicy"]) => {
+  const load = (a: Account) => modelLoad(usage.get(a.id), oversightModel(a.provider, policy)) ?? 1_000;
+  return accounts.filter((a) => !a.blockedUntil || a.blockedUntil <= now)
+    .sort((a, b) => (a.provider === b.provider ? 0 : a.provider === "claude" ? -1 : 1) || load(a) - load(b) || (a.lastUsedAt ?? 0) - (b.lastUsedAt ?? 0));
+};
 
 export function workerLogTail(taskId: string, bytes = LOG_TAIL_BYTES): string | undefined {
   try {
@@ -107,10 +111,12 @@ export function parseOversight(text: string): { answer: string; update?: string 
 }
 
 /** Run the oversight agent on the first usable account; a limit or failure moves to the next. */
-export async function answerOwner(c: OversightContext, runTurn: (o: TurnOptions) => Promise<Turn> = realRunTurn): Promise<OversightAnswer> {
+export async function answerOwner(c: OversightContext, runTurn: (o: TurnOptions) => Promise<Turn> = realRunTurn, getUsage: (accounts: Account[]) => Promise<Map<string, ConnectorUsage>> = (a) => usageFor(a)): Promise<OversightAnswer> {
   const job = c.state.jobs.find((j) => j.id === c.task.jobId);
   const errors: string[] = [];
-  for (const account of oversightAccounts(c.state.accounts, c.now)) {
+  const usable = c.state.accounts.filter((a) => !a.blockedUntil || a.blockedUntil <= (c.now ?? Date.now()));
+  const usage = await getUsage(usable).catch(() => new Map<string, ConnectorUsage>());
+  for (const account of oversightAccounts(c.state.accounts, c.now, usage, job?.modelPolicy)) {
     const model = oversightModel(account.provider, job?.modelPolicy);
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);

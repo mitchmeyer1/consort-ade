@@ -195,3 +195,24 @@ export function usageBlock(usage: ConnectorUsage, now: number): { until: number;
   const resets = full.map((w) => w.resetsAt).filter((t): t is number => !!t && t > now);
   return { until: resets.length ? Math.max(...resets) : now + 60 * 60_000, reason: usage.blocked ?? `${full.map((w) => w.label).join(" and ")} usage exhausted` };
 }
+
+/**
+ * How used up this account is for one model, 0–100: the fullest of the plan-wide windows and the
+ * windows that meter that model's family (Fable for a frontier call, Opus for an Opus call). An
+ * account with no meters (an API key, a failed probe) has no load to compare.
+ */
+export function modelLoad(usage: ConnectorUsage | undefined, model: string): number | undefined {
+  if (!usage || usage.unavailable || !usage.windows.length) return undefined;
+  const relevant = usage.windows.filter((w) => !w.model || meters(model, w.model));
+  return relevant.length ? Math.max(...relevant.map((w) => (w.locked ? 100 : w.percent))) : undefined;
+}
+
+/**
+ * The least-used account for this model, by code, not by asking a model: lowest load first, then
+ * metered accounts before unmetered ones, then the one used longest ago. Accounts whose own model
+ * window is spent are skipped.
+ */
+export function leastLoaded<A extends { id: string; lastUsedAt?: number }>(accounts: A[], model: string, usage: Map<string, ConnectorUsage>): A | undefined {
+  const scored = accounts.filter((a) => !modelBlock(usage.get(a.id), model)).map((a) => ({ a, load: modelLoad(usage.get(a.id), model) }));
+  return scored.sort((x, y) => (x.load ?? 1_000) - (y.load ?? 1_000) || (x.a.lastUsedAt ?? 0) - (y.a.lastUsedAt ?? 0))[0]?.a;
+}

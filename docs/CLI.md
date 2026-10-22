@@ -140,6 +140,10 @@ Slack headings use a local formatter, so naming a task consumes no model call. E
 - `Ready to merge. Approved, no open threads, CI green: <PR>` — done.
 - `❌ Stuck at <stage>` / `❌ Evidence blocked. PR not handed off` — the stop report. Every stop (a turn past its time limit, three turns without progress, a failed evidence check, a crash, a broken PR watch) posts the same shape: one line on what went wrong, the reasons as bullets, the agent's last lines (`Last seen`, `Before that`), what was already retried, the raw error in a code block, and one line on how to reply. Reply in the thread; the task stays open. `consort-cli tasks logs <task>` has the full log.
 
+### Spreading work across accounts
+
+Each new agent (a fresh session, a review, a parallel worker, the oversight agent) goes to the account with the least usage for its model. Code reads each account's plan meters and decides; no AI is involved. A frontier call (Fable, Astra) compares the plan-wide windows plus that model's own window. Other calls (Opus, Sonnet, Sol) compare the plan-wide windows plus their model's window if the plan has one. Accounts whose model window is spent are skipped; ties go to the account used longest ago. A turn that resumes a session stays on that session's account. Usage is cached in `~/.consort-cli/usage-cache.json` for 2 minutes, shared by the view, the daemon and the workers. The worker log shows each choice, for example `claude-sonnet-5 on Idle; claude use for this model: Busy 85%, Idle 12%`.
+
 ### Build progress
 
 The spec step splits the build into tickets under `.consort/ship/issues/`, each with a `Status:` line. While a task is building, `consort-cli view` and the Slack status line show how many are done, for example `Build 8/18`. Each task in `consort-cli view` takes three lines: the table row, what the worker is doing now at full width, and a blank line.

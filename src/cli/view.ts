@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { ago, costCell, FINISHED, parseShortstat, taskHealth, taskStep, scanCountdown, usageBars, usageBarText, visibleTasks } from "../shared/headless.ts";
 import { usageBlock, type ConnectorUsage } from "../shared/usage.ts";
 import { recentStatusEvents } from "./statusLog";
-import { readAllUsage } from "./usage";
+import { readAllUsage, saveUsage } from "./usage";
 import { alive, daemonPid } from "./daemonctl";
 import { resetLabel } from "../shared/seatPool.ts";
 import { loadState, LOG_DIR, type Task } from "./state";
@@ -144,7 +144,7 @@ export async function viewLoop(intervalMs = 1_000, usageEveryMs = 60_000): Promi
   let usage: Map<string, ConnectorUsage> | undefined = new Map();
   const draw = () => { out.write(`\x1b[2J\x1b[H${renderView(Date.now(), undefined, usage)}\n`); };
   let reading = false;
-  const readUsage = async () => { if (reading) return; reading = true; try { usage = await readAllUsage(loadState().accounts); } finally { reading = false; } draw(); };
+  const readUsage = async () => { if (reading) return; reading = true; try { usage = await readAllUsage(loadState().accounts); saveUsage(usage); } finally { reading = false; } draw(); };
   draw();
   void readUsage();
   const timer = setInterval(draw, intervalMs);

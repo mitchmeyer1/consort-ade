@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { applyShipChange, newShipFeature, parseShipMarkers, prNumberFromUrl, shipBranch, shipFolder, shipSlug, stripShipMarkers, type ShipFeature, type ShipTicket } from "../shared/ship.ts";
 import { shipPrompt } from "../shared/shipPrompt.ts";
-import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUsd, DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, VERIFY_EVIDENCE_PROMPT, parseAskUser, parseReviewerReply, observeReviewBatch, pickTurnAccount, prReadiness, ProblemError, problemOf, REBOOT_PROMPT, RESPOND_TO_REVIEW, REVIEW_QUIET_MS, cliReviewRotation, reviewersWithoutApproval, reviewWaitMessage, seedModels, slackLines, slackMessage, slackStatus, stripAskUser, type Problem } from "../shared/headless.ts";
+import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUsd, DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, VERIFY_EVIDENCE_PROMPT, parseAskUser, parseReviewerReply, observeReviewBatch, pickAccount, prReadiness, ProblemError, problemOf, REBOOT_PROMPT, RESPOND_TO_REVIEW, REVIEW_QUIET_MS, cliReviewRotation, reviewersWithoutApproval, reviewWaitMessage, seedModels, slackLines, slackMessage, slackStatus, stripAskUser, type Problem } from "../shared/headless.ts";
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { selectCliModel, type CliModelRole } from "../shared/cliModels.ts";
@@ -19,9 +19,9 @@ import { readPr, requestReviewers, reviewerSuggestions, validateReviewers, whoAm
 import { findBrowser, publishEvidence, validateEvidence, writeScreenshotHelper } from "./evidence";
 import { allocateEnvironment, cleanupEnvironment, withChildEnvironment } from "./environment";
 import { flushTaskNotifications, notifyTask } from "./lifecycle";
-import { readUsage } from "./usage";
+import { readUsage, saveUsage, usageFor } from "./usage";
 import type { TaskEnv } from "../shared/headless.ts";
-import { usageBlock } from "../shared/usage.ts";
+import { leastLoaded, modelLoad, usageBlock } from "../shared/usage.ts";
 import { statusEvent } from "./statusLog";
 import { Slack } from "./slack";
 import { ensureSlackIdentity } from "./slackIdentity";
@@ -168,7 +168,19 @@ export async function workTask(taskId: string): Promise<void> {
     for (let attempt = 0; attempt < 12;) {
       const live = loadState();
       const cur = live.tasks.find((t) => t.id === taskId)!;
-      const who = pickTurnAccount(fixedModel ? live.accounts.filter(a => a.provider === provider) : live.accounts, provider, Date.now(), cur.accountIds);
+      // a turn that resumes a session stays on that session's account; any new agent goes to the least-used account for its model
+      const canResume = resume && managesSession && !!cur.sessions[provider] && !!cur.accountIds[provider];
+      const pickFor = async (p: Provider, m: string) => {
+        const usable = live.accounts.filter((a) => a.provider === p && !(a.blockedUntil && a.blockedUntil > Date.now()));
+        const sticky = canResume && p === provider ? usable.find((a) => a.id === cur.accountIds[p]) : undefined;
+        if (sticky || usable.length <= 1) return sticky ?? usable[0];
+        const usage = await usageFor(usable);
+        const pick = leastLoaded(usable, m, usage) ?? pickAccount(usable, p, Date.now());
+        log(task, `${m} on ${pick?.name ?? "none"}; ${p} use for this model: ${usable.map((a) => `${a.name} ${modelLoad(usage.get(a.id), m) ?? "?"}%`).join(", ")}`);
+        return pick;
+      };
+      const other: Provider = provider === "claude" ? "codex" : "claude";
+      const who = await pickFor(provider, model) ?? (fixedModel ? undefined : await pickFor(other, modelFor(other, role)));
       if (!who) {
         const resets = (fixedModel ? [provider] : ["claude", "codex"] as const).map((p) => earliestUnblock(live.accounts, p, Date.now())).filter((t): t is number => t !== undefined);
         const until = resets.length ? Math.min(...resets) : Date.now() + DEFAULT_BLOCK_MS;
@@ -178,7 +190,7 @@ export async function workTask(taskId: string): Promise<void> {
         await new Promise((r) => setTimeout(r, Math.min(30_000, Math.max(1_000, until - Date.now()))));
         continue;
       }
-      const usage = await readUsage(who);
+      const usage = (await usageFor([who], 60_000)).get(who.id)!;
       const blocked = usageBlock(usage, Date.now());
       if (blocked) { blockAccount(who.id, blocked.until, blocked.reason); continue; }
       await notifyTask(taskId, "running", `Continuing on ${who.provider} (${who.name}).`);
@@ -205,7 +217,9 @@ export async function workTask(taskId: string): Promise<void> {
         checking = true;
         try {
           await flushTaskNotifications(taskId);
-          const block = usageBlock(await readUsage(who), Date.now());
+          const latest = await readUsage(who);
+          saveUsage(new Map([[who.id, latest]]));
+          const block = usageBlock(latest, Date.now());
           if (!active) return;
           usageLimit = block;
           if (usageLimit) { blockAccount(who.id, usageLimit.until, usageLimit.reason); abort.abort(); }

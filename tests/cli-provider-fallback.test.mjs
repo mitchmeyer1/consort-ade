@@ -32,7 +32,7 @@ for (const blockedAtStart of [true, false]) {
       '../main/ship': { excludeConsortDir: async () => {}, fetchTicket: async () => ({}), writeTicketFile: () => '' },
       './slackIdentity': { ensureSlackIdentity: async () => {} },
       './lifecycle': { notifyTask: async () => {} },
-      './usage': { readUsage: async () => ({ at: Date.now(), windows: [] }) },
+      './usage': { readUsage: async () => ({ at: Date.now(), windows: [] }), saveUsage() {}, usageFor: async list => new Map(list.map(a => [a.id, { at: Date.now(), windows: [] }])) },
       '../shared/usage.ts': { usageBlock: () => undefined },
       './sources': { sourceFor: () => ({}) },
       './environment': { allocateEnvironment: async () => ({}) },

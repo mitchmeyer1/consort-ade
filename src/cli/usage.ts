@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { claudeUsageFrom, codexUsageFrom, type ConnectorUsage } from "../shared/usage.ts";
 import { binaryFor, envFor } from "./agent";
@@ -65,3 +65,29 @@ export async function readUsage(account: Account): Promise<ConnectorUsage> {
 
 /** every account's usage, probed in parallel; the view calls this once a minute */
 export const readAllUsage = async (accounts: Account[]): Promise<Map<string, ConnectorUsage>> => new Map((await Promise.all(accounts.map(async (a) => [a.id, await readUsage(a)] as const))));
+
+/**
+ * Usage shared across processes: the view, the daemon and every worker read and refresh one cache
+ * file, so picking the least-used account does not re-probe every account for every agent turn.
+ */
+const CACHE = () => join(HOME, "usage-cache.json");
+function loadCache(): Record<string, ConnectorUsage> {
+  try { return JSON.parse(readFileSync(CACHE(), "utf8")); } catch { return {}; }
+}
+export function saveUsage(fresh: Map<string, ConnectorUsage>): void {
+  try {
+    const all = { ...loadCache(), ...Object.fromEntries(fresh) };
+    const tmp = `${CACHE()}.${process.pid}.tmp`;
+    mkdirSync(HOME, { recursive: true });
+    writeFileSync(tmp, JSON.stringify(all));
+    renameSync(tmp, CACHE());
+  } catch {}
+}
+/** each account's usage, from the cache when younger than `maxAgeMs`, else probed now (in parallel) */
+export async function usageFor(accounts: Account[], maxAgeMs = 2 * 60_000, now = Date.now(), probe: (a: Account) => Promise<ConnectorUsage> = readUsage): Promise<Map<string, ConnectorUsage>> {
+  const cache = loadCache();
+  const stale = accounts.filter((a) => !cache[a.id] || now - cache[a.id].at > maxAgeMs);
+  const fresh = new Map(await Promise.all(stale.map(async (a) => [a.id, await probe(a)] as const)));
+  if (fresh.size) saveUsage(fresh);
+  return new Map(accounts.map((a) => [a.id, fresh.get(a.id) ?? cache[a.id]] as const));
+}

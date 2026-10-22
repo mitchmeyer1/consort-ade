@@ -9,6 +9,7 @@ import * as ship from '../src/shared/ship.ts';
 import * as cliModels from '../src/shared/cliModels.ts';
 import * as cliTurnPolicy from '../src/shared/cliTurnPolicy.ts';
 import { usageBlock } from '../src/shared/usage.ts';
+import * as usageMod from '../src/shared/usage.ts';
 import * as ownerUpdates from '../src/cli/ownerUpdates.ts';
 
 const require = createRequire(import.meta.url);
@@ -31,7 +32,7 @@ function harness(opts = {}) {
     '../shared/headless.ts': headless, '../shared/seatPool.ts': seatPool, '../shared/ship.ts': ship,
     '../shared/cliModels.ts': cliModels, '../shared/cliTurnPolicy.ts': cliTurnPolicy,
       './capacity': { AccountUnavailableError: class extends Error {}, withAgentTurn: async (_, __, fn) => fn(), withEnvironmentSlot: async (_, fn) => fn() },
-      './parallel': { prepareResearchTasks: async () => [], recoverImplementation: async () => [], readImplementationTasks: async () => [], runImplementation: async o => opts.runImplementation?.(o) ?? ({ completed: [], commits: [] }), runResearch: async o => opts.runResearch?.(o) ?? ({ summary: 'No conflicting flows found', results: [], reused: false }) }, '../shared/usage.ts': { usageBlock },
+      './parallel': { prepareResearchTasks: async () => [], recoverImplementation: async () => [], readImplementationTasks: async () => [], runImplementation: async o => opts.runImplementation?.(o) ?? ({ completed: [], commits: [] }), runResearch: async o => opts.runResearch?.(o) ?? ({ summary: 'No conflicting flows found', results: [], reused: false }) }, '../shared/usage.ts': usageMod,
     '../shared/shipPrompt.ts': { shipPrompt: o => opts.shipPrompt?.(o) ?? 'fix findings' },
     '../shared/review.ts': { parseReview: () => ({}), reviewSummary: () => opts.missingReport ? undefined : opts.summary ?? { total: 0 } },
     '../main/ship': { excludeConsortDir: async () => {}, fetchTicket: async () => ({}), writeTicketFile: () => '' },
@@ -48,7 +49,7 @@ function harness(opts = {}) {
     './evidence': { findBrowser: async () => '/browser', writeScreenshotHelper: () => '/helper', validateEvidence: () => { events.push('validate evidence'); return opts.validateEvidence?.(); }, publishEvidence: async () => { events.push('publish evidence'); return opts.publishEvidence?.() ?? { items: 1, images: 1, prComment: true, ticketComment: true }; } },
     './environment': { withChildEnvironment: async (_, id, fn) => fn({ CONSORT_RUN: `child-${id}` }), allocateEnvironment: async () => ({}), cleanupEnvironment: async () => ({}) },
     './slack': { Slack: class { async post(text, thread, broadcast) { if (opts.failPost?.(text)) throw new Error('Slack unavailable'); messages.push({ text, thread, broadcast }); return String(messages.length); } async waitForReply(thread, ts, options) { options?.onCheck?.('answer'); events.push('owner reply'); opts.onReply?.(task); return opts.reply ?? 'Proceed'; } } },
-    './usage': { readUsage: async a => opts.usage?.(a) ?? ({ at: Date.now(), windows: [] }) },
+    './usage': (() => { const read = async a => opts.usage?.(a) ?? ({ at: Date.now(), windows: [] }); return { readUsage: read, saveUsage() {}, usageFor: async list => new Map(await Promise.all(list.map(async a => [a.id, await read(a)]))) }; })(),
     './agent': { packageRoot: () => '/package', stopAgents: () => events.push('abort agent'), runTurn: async o => { events.push(`turn:${o.account.provider}`); return opts.turn?.(o, task, interval, deadline) ?? { text: o.prompt.includes(headless.VERIFY_EVIDENCE_PROMPT) ? '[evidence-approved]' : '' }; } },
     './prmonitor': {
       validateReviewers: async (_, names) => names.filter(n => ['ada','bob'].includes(n)),
@@ -708,4 +709,18 @@ test('a queued Slack update revises the ticket, attaches its files, and reports 
   assert.match(applied.text, /Added CSV export to ticket and code[\s\S]*Ticket description updated[\s\S]*Attached to the ticket: spec\.pdf/);
   assert.deepEqual(h.task.ownerUpdates, []);
   assert.equal(h.task.status, 'ready');
+});
+
+test('a new agent goes to the least-used account; a resumed session stays on its account', async () => {
+  const accounts = [{ id: 'busy', provider: 'claude', name: 'Busy' }, { id: 'idle', provider: 'claude', name: 'Idle' }];
+  const load = { busy: 85, idle: 12 };
+  const usage = a => ({ keyId: a.id, at: Date.now(), windows: [{ id: 'wk', label: 'Weekly', percent: load[a.id] }] });
+  const fresh = [];
+  const h = harness({ accounts, usage, task: { feature: { stage: 'Implementing', prs: [], history: [] }, accountIds: {}, sessions: {} }, turn: o => { fresh.push(o.account.id); throw halt; } });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.deepEqual(fresh, ['idle']);
+  const resumed = [];
+  const r = harness({ accounts, usage, task: { feature: { stage: 'Implementing', prs: [], history: [] }, accountIds: { claude: 'busy' }, sessions: { claude: 'live-session' } }, turn: o => { resumed.push([o.account.id, o.resume]); throw halt; } });
+  await assert.rejects(r.work(), e => e === halt);
+  assert.deepEqual(resumed, [['busy', 'live-session']]);
 });
