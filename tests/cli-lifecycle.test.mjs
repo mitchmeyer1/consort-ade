@@ -543,7 +543,7 @@ test('a requested model escalation reruns the job on frontier without resuming t
   assert.equal(h.task.turnHistory[1].escalationReason, 'Security permission inheritance is uncertain');
 });
 
-test('two ordinary model SDK errors escalate once rather than retrying indefinitely', async () => {
+test('two ordinary model SDK errors escalate once rather than retrying indefinitely; the retry moves to another account', async () => {
   const models = [];
   const h = harness({ task: { envReadyAt: undefined }, sleep() {}, turn: o => {
     models.push(o.model);
@@ -551,7 +551,8 @@ test('two ordinary model SDK errors escalate once rather than retrying indefinit
     throw halt;
   } });
   await assert.rejects(h.work(), e => e === halt);
-  assert.deepEqual(models, ['claude-sonnet-5', 'claude-sonnet-5', 'claude-fable-5-1']);
+  // the second attempt goes to the account that has not failed (Codex here), then the escalation to the frontier model
+  assert.deepEqual(models, ['claude-sonnet-5', 'gpt-5.6-sol', 'claude-fable-5-1']);
   assert.equal(h.task.turnHistory.length, 2);
   assert.ok(h.task.turnHistory.every(turn => turn.error === 'SDK transport failure'));
 });
@@ -637,7 +638,7 @@ test('an Astra review question continues on Astra without resuming the builder s
   assert.equal(h.task.reviewsDone, 2);
 });
 
-test('separate parallel readers each retry one SDK error without blocking their shared account', async () => {
+test('separate parallel readers each retry one SDK error on another account without blocking the first', async () => {
   const calls = [], attempts = new Map();
   const h = harness({ task: { feature: { stage: 'Grilling', prs: [], history: [] } }, sleep() {},
     runResearch: async o => {
@@ -654,7 +655,9 @@ test('separate parallel readers each retry one SDK error without blocking their 
   });
   await assert.rejects(h.work(), e => e === halt);
   assert.equal(calls.length, 4);
-  assert.ok(calls.every(o => o.account.provider === 'claude' && o.model === 'claude-haiku-4-5-20251001'));
+  const byReader = id => calls.filter(o => o.cwd === `/read/${id}`).map(o => o.account.id);
+  for (const id of ['flows', 'tests']) { const [first, retry] = byReader(id); assert.notEqual(first, retry, 'the retry uses a different account'); }
+  assert.ok(calls.filter(o => o.account.provider === 'codex').every(o => o.model === 'gpt-5.6-luna'), 'Codex readers use its reader model');
   assert.equal(h.accounts.find(a => a.provider === 'claude').blockedUntil, undefined);
   assert.deepEqual([...attempts.values()], [2, 2]);
 });
@@ -795,4 +798,22 @@ test('subtasks are saved for the agent, linking is tried at most twice, and subt
   assert.equal(h.task.subtaskLinkTries, 2);
   assert.ok(h.events.includes('subtask sync'), 'synced after the build step');
   assert.deepEqual(h.task.subtaskSync, { synced: 'progress' });
+});
+
+test('a frontier turn picks Codex when the Claude account is nearly out of Fable, and a network error moves on instead of asking the owner', async () => {
+  const seen = [];
+  const accounts = [{ id: 'c', provider: 'claude', name: 'Claude' }, { id: 'x', provider: 'codex', name: 'Codex' }];
+  const usage = a => a.provider === 'claude'
+    ? { keyId: a.id, at: Date.now(), windows: [{ id: '5h', label: '5h', percent: 16 }, { id: 'model:Fable', label: 'Fable', percent: 96, model: 'Fable' }] }
+    : { keyId: a.id, at: Date.now(), windows: [{ id: '5h', label: '5h', percent: 0 }, { id: 'wk', label: 'wk', percent: 31 }] };
+  const h = harness({ accounts, usage, sleep() {}, task: { feature: { stage: 'Implementing', prs: [], history: [] }, accountIds: {}, sessions: {} },
+    turn: o => {
+      seen.push(`${o.account.id}:${o.model}`);
+      if (seen.length === 1) return { text: '', error: "API Error: Can't reach the API server (ENOTFOUND)" };
+      throw halt;
+    } });
+  await assert.rejects(h.work(), e => e === halt);
+  // no tickets yet: the plan turn is frontier work, which goes to Codex (Astra) first; the network error moves it to Claude
+  assert.deepEqual(seen, ['x:gpt-6-astra', 'c:claude-fable-5-1']);
+  assert.ok(!h.events.includes('owner reply'));
 });

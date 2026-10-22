@@ -39,11 +39,11 @@ export function oversightModel(provider: Provider, policy?: CliState["jobs"][num
   return provider === "claude" ? models.find((m) => /opus/.test(m)) ?? selectCliModel(provider, models, "implementation") : selectCliModel(provider, models, "implementation");
 }
 
-/** usable accounts, Claude first; within a provider the least used for the oversight model first, then least recently used */
+/** usable accounts, least used for the oversight model first on either provider (Claude breaks ties), then least recently used */
 export const oversightAccounts = (accounts: Account[], now = Date.now(), usage = new Map<string, ConnectorUsage>(), policy?: CliState["jobs"][number]["modelPolicy"]) => {
   const load = (a: Account) => modelLoad(usage.get(a.id), oversightModel(a.provider, policy)) ?? 1_000;
   return accounts.filter((a) => !a.blockedUntil || a.blockedUntil <= now)
-    .sort((a, b) => (a.provider === b.provider ? 0 : a.provider === "claude" ? -1 : 1) || load(a) - load(b) || (a.lastUsedAt ?? 0) - (b.lastUsedAt ?? 0));
+    .sort((a, b) => load(a) - load(b) || (a.provider === b.provider ? 0 : a.provider === "claude" ? -1 : 1) || (a.lastUsedAt ?? 0) - (b.lastUsedAt ?? 0));
 };
 
 export function workerLogTail(taskId: string, bytes = LOG_TAIL_BYTES): string | undefined {

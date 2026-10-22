@@ -27,7 +27,7 @@ import type { Subtask } from "./sources";
 import { draftBody, draftTitle, ensureDraftPr, updateDraftBody } from "./draftPr";
 import { stepLabel } from "./buildProgress";
 import type { TaskEnv } from "../shared/headless.ts";
-import { leastLoaded, modelLoad, usageBlock } from "../shared/usage.ts";
+import { modelBlock, modelLoad, usageBlock } from "../shared/usage.ts";
 import { statusEvent } from "./statusLog";
 import { Slack } from "./slack";
 import { ensureSlackIdentity } from "./slackIdentity";
@@ -171,6 +171,8 @@ export async function workTask(taskId: string): Promise<void> {
   let idle = 0;
   const turn = async (prompt: string | ((provider: Provider) => string), provider: Provider = builderProvider, role: CliModelRole = "planning", resume = true, timeoutMs?: number, cwd = task.worktree, fixedModel?: string, turnEnv: TaskEnv = env): Promise<string> => {
     const crashes = new Map<string, number>(); // failures in unrelated parallel jobs never combine
+    // accounts that errored on this turn: the next attempt goes to a different account, on either provider
+    const tried = new Set<string>();
     let lastCrash: string | undefined;
     let failedTurns = 0;
     let model = fixedModel ?? modelFor(provider, role);
@@ -192,23 +194,29 @@ export async function workTask(taskId: string): Promise<void> {
       const cur = live.tasks.find((t) => t.id === taskId)!;
       // a turn that resumes a session stays on that session's account; any new agent goes to the least-used account for its model
       const canResume = resume && managesSession && !!cur.sessions[provider] && !!cur.accountIds[provider];
-      const pickFor = async (p: Provider, m: string) => {
-        const usable = live.accounts.filter((a) => a.provider === p && !(a.blockedUntil && a.blockedUntil > Date.now()));
-        // the pick is counted the moment it is made (released when the turn ends), so tickets picking at once spread out
-        const reserve = (a: Account | undefined) => { if (a) mine.set(a.id, (mine.get(a.id) ?? 0) + 1); return a; };
-        const sticky = canResume && p === provider ? usable.find((a) => a.id === cur.accountIds[p]) : undefined;
+      // Claude and Codex are interchangeable: a new agent goes to whichever account, on either provider, has the most room
+      // for this kind of turn (Fable vs Astra for frontier work, Sonnet/Opus vs Sol otherwise)
+      const reserve = (a: Account | undefined) => { if (a) mine.set(a.id, (mine.get(a.id) ?? 0) + 1); return a; };
+      const pickAny = async (): Promise<Account | undefined> => {
+        const now = Date.now();
+        const providers: Provider[] = fixedModel ? [provider] : ["claude", "codex"];
+        const open = live.accounts.filter((a) => providers.includes(a.provider) && !(a.blockedUntil && a.blockedUntil > now));
+        // every account already failed once this turn: start over rather than report a usage limit that is not there
+        if (open.length && open.every((a) => tried.has(a.id))) tried.clear();
+        const usable = open.filter((a) => !tried.has(a.id));
+        const sticky = canResume ? usable.find((a) => a.provider === provider && a.id === cur.accountIds[provider]) : undefined;
         if (sticky || usable.length <= 1) return reserve(sticky ?? usable[0]);
         const usage = await usageFor(usable);
+        const modelOn = (a: Account) => (fixedModel && a.provider === provider ? fixedModel : modelFor(a.provider, role));
         // accounts already running as many turns as they allow would only queue; parallel tickets spread to the free ones
         const running = (id: string) => (mine.get(id) ?? 0) + loadState().tasks.flatMap((t) => t.activeTurns ?? []).filter((a) => a.accountId === id && a.pid !== process.pid && processAlive(a.pid)).reduce((n, a) => n + (a.units ?? 1), 0);
-        const free = usable.filter((a) => running(a.id) < (a.maxActiveTurns ?? 2));
-        const pick = leastLoaded(free.length ? free : usable, m, usage) ?? pickAccount(usable, p, Date.now());
+        const scored = usable.filter((a) => !modelBlock(usage.get(a.id), modelOn(a))).map((a) => ({ a, full: running(a.id) >= (a.maxActiveTurns ?? 2) ? 1 : 0, load: modelLoad(usage.get(a.id), modelOn(a)) ?? 1_000 }));
+        const pick = scored.sort((x, y) => x.full - y.full || x.load - y.load || (x.a.lastUsedAt ?? 0) - (y.a.lastUsedAt ?? 0))[0]?.a ?? pickAccount(usable, provider, now);
         reserve(pick);
-        log(task, `${m} on ${pick?.name ?? "none"}; ${p} use for this model: ${usable.map((a) => `${a.name} ${modelLoad(usage.get(a.id), m) ?? "?"}%`).join(", ")}`);
+        log(task, `${role} turn on ${pick ? `${pick.name} (${modelOn(pick)})` : "none"}; use for this turn: ${scored.map((x) => `${x.a.name} ${modelOn(x.a)} ${x.load === 1_000 ? "?" : x.load}%`).join(", ")}`);
         return pick;
       };
-      const other: Provider = provider === "claude" ? "codex" : "claude";
-      const who = await pickFor(provider, model) ?? (fixedModel ? undefined : await pickFor(other, modelFor(other, role)));
+      const who = await pickAny();
       if (!who) {
         const resets = (fixedModel ? [provider] : ["claude", "codex"] as const).map((p) => earliestUnblock(live.accounts, p, Date.now())).filter((t): t is number => t !== undefined);
         const until = resets.length ? Math.min(...resets) : Date.now() + DEFAULT_BLOCK_MS;
@@ -225,7 +233,7 @@ export async function workTask(taskId: string): Promise<void> {
       updateTask(taskId, { status: "working", note: undefined });
       attempt++;
       if (who.provider !== provider) {
-        log(task, `No usable ${provider} account; continuing ${role} on ${who.provider} (${who.name})`);
+        log(task, `continuing ${role} on ${who.provider} (${who.name}): it has the most room`);
         provider = who.provider;
         model = modelFor(provider, role);
       }
@@ -285,10 +293,23 @@ export async function workTask(taskId: string): Promise<void> {
       }
       if (res.sessionId && managesSession) updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: res.sessionId } }));
       if (res.error) {
+        tried.add(who.id);
+        if (managesSession) updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: undefined } }));
+        const untried = live.accounts.some((a) => (fixedModel ? a.provider === provider : true) && !tried.has(a.id) && !(a.blockedUntil && a.blockedUntil > Date.now()));
+        // a network error says nothing about the model: try another account now; when every one has failed, wait and start over
+        if (/ENOTFOUND|EAI_AGAIN|ECONNRESET|ETIMEDOUT|ECONNREFUSED|socket hang up|Can't reach the API|network error|fetch failed/i.test(res.error)) {
+          lastCrash = `${who.name} (${provider} ${model}): ${res.error}`;
+          failedTurns++;
+          log(task, `${who.name} could not reach its API (${res.error.slice(0, 80)}); ${untried ? "trying another account" : "every account failed; retrying in 60s"}`);
+          if (!untried) { tried.clear(); activity("AI APIs unreachable; retrying in 60s"); await new Promise((r) => setTimeout(r, 60_000)); }
+          continue;
+        }
         roleFailures++;
         if (roleFailures >= (job.maxModelAttempts ?? 2)) {
           if (role !== "frontier") { escalate(res.error); continue; }
-          throw new ProblemError({ where: feature.stage, what: `The ${role} model failed ${roleFailures} attempts`, error: res.error });
+          // the frontier model on one account failing is not the end: try it on every other account, Claude or Codex, first
+          if (untried) { log(task, `frontier turn failed on ${who.name}; trying it on another account`); continue; }
+          throw new ProblemError({ where: feature.stage, what: `The ${role} model failed on every account (${tried.size} tried)`, error: res.error });
         }
         crashes.set(who.id, (crashes.get(who.id) ?? 0) + 1);
         const n = crashes.get(who.id)!;
