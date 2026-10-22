@@ -1,5 +1,6 @@
 import { replyAfter, slackMessage, slackStatus, STATUS_TAIL } from "../shared/headless.ts";
 import type { SlackConfig } from "./state";
+import { redactPii } from "../shared/redact.ts";
 import type { SlackFile } from "./ownerUpdates";
 
 export type SlackThreadMessage = { ts: string; user?: string; text?: string; bot_id?: string; files?: SlackFile[] };
@@ -23,6 +24,8 @@ export class Slack {
   private async api(method: string, body: Record<string, unknown>): Promise<any> {
     // form fields, not JSON: Slack's read methods (conversations.replies, conversations.history…) answer
     // invalid_arguments to a JSON body; every method accepts form encoding
+    // no names, emails, phone numbers or addresses leave for Slack (shared/redact.ts)
+    if (typeof body.text === "string") body = { ...body, text: redactPii(body.text) };
     const form = new URLSearchParams();
     for (const [k, v] of Object.entries(body)) if (v !== undefined) form.set(k, typeof v === "string" ? v : JSON.stringify(v));
     const res = await this.fetchImpl(`https://slack.com/api/${method}`, {

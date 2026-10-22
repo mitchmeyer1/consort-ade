@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import ts from 'typescript';
 import * as seatPool from '../src/shared/seatPool.ts';
 import { slackMessage, slackStatus, STATUS_TAIL } from '../src/shared/headless.ts';
+import { redactPii } from '../src/shared/redact.ts';
 const require = createRequire(import.meta.url);
 const code = ts.transpileModule(readFileSync(new URL('../src/cli/agent.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText.replace(/import\.meta\.url/g, '"file:///virtual/cli/agent.js"');
 function load(runStreamed, onStart = () => {}, onNew = () => {}) {
@@ -52,7 +53,7 @@ test('Codex terminal quota errors return immediately instead of waiting on the s
 test('Slack replies always stay inside the ticket thread', async () => {
   const source = ts.transpileModule(readFileSync(new URL('../src/cli/slack.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const mod = { exports: {} };
-  new Function('require', 'module', 'exports', source)(() => ({ slackMessage, slackStatus, STATUS_TAIL }), mod, mod.exports);
+  new Function('require', 'module', 'exports', source)(() => ({ slackMessage, slackStatus, STATUS_TAIL, redactPii }), mod, mod.exports);
   let body;
   const slack = new mod.exports.Slack({ botToken: 'test', channel: 'C1' }, async (_, init) => { body = new URLSearchParams(init.body); return { json: async () => ({ ok: true, ts: '2' }) }; });
   for (const [text, status] of [['Paused', 'WAITING'], ['Resumed', 'RUNNING'], ['Question?', 'WAITING'], ['Completed', 'COMPLETED'], ['Worker exited', 'STOPPED'], ['Routine progress', 'RUNNING']]) {

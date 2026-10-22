@@ -11,24 +11,18 @@ import { Slack } from "./slack";
 import { taskSlackLinks } from "./slackLinks";
 
 const run = promisify(execFile);
-/** GitHub login → the person's name ("" is the signed-in gh user); the login when GitHub has no name */
-const names = new Map<string, Promise<string | undefined>>();
-export function githubName(login = ""): Promise<string | undefined> {
-  let pending = names.get(login);
-  if (!pending) {
-    pending = run("gh", ["api", login ? `users/${login}` : "user", "--jq", ".name // .login"], { timeout: 10_000 })
-      .then((r) => r.stdout.trim() || login || undefined)
-      .catch(() => { names.delete(login); return login || undefined; });
-    names.set(login, pending);
-  }
-  return pending;
+/** the signed-in gh user's login, looked up once */
+let me: Promise<string | undefined> | undefined;
+export function githubLogin(): Promise<string | undefined> {
+  me ??= run("gh", ["api", "user", "--jq", ".login"], { timeout: 10_000 }).then((r) => r.stdout.trim() || undefined).catch(() => { me = undefined; return undefined; });
+  return me;
 }
 
-/** "reviewing: Will Lerner" for a review (the PR's author), "author: Mitch Meyer" for a build (you) */
-export async function cardByline(task: Task, name: (login?: string) => Promise<string | undefined> = githubName): Promise<string | undefined> {
-  if (task.kind === "review") { const who = await name(task.review?.author); return who ? `reviewing: ${who}` : undefined; }
-  const who = await name();
-  return who ? `author: ${who}` : undefined;
+/** "reviewing: @wildebeast" for a review (the PR's author), "author: @you" for a build: GitHub logins, never names (shared/redact.ts) */
+export async function cardByline(task: Task, login: (who?: string) => Promise<string | undefined> = githubLogin): Promise<string | undefined> {
+  if (task.kind === "review") return task.review?.author ? `reviewing: @${task.review.author}` : undefined;
+  const who = await login();
+  return who ? `author: @${who}` : undefined;
 }
 
 export async function refreshSlackCards(now = Date.now(), slackFor = (cfg: NonNullable<ReturnType<typeof loadState>["slack"]>) => new Slack(cfg)): Promise<void> {

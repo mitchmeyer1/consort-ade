@@ -125,3 +125,16 @@ test('a ClickUp owner update replaces the description with Markdown', async (t) 
   await clickupSource('k', job).updateBody('a1', '## Goal\n- Export CSV');
   assert.deepEqual(calls.at(-1), { path: '/task/a1', method: 'PUT', body: { markdown_content: '## Goal\n- Export CSV' } });
 });
+
+test('Slack: posts and card edits leave with names, emails, phones and addresses masked', async (t) => {
+  const sent = [];
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    sent.push({ method: String(url).split('/api/')[1], body: Object.fromEntries(new URLSearchParams(init.body)) });
+    return new Response(JSON.stringify({ ok: true, ts: '1.0' }), { status: 200 });
+  });
+  const slack = new Slack({ botToken: 'xoxb-1', userId: 'U1', channel: 'C1' });
+  await slack.post('Patient Mary Jones (mary@x.org, 555-123-4567) at 12 Elm St asked <@U1>');
+  await slack.update('1.0', 'card for John Smith');
+  assert.match(sent[0].body.text, /^✅ Patient \*\*\*\* \(\*\*\*\*, \*\*\*\*\) at \*\*\*\* asked <@U1>/);
+  assert.equal(sent[1].body.text, 'card for ****');
+});

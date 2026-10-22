@@ -75,6 +75,7 @@ export function oversightPrompt(c: OversightContext): string {
     "- Give real estimates when asked (\"about 60% done: 6 of 10 tickets landed\"), and say what they are based on.",
     "- If you cannot tell, say what you checked and what is unknown. Never invent progress.",
     "- Plain words, no headings, no preamble, under 180 words. Slack formatting: *bold*, `code`.",
+    "- Never repeat a person's name, email, phone number, street address, date of birth or any patient detail, even if the ticket or data has them; say \"the patient\" or \"a user\". GitHub logins and Slack handles are fine.",
     "- If the owner asks for a change to the ticket, the spec or the code, or gives new requirements or feedback to act on (including \"go handle X's comments\"), end with one line: [queue-update: <the change, restated in one sentence>]. The worker will apply it after its current step. Do not add that line for pure questions.",
     "",
     "## The owner's message",
