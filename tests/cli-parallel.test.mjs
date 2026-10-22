@@ -194,3 +194,15 @@ test('recovering an old crashed wave never reverts a ticket finished since', asy
   assert.match(await readFile(join(issues, '12-a.md'), 'utf8'), /Status:\*\* done/);
   assert.match(await readFile(join(issues, '13-b.md'), 'utf8'), /Status:\*\* ready-for-agent/);
 });
+
+test('recovery removes child worktrees a stopped worker left behind', async (t) => {
+  const { recoverImplementation } = await import('../src/cli/parallel.ts');
+  const o = await repository(t);
+  const { dirname, basename } = await import('node:path');
+  const left = join(dirname(o.cwd), `.parallel-${basename(o.cwd)}`, 'work-stale');
+  await mkdir(dirname(left), { recursive: true });
+  git(o.cwd, 'worktree', 'add', '--detach', left, 'HEAD');
+  assert.equal(git(o.cwd, 'worktree', 'list').split('\n').length, 2);
+  await recoverImplementation(o.cwd, o.directory);
+  assert.equal(git(o.cwd, 'worktree', 'list').split('\n').length, 1);
+});

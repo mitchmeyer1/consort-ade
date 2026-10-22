@@ -466,11 +466,13 @@ export async function workTask(taskId: string): Promise<void> {
       if (graph.remaining) {
         const ids = tickets.map((t) => t.id).join(",");
         const current = loadState().tasks.find((t) => t.id === taskId);
-        if (tooSerial(graph) && !current?.graphResplitAt) {
-          updateTask(taskId, { graphResplitAt: Date.now() });
-          log(task, `build graph is mostly a chain (${graphSummary(graph)}); re-splitting for parallel work`);
+        const asked = !!current?.resplitRequested;
+        if (asked || (tooSerial(graph) && !current?.graphResplitAt)) {
+          updateTask(taskId, { graphResplitAt: Date.now(), resplitRequested: undefined });
+          log(task, `${asked ? "owner asked to re-split the build" : "build graph is mostly a chain"} (${graphSummary(graph)}); re-splitting for parallel work`);
           activity("re-splitting the build into parallel tickets");
-          await completeReply(await turn(RESPLIT_PROMPT(graph, tickets), builderProvider, "planning"), undefined, "planning");
+          if (asked) await say(slackMessage("update", `Re-splitting the remaining build for parallel work (${graphSummary(graph)} now)`));
+          await completeReply(await turn(RESPLIT_PROMPT(graph, tickets, asked), builderProvider, "planning"), undefined, "planning");
           continue;
         }
         if (current?.buildPlanIds !== ids) {

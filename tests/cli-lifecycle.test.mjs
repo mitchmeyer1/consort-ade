@@ -769,3 +769,14 @@ test('parallel tickets picking at the same moment spread across accounts with fr
   await assert.rejects(h.work(), e => e === halt);
   assert.deepEqual(used.sort(), ['c1', 'c2']);
 });
+
+test('consort-cli tasks split forces one re-split even when the graph is not a chain', async () => {
+  const prompts = [];
+  const plan = { waves: [['a', 'b', 'c']], remaining: 3, done: 5, problems: [] };
+  const h = harness({ task: { feature: { stage: 'Implementing', prs: [], history: [] }, resplitRequested: 1 }, graph: { tickets: [{ id: 'a' }], plan, serial: false },
+    turn: o => { prompts.push(o.prompt); if (prompts.length === 2) throw halt; return { text: '' }; } });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.match(prompts[0], /RESPLIT THE GRAPH/);
+  assert.equal(h.task.resplitRequested, undefined);
+  assert.ok(h.messages.some(m => /Re-splitting the remaining build/.test(m.text)));
+});

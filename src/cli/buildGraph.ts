@@ -70,9 +70,9 @@ export const graphSummary = (g: BuildGraph) =>
   `${g.remaining} ticket${g.remaining === 1 ? "" : "s"} left in ${g.waves.length} wave${g.waves.length === 1 ? "" : "s"}, up to ${Math.max(0, ...g.waves.map((w) => w.length))} at once`;
 
 /** the one re-split turn for a graph that is mostly a chain */
-export const RESPLIT_PROMPT = (g: BuildGraph, tickets: GraphTicket[]) => `## This turn: re-split the remaining build tickets so they can run in parallel
+export const RESPLIT_PROMPT = (g: BuildGraph, tickets: GraphTicket[], asked = false) => `## This turn: re-split the remaining build tickets so they can run in parallel
 
-Consort runs every ticket whose blockers are done at the same time, each in its own worktree. The remaining tickets form ${g.waves.length} waves for ${g.remaining} tickets, which is mostly a chain:
+Consort runs every ticket whose blockers are done at the same time, each in its own worktree. ${asked ? "The owner asked for the rest of the build to be divided into as many parallel pieces as the code allows. Read what is already built (git log, the done tickets) and split what is left by objective; tickets marked in-progress were interrupted, so treat their work as not started unless it is committed. The" : "The"} remaining tickets form ${g.waves.length} waves for ${g.remaining} tickets${asked ? "" : ", which is mostly a chain"}:
 ${g.waves.map((w, i) => `- wave ${i + 1}: ${w.join(", ")}`).join("\n")}
 ${g.problems.length ? `\nProblems found:\n${g.problems.map((p) => `- ${p}`).join("\n")}\n` : ""}
 Rewrite only the tickets that are not done (${tickets.filter((t) => !isDone(t)).map((t) => t.id).join(", ")}) in .consort/ship/issues/. Do not change done tickets or code in this turn.

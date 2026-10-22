@@ -115,6 +115,8 @@ export type Task = {
   reviewsDone: number;
   /** the build graph was re-split once for parallel work (cli/buildGraph.ts) */
   graphResplitAt?: number;
+  /** `consort-cli tasks split`: re-split the unfinished build tickets on the next build step, chain or not */
+  resplitRequested?: number;
   /** the ticket set the last "Build plan" Slack line described */
   buildPlanIds?: string;
   /** review thread ids already answered */

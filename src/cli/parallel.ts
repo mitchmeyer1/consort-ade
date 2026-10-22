@@ -137,6 +137,12 @@ async function currentStatus(cwd: string, id: string): Promise<string | undefine
 }
 /** Recover a crash between cherry-pick and checkpoint, without replaying completed work. */
 export async function recoverImplementation(cwd: string, directory: string): Promise<string[]> {
+  // child worktrees left by a worker that was stopped mid-wave: no child runs while the coordinator recovers
+  const children = join(dirname(resolve(cwd)), `.parallel-${basename(resolve(cwd))}`);
+  for (const dir of await readdir(children).catch(() => [] as string[])) {
+    await git(cwd, "worktree", "remove", "--force", join(children, dir)).catch(() => rm(join(children, dir), { recursive: true, force: true }));
+  }
+  await git(cwd, "worktree", "prune").catch(() => undefined);
   const wave: Wave | undefined = await readFile(join(directory, "implementation.json"), "utf8").then(JSON.parse).catch(() => undefined);
   if (!wave) return [];
   try {
