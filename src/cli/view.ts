@@ -68,7 +68,7 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   // finished tickets (not failed ones, which need a look) get their own short list below
   const completed = recentCompleted(tasks);
   const working = tasks.filter((t) => !completed.includes(t));
-  lines.push(`${cream(bold("Tickets"))} ${dim(`· ${active} active`)}`);
+  lines.push(`${cream(bold("Working"))} ${dim(`· ${active} active`)}`);
   // one aligned row per ticket, coloured like the accounts list; what it is doing, dim, under it; then a blank line
   const cols = { ticket: 12, title: 28, step: 5, stage: 12, next: 14, status: 9, account: 16, cost: 13, ports: 11, age: 12, log: 5 };
   lines.push(dim(`  ${[pad("TICKET", cols.ticket), pad("TITLE", cols.title), pad("STEP", cols.step), pad("STAGE", cols.stage), pad("NEXT", cols.next), pad("STATUS", cols.status), pad("ACCOUNT", cols.account), pad("COST", cols.cost), pad("PORTS", cols.ports), pad("AGE", cols.age), pad("LOG", cols.log), "DIFF"].join("  ")}`));
