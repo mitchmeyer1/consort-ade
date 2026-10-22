@@ -349,8 +349,9 @@ test('intentional worker shutdown does not ask Slack to recover an aborted turn'
   assert.ok(!h.events.includes('owner reply'));
 });
 
-test('routine planning and implementation use configured Sol or Sonnet models', async () => {
+test('the environment and build run one tier below the planner; grilling and the build plan run on the strongest model', async () => {
   const routine = cliModels.selectCliModel('claude', headless.seedModels().claude, 'implementation');
+  const planner = cliModels.selectCliModel('claude', headless.seedModels().claude, 'planning');
   const seen = [];
   // Environment, Grilling, Spec'd and Implementing all use ordinary model roles.
   let n = 0;
@@ -364,7 +365,7 @@ test('routine planning and implementation use configured Sol or Sonnet models', 
   } });
   await assert.rejects(h.work(), e => e === halt);
   assert.equal(seen[0].model, routine, 'environment setup is routine');
-  assert.equal(seen[1].model, routine, 'grilling uses Sonnet by default');
+  assert.equal(seen[1].model, planner, 'grilling plans on the strongest model');
   // until the build tickets exist, the turn writes the build plan: that decides how parallel the build is, so Fable or Astra
   const frontier = cliModels.selectCliModel('claude', headless.seedModels().claude, 'frontier');
   assert.equal(seen[2].model, frontier, "spec'd writes the build plan on the frontier model");
@@ -537,7 +538,7 @@ test('a requested model escalation reruns the job on frontier without resuming t
     throw halt;
   } });
   await assert.rejects(h.work(), e => e === halt);
-  assert.deepEqual(seen.slice(0, 2).map(o => o.model), ['claude-sonnet-5', 'claude-fable-5-1']);
+  assert.deepEqual(seen.slice(0, 2).map(o => o.model), ['claude-opus-5', 'claude-fable-5-1']);
   assert.equal(seen[1].resume, undefined);
   assert.match(seen[1].prompt, /Security permission inheritance is uncertain/);
   assert.equal(h.task.turnHistory[0].role, 'implementation');
@@ -553,7 +554,7 @@ test('two ordinary model SDK errors escalate once rather than retrying indefinit
   } });
   await assert.rejects(h.work(), e => e === halt);
   // the second attempt goes to the account that has not failed (Codex here), then the escalation to the frontier model
-  assert.deepEqual(models, ['claude-sonnet-5', 'gpt-5.6-sol', 'claude-fable-5-1']);
+  assert.deepEqual(models, ['claude-opus-5', 'gpt-5.6-sol', 'claude-fable-5-1']);
   assert.equal(h.task.turnHistory.length, 2);
   assert.ok(h.task.turnHistory.every(turn => turn.error === 'SDK transport failure'));
 });
@@ -615,7 +616,7 @@ test('stage runtime schedules isolated readers and writers then passes shared re
   assert.ok(readers.every(o => o.readOnly && o.model === 'claude-haiku-4-5-20251001' && o.effort === 'low' && !o.resume));
   const writers = seen.filter(o => o.cwd.startsWith('/write/'));
   assert.equal(writers.length, 2);
-  assert.ok(writers.every(o => !o.readOnly && o.model === 'claude-sonnet-5' && !o.resume));
+  assert.ok(writers.every(o => !o.readOnly && o.model === 'claude-opus-5' && !o.resume));
   assert.equal(new Set(writers.map(o => o.env.CONSORT_RUN)).size, 2);
   assert.equal(new Set([...readers, ...writers].map(o => o.cwd)).size, 4);
   assert.ok(seen.some(o => o.cwd === '/virtual' && /Flow export preserves archived records/.test(o.prompt)));

@@ -22,9 +22,14 @@ export function selectCliModel(provider: Provider, available: string[], role: Cl
   if (configured && !belongs(configured)) throw new Error(`Model ${configured} does not belong to ${provider}`);
   if (configured) return configured;
   const ranked = cliModelsByCapability(available.filter(belongs));
-  if (role === "frontier") return ranked[0] ?? "";
+  const top = ranked[0] ?? "";
+  // Judgement runs on the strongest model: planning decides what gets built, frontier reviews it.
+  if (role === "frontier" || role === "planning") return top;
+  const extraction = (id: string) => /haiku|luna|mini|nano/.test(id);
   const routine = ranked.find((id) => /sonnet|(?:^|-)sol(?:-|$)/.test(id));
-  if (role === "reader") return ranked.find((id) => /haiku|luna|mini|nano/.test(id)) ?? routine ?? ranked.at(-1) ?? "";
+  if (role === "reader") return ranked.find(extraction) ?? routine ?? ranked.at(-1) ?? "";
+  // The build is nearly all of the tokens, so it runs one tier below the planner that specified it.
+  if (role === "implementation") return ranked.find((id) => cliModelRank(id) < cliModelRank(top) && !extraction(id)) ?? top;
   // Do not fall back from ordinary work to an extraction model when a stronger model exists.
-  return routine ?? ranked.find((id) => !/fable|mythos|astra|haiku|luna|mini|nano/.test(id)) ?? ranked[0] ?? "";
+  return routine ?? ranked.find((id) => !/fable|mythos|astra/.test(id) && !extraction(id)) ?? top;
 }
