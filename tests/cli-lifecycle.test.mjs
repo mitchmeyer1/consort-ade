@@ -20,7 +20,7 @@ function harness(opts = {}) {
   const events = [], messages = [];
   const task = { id: 't', jobId: 'j', ticket: { id: 'T1', title: 'Example', url: 'https://ticket/1' }, worktree: '/virtual', branch: 'feature', accountIds: {}, sessions: {}, reviewsDone: 0, threadsSeen: [], envReadyAt: 1, evidenceValidatedAt: 1, feature: { stage: 'In Review', prs: ['https://github.com/a/b/pull/1'], evidenceAt: 1 }, ...opts.task };
   const accounts = opts.accounts ?? [{ id: 'c', provider: 'claude', name: 'Claude' }, { id: 'x', provider: 'codex', name: 'Codex' }];
-  const state = { tasks: [task], jobs: [{ id: 'j', repo: '/virtual', base: 'main' }], accounts, slack: { userId: 'owner' } };
+  const state = { tasks: [task], jobs: [{ id: 'j', repo: '/virtual', base: 'main', ...opts.job }], accounts, slack: { userId: 'owner' } };
   let interval, deadline;
   let clock = Date.now();
   class Clock extends Date { static now() { return clock; } }
@@ -820,6 +820,20 @@ test('a frontier turn picks Codex when the Claude account is nearly out of Fable
   assert.ok(!h.events.includes('owner reply'));
 });
 
+test('a configured role effort reaches the turn and the task records it', async () => {
+  const seen = [];
+  const h = harness({ job: { effortPolicy: { implementation: 'xhigh', planning: 'low' } }, task: { envReadyAt: undefined, feature: { stage: 'Grilling', prs: [], history: [] } }, turn: o => {
+    seen.push(o);
+    if (seen.length === 1) return { text: 'env ready' };
+    throw halt;
+  } });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.deepEqual(seen.map(o => o.effort), ['xhigh', 'low']);
+  assert.equal(h.task.turnHistory[0].effort, 'xhigh');
+  assert.equal(h.task.turn.effort, 'low');
+  assert.equal(h.task.turn.model, seen[1].model);
+});
+
 test('a turn that goes quiet for 25 minutes is stopped, reported in Slack, and retried; a second silence asks the owner', async () => {
   let h, calls = 0;
   const hang = (o, interval) => new Promise(resolve => {
@@ -833,4 +847,35 @@ test('a turn that goes quiet for 25 minutes is stopped, reported in Slack, and r
   await assert.rejects(h.work(), /went quiet for 25 minutes twice/);
   assert.equal(calls, 2, 'retried once, then gave up');
   assert.ok(h.messages.some(m => /went quiet for 25 min .*last: Dispatching reader 1 of 15.*Restarting this step/.test(m.text)), 'the first silence is posted');
+});
+
+test('the planner sets the build effort for the writers, and a scanner-level effort still wins', async () => {
+  for (const [policy, expected] of [[undefined, 'xhigh'], [{ implementation: 'low' }, 'low']]) {
+    const seen = [], forms = [];
+    const h = harness({ job: policy ? { effortPolicy: policy } : {}, task: { feature: { stage: 'Grilling', prs: [], history: [] }, accountIds: { claude: 'c' }, sessions: { claude: 'parent-session' } },
+      runResearch: async () => ({ summary: 'Flow export preserves archived records', reused: false, results: [] }),
+      runImplementation: async o => {
+        await Promise.all(['frontend', 'backend'].map(id => o.run({ id, cwd: `/write/${id}`, prompt: `Write ${id}`, kind: 'implementation' })));
+        await o.check('/virtual');
+        return { completed: ['frontend', 'backend'], commits: ['a', 'b'], failed: [] };
+      },
+      shipPrompt: o => { forms.push(o); return 'coordinate stage'; },
+      turn: o => {
+        seen.push(o);
+        if (o.cwd !== '/virtual') return { text: 'Child report', sessionId: `child-${o.cwd}` };
+        if (o.prompt.includes('integrated parallel ticket commits')) return { text: '[parallel-check: pass]' };
+        if (o.prompt.includes('coordinate stage') && forms.length === 1) return { text: "[ship-stage: Spec'd | research complete] [build-effort: xhigh — crosses billing and the warehouse sync]" };
+        throw halt;
+      },
+    });
+    await assert.rejects(h.work(), e => e === halt);
+    const writers = seen.filter(o => o.cwd.startsWith('/write/'));
+    assert.equal(writers.length, 2);
+    assert.ok(writers.every(o => o.effort === expected), `writers run at ${expected}`);
+    assert.ok(seen.some(o => o.cwd === '/virtual' && o.prompt.includes('coordinate stage') && o.prompt.includes('[build-effort:')), 'the spec turn is asked for the build effort');
+    assert.ok(!writers.some(o => o.prompt.includes('[build-effort:')), 'build turns are not asked');
+    assert.equal(h.task.plannedEffort.level, 'xhigh');
+    assert.equal(h.task.plannedEffort.reason, 'crosses billing and the warehouse sync');
+    assert.ok(h.messages.some(m => /Build effort: xhigh/.test(m.text)), 'the thread names the planner\'s choice');
+  }
 });

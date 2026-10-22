@@ -4,13 +4,14 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import ts from 'typescript';
 import * as seatPool from '../src/shared/seatPool.ts';
+import * as cliTurnPolicy from '../src/shared/cliTurnPolicy.ts';
 import { slackMessage, slackStatus, STATUS_TAIL } from '../src/shared/headless.ts';
 import { redactPii } from '../src/shared/redact.ts';
 const require = createRequire(import.meta.url);
 const code = ts.transpileModule(readFileSync(new URL('../src/cli/agent.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText.replace(/import\.meta\.url/g, '"file:///virtual/cli/agent.js"');
 function load(runStreamed, onStart = () => {}, onNew = () => {}) {
   const mocks = {
-    './state': { HOME: '/virtual' }, './telemetry': { recordTurn() {}, sumUsage: () => ({ usd: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }) }, '../shared/seatPool.ts': seatPool,
+    './state': { HOME: '/virtual' }, './telemetry': { recordTurn() {}, sumUsage: () => ({ usd: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }) }, '../shared/seatPool.ts': seatPool, '../shared/cliTurnPolicy.ts': cliTurnPolicy,
     '../main/cliRuntime': { cliBinary: () => '/virtual/codex' },
     '@openai/codex-sdk': { Codex: class { constructor(o) { onNew(o); } startThread(o) { onStart(o); return { runStreamed }; } } },
   };
@@ -131,4 +132,11 @@ test('Claude reader budget denies background and overlapping delegates and relea
   await after({}, 'second', {});
   assert.equal((await before({ ...event, tool_input: { run_in_background: true } }, 'background', {})).hookSpecificOutput.permissionDecision, 'deny');
   assert.equal((await delegateBudget(0).PreToolUse[0].hooks[0](event, 'none', {})).hookSpecificOutput.permissionDecision, 'deny');
+});
+
+test('a max effort turn asks Codex for xhigh, its top level', async () => {
+  let options;
+  const agent = load(async () => ({ events: (async function* () { yield { type: 'turn.completed', usage: {} }; })() }), o => { options = o; });
+  await agent.runTurn({ ...opts, effort: 'max' });
+  assert.equal(options.modelReasoningEffort, 'xhigh');
 });

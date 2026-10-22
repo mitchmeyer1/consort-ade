@@ -345,6 +345,7 @@ export function slackStatus(text: string, status?: SlackTaskStatus, links?: Slac
 export const slackLines = {
   claimed: (title: string, url: string, branch: string) => `✅ *Picked up:* <${url}|${title}>\n• branch \`${branch}\``,
   stage: (stage: string, note?: string) => `✅ *${stage}*${note ? ` · ${brief(note, 160)}` : ""}`,
+  buildEffort: (level: string, reason?: string) => `✅ *Build effort: ${level}*${reason ? ` · ${brief(reason, 160)}` : ""}`,
   question: (qs: string[], url: string) => `❓ *Need you* (<${url}|ticket>)\n${qs.map((q, i) => `${qs.length > 1 ? `${i + 1}. ` : "• "}${brief(q, 600)}`).join("\n")}\n_Reply in this thread._`,
   pr: (url: string) => `✅ Draft PR: ${url}`,
   review: (round: number, model: string, findings: number) => `✅ Review ${round} on \`${model}\`: ${findings} finding${findings === 1 ? "" : "s"}${findings ? ", fixing" : ""}`,

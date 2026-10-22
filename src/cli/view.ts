@@ -13,7 +13,7 @@ import { stepLabel } from "./buildProgress";
 /**
  * `consort-cli view`: a terminal dashboard that redraws every couple of seconds from the state
  * file. Three lines per task: a row with ticket, title, stage (with build progress, "Build 7/18"),
- * status, the account it is on and how long it has run; then what the worker is doing right now,
+ * status, the account it is on, the model and effort of its current turn, and how long it has run; then what the worker is doing right now,
  * dim; then a blank line. Below that, the six most recent completed tickets in one short list;
  * failed ones stay in the main list for a day. Then the accounts (and which are blocked until when) and the scanners with
  * their next scan. `q` quits.
@@ -22,6 +22,9 @@ import { stepLabel } from "./buildProgress";
 import { amber, banner, blue, bold, cream, dim, green, mint, red, steel } from "./theme";
 
 const pad = (s: string, n: number) => (s.length > n ? `${s.slice(0, Math.max(0, n - 1))}…` : s).padEnd(n);
+
+/** the turn in flight (or the last one): its model without the provider prefix or date stamp, and its effort */
+const turnCell = (task: Task) => (task.turn ? `${task.turn.model.replace(/^claude-/, "").replace(/-\d{8,}$/, "")} · ${task.turn.effort}` : "");
 
 /** the worker's log: how many lines, and the last one */
 const logOf = (task: Task, now: number): { lines: number; last: string; ageMs?: number } => {
@@ -70,8 +73,8 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   const working = tasks.filter((t) => !completed.includes(t));
   lines.push(`${cream(bold("Working"))} ${dim(`· ${active} active`)}`);
   // one aligned row per ticket, coloured like the accounts list; what it is doing, dim, under it; then a blank line
-  const cols = { ticket: 12, title: 28, step: 5, stage: 12, next: 14, status: 9, account: 16, cost: 13, ports: 11, age: 12, log: 5 };
-  lines.push(dim(`  ${[pad("TICKET", cols.ticket), pad("TITLE", cols.title), pad("STEP", cols.step), pad("STAGE", cols.stage), pad("NEXT", cols.next), pad("STATUS", cols.status), pad("ACCOUNT", cols.account), pad("COST", cols.cost), pad("PORTS", cols.ports), pad("AGE", cols.age), pad("LOG", cols.log), "DIFF"].join("  ")}`));
+  const cols = { ticket: 12, title: 28, step: 5, stage: 12, next: 14, status: 9, account: 16, turn: 20, cost: 13, ports: 11, age: 12, log: 5 };
+  lines.push(dim(`  ${[pad("TICKET", cols.ticket), pad("TITLE", cols.title), pad("STEP", cols.step), pad("STAGE", cols.stage), pad("NEXT", cols.next), pad("STATUS", cols.status), pad("ACCOUNT", cols.account), pad("TURN", cols.turn), pad("COST", cols.cost), pad("PORTS", cols.ports), pad("AGE", cols.age), pad("LOG", cols.log), "DIFF"].join("  ")}`));
   if (!working.length) lines.push(dim("  nothing in flight; the daemon claims tickets as scanners come due"), "");
   for (const t of working) {
     const acct = accountName(t.activeProvider ? t.accountIds[t.activeProvider] : t.accountIds.claude ?? t.accountIds.codex);
@@ -95,6 +98,7 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
       dim(pad(step.next, cols.next)),
       healthPaint(pad(health.label, cols.status)),
       dim(pad(acct, cols.account)),
+      dim(pad(turnCell(t), cols.turn)),
       paint(pad(costCell(t.cost), cols.cost), amber),
       dim(pad(t.portBase ? `${t.portBase}-${t.portBase + 99}` : "", cols.ports)),
       dim(pad(age, cols.age)),
