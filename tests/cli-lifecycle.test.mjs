@@ -782,16 +782,15 @@ test('consort-cli tasks split forces one re-split even when the graph is not a c
   assert.ok(h.messages.some(m => /Re-splitting the remaining build/.test(m.text)));
 });
 
-test('subtasks are saved for the agent, linked once, and synced after each step', async () => {
+test('subtasks are saved for the agent, linking is tried at most twice, and subtasks sync after each step', async () => {
   const prompts = [];
   const h = harness({ task: { feature: { stage: 'Implementing', prs: [], history: [] } }, subtasks: [{ id: 's1', name: '1. Model', url: 'u' }], needsLinks: true,
     graph: { tickets: [{ id: '01' }], plan: { waves: [['01']], remaining: 1, done: 0, problems: [] } },
-    turn: o => { prompts.push(o.prompt); if (prompts.length === 3) throw halt; return { text: '' }; } });
+    turn: o => { prompts.push(o.prompt); if (prompts.length === 4) throw halt; return { text: '' }; } });
   await assert.rejects(h.work(), e => e === halt);
   assert.ok(h.events.includes('subtasks file'));
-  assert.match(prompts[0], /LINK THE TICKETS/);
-  assert.ok(h.task.subtasksLinkedAt, 'linked once');
-  assert.ok(!prompts.slice(1).some(p => /LINK THE TICKETS/.test(p)));
+  assert.deepEqual(prompts.map(p => /LINK THE TICKETS/.test(p)), [true, true, false, false]);
+  assert.equal(h.task.subtaskLinkTries, 2);
   assert.ok(h.events.includes('subtask sync'), 'synced after the build step');
   assert.deepEqual(h.task.subtaskSync, { synced: 'progress' });
 });

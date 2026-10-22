@@ -482,11 +482,14 @@ export async function workTask(taskId: string): Promise<void> {
       if (graph.remaining) {
         const ids = tickets.map((t) => t.id).join(",");
         const current = loadState().tasks.find((t) => t.id === taskId);
-        if (needsLinks(subtasks, tickets) && !current?.subtasksLinkedAt) {
-          updateTask(taskId, { subtasksLinkedAt: Date.now() });
+        // two tries to link the tickets to the ClickUp subtasks; the agent edits only the ticket files
+        if (needsLinks(subtasks, tickets) && (current?.subtaskLinkTries ?? 0) < 2) {
+          updateTask(taskId, { subtaskLinkTries: (current?.subtaskLinkTries ?? 0) + 1 });
           log(task, `linking ${tickets.length} build tickets to ${subtasks.length} ClickUp subtasks`);
           activity("linking build tickets to the ClickUp subtasks");
-          await completeReply(await turn(LINK_PROMPT, builderProvider, "reader"), undefined, "reader");
+          await completeReply(await turn(LINK_PROMPT, builderProvider, "implementation"), undefined, "implementation");
+          if (needsLinks(subtasks, await readGraph(task.worktree).catch(() => []))) log(task, "the link turn added no ClickUp lines");
+          else await syncSubtaskStatus();
           continue;
         }
         const asked = !!current?.resplitRequested;
