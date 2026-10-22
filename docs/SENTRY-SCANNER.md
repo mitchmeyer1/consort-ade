@@ -12,7 +12,7 @@ Run `consort-cli setup`, add a scanner, and choose `sentry` as the source. Setup
 4. A destination list or folder. For a folder, explicitly select the list inside it that receives tickets; ClickUp tasks belong to lists, not directly to folders.
 5. An output tag and the list's initial task status. Both are configurable; there is no hard-coded Aligned list or tag.
 
-Setup verifies read access and the chosen list/workspace, but creates no tickets. A Sentry-only installation does not need an AI account. An existing saved ClickUp token is reused. Sentry tokens live in the mode-600 CLI state file and are included in secret-bearing scanner exports.
+Setup verifies read access and the chosen list/workspace, but creates no tickets. Bundle planning reuses saved Claude Code/Codex accounts, and setup asks for one only if none is configured. The saved Slack connection and ClickUp token are reused. Setup also reuses an existing Sentry token for the same repository and suggests the existing ClickUp worker’s destination, tag, and status. Sentry tokens live in the mode-600 CLI state file and are included in secret-bearing scanner exports.
 
 ## Suggested routing
 
@@ -44,15 +44,17 @@ Multiple projects/environments can be comma-separated. For folder routing, setup
 
 ## Grouping
 
-Sentry already groups events into issues. Consort groups duplicate issues conservatively by organization/host, project, error title, and code location. UUIDs and hex memory addresses in titles are normalized. Different projects, errors, or code locations stay separate; missing code locations do not justify merging issues. This is deterministic grouping, not an AI guess about a shared root cause.
+Sentry already groups events into issues. Consort first fetches every page matching the configured projects, environments, and query. It forms exact diagnostic groups, then uses one existing Consort AI account to consider the complete scan and read relevant repository code before publishing any ticket. Different errors and projects may enter one **Sentry bundle** when evidence points to a shared real bug. Similar wording alone is insufficient; unrelated reports stay separate.
 
-Each new ticket contains its group marker, every related issue ID/link, event counts, first/last-seen timestamps, environments, locations, and investigation instructions. The agent must still confirm the root cause before implementing a fix. Raw event payloads and credentials are not copied into tickets.
+The planner must assign every input group exactly once and explain each bundle. Missing, invented, or repeated groups, a failed AI turn, exhausted accounts, or an input too large to inspect in full stop ticket creation. No sample or truncated scan creates work. The scanner retries on its next scheduled scan after credits recover. Planning can use existing subscription logins or API keys and incurs normal provider usage; no second credentials or Slack connection is created.
+
+Each bundle creates one ClickUp ticket containing the shared-cause explanation and every related issue ID/link, count, location, and first/last-seen time. The matched ClickUp worker scanner claims that ticket using normal multi-worker deduplication, then uses the existing accounts, Slack task thread, review pipeline, and evidence checks. The worker must still reproduce and confirm the cause before implementing. Sentry diagnostic text is untrusted; credentials are not included in planner input or tickets.
 
 ## Duplicate protection
 
-Before creation, the producer enumerates accessible ClickUp tasks across the chosen workspace, including closed tasks and subtasks, without restricting tags, lists, or scanner ownership. It matches a durable group marker, Sentry issue URLs, or issue short IDs. Existing tickets from other scanners/agents are therefore respected when they contain those references. Closed matching tickets are not duplicated or reopened automatically.
+Before creation, the producer enumerates accessible ClickUp tasks across the chosen workspace, including closed tasks and subtasks, without restricting tags, lists, or scanner ownership. It matches a durable group marker, Sentry issue URLs, or issue short IDs. Existing tickets from other scanners/agents are therefore respected when they contain those references. Closed matching tickets are not duplicated or reopened automatically. New reports for an existing referenced bundle are appended to that ticket, preserving its existing description, instead of creating another implementation task.
 
-For simultaneous cooperating producers, the winner atomically creates a deterministic GitHub reference under `refs/heads/consort-sentry/<hash>`. The hash includes workspace and Sentry group identity, not scanner name, output list, or tag. The producer rechecks ClickUp after winning, then creates one ticket. These reservation branches point at the configured base commit and contain no token or issue payload. The GitHub credential needs permission to create references.
+For simultaneous cooperating producers, the winner atomically creates a deterministic GitHub reference under `refs/heads/consort-sentry/<hash>`. Reservations cover the bundle and every individual Sentry issue, using workspace, organization, and host identity rather than scanner name, list, or tag. Per-issue reservations prevent concurrent producers from creating overlapping bundles even if their AI grouping differs. The producer rechecks ClickUp after winning, then creates one ticket. These reservation branches point at the configured base commit and contain no token or issue payload. The GitHub credential needs permission to create references.
 
 A failed search never falls back to creating blindly. An ambiguous creation timeout, missing task ID, or existing reservation without a visible ticket blocks another creation. The status log reports reserved groups for reconciliation. This favors avoiding duplicates over automatic retries after ambiguous writes.
 
@@ -60,7 +62,7 @@ All cooperating producers must use the same reservation repository. ClickUp visi
 
 ### Reconcile an orphan reservation
 
-If a reservation exists without a ticket, first inspect the full workspace and stop other producers for that group. The previous request may have created a task despite its timeout. If you find the task, keep the reservation and its Sentry references. Only after confirming no task exists should an operator remove that exact reservation reference and rerun the scan. Consort never automatically removes reservations or deletes tickets. GitHub branch rules must allow this namespace; normal cleanup tooling must leave these references alone.
+If a reservation exists without a ticket, first inspect the full workspace and stop other producers for that bundle and its issue IDs. The previous request may have created a task despite its timeout. If you find the task, keep the reservation and its Sentry references. Only after confirming no task exists should an operator remove that exact reservation reference and rerun the scan. Consort never automatically removes reservations or deletes tickets. GitHub branch rules must allow this namespace; normal cleanup tooling must leave these references alone.
 
 ## Existing Aligned logic reviewed
 

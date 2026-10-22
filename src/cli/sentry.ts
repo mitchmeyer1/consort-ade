@@ -1,12 +1,12 @@
 /** Sentry is a ticket producer: it never claims work or starts a worker agent. */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { groupSentryIssues, matchingSentryTask, sentryReservationKey, sentryTicketDescription, type SentryIssue, type SentryScannerConfig } from "../shared/sentryScanner.ts";
+import { groupSentryIssues, matchingSentryTask, sentryReservationKey, sentryIssueReservationKey, sentryTicketDescription, type SentryGroup, type SentryIssue, type SentryScannerConfig } from "../shared/sentryScanner.ts";
 import type { Job } from "./state";
 const run = promisify(execFile);
 const CLICKUP = "https://api.clickup.com/api/v2";
 export type SentryScanResult = { issues: number; groups: number; created: number; existing: number; reserved: number; preview: number; tickets: string[] };
-type Deps = { fetch: typeof fetch; reserve: (job: Job, key: string) => Promise<boolean> };
+type Deps = { fetch: typeof fetch; reserve: (job: Job, key: string) => Promise<boolean>; plan: (job: Job, groups: SentryGroup[]) => Promise<SentryGroup[]> };
 
 /** Atomic GitHub ref creation elects one producer across processes/machines. Never auto-delete a reservation. */
 export async function reserveSentryGroup(job: Job, key: string, execute?: (args: string[]) => Promise<string>): Promise<boolean> {
@@ -63,7 +63,7 @@ export async function scanSentry(job: Job, clickupKey: string | undefined, opts:
   const config = job.sentry;
   validateSentryConfig(config);
   if (!clickupKey) throw new Error("Sentry ticket creation needs a ClickUp API key.");
-  const deps: Deps = { fetch: (...args) => fetch(...args), reserve: reserveSentryGroup, ...opts.deps };
+  const deps: Deps = { fetch: (...args) => fetch(...args), reserve: reserveSentryGroup, plan: async (j, g) => (await import("./sentryBundles.ts")).planSentryBundles(j, g), ...opts.deps };
   const request = async (path: string, init?: RequestInit) => (await jsonRequest(deps.fetch, `${CLICKUP}${path}`, clickupKey, init)).data;
   // Validate routing before reading/claiming issues. A folder is a selector; tasks are always created in its chosen list.
   const destination = await request(`/list/${encodeURIComponent(config.listId)}`);
@@ -76,7 +76,7 @@ export async function scanSentry(job: Job, clickupKey: string | undefined, opts:
   if (!Array.isArray(tags.tags)) throw new Error("ClickUp tag lookup failed.");
   const tagExists = tags.tags.some((t: any) => t.name?.toLowerCase() === config.tag.toLowerCase());
   const issues = await readSentryIssues(config, deps.fetch);
-  const groups = groupSentryIssues(issues, config);
+  const groups = await deps.plan(job, groupSentryIssues(issues, config));
   const readTasks = async (): Promise<any[]> => {
     const tasks: any[] = [];
     const ids = new Set<string>();
@@ -97,8 +97,20 @@ export async function scanSentry(job: Job, clickupKey: string | undefined, opts:
   if (!groups.length) return result;
   let tasks = await readTasks();
   let tagReady = tagExists;
+  const attachToExisting = async (group: SentryGroup): Promise<boolean> => {
+    const existing = tasks.find(t => matchingSentryTask(t, group));
+    if (!existing) return false;
+    const old = existing.markdown_description ?? existing.description ?? "";
+    const missing = group.issues.filter(issue => !matchingSentryTask(existing, { ...group, key: "", issues: [issue] }));
+    if (missing.length && !opts.dryRun) {
+      const markdown = `${old}\n\n## Additional reports in this Sentry bundle\n${sentryTicketDescription({ ...group, issues: missing }, config)}`;
+      await request(`/task/${encodeURIComponent(existing.id)}`, { method: "PUT", body: JSON.stringify({ markdown_content: markdown }) });
+      existing.markdown_description = markdown;
+    }
+    return true;
+  };
   for (const group of groups) {
-    if (tasks.some((t) => matchingSentryTask(t, group))) { result.existing++; continue; }
+    if (await attachToExisting(group)) { result.existing++; continue; }
     if (opts.dryRun) { result.preview++; continue; }
     if (!tagReady) {
       const currentTags = await request(`/space/${encodeURIComponent(spaceId)}/tag`);
@@ -106,9 +118,14 @@ export async function scanSentry(job: Job, clickupKey: string | undefined, opts:
       tagReady = true;
     }
     if (!(await deps.reserve(job, sentryReservationKey(config.workspaceId, group)))) { result.reserved++; continue; }
+    let ownsIssues = true;
+    for (const issue of [...group.issues].sort((a,b) => a.id.localeCompare(b.id))) {
+      if (!(await deps.reserve(job, sentryIssueReservationKey(config.workspaceId, config, issue.id)))) { ownsIssues = false; break; }
+    }
+    if (!ownsIssues) { result.reserved++; continue; }
     // Another agent may have created a ticket between the initial search and our reservation.
     tasks = await readTasks();
-    if (tasks.some((t) => matchingSentryTask(t, group))) { result.existing++; continue; }
+    if (await attachToExisting(group)) { result.existing++; continue; }
     const ticket = await request(`/list/${encodeURIComponent(config.listId)}/task`, { method: "POST", body: JSON.stringify({ name: `[Sentry] ${group.title}`.slice(0, 250), markdown_content: sentryTicketDescription(group, config), tags: [config.tag.toLowerCase()], ...(config.status ? { status: config.status } : {}), notify_all: false, check_required_custom_fields: true }) });
     if (!ticket.id) throw new Error("ClickUp did not return a task id; reservation kept to prevent a duplicate. Reconcile manually.");
     result.created++; result.tickets.push(String(ticket.id));

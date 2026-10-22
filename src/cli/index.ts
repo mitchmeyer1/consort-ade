@@ -456,7 +456,7 @@ async function daemon() {
       try {
         if (job.source === "sentry") {
           const result = await scanSentry(job, s.clickupKey);
-          statusEvent(result.reserved ? "warn" : "success", `${job.name}: ${result.issues} Sentry issues → ${result.groups} groups; ${result.created} ClickUp tickets created; ${result.existing} existing; ${result.reserved} reserved elsewhere or awaiting reconciliation`);
+          statusEvent(result.reserved ? "warn" : "success", `${job.name}: ${result.issues} Sentry issues → ${result.groups} planned bug bundles; ${result.created} ClickUp tickets created; ${result.existing} existing; ${result.reserved} reserved elsewhere or awaiting reconciliation`);
           const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); j.scanStartedAt = undefined; saveState(after); }
           continue;
         }

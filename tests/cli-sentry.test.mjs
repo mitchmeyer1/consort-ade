@@ -30,6 +30,11 @@ function world(opts = {}) {
       if (opts.taskPages && u.searchParams.get('page') === '0') return json({ tasks: [{ id: 'unrelated', description: 'unrelated' }] });
       return json({ tasks, last_page: true });
     }
+    if (u.pathname.startsWith('/api/v2/task/') && method === 'PUT') {
+      const task = tasks.find(t => t.id === u.pathname.split('/').at(-1));
+      task.markdown_description = body.markdown_content;
+      return json(task);
+    }
     if (u.pathname === '/api/v2/list/l/task' && method === 'POST') {
       creates++;
       const task = { id: `task-${creates}`, name: body.name, markdown_description: body.markdown_content, tags: body.tags.map(name => ({ name })), status: { status: body.status } };
@@ -39,7 +44,7 @@ function world(opts = {}) {
     }
     throw new Error(`Unexpected ${method} ${url}`);
   };
-  const deps = { fetch: fetcher, reserve: async (_, key) => { if (locks.has(key)) return false; locks.add(key); return true; } };
+  const deps = { fetch: fetcher, plan: opts.plan ?? (async (_, groups) => groups), reserve: async (_, key) => { if (locks.has(key)) return false; locks.add(key); return true; } };
   return { calls, tasks, locks, deps, run: extra => scanSentry(job, 'clickup-secret', { deps, ...extra }) };
 }
 
@@ -79,7 +84,7 @@ test('concurrent cooperating scanners create only one task', async () => {
   const results = await Promise.all([w.run(), w.run()]);
   assert.equal(results.reduce((n, r) => n + r.created, 0), 1);
   assert.equal(w.tasks.length, 1);
-  assert.equal(w.locks.size, 1);
+  assert.equal(w.locks.size, 3);
 });
 
 test('a ticket created by another agent during reservation is found by the second search', async () => {
@@ -91,7 +96,7 @@ test('a ticket created by another agent during reservation is found by the secon
 test('ambiguous task-creation timeout keeps reservation and avoids retry duplicates', async () => {
   const w = world({ createTimeout: true });
   await assert.rejects(w.run(), /connection lost/);
-  assert.equal(w.locks.size, 1);
+  assert.equal(w.locks.size, 3);
   assert.equal((await w.run()).existing, 1);
   assert.equal(w.tasks.length, 1);
 });
@@ -205,4 +210,45 @@ test('setup explicitly chooses a child list, tag and initial status without crea
   assert.equal(result.job.sentry.status, 'ready');
   assert.equal(result.job.maxParallel, 0);
   assert.ok(calls.every(c => c.method === 'GET'));
+  const defaults = new Map();
+  const reused = await configureSentryScanner(async (q, opts) => {
+    assert.ok(!q.includes('auth token') && !q.includes('API token'), 'saved credentials must not be requested again');
+    defaults.set(q, opts?.default);
+    return answers.get(q);
+  }, 'clickup-key', { repo: '/repo', base: 'main' }, fetcher, [result.job]);
+  assert.equal(reused.job.sentry.token, 'secret');
+  assert.equal(defaults.get('Sentry organization slug'), 'aligned');
+  assert.equal(defaults.get('Destination ClickUp list or folder URL/id (use folder:<id> for a bare folder ID)'), 'folder:1234567');
+  assert.equal(defaults.get('Tag to put on each created ticket (align with a ClickUp worker scanner)'), 'ai-handle');
+});
+
+test('the entire paginated scan is bundled before creating a ticket for differently named reports',async()=>{
+  const {applySentryBundlePlan}=await import('../src/shared/sentryScanner.ts');
+  const w=world({sentryPages:true,issues:[issue('1'),issue('2',{title:'Request failed',project:{slug:'web'},culprit:'client/map.ts'})],plan:async(_,groups)=>{
+    assert.equal(groups.length,2);
+    assert.equal(w.calls.filter(c=>c.u.hostname==='sentry.io').length,2);
+    assert.equal(w.calls.filter(c=>c.method==='POST').length,0);
+    return applySentryBundlePlan(groups,JSON.stringify({bundles:[{groupKeys:groups.map(g=>g.key),title:'Map request fails',reason:'The client map request calls the failing map handler.'}]}));
+  }});
+  const result=await w.run();assert.equal(result.groups,1);assert.equal(result.created,1);
+  assert.match(w.tasks[0].markdown_description,/NODE-1/);assert.match(w.tasks[0].markdown_description,/NODE-2/);
+  assert.match(w.tasks[0].markdown_description,/Why these reports belong together/);
+});
+
+test('invalid or incomplete planning creates no ticket or reservation',async()=>{
+  const {applySentryBundlePlan}=await import('../src/shared/sentryScanner.ts');
+  const w=world({plan:async(_,groups)=>applySentryBundlePlan(groups,'{"bundles":[]}')});
+  await assert.rejects(w.run(),/omitted reports/);
+  assert.equal(w.locks.size,0);assert.ok(!w.calls.some(c=>c.method==='POST'));
+  const groups=groupSentryIssues([issue('1'),issue('2',{title:'other'})],config);
+  const bundle={groupKeys:[groups[0].key],title:'A',reason:'proof'};
+  assert.throws(()=>applySentryBundlePlan(groups,JSON.stringify({bundles:[bundle,bundle]})),/duplicated/);
+});
+
+test('new related reports attach to an existing task without spawning a duplicate bundle',async()=>{
+  const w=world({tasks:[{id:'already-working',description:'Investigating https://sentry.io/issues/1/'}]});
+  const result=await w.run();assert.equal(result.existing,1);assert.equal(result.created,0);
+  assert.equal(w.calls.filter(c=>c.method==='PUT').length,1);
+  assert.match(w.tasks[0].markdown_description,/NODE-2/);
+  assert.equal(w.locks.size,0);
 });
