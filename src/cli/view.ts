@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { ago, costCell, FINISHED, parseShortstat, taskHealth, taskStep, scanCountdown, usageBars, usageBarText, visibleTasks } from "../shared/headless.ts";
+import { ago, costCell, FINISHED, parseShortstat, taskHealth, taskStep, scanCountdown, usageBars, usageBarText, visibleTasks, recentCompleted, KEEP_COMPLETED } from "../shared/headless.ts";
 import { usageBlock, type ConnectorUsage } from "../shared/usage.ts";
 import { recentStatusEvents } from "./statusLog";
 import { readAllUsage, saveUsage } from "./usage";
@@ -14,8 +14,8 @@ import { stepLabel } from "./buildProgress";
  * `consort-cli view`: a terminal dashboard that redraws every couple of seconds from the state
  * file. Three lines per task: a row with ticket, title, stage (with build progress, "Build 7/18"),
  * status, the account it is on and how long it has run; then what the worker is doing right now,
- * full width; then a blank line. Finished tasks stay for a day, then drop
- * off. Below the table: the accounts (and which are blocked until when) and the scanners with
+ * dim; then a blank line. Below that, the six most recent completed tickets in one short list;
+ * failed ones stay in the main list for a day. Then the accounts (and which are blocked until when) and the scanners with
  * their next scan. `q` quits.
  */
 
@@ -66,7 +66,7 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   ]));
   lines.push("");
   // finished tickets (not failed ones, which need a look) get their own short list below
-  const completed = tasks.filter((t) => FINISHED.includes(t.status) && t.status !== "failed");
+  const completed = recentCompleted(tasks);
   const working = tasks.filter((t) => !completed.includes(t));
   lines.push(`${cream(bold("Tickets"))} ${dim(`· ${active} active`)}`);
   // one aligned row per ticket, coloured like the accounts list; what it is doing, dim, under it; then a blank line
@@ -106,7 +106,7 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   }
   if (completed.length) {
     const done = { ticket: 12, title: 34, status: 10, cost: 13 };
-    lines.push(`${cream(bold("Completed"))} ${dim(`· ${completed.length}, shown for a day`)}`);
+    lines.push(`${cream(bold("Completed"))} ${dim(`· most recent ${KEEP_COMPLETED}`)}`);
     lines.push(dim(`  ${[pad("TICKET", done.ticket), pad("TITLE", done.title), pad("STATUS", done.status), pad("COST", done.cost), "AGE"].join("  ")}`));
     for (const t of completed) {
       const health = taskHealth(t, s.accounts, { workerAlive: false, logAgeMs: now - t.updatedAt }, now);

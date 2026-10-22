@@ -22,7 +22,7 @@ import { applyBundle, buildBundle } from "./transfer";
 import { cleanupEnvironment } from "./environment";
 import { alive, DAEMON_LOG, daemonPid, recordDaemon, startDetached, stopDaemon } from "./daemonctl";
 import { banner, cream, dim, mint, ok, bad } from "./theme";
-import { FINISHED } from "../shared/headless.ts";
+import { FINISHED, retainedTasks } from "../shared/headless.ts";
 import { DEFAULT_STATUSES, host, loadState, LOG_DIR, newId, saveState, updateTask, type Job, type Task } from "./state";
 
 /**
@@ -380,8 +380,8 @@ async function daemon() {
   setInterval(checkStatusQuestions, 15_000);
   for (;;) {
     const s = loadState();
-    // finished tasks fall out of the state file after a week; the dashboard stops showing them after a day
-    const keep = s.tasks.filter((t) => !FINISHED.includes(t.status) || Date.now() - (t.finishedAt ?? t.updatedAt) < 7 * 24 * 3_600_000);
+    // completed tasks beyond the newest six fall out of the state file (ready-to-merge ones stay); failed ones after a week
+    const keep = retainedTasks(s.tasks, Date.now());
     if (keep.length !== s.tasks.length) { s.tasks = keep; saveState(s); }
     for (const t of s.tasks) if (!(t.pid && alive(t.pid))) await flushTaskNotifications(t.id);
     // workers that should be running but are not: the daemon restarted, or the box did

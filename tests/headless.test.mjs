@@ -128,17 +128,22 @@ test('the account pool: sticky while usable, least recently used otherwise, bloc
   assert.equal(earliestUnblock(accounts, 'codex', now), undefined);
 });
 
-test('the dashboard keeps finished tasks for a day, then drops them; running ones always show', async () => {
-  const { visibleTasks, ago } = await import('../src/shared/headless.ts');
-  const h = 3_600_000, now = 10 * h;
+test('the dashboard shows the six newest completed tasks and failed ones for a day; running ones always show', async () => {
+  const { visibleTasks, retainedTasks, recentCompleted, ago } = await import('../src/shared/headless.ts');
+  const h = 3_600_000, now = 1000 * h;
+  const done = Array.from({ length: 8 }, (_, i) => ({ id: `done${i}`, status: i % 2 ? 'released' : 'done', finishedAt: now - (i + 1) * 30 * h, updatedAt: 0 }));
   const tasks = [
     { id: 'live', status: 'working', updatedAt: now - 9 * h },
-    { id: 'fresh', status: 'ready', finishedAt: now - 1 * h, updatedAt: now - 1 * h },
-    { id: 'old', status: 'done', finishedAt: now - 3 * h, updatedAt: now - 3 * h },
-    { id: 'legacy', status: 'failed', updatedAt: now - 2.5 * h },
-    { id: 'stale', status: 'done', finishedAt: now - 25 * h, updatedAt: now - 25 * h },
+    { id: 'ready-old', status: 'ready', finishedAt: now - 900 * h, updatedAt: 0 },
+    { id: 'failed-new', status: 'failed', updatedAt: now - 2 * h },
+    { id: 'failed-old', status: 'failed', updatedAt: now - 30 * h },
+    { id: 'failed-ancient', status: 'failed', updatedAt: now - 200 * h },
+    ...done,
   ];
-  assert.deepEqual(visibleTasks(tasks, now).map((t) => t.id), ['live', 'fresh', 'old', 'legacy']);
+  assert.deepEqual(recentCompleted(tasks).map((t) => t.id), ['done0', 'done1', 'done2', 'done3', 'done4', 'done5'], 'newest first, no time limit');
+  assert.deepEqual(visibleTasks(tasks, now).map((t) => t.id), ['live', 'failed-new', 'done0', 'done1', 'done2', 'done3', 'done4', 'done5']);
+  // the state file drops completed tasks past the newest six, but never one still ready to merge
+  assert.deepEqual(retainedTasks(tasks, now).map((t) => t.id), ['live', 'ready-old', 'failed-new', 'failed-old', 'done0', 'done1', 'done2', 'done3', 'done4', 'done5']);
   assert.equal(ago(5 * 60_000), '5m');
   assert.equal(ago(2 * h + 5 * 60_000), '2h 05m');
   assert.equal(ago(28 * h), '1d 4h');

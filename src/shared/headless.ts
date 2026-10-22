@@ -552,11 +552,29 @@ export const costCell = (c?: TaskCost) => (c ? `${shortUsd(c)} ${shortTokens(tot
 /** the line that goes on the PR and the ticket with the evidence */
 export const costLine = (c?: TaskCost) => c ? `Agent cost: ${shortUsd(c)} (est.) over ${c.turns} turn${c.turns === 1 ? "" : "s"} and ${shortTokens(totalTokens(c.tokens))} tokens (${shortTokens(c.tokens.input + c.tokens.cacheRead + c.tokens.cacheWrite)} in, ${shortTokens(c.tokens.output)} out${c.tokens.cacheRead ? `, ${Math.round((100 * c.tokens.cacheRead) / Math.max(1, c.tokens.input + c.tokens.cacheRead + c.tokens.cacheWrite))}% from cache` : ""})${c.unpriced?.length ? `; no price known for ${c.unpriced.join(", ")}, so the dollars are low` : ""}.` : "";
 
-/** the dashboard keeps finished tasks on screen for a day, then drops them */
+/** failed tasks stay on the dashboard for a day; completed ones are the most recent KEEP_COMPLETED */
 export const VIEW_RETENTION_MS = 24 * 60 * 60_000;
+export const KEEP_COMPLETED = 6;
 export const FINISHED: readonly string[] = ["ready", "done", "failed", "released"];
-export function visibleTasks<T extends { status: string; finishedAt?: number; updatedAt: number }>(tasks: T[], now: number, retention = VIEW_RETENTION_MS): T[] {
-  return tasks.filter((t) => !FINISHED.includes(t.status) || now - (t.finishedAt ?? t.updatedAt) < retention);
+type Finishable = { id: string; status: string; finishedAt?: number; updatedAt: number };
+const finishedAt = (t: Finishable) => t.finishedAt ?? t.updatedAt;
+/** finished without failing: ready to merge, merged or closed, or released */
+export const isCompleted = (t: { status: string }) => FINISHED.includes(t.status) && t.status !== "failed";
+/** the newest completed tasks, newest first */
+export const recentCompleted = <T extends Finishable>(tasks: T[], keep = KEEP_COMPLETED): T[] =>
+  tasks.filter(isCompleted).sort((a, b) => finishedAt(b) - finishedAt(a)).slice(0, keep);
+export function visibleTasks<T extends Finishable>(tasks: T[], now: number, retention = VIEW_RETENTION_MS): T[] {
+  const recent = new Set(recentCompleted(tasks).map((t) => t.id));
+  return tasks.filter((t) => !FINISHED.includes(t.status) || recent.has(t.id) || (t.status === "failed" && now - finishedAt(t) < retention));
+}
+/**
+ * What the daemon keeps in the state file: everything open, the newest KEEP_COMPLETED completed
+ * tasks, every task still ready to merge (its PR is open and a Slack update can reopen it), and
+ * failed tasks for a week.
+ */
+export function retainedTasks<T extends Finishable>(tasks: T[], now: number): T[] {
+  const recent = new Set(recentCompleted(tasks).map((t) => t.id));
+  return tasks.filter((t) => !FINISHED.includes(t.status) || recent.has(t.id) || t.status === "ready" || (t.status === "failed" && now - finishedAt(t) < 7 * 24 * 3_600_000));
 }
 /** "3m", "2h 05m", "1d 4h" */
 export function ago(ms: number): string {
