@@ -8,7 +8,7 @@ import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUs
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { selectCliModel, type CliModelRole } from "../shared/cliModels.ts";
-import { MODEL_ROLE_RULES, parseBuildEffort, parseModelEscalation, PLANNER_ROLES, roleEffort, stageModelRole } from "../shared/cliTurnPolicy.ts";
+import { MODEL_ROLE_RULES, BUILD_EFFORT_RULE, parseBuildEffort, parseModelEscalation, roleEffort, stageModelRole } from "../shared/cliTurnPolicy.ts";
 import { AccountUnavailableError, withAgentTurn, withEnvironmentSlot } from "./capacity";
 import { prepareResearchTasks, readImplementationTasks, recoverImplementation, runImplementation, runResearch, type ParallelRun } from "./parallel";
 import { excludeConsortDir, fetchTicket, writeTicketFile } from "../main/ship";
@@ -291,7 +291,7 @@ export async function workTask(taskId: string): Promise<void> {
         quietSince = Date.now();
         usageTimer = setInterval(checkUsage, 60_000);
         deadline = timeoutMs ? setTimeout(() => { timedOut = true; trace.reason = "timeout"; abort.abort(); }, timeoutMs) : undefined;
-        return runTurn({ trace, cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}\n\n${ENVIRONMENT_RULES(turnEnv)}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: turnEnv, signal: abort.signal, readOnly, effort, delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { quietSince = Date.now(); const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
+        return runTurn({ trace, cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}${feature.stage === "Grilling" ? `\n${BUILD_EFFORT_RULE}` : ""}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}\n\n${ENVIRONMENT_RULES(turnEnv)}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: turnEnv, signal: abort.signal, readOnly, effort, delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { quietSince = Date.now(); const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
       }, reviewUnits); }
       catch (e) { if (e instanceof AccountUnavailableError) { continue; } throw e; }
       finally { active = false; mine.set(who.id, (mine.get(who.id) ?? 1) - 1); if (usageTimer) clearInterval(usageTimer); if (deadline) clearTimeout(deadline); }
@@ -372,9 +372,10 @@ export async function workTask(taskId: string): Promise<void> {
     const file = join(task.worktree, ".consort", "pr-review", `pr-${pr}.review.json`);
     try { return reviewSummary(parseReview(readFileSync(file, "utf8"))); } catch { return undefined; }
   };
-  const applyReply = async (text: string, role: CliModelRole) => {
+  const applyReply = async (text: string) => {
     const change = parseShipMarkers(text);
-    const planned = PLANNER_ROLES.includes(role) ? parseBuildEffort(text) : undefined;
+    // the spec's turns set the build effort; a review or an escalated build turn never resets it
+    const planned = feature.stage === "Grilling" ? parseBuildEffort(text) : undefined;
     if (planned) { updateTask(task.id, { plannedEffort: { ...planned, at: Date.now() } }); await say(slackLines.buildEffort(planned.level, planned.reason)); }
     const before = feature;
     if (change) feature = applyShipChange(feature, change, Date.now());
@@ -391,11 +392,11 @@ export async function workTask(taskId: string): Promise<void> {
   };
 
   const completeReply = async (text: string, timeoutMs?: number, role: CliModelRole = "planning", provider: Provider = builderProvider, fixedModel?: string) => {
-    await applyReply(text, role);
+    await applyReply(text);
     while (pendingUser) {
       const prompt = pendingUser;
       pendingUser = undefined;
-      await applyReply(await turn(prompt, provider, role, !fixedModel, timeoutMs, task.worktree, fixedModel), role);
+      await applyReply(await turn(prompt, provider, role, !fixedModel, timeoutMs, task.worktree, fixedModel));
     }
   };
   /**
@@ -597,7 +598,7 @@ export async function workTask(taskId: string): Promise<void> {
     turnTag = `t${n + 1} · `; activity(`${turnTag}starting`);
     const text = await turn(prompt, builderProvider, role);
     log(task, `turn ${n + 1} at ${feature.stage}: ${stripAskUser(stripShipMarkers(text)).slice(0, 300).replace(/\n/g, " ")}`);
-    await applyReply(text, role);
+    await applyReply(text);
     await saveProgress();
     if (idle >= STUCK_AFTER) {
       const answer = await ask([slackLines.problem({ where: feature.stage, what: `${idle} turns in a row did not move the stage`, why: [`Last reply: ${brief(stripAskUser(stripShipMarkers(text)), 300)}`], recent: [...recent], ask: "Reply with what to do next." }, task.ticket.url)], true);

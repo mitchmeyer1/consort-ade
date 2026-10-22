@@ -871,6 +871,8 @@ test('the planner sets the build effort for the writers, and a scanner-level eff
     const writers = seen.filter(o => o.cwd.startsWith('/write/'));
     assert.equal(writers.length, 2);
     assert.ok(writers.every(o => o.effort === expected), `writers run at ${expected}`);
+    assert.ok(seen.some(o => o.cwd === '/virtual' && o.prompt.includes('coordinate stage') && o.prompt.includes('[build-effort:')), 'the spec turn is asked for the build effort');
+    assert.ok(!writers.some(o => o.prompt.includes('[build-effort:')), 'build turns are not asked');
     assert.equal(h.task.plannedEffort.level, 'xhigh');
     assert.equal(h.task.plannedEffort.reason, 'crosses billing and the warehouse sync');
     assert.ok(h.messages.some(m => /Build effort: xhigh/.test(m.text)), 'the thread names the planner\'s choice');
