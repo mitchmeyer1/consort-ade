@@ -107,14 +107,14 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-async function flow(t, findings) {
+async function flow(t, findings, extraJobs = []) {
   const root = await mkdtemp(join(tmpdir(), 'consort-review-')); t.after(() => rm(root, { recursive: true, force: true }));
   const repo = join(root, 'repo'), wt = join(root, 'wt');
   await mkdir(repo); await mkdir(wt);
   await writeFile(join(repo, '.env'), 'DB=local\n'); await writeFile(join(repo, '.env.example'), 'x');
   await writeFile(join(wt, '.ai-review-rules.md'), '# rules');
   const task = { id: 't', jobId: 'j', kind: 'review', worktree: wt, status: 'working', envReadyAt: 1, review: { repo: 'acme/mono', pr: 9, url: 'https://github.com/acme/mono/pull/9', title: 'Add CSV export', author: 'dev', head: 'h', base: 'development' } };
-  const state = { tasks: [task], jobs: [{ id: 'j', repo, name: 'reviews', reviewer: 'mitch' }], accounts: [{ id: 'c', provider: 'claude', name: 'C' }, { id: 'x', provider: 'codex', name: 'X' }], slack: { userId: 'u' } };
+  const state = { tasks: [task], jobs: [{ id: 'j', repo, name: 'reviews', reviewer: 'mitch', source: 'review' }, ...extraJobs.map(j => ({ ...j, repo }))], accounts: [{ id: 'c', provider: 'claude', name: 'C' }, { id: 'x', provider: 'codex', name: 'X' }], slack: { userId: 'u' } };
   const turns = [], posts = [], slackPosts = [];
   const runTurn = async o => {
     turns.push({ model: o.model, readOnly: o.readOnly, prompt: o.prompt });
@@ -156,4 +156,9 @@ test('a High finding requests changes and never asks to approve', async (t) => {
   assert.deepEqual(f.posts.map(p => p.event), ['REQUEST_CHANGES']);
   assert.ok(!f.slackPosts.some(p => /Approve PR/.test(p)));
   assert.match(f.task.note, /requested changes/);
+});
+
+test('a review uses the model settings of the build scanner on the same repository', async (t) => {
+  const f = await flow(t, [], [{ id: 'b', source: 'clickup', modelPolicy: { frontier: { claude: 'claude-opus-5', codex: 'gpt-6-astra-pro' } } }]);
+  assert.match(f.turns[0].model, /^(claude-opus-5|gpt-6-astra-pro)$/);
 });

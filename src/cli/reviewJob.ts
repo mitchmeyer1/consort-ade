@@ -18,7 +18,7 @@ import { execFile } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { addTurnCost, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, seedModels, slackMessage, slackStatus } from "../shared/headless.ts";
+import { addTurnCost, ENVIRONMENT_RULES, HEADLESS_RULES, seedModels, slackMessage, slackStatus } from "../shared/headless.ts";
 import { selectCliModel } from "../shared/cliModels.ts";
 import { modelBlock, modelLoad, usageBlock } from "../shared/usage.ts";
 import { parseReview, serializeReview, type Finding, type Review, type ReviewEvent } from "../shared/review.ts";
@@ -29,6 +29,7 @@ import { withAgentTurn } from "./capacity";
 import { allocateEnvironment, cleanupEnvironment } from "./environment";
 import { oversightModel } from "./oversight";
 import { postReview } from "./reviewPost";
+import { environmentPrompt, saveRepoEnv } from "./repoEnv";
 import { Slack } from "./slack";
 import { blockAccount, HOME, loadState, newId, touchAccount, updateTask, WORK_DIR, type Account, type Job, type Task } from "./state";
 import { usageFor } from "./usage";
@@ -201,13 +202,15 @@ export async function reviewTask(taskId: string): Promise<void> {
   const env = await allocateEnvironment(loadState().tasks.find((x) => x.id === taskId)!);
 
   const models = seedModels();
+  // model settings: the review scanner's own, else those of a build scanner on the same repository
+  const policy = job.modelPolicy ?? state.jobs.find((j) => j.repo === job.repo && j.source !== "review" && j.modelPolicy)?.modelPolicy;
   const turn = async (role: "frontier" | "swarm" | "setup", prompt: string, readOnly: boolean, timeoutMs: number): Promise<string> => {
     const tried = new Set<string>();
     for (let attempt = 0; attempt < 8; attempt++) {
       const now = Date.now();
       const open = loadState().accounts.filter((a) => !(a.blockedUntil && a.blockedUntil > now) && !tried.has(a.id));
       if (!open.length) { tried.clear(); await new Promise((r) => setTimeout(r, 60_000)); continue; }
-      const modelOn = (a: Account) => role === "frontier" ? selectCliModel(a.provider, models[a.provider], "frontier", job.modelPolicy) : role === "swarm" ? oversightModel(a.provider, job.modelPolicy) : selectCliModel(a.provider, models[a.provider], "implementation", job.modelPolicy);
+      const modelOn = (a: Account) => role === "frontier" ? selectCliModel(a.provider, models[a.provider], "frontier", policy) : role === "swarm" ? oversightModel(a.provider, policy) : selectCliModel(a.provider, models[a.provider], "implementation", policy);
       const usage = await usageFor(open);
       const who = open.filter((a) => !modelBlock(usage.get(a.id), modelOn(a)) && !usageBlock(usage.get(a.id) ?? { keyId: a.id, at: 0, windows: [] }, now))
         .sort((x, y) => (modelLoad(usage.get(x.id), modelOn(x)) ?? 1_000) - (modelLoad(usage.get(y.id), modelOn(y)) ?? 1_000) || (x.lastUsedAt ?? 0) - (y.lastUsedAt ?? 0))[0];
@@ -232,7 +235,10 @@ export async function reviewTask(taskId: string): Promise<void> {
   try {
     if (!loadState().tasks.find((x) => x.id === taskId)?.envReadyAt) {
       activity("setting up databases and services for the review");
-      await turn("setup", ENVIRONMENT_PROMPT(env), false, 30 * 60_000).catch((e) => log(`environment setup incomplete: ${(e as Error).message}`));
+      // the repo's setup is shared with its build tasks: start from it, and save what this review proves
+      await turn("setup", environmentPrompt(job.repo, wt, env), false, 30 * 60_000)
+        .then(() => { if (saveRepoEnv(job.repo, wt)) log("saved this repo's environment setup"); })
+        .catch((e) => log(`environment setup incomplete: ${(e as Error).message}`));
       updateTask(taskId, { envReadyAt: Date.now() });
     }
 
@@ -290,7 +296,7 @@ export async function reviewTask(taskId: string): Promise<void> {
         updateTask(taskId, { status: "done", finishedAt: Date.now(), note: approved.event === "APPROVE" ? "approved" : "commented (own PR)", activity: "review done" });
       } else {
         await say(`Left <${t.url}|PR #${t.pr}> unapproved${answer ? ` (you said: ${answer.slice(0, 80)})` : ""}.`, "COMPLETED");
-        updateTask(taskId, { status: "done", finishedAt: Date.now(), note: "not approved", activity: "review done, not approved" });
+        updateTask(taskId, { status: "done", finishedAt: Date.now(), note: slack ? "not approved" : "not approved: approval needs Slack (consort-cli slack set …)", activity: "review done, not approved" });
       }
     }
   } finally {

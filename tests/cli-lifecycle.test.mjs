@@ -40,6 +40,7 @@ function harness(opts = {}) {
     './ownerUpdates': ownerUpdates,
     './checkpoint': { checkpoint: async (cwd, branch, message) => { events.push(`checkpoint:${message}`); return { committed: true, pushed: true }; } },
     './buildProgress': { stepLabel: name => name },
+    './repoEnv': { environmentPrompt: (_, __, env) => headless.ENVIRONMENT_PROMPT(env), saveRepoEnv: () => { events.push('repo env saved'); return true; } },
     './buildGraph': { readGraph: async () => opts.graph?.tickets ?? [], planWaves: () => opts.graph?.plan ?? { waves: [], remaining: 0, done: 0, problems: [] }, tooSerial: () => !!opts.graph?.serial, graphSummary: g => `${g.remaining} left in ${g.waves.length} waves`, RESPLIT_PROMPT: () => 'RESPLIT THE GRAPH' },
     './draftPr': { draftTitle: t => `[WIP] ${t.title}`, draftBody: (t, progress) => `Progress: ${progress}`, ensureDraftPr: async o => { events.push(`draft:${o.title}:${o.body}`); return opts.draftPr ?? { error: 'no commits yet' }; }, updateDraftBody: async (_, url, body) => { events.push(`draft body:${url}:${body}`); } },
     './slackLinks': { taskSlackLinks: async t => ({ ticket: t.ticket.url, github: t.feature?.prs?.at(-1) ?? 'https://github.com/a/b/tree/feature' }) },

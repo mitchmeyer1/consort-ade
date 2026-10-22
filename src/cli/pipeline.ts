@@ -21,6 +21,7 @@ import { allocateEnvironment, cleanupEnvironment, withChildEnvironment } from ".
 import { flushTaskNotifications, notifyTask } from "./lifecycle";
 import { readUsage, saveUsage, usageFor } from "./usage";
 import { checkpoint } from "./checkpoint";
+import { environmentPrompt, saveRepoEnv } from "./repoEnv";
 import { graphSummary, planWaves, readGraph, RESPLIT_PROMPT, tooSerial } from "./buildGraph";
 import { LINK_PROMPT, needsLinks, syncSubtaskProgress, writeSubtaskFile, type SubtaskState } from "./subtasks";
 import type { Subtask } from "./sources";
@@ -466,8 +467,10 @@ export async function workTask(taskId: string): Promise<void> {
   // ── the environment: what running this repo takes, on this task's ports ────────────────
   if (!task.envReadyAt) {
     activity("setting up the local environment");
-    const text = await turn(ENVIRONMENT_PROMPT(env), builderProvider, "implementation");
+    // start from what an earlier task on this repo worked out, and keep this one's for the next (cli/repoEnv.ts)
+    const text = await turn(environmentPrompt(job.repo, task.worktree, env), builderProvider, "implementation");
     await completeReply(text, undefined, "implementation");
+    if (saveRepoEnv(job.repo, task.worktree)) log(task, "saved this repo's environment setup for the next task");
     updateTask(task.id, { envReadyAt: Date.now() });
     await say(slackLines.env(env.CONSORT_PORT_RANGE));
   }

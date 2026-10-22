@@ -198,6 +198,8 @@ consort-cli scanners add --name "reviews" --source review --repo ~/Work/aligned-
 4. has Fable or Astra verify every finding against the code, merge duplicates and settle severities (a rule in `.ai-review-rules.md` wins), saved as a standard `.review.json` (also under `~/.consort-cli/reviews/`);
 5. posts one GitHub review. Any Critical or High finding: **Request changes**, done. Otherwise it posts the comments, then asks you in the review's Slack thread with a TL;DR, the findings and the link, and approves only when you reply yes.
 
+A review scanner reuses what the box already has: the Claude and Codex accounts (with the same usage balancing and turn limits), the Slack bot and thread handling (including the question-answering agent), the `gh` login (reviews post as that user; setup shows which), and the model settings of a build scanner on the same repository when the review scanner has none. Its environment turn starts from the repository's saved setup: after any task on a repository proves its environment, `ENV.md` and the scripts are kept under `~/.consort-cli/repo-env/` and the next build or review task adapts them to its own ports instead of re-reading the repository. Without Slack, reviews still comment and request changes but never approve; `scanners add` and `setup` say so.
+
 ## Commands
 
 | Command | Does |

@@ -198,6 +198,9 @@ async function main(argv: string[]) {
         job.reviewer = need(a, "reviewer").replace(/^@/, "");
         job.everyMinutes = Number(str(a, "every") ?? 5) || 5;
         job.maxParallel = Number(str(a, "max-parallel") ?? 4) || 4; // the reviewer swarm runs this many agents at once
+        // a review reuses the box's accounts, Slack, gh login and the repo's environment setup; approvals need Slack
+        if (!s.slack) console.log(bad("Slack is not set up: reviews will post comments and request changes, but never approve, because approval waits for your yes on Slack. Run consort-cli slack set …"));
+        if (!s.accounts.length) console.log(bad("No AI accounts yet: consort-cli accounts add --provider claude|codex"));
       }
       if (source === "clickup" && !job.scope) fail("--list, --folder or --space <clickup id> is required for a clickup scanner");
       s.jobs.push(job); saveState(s);

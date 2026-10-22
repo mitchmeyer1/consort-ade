@@ -197,11 +197,11 @@ export async function runSetup(): Promise<void> {
           break;
         }
         if (kind === "sentry") {
-          console.log(dim("Sentry creates grouped ClickUp tickets only. Select the shared GitHub checkout used for atomic duplicate reservations; existing worker scanners pick up the output list/tag."));
+          console.log(dim("Sentry plans bug bundles with existing AI accounts, then creates one ClickUp ticket per bundle. Select the shared GitHub checkout used for atomic duplicate reservations; existing worker scanners pick up the output list/tag."));
           const repo = await repoChecks(ask);
           if (!repo) continue;
           try {
-            const configured = await configureSentryScanner(ask, loadState().clickupKey, repo);
+            const configured = await configureSentryScanner(ask, loadState().clickupKey, repo, undefined, loadState().jobs);
             s = loadState(); s.clickupKey = configured.clickupKey; s.jobs.push(configured.job); saveState(s);
             console.log(ok(`Sentry scanner saved: ClickUp list ${configured.job.sentry!.listId}, tag ${configured.job.sentry!.tag}. Align a ClickUp worker scanner with that destination to implement the tickets.`));
           } catch (e) { console.log(bad(`Sentry setup failed: ${(e as Error).message}`)); }
@@ -294,7 +294,7 @@ export async function runSetup(): Promise<void> {
         s = loadState(); s.accounts = s.accounts.filter((x) => x.id !== acc.id); saveState(s); console.log(`account "${acc.name}" removed`);
       }
     }
-    while (s.jobs.some((j) => j.source !== "sentry") && (!s.accounts.length || await yes(ask, "Add an account?", !s.accounts.length))) {
+    while (s.jobs.length > 0 && (!s.accounts.length || await yes(ask, "Add an account?", !s.accounts.length))) {
       const provider = (await ask("Provider: claude or codex", { default: "claude" })).toLowerCase();
       if (provider !== "claude" && provider !== "codex") { console.log(bad("type claude or codex")); continue; }
       const name = await ask("A label for it (e.g. work, personal, billing)", { default: `${provider} ${s.accounts.filter((x) => x.provider === provider).length + 1}` });
@@ -374,6 +374,15 @@ export async function runSetup(): Promise<void> {
     for (const job of s.jobs) {
       const probe = join(WORK_DIR, `.probe-${process.pid}`);
       try { mkdirSync(probe, { recursive: true }); (await import("node:fs")).rmSync(probe, { recursive: true }); console.log(ok(`can create worktrees under ${WORK_DIR}`)); } catch { console.log(bad(`cannot write ${WORK_DIR}`)); }
+      if (job.source === "review") {
+        // a review never pushes; it reads PRs and posts reviews with the gh login, and approves only after a Slack yes
+        const who = await run("gh", ["api", "user", "--jq", ".login"], { cwd: job.repo, timeout: 30_000 }).then((r) => r.stdout.trim(), () => "");
+        const prs = await run("gh", ["pr", "list", "--state", "open", "--limit", "100", "--json", "number"], { cwd: job.repo, timeout: 60_000 }).then((r) => JSON.parse(r.stdout).length as number, () => -1);
+        console.log(prs >= 0 ? ok(`gh can read ${job.repo}'s PRs (${prs} open); reviews post as @${who || "?"}`) : bad(`gh cannot list PRs in ${job.repo}: run gh auth login`));
+        if (who && job.reviewer && who.toLowerCase() !== job.reviewer.toLowerCase()) console.log(dim(`reviews are for @${job.reviewer} but post as @${who}; GitHub shows them from @${who}`));
+        if (!s.slack) console.log(bad(`review scanner "${job.name}" will never approve: approval waits for your yes on Slack, and Slack is not set up`));
+        continue;
+      }
       const push = await run("git", ["push", "--dry-run", "origin", `HEAD:refs/heads/consort-cli-probe-${process.pid}`], { cwd: job.repo, timeout: 60_000 }).then(() => true, () => false);
       console.log(push ? ok(`can push branches to origin of ${job.repo}`) : bad(`cannot push to origin of ${job.repo}: check the deploy key or token`));
       if (job.source === "clickup" && s.clickupKey && (job.scope || job.listId)) {
