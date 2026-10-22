@@ -8,7 +8,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ticketStatus } from "./buildProgress";
 
-export type GraphTicket = { id: string; title: string; status: string; blockedBy: string[]; files: string[] };
+export type GraphTicket = { id: string; title: string; status: string; blockedBy: string[]; files: string[]; /** ClickUp subtask IDs this ticket delivers (the `ClickUp:` line) */ clickup: string[] };
 export type BuildGraph = { waves: string[][]; remaining: number; done: number; problems: string[] };
 
 const field = (text: string, name: string) => text.match(new RegExp(`(?:^|\\n)\\s*(?:[-*]\\s+)?(?:\\*\\*)?${name}:(?:\\*\\*)?\\s*([^\\n]+)`, "i"))?.[1]?.replace(/\*/g, "").trim();
@@ -26,6 +26,7 @@ export async function readGraph(worktree: string): Promise<GraphTicket[]> {
       title: text.match(/^#\s*(.+)$/m)?.[1]?.trim() ?? file,
       status: ticketStatus(text) ?? "unknown",
       blockedBy: /^(?:none|n\/a|—|-|)$/i.test(blocked) ? [] : blocked.split(/[,;\s]+/).map((s) => s.replace(/\.md$/, "").replace(/[`*]/g, "")).filter((s) => /\w/.test(s)),
+      clickup: (field(text, "ClickUp") ?? "").match(/\b[0-9a-z]{6,}\b/gi)?.filter((x) => /\d/.test(x)) ?? [],
       files: (field(text, "Files") ?? "").split(/[,;]/).map((s) => s.replace(/\s*\(.*$/, "").trim().replace(/^`|`$/g, "").trim()).filter(Boolean),
     };
   }));
@@ -80,5 +81,6 @@ Rewrite only the tickets that are not done (${tickets.filter((t) => !isDone(t)).
 - Put shared contracts (types, interfaces, schema, a stub client) in one small ticket first, so the tickets that use them can run side by side against the contract.
 - "Blocked by" only when a ticket truly needs another one's code to compile or test. Prefer more, smaller tickets that start now over a long chain.
 - Every ticket keeps explicit, non-overlapping Files, a Blocked by line (none or ticket IDs), Status: ready-for-agent, and acceptance criteria. Number new files after the highest existing number; delete files you merge away.
+- When .consort/ship/SUBTASKS.md exists, every ticket keeps a line "**ClickUp:** <subtask IDs it delivers>" from that file, so Consort can move those subtasks as the tickets land.
 - Keep the final sweep/PR ticket last.
 When done, print the new waves (which tickets start together) and emit [ship-next: /ship].`;

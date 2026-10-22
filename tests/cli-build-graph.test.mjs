@@ -40,8 +40,10 @@ test('ticket files are read the way the agent writes them', async (tt) => {
   const wt = await mkdtemp(join(tmpdir(), 'consort-graph-')); tt.after(() => rm(wt, { recursive: true, force: true }));
   const dir = join(wt, '.consort', 'ship', 'issues'); await mkdir(dir, { recursive: true });
   await writeFile(join(dir, '01-model.md'), '# 01: Data model\n**Blocked by:** —\n**Files:** `packages/core/src/model.ts`\n**Status:** done\n');
-  await writeFile(join(dir, '02-service.md'), '# 02: Service\n**Blocked by:** 01, 09\n**Files:** `packages/core/src/services/` (new pure modules only), `packages/core/src/x.ts`\n**Status:** ready-for-agent\n');
+  await writeFile(join(dir, '02-service.md'), '# 02: Service\n**Blocked by:** 01, 09\n**Files:** `packages/core/src/services/` (new pure modules only), `packages/core/src/x.ts`\n**Status:** ready-for-agent\n**ClickUp:** 17thtp0p4yp, 17thtp0p4yq\n');
   const g = await readGraph(wt);
+  assert.deepEqual(g[1].clickup, ['17thtp0p4yp', '17thtp0p4yq']);
+  assert.deepEqual(g[0].clickup, []);
   assert.deepEqual(g.map(x => [x.id, x.status, x.blockedBy, x.files]), [['01-model', 'done', [], ['packages/core/src/model.ts']], ['02-service', 'ready-for-agent', ['01', '09'], ['packages/core/src/services/', 'packages/core/src/x.ts']]]);
   assert.deepEqual(planWaves(g).waves, [['02-service']], '01 matches 01-model and is done');
 });

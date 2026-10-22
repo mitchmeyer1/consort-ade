@@ -49,7 +49,8 @@ function harness(opts = {}) {
       updateTask: (id, patch) => Object.assign(task, typeof patch === 'function' ? patch(task) : patch),
       touchAccount() {}, blockAccount: (id, until, reason) => Object.assign(accounts.find(a => a.id === id), { blockedUntil: until ?? Date.now() + 60000, blockedWhy: reason }),
     },
-    './sources': { sourceFor: () => ({ comment: async (_, text) => events.push(`ticket comment:${text}`), setStatus: async () => {}, updateBody: async (id, body) => events.push(`ticket body:${id}:${body}`), attach: async (id, file) => { events.push(`attach:${file}`); return true; } }) },
+    './sources': { sourceFor: () => ({ comment: async (_, text) => events.push(`ticket comment:${text}`), setStatus: async () => {}, updateBody: async (id, body) => events.push(`ticket body:${id}:${body}`), attach: async (id, file) => { events.push(`attach:${file}`); return true; }, subtasks: async () => opts.subtasks ?? [] }) },
+    './subtasks': { writeSubtaskFile: () => events.push('subtasks file'), needsLinks: () => !!opts.needsLinks, syncSubtasks: async o => { events.push(`subtask sync${o.force ? `:${o.force}` : ''}`); return { ...o.saved, synced: 'progress' }; }, LINK_PROMPT: 'LINK THE TICKETS' },
     './evidence': { findBrowser: async () => '/browser', writeScreenshotHelper: () => '/helper', validateEvidence: () => { events.push('validate evidence'); return opts.validateEvidence?.(); }, publishEvidence: async () => { events.push('publish evidence'); return opts.publishEvidence?.() ?? { items: 1, images: 1, prComment: true, ticketComment: true }; } },
     './environment': { withChildEnvironment: async (_, id, fn) => fn({ CONSORT_RUN: `child-${id}` }), allocateEnvironment: async () => ({}), cleanupEnvironment: async () => ({}) },
     './slack': { Slack: class { async post(text, thread, broadcast) { if (opts.failPost?.(text)) throw new Error('Slack unavailable'); messages.push({ text, thread, broadcast }); return String(messages.length); } async waitForReply(thread, ts, options) { options?.onCheck?.('answer'); events.push('owner reply'); opts.onReply?.(task); return opts.reply ?? 'Proceed'; } } },
@@ -779,4 +780,18 @@ test('consort-cli tasks split forces one re-split even when the graph is not a c
   assert.match(prompts[0], /RESPLIT THE GRAPH/);
   assert.equal(h.task.resplitRequested, undefined);
   assert.ok(h.messages.some(m => /Re-splitting the remaining build/.test(m.text)));
+});
+
+test('subtasks are saved for the agent, linked once, and synced after each step', async () => {
+  const prompts = [];
+  const h = harness({ task: { feature: { stage: 'Implementing', prs: [], history: [] } }, subtasks: [{ id: 's1', name: '1. Model', url: 'u' }], needsLinks: true,
+    graph: { tickets: [{ id: '01' }], plan: { waves: [['01']], remaining: 1, done: 0, problems: [] } },
+    turn: o => { prompts.push(o.prompt); if (prompts.length === 3) throw halt; return { text: '' }; } });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.ok(h.events.includes('subtasks file'));
+  assert.match(prompts[0], /LINK THE TICKETS/);
+  assert.ok(h.task.subtasksLinkedAt, 'linked once');
+  assert.ok(!prompts.slice(1).some(p => /LINK THE TICKETS/.test(p)));
+  assert.ok(h.events.includes('subtask sync'), 'synced after the build step');
+  assert.deepEqual(h.task.subtaskSync, { synced: 'progress' });
 });

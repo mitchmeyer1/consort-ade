@@ -117,6 +117,10 @@ export type Task = {
   graphResplitAt?: number;
   /** `consort-cli tasks split`: re-split the unfinished build tickets on the next build step, chain or not */
   resplitRequested?: number;
+  /** where the worker last moved each ClickUp subtask (cli/subtasks.ts) */
+  subtaskSync?: Record<string, import("./subtasks").SubtaskState>;
+  /** the build tickets were linked to the ClickUp subtasks once */
+  subtasksLinkedAt?: number;
   /** the ticket set the last "Build plan" Slack line described */
   buildPlanIds?: string;
   /** review thread ids already answered */

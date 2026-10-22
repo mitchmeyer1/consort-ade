@@ -24,7 +24,10 @@ export type Source = {
   updateBody(id: string, body: string): Promise<void>;
   /** attach a file to the ticket; false when the source cannot hold files */
   attach(id: string, file: string): Promise<boolean>;
+  /** the ticket's subtasks (ClickUp); GitHub issues have none */
+  subtasks(id: string): Promise<Subtask[]>;
 };
+export type Subtask = { id: string; name: string; status?: string; url: string; description?: string };
 
 const run = promisify(execFile);
 const gh = async (cwd: string, args: string[]) => (await run("gh", args, { cwd, timeout: 60_000, maxBuffer: 1 << 23 })).stdout;
@@ -145,6 +148,10 @@ export function clickupSource(key: string, job: Job): Source {
       await clickup(key, `/task/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ markdown_content: body }) });
     },
     async attach(id, file) { await uploadClickupAttachment(key, id, file, "application/octet-stream"); return true; },
+    async subtasks(id) {
+      const t = await clickup(key, `/task/${encodeURIComponent(id)}?include_subtasks=true`);
+      return ((t.subtasks ?? []) as any[]).map((x) => ({ id: String(x.id), name: String(x.name ?? x.id), status: x.status?.status, url: x.url ?? `https://app.clickup.com/t/${x.id}`, ...(x.text_content || x.description ? { description: String(x.text_content || x.description).slice(0, 1500) } : {}) }));
+    },
   };
 }
 
@@ -184,6 +191,7 @@ export function githubSource(job: Job): Source {
     async updateBody(id, body) { await gh(job.repo, ["issue", "edit", id, "--body", body]); },
     // GitHub's API has no issue attachment upload; the comment names the files instead
     async attach() { return false; },
+    async subtasks() { return []; },
   };
 }
 

@@ -22,6 +22,8 @@ import { flushTaskNotifications, notifyTask } from "./lifecycle";
 import { readUsage, saveUsage, usageFor } from "./usage";
 import { checkpoint } from "./checkpoint";
 import { graphSummary, planWaves, readGraph, RESPLIT_PROMPT, tooSerial } from "./buildGraph";
+import { LINK_PROMPT, needsLinks, syncSubtasks, writeSubtaskFile, type SubtaskState } from "./subtasks";
+import type { Subtask } from "./sources";
 import { draftBody, draftTitle, ensureDraftPr, updateDraftBody } from "./draftPr";
 import { stepLabel } from "./buildProgress";
 import type { TaskEnv } from "../shared/headless.ts";
@@ -97,6 +99,19 @@ export async function workTask(taskId: string): Promise<void> {
   await excludeConsortDir(task.worktree).catch(() => {});
   const fetched = await fetchTicket(task.ticket, { repoPath: job.repo, clickupKey: state.clickupKey });
   let ticketBody = writeTicketFile(task.worktree, task.ticket, fetched);
+  // the ClickUp subtasks, so the build tickets can name them and the worker can move them (cli/subtasks.ts)
+  const claimed = task!;
+  const subtasks = await source.subtasks(claimed.ticket.id).catch((e) => { log(claimed, `subtasks not read: ${(e as Error).message}`); return [] as Subtask[]; });
+  if (subtasks.length) writeSubtaskFile(claimed.worktree, subtasks);
+  const syncSubtaskStatus = async (force?: SubtaskState) => {
+    if (!subtasks.length) return;
+    const tickets = await readGraph(claimed.worktree).catch(() => []);
+    const head = await run("git", ["rev-parse", "--short", "HEAD"], { cwd: claimed.worktree }).then((r) => r.stdout.trim()).catch(() => "");
+    const where = [head && `Commit ${head} on ${claimed.branch}.`, feature.prs[0] && `PR: ${feature.prs[0]}`].filter(Boolean).join(" ");
+    const saved = loadState().tasks.find((t) => t.id === taskId)?.subtaskSync ?? {};
+    const next = await syncSubtasks({ source, parentId: claimed.ticket.id, subtasks, tickets, saved, where, force, log: (l) => log(claimed, l) });
+    if (JSON.stringify(next) !== JSON.stringify(saved)) updateTask(taskId, { subtaskSync: next });
+  };
 
   await ensureSlackIdentity(taskId);
   task = loadState().tasks.find(t => t.id === taskId)!;
@@ -387,6 +402,7 @@ export async function workTask(taskId: string): Promise<void> {
     const saved = await checkpoint(task.worktree, task.branch, `Consort checkpoint: ${progressLabel()}`);
     if (saved.error) log(task, `checkpoint failed: ${saved.error}`);
     else if (saved.committed || saved.pushed) log(task, `checkpoint${saved.committed ? " committed" : ""}${saved.pushed ? ` and pushed ${task.branch}` : ""}`);
+    await syncSubtaskStatus();
     if (!feature.prs.length) await openDraft();
     else if (draftOpen() && !saved.error) {
       const failed = await updateDraftBody(task.worktree, feature.prs[0], draftBody(task.ticket, progressLabel(), ticketBody));
@@ -466,6 +482,13 @@ export async function workTask(taskId: string): Promise<void> {
       if (graph.remaining) {
         const ids = tickets.map((t) => t.id).join(",");
         const current = loadState().tasks.find((t) => t.id === taskId);
+        if (needsLinks(subtasks, tickets) && !current?.subtasksLinkedAt) {
+          updateTask(taskId, { subtasksLinkedAt: Date.now() });
+          log(task, `linking ${tickets.length} build tickets to ${subtasks.length} ClickUp subtasks`);
+          activity("linking build tickets to the ClickUp subtasks");
+          await completeReply(await turn(LINK_PROMPT, builderProvider, "reader"), undefined, "reader");
+          continue;
+        }
         const asked = !!current?.resplitRequested;
         if (asked || (tooSerial(graph) && !current?.graphResplitAt)) {
           updateTask(taskId, { graphResplitAt: Date.now(), resplitRequested: undefined });
@@ -623,7 +646,7 @@ export async function workTask(taskId: string): Promise<void> {
         continue;
       }
       if (state.state === "OPEN" && await applyOwnerUpdates()) continue;
-      if (state.state !== "OPEN") { await tell(slackLines.prClosed(state.state.toLowerCase())); await finish("done", `PR ${state.state.toLowerCase()}`); if (state.state === "MERGED") await source.setStatus(task.ticket.id, "done").catch(() => {}); return; }
+      if (state.state !== "OPEN") { await tell(slackLines.prClosed(state.state.toLowerCase())); await finish("done", `PR ${state.state.toLowerCase()}`); if (state.state === "MERGED") { await source.setStatus(task.ticket.id, "done").catch(() => {}); await syncSubtaskStatus("done").catch(() => {}); } return; }
       const seen = new Set(loadState().tasks.find((t) => t.id === taskId)?.threadsSeen ?? []);
       const fresh = [...state.unresolved, ...(state.feedback ?? [])].filter((t) => (!!t.threadId || !seen.has(t.id)) && t.author && t.author !== me && !/\[bot\]$/.test(t.author));
       const currentTask = loadState().tasks.find((t) => t.id === taskId)!;
