@@ -13,3 +13,14 @@ export function stageModelRole(stage: string, stalled = 0): CliModelRole {
   if (stalled >= 2) return "frontier";
   return ["Spec'd", "Implementing", "Ready to Test", "Revising"].includes(stage) ? "implementation" : "planning";
 }
+
+/** Reasoning effort by role: judgement gets more, bounded reading gets less. A scanner can set any role. */
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+export type CliEffortPolicy = Partial<Record<CliModelRole, EffortLevel>>;
+export const isEffortLevel = (value: string): value is EffortLevel => (EFFORT_LEVELS as readonly string[]).includes(value);
+export function roleEffort(role: CliModelRole, policy: CliEffortPolicy = {}): EffortLevel {
+  return policy[role] ?? (role === "reader" ? "low" : role === "frontier" ? "high" : "medium");
+}
+/** Codex has no `max`; its top level is `xhigh`. */
+export const codexEffort = (effort: EffortLevel): Exclude<EffortLevel, "max"> => (effort === "max" ? "xhigh" : effort);

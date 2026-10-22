@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { availableTaskSlots } from "./capacity";
+import { EFFORT_LEVELS, isEffortLevel } from "../shared/cliTurnPolicy.ts";
 import { execFile, spawn } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
@@ -84,7 +85,7 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
            reads SENTRY_AUTH_TOKEN from the environment; creates ClickUp tickets without starting workers
   scanners list | scanners remove <id> | scanners enable|disable <id> | scanners scan <id>   (scan: dry run)
                                                                           a scanner watches one place for tickets and hands each match to a worker agent
-  scanners configure <id> [--max-parallel N] [--max-open-tasks N] [--max-environments N] [--planning-model provider:model] [--implementation-model provider:model] [--coordination-model provider:model] [--reader-model provider:model] [--frontier-model provider:model] [--parallel-research N] [--parallel-implementation N] [--max-model-attempts N]
+  scanners configure <id> [--max-parallel N] [--max-open-tasks N] [--max-environments N] [--planning-model provider:model] [--implementation-model provider:model] [--coordination-model provider:model] [--reader-model provider:model] [--frontier-model provider:model] [--<role>-effort low|medium|high|xhigh|max] [--parallel-research N] [--parallel-implementation N] [--max-model-attempts N]
   capacity configure [--max-active-turns N] [--max-open-tasks N] [--max-environments N]
   accounts configure <id> --max-active-turns N
   run [-d]                                                                the daemon: scan, claim, dispatch, watch; -d runs it in the background
@@ -248,6 +249,11 @@ async function main(argv: string[]) {
           if ((provider === "claude" && !model.startsWith("claude-")) || (provider === "codex" && !model.startsWith("gpt-"))) fail(`--${role}-model names a model for the wrong provider`);
           job.modelPolicy = { ...job.modelPolicy, [role]: { ...job.modelPolicy?.[role], [provider]: model } };
         }
+      }
+      for (const role of ["planning", "implementation", "coordination", "reader", "frontier"] as const) {
+        const raw = str(a, `${role}-effort`); if (raw === undefined) continue;
+        if (!isEffortLevel(raw)) fail(`--${role}-effort must be one of ${EFFORT_LEVELS.join(", ")}`);
+        job.effortPolicy = { ...job.effortPolicy, [role]: raw };
       }
       saveState(s); console.log(`Updated scanner ${job.name}.`); return;
     }

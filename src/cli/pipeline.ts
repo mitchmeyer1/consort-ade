@@ -8,7 +8,7 @@ import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUs
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { selectCliModel, type CliModelRole } from "../shared/cliModels.ts";
-import { MODEL_ROLE_RULES, parseModelEscalation, stageModelRole } from "../shared/cliTurnPolicy.ts";
+import { MODEL_ROLE_RULES, parseModelEscalation, roleEffort, stageModelRole } from "../shared/cliTurnPolicy.ts";
 import { AccountUnavailableError, withAgentTurn, withEnvironmentSlot } from "./capacity";
 import { prepareResearchTasks, readImplementationTasks, recoverImplementation, runImplementation, runResearch, type ParallelRun } from "./parallel";
 import { excludeConsortDir, fetchTicket, writeTicketFile } from "../main/ship";
@@ -238,9 +238,10 @@ export async function workTask(taskId: string): Promise<void> {
         provider = who.provider;
         model = modelFor(provider, role);
       }
+      const effort = roleEffort(role, job.effortPolicy);
       updateTask(task.id, (t) => ({ activeProvider: provider,
         ...(managesSession ? { accountIds: { ...t.accountIds, [provider]: who.id }, sessions: { ...t.sessions, [provider]: t.accountIds[provider] === who.id ? t.sessions[provider] : undefined } } : {}),
-        activity: `${turnTag}running ${provider} ${model} on ${who.name}` }));
+        activity: `${turnTag}running ${provider} ${model} on ${who.name}`, turn: { role, provider, model, effort, startedAt: Date.now() } }));
       touchAccount(who.id);
       const reviewUnits = fixedModel ? Math.min(2, job.maxParallel ?? 2, who.maxActiveTurns ?? 2, live.capacity?.maxActiveTurns ?? 4) : 1;
       const delegation = reviewUnits > 1 ? "You may run ONE foreground review reader at a time, on the supplied reader model. Never spawn nested agents or background agents. This overrides any larger wave in the skill." : "Do not dispatch agents. Consort has reserved only your turn; inspect the review evidence yourself. This overrides the skill's delegation instructions.";
@@ -273,14 +274,14 @@ export async function workTask(taskId: string): Promise<void> {
         startedAt = Date.now();
         usageTimer = setInterval(checkUsage, 60_000);
         deadline = timeoutMs ? setTimeout(() => { timedOut = true; abort.abort(); }, timeoutMs) : undefined;
-        return runTurn({ cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}\n\n${ENVIRONMENT_RULES(turnEnv)}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: turnEnv, signal: abort.signal, readOnly, effort: role === "reader" ? "low" : role === "frontier" ? "high" : "medium", delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
+        return runTurn({ cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}\n\n${ENVIRONMENT_RULES(turnEnv)}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: turnEnv, signal: abort.signal, readOnly, effort, delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
       }, reviewUnits); }
       catch (e) { if (e instanceof AccountUnavailableError) { continue; } throw e; }
       finally { active = false; mine.set(who.id, (mine.get(who.id) ?? 1) - 1); if (usageTimer) clearInterval(usageTimer); if (deadline) clearTimeout(deadline); }
       if (usageLimit) res.limit = { text: usageLimit.reason, resetsAt: usageLimit.until };
       updateTask(taskId, t => ({
         ...(res.usage?.length ? { cost: addTurnCost(t.cost, res.usage) } : {}),
-        turnHistory: [...(t.turnHistory ?? []), { at: startedAt, stage: feature.stage, role, provider, model, durationMs: Date.now() - startedAt, usage: res.usage, error: timedOut ? `Timed out after ${timeoutMs}ms` : res.error ?? res.limit?.text, escalated: !!escalationReason, escalationReason }],
+        turnHistory: [...(t.turnHistory ?? []), { at: startedAt, stage: feature.stage, role, provider, model, effort, durationMs: Date.now() - startedAt, usage: res.usage, error: timedOut ? `Timed out after ${timeoutMs}ms` : res.error ?? res.limit?.text, escalated: !!escalationReason, escalationReason }],
       }));
       if (timedOut) {
         const minutes = Math.round(timeoutMs! / 60_000);
@@ -439,7 +440,7 @@ export async function workTask(taskId: string): Promise<void> {
     setTimeout(done, ms);
   });
 
-  log(task, `models: planning, spec and judgement on ${builderModel}; build and routine turns on ${workerModel}`);
+  log(task, `models: planning, spec and judgement on ${builderModel} at ${roleEffort("planning", job.effortPolicy)} effort; build and routine turns on ${workerModel} at ${roleEffort("implementation", job.effortPolicy)} effort`);
   if (task.rebootedAt) {
     // `consort-cli reboot`: the owner stopped the last worker; open by working out where it got to
     log(task, "rebooted by the owner; picking up after the last run");

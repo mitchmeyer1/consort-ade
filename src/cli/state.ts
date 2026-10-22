@@ -66,6 +66,7 @@ export type Job = {
   maxOpenTasks?: number;
   maxEnvironments?: number;
   modelPolicy?: import("../shared/cliModels.ts").CliModelPolicy;
+  effortPolicy?: import("../shared/cliTurnPolicy.ts").CliEffortPolicy;
   parallelResearch?: number;
   parallelImplementation?: number;
   maxModelAttempts?: number;
@@ -108,8 +109,10 @@ export type Task = {
   sessions: Partial<Record<Provider, string>>;
   accountIds: Partial<Record<Provider, string>>;
   /** provider executing the current turn, including a fallback from the builder's provider */
-  turnHistory?: { at: number; stage: string; role: string; provider: Provider; model: string; durationMs: number; usage?: import("../shared/headless.ts").TurnUsage[]; error?: string; escalated?: boolean; escalationReason?: string }[];
+  turnHistory?: { at: number; stage: string; role: string; provider: Provider; model: string; effort?: import("../shared/cliTurnPolicy.ts").EffortLevel; durationMs: number; usage?: import("../shared/headless.ts").TurnUsage[]; error?: string; escalated?: boolean; escalationReason?: string }[];
   riskReason?: string;
+  /** the turn in flight, or the last one: the view shows its model and effort beside the account */
+  turn?: { role: string; provider: Provider; model: string; effort: import("../shared/cliTurnPolicy.ts").EffortLevel; startedAt: number };
   activeProvider?: Provider;
   activeTurns?: { id: string; pid: number; accountId: string; startedAt: number; units?: number }[];
   childEnvironments?: { id: string; portBase: number; runCode: string; pid: number }[];

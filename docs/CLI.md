@@ -103,6 +103,8 @@ CLI models are selected by job role in `src/shared/cliModels.ts`; desktop model 
 
 Defaults select matching models from the CLI seed catalog. A configured role can name a supported newer release explicitly; account access must exist. Provider fallback preserves the job role. An agent can request frontier analysis with `[model-escalate: reason]`; two failed ordinary attempts also escalate by default. Owner decisions still use Slack questions. Frontier failures stop for recovery rather than retrying without a bound. Every attempted turn records its role, model, elapsed execution time, usage, error and escalation reason in `tasks[].turnHistory`; limit attempts retain returned usage. Estimated API cost is separate from subscription quota. Unknown model prices remain visibly unpriced.
 
+Each role also carries a reasoning effort: `low` for readers, `high` for frontier turns, `medium` for the rest. `scanners configure` takes `--<role>-effort low|medium|high|xhigh|max` for any of the five roles; Codex has no `max` and runs `xhigh` for it. The task log's first lines name the planning and build efforts beside their models, every `tasks[].turnHistory` entry records the effort it ran at, and the dashboard's TURN column shows the model and effort of the turn in flight.
+
 Configure existing scanners without setup:
 
 ```sh
@@ -112,6 +114,7 @@ consort-cli scanners configure <scanner-id> \
   --implementation-model codex:gpt-6.1-sol \
   --reader-model codex:gpt-6-luna \
   --max-model-attempts 2 \
+  --planning-effort high --implementation-effort medium \
   --parallel-research 2 --parallel-implementation 2 \
   --max-parallel 2 --max-open-tasks 8 --max-environments 8
 consort-cli accounts configure <account-id> --max-active-turns 2
@@ -239,7 +242,7 @@ Nothing asks for permission: Claude Code runs with permissions bypassed and Code
 consort-cli view
 ```
 
-A live table (header says whether the daemon is running): ticket, title, the step it is on as `n/9` (environment, grilling, build, test, one review per model in the rotation, evidence, watch PR), the step's name, the step that comes next, status, the account in use, what it has cost so far (estimated dollars and total tokens over every agent turn; Claude Code prices its own turns, Codex turns are priced from the table in `src/shared/headless.ts`), how long it has run, and what the worker is doing right now. Finished tasks stay for 24 hours, then drop off. The same cost line is printed with the evidence on the PR and the ticket. Below it, the accounts, each with its plan meters as bars (5-hour, weekly, and one per model family, like the desktop's Usage panel; amber from 80%, red from 95%), when the 5-hour window resets, and any block; then the scanners with their next scan, and the commands that stop the daemon or one agent. Usage is read once a minute by asking each login's own CLI, with no model call; API-key accounts have no meters. `--once` prints one frame (`--no-usage` skips the read). `q` quits.
+A live table (header says whether the daemon is running): ticket, title, the step it is on as `n/9` (environment, grilling, build, test, one review per model in the rotation, evidence, watch PR), the step's name, the step that comes next, status, the account in use, the model and effort of the turn in flight (TURN), what it has cost so far (estimated dollars and total tokens over every agent turn; Claude Code prices its own turns, Codex turns are priced from the table in `src/shared/headless.ts`), how long it has run, and what the worker is doing right now. Finished tasks stay for 24 hours, then drop off. The same cost line is printed with the evidence on the PR and the ticket. Below it, the accounts, each with its plan meters as bars (5-hour, weekly, and one per model family, like the desktop's Usage panel; amber from 80%, red from 95%), when the 5-hour window resets, and any block; then the scanners with their next scan, and the commands that stop the daemon or one agent. Usage is read once a minute by asking each login's own CLI, with no model call; API-key accounts have no meters. `--once` prints one frame (`--no-usage` skips the read). `q` quits.
 
 STATUS shows green `RUNNING` while the worker is active, yellow `WAITING` for a required owner Slack reply; PR review and CI monitoring remain green `RUNNING`, and red `STOPPED` when the task failed or its worker is gone. Yellow `LIMIT` means the worker is waiting for account usage to reset; yellow `STALLED` means no activity for ten minutes. Bright blue `COMPLETED` means three internal reviews are finished, two human reviewers were requested, one selected reviewer approved, every thread is resolved, and CI passed. Consort never merges. ACTIVITY shows the reason. A usage limit can leave a worker alive and waiting, so it does not by itself mean the task failed.
 

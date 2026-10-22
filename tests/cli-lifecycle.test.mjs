@@ -20,7 +20,7 @@ function harness(opts = {}) {
   const events = [], messages = [];
   const task = { id: 't', jobId: 'j', ticket: { id: 'T1', title: 'Example', url: 'https://ticket/1' }, worktree: '/virtual', branch: 'feature', accountIds: {}, sessions: {}, reviewsDone: 0, threadsSeen: [], envReadyAt: 1, evidenceValidatedAt: 1, feature: { stage: 'In Review', prs: ['https://github.com/a/b/pull/1'], evidenceAt: 1 }, ...opts.task };
   const accounts = opts.accounts ?? [{ id: 'c', provider: 'claude', name: 'Claude' }, { id: 'x', provider: 'codex', name: 'Codex' }];
-  const state = { tasks: [task], jobs: [{ id: 'j', repo: '/virtual', base: 'main' }], accounts, slack: { userId: 'owner' } };
+  const state = { tasks: [task], jobs: [{ id: 'j', repo: '/virtual', base: 'main', ...opts.job }], accounts, slack: { userId: 'owner' } };
   let interval, deadline;
   let clock = Date.now();
   class Clock extends Date { static now() { return clock; } }
@@ -817,4 +817,18 @@ test('a frontier turn picks Codex when the Claude account is nearly out of Fable
   // no tickets yet: the plan turn is frontier work, which goes to Codex (Astra) first; the network error moves it to Claude
   assert.deepEqual(seen, ['x:gpt-6-astra', 'c:claude-fable-5-1']);
   assert.ok(!h.events.includes('owner reply'));
+});
+
+test('a configured role effort reaches the turn and the task records it', async () => {
+  const seen = [];
+  const h = harness({ job: { effortPolicy: { implementation: 'xhigh', planning: 'low' } }, task: { envReadyAt: undefined, feature: { stage: 'Grilling', prs: [], history: [] } }, turn: o => {
+    seen.push(o);
+    if (seen.length === 1) return { text: 'env ready' };
+    throw halt;
+  } });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.deepEqual(seen.map(o => o.effort), ['xhigh', 'low']);
+  assert.equal(h.task.turnHistory[0].effort, 'xhigh');
+  assert.equal(h.task.turn.effort, 'low');
+  assert.equal(h.task.turn.model, seen[1].model);
 });
