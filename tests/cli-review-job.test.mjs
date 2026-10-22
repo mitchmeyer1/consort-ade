@@ -107,7 +107,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-async function flow(t, findings, extraJobs = [], resume) {
+async function flow(t, findings, extraJobs = [], resume, opts = {}) {
   const root = await mkdtemp(join(tmpdir(), 'consort-review-')); t.after(() => rm(root, { recursive: true, force: true }));
   const repo = join(root, 'repo'), wt = join(root, 'wt');
   await mkdir(repo); await mkdir(wt);
@@ -119,8 +119,8 @@ async function flow(t, findings, extraJobs = [], resume) {
   const runTurn = async o => {
     turns.push({ model: o.model, readOnly: o.readOnly, prompt: o.prompt });
     if (o.prompt.includes('step 1 of 3')) { await writeFile(join(wt, '.consort', 'review', 'plan.json'), JSON.stringify({ tldr: 'Adds a CSV export.', emoji: '📤', title: 'CSV report export', slices: [{ id: 's1', title: 'API', files: ['src/a.ts'] }, { id: 's2', title: 'UI', files: ['src/b.tsx'] }] })); return { text: 'written' }; }
-    if (o.prompt.includes('Review one area')) return { text: `[review-findings]\n\`\`\`json\n${JSON.stringify(findings)}\n\`\`\`` };
-    if (o.prompt.includes('step 3 of 3')) return { text: `[review-final]\n\`\`\`json\n${JSON.stringify({ summary: 'Adds a CSV export.', flows: ['Exporting a report now downloads a CSV.'], headline: 'ok', findings })}\n\`\`\`` };
+    if (o.prompt.includes('Review one area')) return { text: `[review-findings]\n\`\`\`json\n${JSON.stringify(typeof findings === 'function' ? findings() : findings)}\n\`\`\`` };
+    if (o.prompt.includes('step 3 of 3')) return { text: `[review-final]\n\`\`\`json\n${JSON.stringify({ summary: 'Adds a CSV export.', flows: ['Exporting a report now downloads a CSV.'], headline: 'ok', findings: typeof findings === 'function' ? findings() : findings })}\n\`\`\`` };
     return { text: 'done' };
   };
   const mocks = {
@@ -129,7 +129,7 @@ async function flow(t, findings, extraJobs = [], resume) {
     './oversight': { oversightModel: p => (p === 'claude' ? 'claude-opus-5' : 'gpt-5.6-sol') },
     './reviewPost': { postReview: async (r, f, event, body) => { posts.push({ event, n: f.length, body }); return { url: 'https://github.com/acme/mono/pull/9#review', event, inline: f.length, general: 0 }; } },
     './slackIdentity': { slackIdentityFor: title => ({ emoji: '📊', title }), takenEmojis: () => [] },
-    './slack': { Slack: class { async post(text) { slackPosts.push(text); return String(slackPosts.length); } async waitForReply() { return 'yes'; } } },
+    './slack': { Slack: class { async post(text) { slackPosts.push(text); return String(slackPosts.length); } async waitForReply() { return opts.reply ?? 'yes'; } } },
     './state': { WORK_DIR: root, HOME: root, newId: () => 'x', loadState: () => state, updateTask: (id, patch) => Object.assign(task, typeof patch === 'function' ? patch(task) : patch), touchAccount() {}, blockAccount() {} },
     './usage': { usageFor: async accts => new Map(accts.map(a => [a.id, { keyId: a.id, at: Date.now(), windows: [{ id: '5h', label: '5h', percent: a.provider === 'claude' ? 90 : 10 }] }])) },
     'node:util': { promisify: () => async () => ({ stdout: '' }) },
@@ -140,8 +140,10 @@ async function flow(t, findings, extraJobs = [], resume) {
     await writeFile(join(wt, '.consort', 'review', 'pr-9.review.json'), JSON.stringify({ repo: 'acme/mono', pr: 9, url: 'u', head: 'h', base: 'b', findings: [] }));
     Object.assign(task, { slackThread: '1', pendingQuestion: { questions: ['Approve PR #9?'], afterTs: '5' } });
   }
-  await reviewTask('t');
-  return { task, turns, posts, slackPosts, wt, root };
+  const watches = [...(opts.watches ?? [{ state: 'MERGED' }])];
+  const sleeps = [];
+  await reviewTask('t', async () => (watches.length > 1 ? watches.shift() : watches[0]), async ms => { sleeps.push(ms); });
+  return { task, turns, posts, slackPosts, wt, root, sleeps };
 }
 
 test('a clean review: frontier overview, swarm on Opus/Sol, frontier check, comments posted, approval only after Slack yes', async (t) => {
@@ -162,7 +164,34 @@ test('a High finding requests changes and never asks to approve', async (t) => {
   const f = await flow(t, [{ severity: 'high', category: 'scaling', title: 'Unbounded query', file: 'src/a.ts', line: 3, comment: 'Paginate.' }]);
   assert.deepEqual(f.posts.map(p => p.event), ['REQUEST_CHANGES']);
   assert.ok(!f.slackPosts.some(p => /\*Approve\?\*/.test(p)));
-  assert.match(f.task.note, /requested changes/);
+  assert.equal(f.task.note, 'merged', 'finished only when the PR merged');
+  assert.ok(f.slackPosts.some(p => /Watching the PR: the next round starts when @dev asks for review again/.test(p)));
+});
+
+test('after Request changes it watches the PR and runs another round when the author asks again, checking earlier findings first', async (t) => {
+  let calls = 0; // round 1: two area reviewers and the verify step
+  const high = [{ severity: 'high', category: 'scaling', title: 'Unbounded query', file: 'src/a.ts', line: 3, comment: 'Paginate.' }];
+  const f = await flow(t, () => (calls++ < 3 ? high : []), [], false, { watches: [
+    { state: 'OPEN', headRefOid: 'h', reviewRequests: [] },
+    { state: 'OPEN', headRefOid: 'h2', reviewRequests: [{ login: 'Mitch' }] },
+  ] });
+  assert.deepEqual(f.posts.map(p => p.event), ['REQUEST_CHANGES', 'APPROVE'], 'round 2 is clean, so it asks and approves');
+  assert.equal(f.task.review.round, 2); assert.equal(f.task.review.head, 'h2');
+  assert.equal(f.task.status, 'done'); assert.equal(f.task.note, 'approved');
+  assert.ok(f.slackPosts.some(p => /Round 2: @dev asked for review again at `h2`/.test(p)));
+  assert.match(await readFile(join(f.wt, '.consort', 'review', 'previous.json'), 'utf8'), /Unbounded query/);
+  assert.ok(f.turns.some(x => x.prompt.includes('step 1 of 3')) && f.turns.filter(x => x.prompt.includes('step 1 of 3')).length === 2, 'a fresh overview each round');
+  assert.equal(f.sleeps.length, 1, 'polled until the request came back');
+});
+
+test('the owner saying no keeps watching; a request that never cleared does not loop on the same head', async (t) => {
+  const f = await flow(t, [], [], false, { reply: 'no', watches: [
+    { state: 'OPEN', headRefOid: 'h', reviewRequests: [{ login: 'mitch' }] },
+    { state: 'OPEN', headRefOid: 'h', reviewRequests: [{ login: 'mitch' }] },
+    { state: 'CLOSED', headRefOid: 'h' },
+  ] });
+  assert.equal(f.turns.filter(x => x.prompt.includes('step 1 of 3')).length, 1, 'one round only');
+  assert.equal(f.task.status, 'done'); assert.equal(f.task.note, 'PR closed');
 });
 
 test('a review uses the model settings of the build scanner on the same repository', async (t) => {

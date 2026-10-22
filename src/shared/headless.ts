@@ -549,7 +549,7 @@ export function slackCardState(t: SlackCardTask, ownerId?: string, limited = fal
   if (t.status === "waiting" || t.pendingQuestion) return { badge: `🟠 *Needs ${owner}*`, detail: brief(firstLine(t.pendingQuestion?.questions[0]) || (t.pauseReason ?? t.note ?? "Reply in the thread").replace(/^Waiting on you:\s*/i, ""), 200) };
   if (t.lifecycle === "paused") return { badge: "⏸️ *Paused*", detail: t.pauseReason ?? t.note };
   if (limited) return { badge: "🟡 *Waiting for AI credits*", detail: "every account is at its usage limit" };
-  if (t.status === "monitoring") return { badge: "🔵 *Waiting on PR reviews and CI*" };
+  if (t.status === "monitoring") return t.kind === "review" ? { badge: "🔵 *Waiting on the author's fixes*", detail: t.note } : { badge: "🔵 *Waiting on PR reviews and CI*" };
   return { badge: "🟢 *Working*" };
 }
 export function slackCard(t: SlackCardTask, links: SlackTaskLinks, opts: { ownerId?: string; limited?: boolean; at: number; /** "author: Mitch Meyer", "reviewing: Will Lerner" */ byline?: string }): { text: string; key: string } {
