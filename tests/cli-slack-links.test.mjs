@@ -64,3 +64,9 @@ test('the thread card says at a glance: working, needs the owner, or done', asyn
   assert.match(slackCard({ ...base, status: 'monitoring' }, links, { at: 1 }).key, /🔵 \*Waiting on PR reviews and CI\*/);
   assert.match(slackCard(base, links, { at: 1, limited: true }).key, /🟡 \*Waiting for AI credits\*/);
 });
+
+test('a running task whose worker was restarted still reads as working', async () => {
+  const { slackCard } = await import('../src/shared/headless.ts');
+  const t = { status: 'working', lifecycle: 'stopped', kind: 'review', reviewStep: 3, reviewsDone: 0, feature: { stage: 'Grilling' } };
+  assert.match(slackCard(t, { ticket: 'https://github.com/a/b/pull/1', github: 'https://github.com/a/b/pull/1' }, { at: 1 }).key, /^🟢 \*Working\* · Step 3\/5 Reviewers\n<https:\/\/github.com\/a\/b\/pull\/1\|ticket>$/);
+});

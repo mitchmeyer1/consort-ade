@@ -10,7 +10,7 @@ export async function taskSlackLinks(task: Task, repo?: string): Promise<SlackTa
   const heading = slackHeading(task.ticket.title, task.slackIdentity);
   // the step tracker under STATUS: what is done, what runs now (with the build's tickets), what is left
   const progress = task.kind === "review" ? slackProgress(task) : task.feature ? slackProgress(task, buildProgress(task.worktree)) : undefined;
-  const pr = task.feature?.prs?.at(-1);
+  const pr = task.review?.url ?? task.feature?.prs?.at(-1);
   if (pr) return { ticket: task.ticket.url, github: pr, heading, progress };
   let remote = "";
   if (repo) {

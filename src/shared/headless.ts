@@ -544,7 +544,7 @@ export function slackCardState(t: SlackCardTask, ownerId?: string, limited = fal
   if (t.status === "ready") return { badge: "✅ *Ready to merge*", detail: "Consort will not merge it." };
   if (t.status === "done") return { badge: "✅ *Done*", detail: t.note };
   if (t.status === "released") return { badge: "⏹️ *Released*", detail: t.note };
-  if (t.status === "failed" || t.lifecycle === "stopped") return { badge: "🔴 *Stopped*", detail: t.note };
+  if (t.status === "failed") return { badge: "🔴 *Stopped*", detail: t.note };
   if (t.status === "waiting" || t.pendingQuestion) return { badge: `🟠 *Needs ${owner}*`, detail: brief(firstLine(t.pendingQuestion?.questions[0]) || (t.pauseReason ?? t.note ?? "Reply in the thread").replace(/^Waiting on you:\s*/i, ""), 200) };
   if (t.lifecycle === "paused") return { badge: "⏸️ *Paused*", detail: t.pauseReason ?? t.note };
   if (limited) return { badge: "🟡 *Waiting for AI credits*", detail: "every account is at its usage limit" };
