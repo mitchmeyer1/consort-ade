@@ -49,3 +49,19 @@ test('the subtask file lists IDs and names for the agent', async (tt) => {
   writeSubtaskFile(wt, subs);
   assert.match(await readFile(join(wt, '.consort', 'ship', 'SUBTASKS.md'), 'utf8'), /- 17thtp0p4yp: 1\. Proposal data model/);
 });
+
+test('each landed ticket comments on its subtasks; the first sync records old work without replaying it', async () => {
+  const { syncSubtaskProgress } = await import('../src/cli/subtasks.ts');
+  const before = [t('01', 'done', ['17thtp0p4yq']), t('02', 'in-progress', ['17thtp0p4yq'])];
+  const first = fake();
+  const a = await syncSubtaskProgress({ source: first.source, parentId: 'P', subtasks: subs, tickets: before, saved: {}, noted: undefined });
+  assert.deepEqual(a.noted, ['01']);
+  assert.ok(!first.calls.some(c => /landed part/.test(c)), 'no replay of work done before');
+  const later = fake();
+  const tickets = [t('01', 'done', ['17thtp0p4yq']), t('02', 'in-progress', ['17thtp0p4yq']), t('05', 'done', ['17thtp0p4yq', '17thtp0p4yp'])];
+  const b = await syncSubtaskProgress({ source: later.source, parentId: 'P', subtasks: subs, tickets, saved: a.states, noted: a.noted, where: 'Commit c1.' });
+  assert.ok(later.calls.includes('comment 17thtp0p4yq Consort landed part of this: ticket 05. Commit c1.'));
+  assert.ok(!later.calls.some(c => c.startsWith('comment 17thtp0p4yp Consort landed')), 'the subtask moving to built gets the built comment instead');
+  assert.ok(later.calls.some(c => c.startsWith('comment 17thtp0p4yp Consort built this')));
+  assert.deepEqual(b.noted.sort(), ['01', '05']);
+});

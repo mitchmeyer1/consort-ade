@@ -22,7 +22,7 @@ import { flushTaskNotifications, notifyTask } from "./lifecycle";
 import { readUsage, saveUsage, usageFor } from "./usage";
 import { checkpoint } from "./checkpoint";
 import { graphSummary, planWaves, readGraph, RESPLIT_PROMPT, tooSerial } from "./buildGraph";
-import { LINK_PROMPT, needsLinks, syncSubtasks, writeSubtaskFile, type SubtaskState } from "./subtasks";
+import { LINK_PROMPT, needsLinks, syncSubtaskProgress, writeSubtaskFile, type SubtaskState } from "./subtasks";
 import type { Subtask } from "./sources";
 import { draftBody, draftTitle, ensureDraftPr, updateDraftBody } from "./draftPr";
 import { stepLabel } from "./buildProgress";
@@ -108,9 +108,10 @@ export async function workTask(taskId: string): Promise<void> {
     const tickets = await readGraph(claimed.worktree).catch(() => []);
     const head = await run("git", ["rev-parse", "--short", "HEAD"], { cwd: claimed.worktree }).then((r) => r.stdout.trim()).catch(() => "");
     const where = [head && `Commit ${head} on ${claimed.branch}.`, feature.prs[0] && `PR: ${feature.prs[0]}`].filter(Boolean).join(" ");
-    const saved = loadState().tasks.find((t) => t.id === taskId)?.subtaskSync ?? {};
-    const next = await syncSubtasks({ source, parentId: claimed.ticket.id, subtasks, tickets, saved, where, force, log: (l) => log(claimed, l) });
-    if (JSON.stringify(next) !== JSON.stringify(saved)) updateTask(taskId, { subtaskSync: next });
+    const current = loadState().tasks.find((t) => t.id === taskId);
+    const saved = current?.subtaskSync ?? {};
+    const { states, noted } = await syncSubtaskProgress({ source, parentId: claimed.ticket.id, subtasks, tickets, saved, noted: current?.subtaskTicketsNoted, where, force, log: (l) => log(claimed, l) });
+    if (JSON.stringify(states) !== JSON.stringify(saved) || JSON.stringify(noted) !== JSON.stringify(current?.subtaskTicketsNoted)) updateTask(taskId, { subtaskSync: states, subtaskTicketsNoted: noted });
   };
 
   await ensureSlackIdentity(taskId);

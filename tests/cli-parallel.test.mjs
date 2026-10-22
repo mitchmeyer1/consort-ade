@@ -206,3 +206,49 @@ test('recovery removes child worktrees a stopped worker left behind', async (t) 
   await recoverImplementation(o.cwd, o.directory);
   assert.equal(git(o.cwd, 'worktree', 'list').split('\n').length, 1);
 });
+
+test('a failed child keeps its work under refs/consort/wip and the next run starts from it', async (t) => {
+  const o = await repository(t);
+  const two = [{ id: 'a', files: ['a.txt'], prompt: '' }, { id: 'b', files: ['b.txt'], prompt: '' }];
+  let round = 0;
+  const run = async ({ cwd, id, prompt }) => {
+    if (round === 0) { await writeFile(join(cwd, `${id}.txt`), `${id} half done\n`); throw new Error('usage limit hit'); }
+    if (id === 'a') assert.match(prompt, /interrupted run of this ticket saved work/);
+    assert.equal(await readFile(join(cwd, `${id}.txt`), 'utf8'), `${id} half done\n`, 'resumed from the saved work');
+    await writeFile(join(cwd, `${id}.txt`), `${id} finished\n`);
+    return { text: 'ok' };
+  };
+  await assert.rejects(runImplementation({ ...o, tasks: two, run, check: async () => {} }), /usage limit hit/);
+  assert.ok(git(o.cwd, 'rev-parse', '--verify', 'refs/consort/wip/a'), 'saved after the failure');
+  round = 1;
+  const r = await runImplementation({ ...o, tasks: two, run, check: async () => {} });
+  assert.deepEqual(r.completed.sort(), ['a', 'b']);
+  assert.equal(await readFile(join(o.cwd, 'a.txt'), 'utf8'), 'a finished\n');
+  assert.throws(() => git(o.cwd, 'rev-parse', '--verify', '--quiet', 'refs/consort/wip/a'), 'the saved ref is dropped once integrated');
+});
+
+test('stopping saves every running child, and cleanup after a crash salvages instead of deleting', async (t) => {
+  const { saveLiveChildren } = await import('../src/cli/parallel.ts');
+  const o = await repository(t);
+  const two = [{ id: 'a', files: ['a.txt'], prompt: '' }, { id: 'b', files: ['b.txt'], prompt: '' }];
+  let release;
+  const gate = new Promise(r => { release = r; });
+  let started = 0;
+  const run = async ({ cwd, id }) => { await writeFile(join(cwd, `${id}.txt`), `${id} in flight\n`); started++; await gate; throw new Error('stopped'); };
+  const wave = runImplementation({ ...o, tasks: two, run, check: async () => {} }).catch(e => e);
+  for (const until = Date.now() + 5000; started < 2 && Date.now() < until;) await new Promise(r => setTimeout(r, 10));
+  await saveLiveChildren();
+  assert.match(git(o.cwd, 'show', 'refs/consort/wip/a:a.txt'), /a in flight/, 'saved while still running');
+  release(); await wave;
+  // a crash that left a folder behind: the marker lets recovery save it before removing the folder
+  const { recoverImplementation } = await import('../src/cli/parallel.ts');
+  const { dirname, basename } = await import('node:path');
+  const left = join(dirname(o.cwd), `.parallel-${basename(o.cwd)}`, 'work-left');
+  git(o.cwd, 'worktree', 'add', '--detach', left, 'HEAD');
+  const base = git(left, 'rev-parse', 'HEAD');
+  await writeFile(`${left}.json`, JSON.stringify({ main: o.cwd, ticket: 'c', base }));
+  await writeFile(join(left, 'c.txt'), 'c unsaved\n');
+  await recoverImplementation(o.cwd, o.directory);
+  assert.match(git(o.cwd, 'show', 'refs/consort/wip/c:c.txt'), /c unsaved/);
+  assert.equal(git(o.cwd, 'worktree', 'list').split('\n').length, 1);
+});

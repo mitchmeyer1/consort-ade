@@ -39,7 +39,7 @@ for (const blockedAtStart of [true, false]) {
       './usage': { readUsage: async () => ({ at: Date.now(), windows: [] }), saveUsage() {}, usageFor: async list => new Map(list.map(a => [a.id, { at: Date.now(), windows: [] }])) },
       '../shared/usage.ts': { usageBlock: () => undefined },
       './sources': { sourceFor: () => ({ subtasks: async () => [] }) },
-      './subtasks': { writeSubtaskFile() {}, needsLinks: () => false, syncSubtasks: async o => o.saved, LINK_PROMPT: '' },
+      './subtasks': { writeSubtaskFile() {}, needsLinks: () => false, syncSubtaskProgress: async o => ({ states: o.saved, noted: [] }), LINK_PROMPT: '' },
       './environment': { allocateEnvironment: async () => ({}) },
       './slackIdentity': { ensureSlackIdentity: async () => {} },
       './state': {

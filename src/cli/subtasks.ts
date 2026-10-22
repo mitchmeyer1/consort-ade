@@ -48,12 +48,24 @@ const names = (tickets: GraphTicket[]) => tickets.map((t) => t.title.replace(/^\
  * `force` moves every subtask to that state (the PR merged).
  */
 export async function syncSubtasks(o: { source: Source; parentId: string; subtasks: Subtask[]; tickets: GraphTicket[]; saved: Record<string, SubtaskState>; where?: string; force?: SubtaskState; log?: (line: string) => void }): Promise<Record<string, SubtaskState>> {
+  return (await syncSubtaskProgress({ ...o, noted: undefined })).states;
+}
+
+/**
+ * The same, plus a comment on each subtask whenever one of its tickets lands ("significant work").
+ * `noted` lists tickets already reported; undefined on the first sync, which records the tickets
+ * already done without commenting, so an existing build is not replayed onto ClickUp.
+ */
+export async function syncSubtaskProgress(o: { source: Source; parentId: string; subtasks: Subtask[]; tickets: GraphTicket[]; saved: Record<string, SubtaskState>; noted: string[] | undefined; where?: string; force?: SubtaskState; log?: (line: string) => void }): Promise<{ states: Record<string, SubtaskState>; noted: string[] }> {
   const next = { ...o.saved };
   const moved: string[] = [];
+  const landedNow = o.noted === undefined ? [] : o.tickets.filter((t) => isDone(t) && !o.noted!.includes(t.id) && t.clickup.length);
+  const movingToBuilt = new Set<string>();
   for (const [id, target] of subtaskTargets(o.subtasks, o.tickets)) {
     // a merge completes only the subtasks the build delivered; one no ticket names (a manual step) is left to people
     const want = o.force && target.tickets.length ? o.force : target.state;
     if (!want || (next[id] && RANK[next[id]] >= RANK[want])) continue;
+    if (want !== "progress") movingToBuilt.add(id);
     const sub = o.subtasks.find((s) => s.id === id)!;
     try {
       await o.source.setStatus(id, want);
@@ -65,11 +77,16 @@ export async function syncSubtasks(o: { source: Source; parentId: string; subtas
       moved.push(`${sub.name} → ${want === "progress" ? "in progress" : want === "review" ? "built, in review" : "complete"}`);
     } catch (e) { o.log?.(`subtask ${sub.name} not moved: ${(e as Error).message}`); }
   }
+  // a ticket landed: say so on each subtask it serves, unless that subtask's "built" comment already names it
+  for (const ticket of landedNow) for (const id of ticket.clickup) {
+    if (movingToBuilt.has(id) || !o.subtasks.some((x) => x.id === id)) continue;
+    await o.source.comment(id, `Consort landed part of this: ${names([ticket])}.${o.where ? ` ${o.where}` : ""}`).catch((e) => o.log?.(`landed comment failed: ${(e as Error).message}`));
+  }
   if (moved.length) {
     const built = o.subtasks.filter((s) => next[s.id] === "review" || next[s.id] === "done").length;
     await o.source.comment(o.parentId, `Consort progress: ${built} of ${o.subtasks.length} subtasks built.\n${moved.map((m) => `• ${m}`).join("\n")}`).catch((e) => o.log?.(`progress comment failed: ${(e as Error).message}`));
   }
-  return next;
+  return { states: next, noted: [...new Set([...(o.noted ?? []), ...o.tickets.filter(isDone).map((t) => t.id)])] };
 }
 
 /** the one turn that links existing build tickets to the ClickUp subtasks */

@@ -52,11 +52,63 @@ async function revision(cwd: string, tasks: ParallelTask[]): Promise<string> {
   }
   return hash.digest("hex");
 }
-async function isolated<T>(o: ParallelOptions, task: ParallelTask, fn: (cwd: string, head: string) => Promise<T>): Promise<T> {
+/**
+ * A child ticket's work is never thrown away. While it runs, the worker commits it every few
+ * minutes; when the worker stops, or the child fails, or a stopped wave is cleaned up, what it has
+ * is committed and kept under refs/consort/wip/<ticket> and pushed to GitHub as
+ * consort-wip/<branch>/<ticket>. The next run of that ticket starts from it.
+ */
+type Child = { main: string; ticket: string; base: string; finished?: boolean };
+const live = new Map<string, Child>();
+export const WIP_SAVE_MS = 5 * 60_000;
+const wipRef = (ticket: string) => `refs/consort/wip/${ticket}`;
+const wipBranch = async (main: string, ticket: string) => `consort-wip/${(await git(main, "branch", "--show-current")).trim() || "detached"}/${ticket}`;
+const markerOf = (cwd: string) => `${cwd}.json`;
+
+/** commit what a child ticket has so far and keep it; false when it has nothing beyond its start */
+export async function saveChild(cwd: string, push = true): Promise<boolean> {
+  const c = live.get(cwd);
+  if (!c || c.finished) return false;
+  await git(cwd, "add", "-A", "--", ".", ":!.consort");
+  if ((await git(cwd, "diff", "--cached", "--name-only")).trim()) await git(cwd, "-c", "core.hooksPath=/dev/null", "commit", "-m", `Consort WIP: ${c.ticket}`);
+  const head = (await git(cwd, "rev-parse", "HEAD")).trim();
+  if (head === c.base) return false;
+  await git(cwd, "update-ref", wipRef(c.ticket), head);
+  if (push) await git(cwd, "push", "--no-verify", "-f", "origin", `${head}:refs/heads/${await wipBranch(c.main, c.ticket)}`).catch(() => undefined);
+  return true;
+}
+/** every running child ticket, saved at once: the worker calls this before it exits on a stop */
+export const saveLiveChildren = () => Promise.all([...live.keys()].map((cwd) => saveChild(cwd).catch(() => false)));
+
+/** start a child from the work an interrupted run of its ticket left, when there is some */
+async function resumeSaved(main: string, cwd: string, task: ParallelTask): Promise<string> {
+  const saved = (await git(main, "rev-parse", "--verify", "--quiet", wipRef(task.id)).catch(() => "")).trim();
+  if (!saved) return "";
+  const from = (await git(cwd, "merge-base", saved, "HEAD")).trim();
+  const patch = await git(cwd, "diff", "--binary", from, saved, "--", ...task.files);
+  if (!patch.trim()) return "";
+  const file = join(cwd, ".consort", "resume.patch");
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, patch);
+  try {
+    await git(cwd, "apply", "--3way", "--whitespace=nowarn", file);
+    return `\n\nAn interrupted run of this ticket saved work (${saved.slice(0, 9)}); it is applied in this worktree. Check it, keep what is right, and continue from it rather than starting over.`;
+  } catch {
+    await git(cwd, "reset", "--hard", "HEAD").catch(() => undefined);
+    return `\n\nAn interrupted run of this ticket saved work as commit ${saved.slice(0, 9)} (git show ${saved.slice(0, 9)}). It no longer applies cleanly; reuse what still fits instead of rewriting it.`;
+  } finally { await rm(file, { force: true }); }
+}
+
+async function isolated<T>(o: ParallelOptions, task: ParallelTask, fn: (cwd: string, head: string) => Promise<T>, ticket = false): Promise<T> {
   // beside the task's worktree, never inside it: copying .consort/ship into a folder within itself fails (EINVAL)
   const cwd = join(dirname(resolve(o.cwd)), `.parallel-${basename(resolve(o.cwd))}`, `work-${randomUUID()}`);
   await mkdir(dirname(cwd), { recursive: true });
   await git(o.cwd, "worktree", "add", "--detach", cwd, "HEAD");
+  if (ticket) {
+    const child: Child = { main: o.cwd, ticket: task.id, base: (await git(cwd, "rev-parse", "HEAD")).trim() };
+    live.set(cwd, child);
+    await writeFile(markerOf(cwd), JSON.stringify(child));
+  }
   try {
     // Ignored ship artifacts carry the spec and decisions into each fresh context.
     await cp(join(o.cwd, ".consort/ship"), join(cwd, ".consort/ship"), {
@@ -66,7 +118,12 @@ async function isolated<T>(o: ParallelOptions, task: ParallelTask, fn: (cwd: str
     if (report) { await mkdir(join(cwd, ".consort/ship/parallel"), { recursive: true }); await writeFile(join(cwd, ".consort/ship/parallel/RESEARCH.md"), report); }
     return await fn(cwd, (await git(cwd, "rev-parse", "HEAD")).trim());
   }
-  finally { await git(o.cwd, "worktree", "remove", "--force", cwd); }
+  finally {
+    // a child that did not finish keeps its work: commit it and save the ref before the folder goes
+    if (live.has(cwd)) { await saveChild(cwd).catch(() => false); live.delete(cwd); }
+    await git(o.cwd, "worktree", "remove", "--force", cwd);
+    await rm(markerOf(cwd), { force: true });
+  }
 }
 function validate(tasks: ParallelTask[]) {
   if (new Set(tasks.map((t) => t.id)).size !== tasks.length) throw new Error("Parallel task IDs must be unique");
@@ -139,8 +196,13 @@ async function currentStatus(cwd: string, id: string): Promise<string | undefine
 export async function recoverImplementation(cwd: string, directory: string): Promise<string[]> {
   // child worktrees left by a worker that was stopped mid-wave: no child runs while the coordinator recovers
   const children = join(dirname(resolve(cwd)), `.parallel-${basename(resolve(cwd))}`);
-  for (const dir of await readdir(children).catch(() => [] as string[])) {
-    await git(cwd, "worktree", "remove", "--force", join(children, dir)).catch(() => rm(join(children, dir), { recursive: true, force: true }));
+  for (const dir of (await readdir(children).catch(() => [] as string[])).filter((d) => !d.endsWith(".json"))) {
+    const path = join(children, dir);
+    // a ticket's leftover work is committed and kept (refs/consort/wip, and GitHub) before its folder goes
+    const child = await readFile(markerOf(path), "utf8").then((t) => JSON.parse(t) as Child).catch(() => undefined);
+    if (child) { live.set(path, child); await saveChild(path).catch(() => false); live.delete(path); }
+    await git(cwd, "worktree", "remove", "--force", path).catch(() => rm(path, { recursive: true, force: true }));
+    await rm(markerOf(path), { force: true });
   }
   await git(cwd, "worktree", "prune").catch(() => undefined);
   const wave: Wave | undefined = await readFile(join(directory, "implementation.json"), "utf8").then(JSON.parse).catch(() => undefined);
@@ -178,7 +240,12 @@ export async function runImplementation(o: ParallelOptions & { check: (cwd: stri
   try {
     for (const task of selected) await ticketStatus(o.cwd, task.id, "in-progress");
     const prepared = await bounded(selected, cap(o.concurrency), async (task) => isolated(o, task, async (cwd, base) => {
-      const result = await o.run({ id: task.id, cwd, kind: "implementation", prompt: `Implement only ticket ${task.id}. Allowed files/directories: ${scopeText(task.files)}. Read .consort/ship/SPEC.md and GRILLING.md when present before editing. Work only in this isolated worktree. Do not push, merge, edit other tickets, or spawn agents. The coordinator integrates commits and runs final checks. Read repository setup before any tests; install local dependencies with the lockfile if needed. If this would break a viable business flow without an owner decision, return [ask-user: ...] and stop.\n\n${task.prompt}` });
+      const resumed = await resumeSaved(o.cwd, cwd, task);
+      const timer = setInterval(() => { void saveChild(cwd).catch(() => false); }, WIP_SAVE_MS);
+      let result;
+      try {
+        result = await o.run({ id: task.id, cwd, kind: "implementation", prompt: `Implement only ticket ${task.id}. Allowed files/directories: ${scopeText(task.files)}. Read .consort/ship/SPEC.md and GRILLING.md when present before editing. Work only in this isolated worktree. Commit in this worktree after each meaningful step (git add -A && git commit -m "<what>"), so the work survives an interruption; Consort also saves it every few minutes. Do not push, merge, edit other tickets, or spawn agents. The coordinator integrates commits and runs final checks. Read repository setup before any tests; install local dependencies with the lockfile if needed. If this would break a viable business flow without an owner decision, return [ask-user: ...] and stop.${resumed}\n\n${task.prompt}` });
+      } finally { clearInterval(timer); }
       if (result.error || result.limit || /\[ask-user:/i.test(result.text)) throw new Error(`Implementation ${task.id}: ${result.error ?? (result.limit ? "account limit" : result.text)}`);
       // Include both agent commits and working changes in a single coordinator-owned commit.
       await git(cwd, "add", "-A", "--", ".", ":!.consort");
@@ -190,8 +257,11 @@ export async function runImplementation(o: ParallelOptions & { check: (cwd: stri
       const commit = (await git(cwd, "rev-parse", "HEAD")).trim();
       const ref = wave.tasks.find((entry) => entry.id === task.id)!.ref;
       await git(cwd, "update-ref", ref, commit);
+      // the finished ticket stays saved until it is integrated, in case integration fails
+      await git(cwd, "update-ref", wipRef(task.id), commit);
+      live.get(cwd)!.finished = true;
       return { id: task.id, ref, commit };
-    }));
+    }, true));
     if ((await git(o.cwd, "rev-parse", "HEAD")).trim() !== head || (await git(o.cwd, "status", "--porcelain", "--untracked-files=no")).trim()) throw new Error("Coordinator changed during parallel implementation; refusing integration");
     wave.tasks = prepared;
     await saveWave(o.directory, wave);
@@ -200,6 +270,8 @@ export async function runImplementation(o: ParallelOptions & { check: (cwd: stri
       catch (e) { await git(o.cwd, "cherry-pick", "--abort").catch(() => undefined); throw e; }
       integrated.push(result.id); await saveWave(o.directory, wave);
       await ticketStatus(o.cwd, result.id, "done");
+      await git(o.cwd, "update-ref", "-d", wipRef(result.id)).catch(() => undefined);
+      await git(o.cwd, "push", "--no-verify", "origin", "--delete", await wipBranch(o.cwd, result.id)).catch(() => undefined);
     }
     await o.check(o.cwd);
     wave.checked = true; await saveWave(o.directory, wave);

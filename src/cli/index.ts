@@ -14,6 +14,7 @@ import { scanSentry, validateSentryConfig } from "./sentry";
 import { Slack } from "./slack";
 import { canStartWorker, handleWorkerExit, requestWorkerStop, workerStopMessage } from "./workerControl";
 import { answerTaskStatusQuestions } from "./slackStatus";
+import { saveLiveChildren } from "./parallel";
 import { sourceFor } from "./sources";
 import { renderView, viewLoop } from "./view";
 import { readAllUsage } from "./usage";
@@ -82,6 +83,7 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   tasks logs <task>                                                       what that agent has been doing              (task or ticket id)
   tasks reboot <task> | reboot --all                                      stop that agent (or every live one) and start it again; it works out where the last run got to
   tasks split <task>                                                      stop that agent, re-split its unfinished build tickets into parallel work, and continue
+                                                                          (reboot and split wait for a running parallel wave unless --force)
   tasks retry <task>                                                      queue a failed task again
   tasks release <task>                                                    stop that agent for good and forget the ticket (worktree stays)
   accounts unblock <id>                                                   clear a usage block early
@@ -270,6 +272,8 @@ async function main(argv: string[]) {
         if (stopping) return;
         stopping = true;
         stopAgents();
+        // commit and keep every running parallel ticket's work before the process goes (cli/parallel.ts)
+        await Promise.race([saveLiveChildren(), new Promise((r) => setTimeout(r, 40_000))]).catch(() => undefined);
         // Keep the pid until exit: the daemon must not start a replacement during Slack delivery.
         updateTask(id!, { activity: `worker stopping (${sig}); progress saved` });
         const current = loadState().tasks.find(t => t.id === id!);
@@ -313,11 +317,15 @@ async function main(argv: string[]) {
       if (a.all && !targets.length) { console.log("No live tasks to reboot."); return; }
       for (const t of targets) {
       if (!live(t!)) fail(`${t!.ticket.id} is ${t!.status}; consort-cli tasks retry runs a finished task again`);
+      // a running parallel wave is saved on the way out, but it still has to start its turns again: ask first
+      const wave = (t!.childEnvironments ?? []).filter((c) => alive(c.pid));
+      if (wave.length && !a.force) fail(`${t!.ticket.id} has a parallel wave running (${wave.length} ticket${wave.length === 1 ? "" : "s"}). Stopping saves their work (and pushes it to consort-wip/ branches) and the next run resumes from it, but their agents must restart. Wait for the wave, or add --force.`);
       if (t!.pid && alive(t!.pid)) {
         // wait for the worker to exit: it saves its state on the way out, and the daemon must not start a second one on top of it
         requestWorkerStop(t!.id, t!.pid, "consort-cli tasks reboot");
         try { process.kill(t!.pid); } catch {}
-        const until = Date.now() + 15_000;
+        // the worker saves its parallel tickets' work on the way out; give it time before forcing
+        const until = Date.now() + 60_000;
         while (alive(t!.pid) && Date.now() < until) await new Promise((r) => setTimeout(r, 250));
         if (alive(t!.pid)) {
           try { process.kill(t!.pid, "SIGKILL"); } catch {}

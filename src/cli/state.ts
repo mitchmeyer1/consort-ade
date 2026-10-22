@@ -119,6 +119,8 @@ export type Task = {
   resplitRequested?: number;
   /** where the worker last moved each ClickUp subtask (cli/subtasks.ts) */
   subtaskSync?: Record<string, import("./subtasks").SubtaskState>;
+  /** build tickets already reported on their ClickUp subtasks as landed */
+  subtaskTicketsNoted?: string[];
   /** tries at linking the build tickets to the ClickUp subtasks (at most two) */
   subtaskLinkTries?: number;
   /** the ticket set the last "Build plan" Slack line described */
