@@ -93,7 +93,7 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
       diff ? paint(diff, mint) : "",
     ].filter(Boolean);
     lines.push(`          ${details.join(dim("  ·  "))}`);
-    if (activity) lines.push(`          ${paint(pad(activity, activityW).trimEnd(), (x) => (health.tone === "bad" ? red(x) : health.tone === "warn" ? amber(x) : x))}`);
+    if (activity) lines.push(`          ${paint(pad(activity, activityW).trimEnd(), (x) => (health.tone === "bad" ? red(x) : health.tone === "warn" ? amber(x) : dim(x)))}`);
   }
   lines.push("");
   const readAt = usage ? Math.max(0, ...[...usage.values()].map((u) => u.at)) : 0;
