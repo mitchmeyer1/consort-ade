@@ -19,7 +19,7 @@ import { stepLabel } from "./buildProgress";
  * their next scan. `q` quits.
  */
 
-import { amber, banner, blue, bold, cream, dim, green, mint, red } from "./theme";
+import { amber, banner, blue, bold, cream, dim, green, mint, red, steel } from "./theme";
 
 const pad = (s: string, n: number) => (s.length > n ? `${s.slice(0, Math.max(0, n - 1))}…` : s).padEnd(n);
 
@@ -65,12 +65,15 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
     `${mint(`${active} active`)} ${dim(`· ${new Date(now).toLocaleTimeString()} · q to quit`)}`,
   ]));
   lines.push("");
-  lines.push(`${cream(bold("Tickets"))} ${dim(`· ${active} active${tasks.length > active ? `, ${tasks.length - active} finished` : ""}`)}`);
+  // finished tickets (not failed ones, which need a look) get their own short list below
+  const completed = tasks.filter((t) => FINISHED.includes(t.status) && t.status !== "failed");
+  const working = tasks.filter((t) => !completed.includes(t));
+  lines.push(`${cream(bold("Tickets"))} ${dim(`· ${active} active`)}`);
   // one aligned row per ticket, coloured like the accounts list; what it is doing, dim, under it; then a blank line
   const cols = { ticket: 12, title: 28, step: 5, stage: 12, next: 14, status: 9, account: 16, cost: 13, ports: 11, age: 12, log: 5 };
   lines.push(dim(`  ${[pad("TICKET", cols.ticket), pad("TITLE", cols.title), pad("STEP", cols.step), pad("STAGE", cols.stage), pad("NEXT", cols.next), pad("STATUS", cols.status), pad("ACCOUNT", cols.account), pad("COST", cols.cost), pad("PORTS", cols.ports), pad("AGE", cols.age), pad("LOG", cols.log), "DIFF"].join("  ")}`));
-  if (!tasks.length) lines.push(dim("  nothing in flight; the daemon claims tickets as scanners come due"), "");
-  for (const t of tasks) {
+  if (!working.length) lines.push(dim("  nothing in flight; the daemon claims tickets as scanners come due"), "");
+  for (const t of working) {
     const acct = accountName(t.activeProvider ? t.accountIds[t.activeProvider] : t.accountIds.claude ?? t.accountIds.codex);
     const log = logOf(t, now);
     const health = taskHealth(t, s.accounts, { workerAlive: !!(t.pid && alive(t.pid)), logAgeMs: Math.min(log.ageMs ?? Infinity, now - t.updatedAt) }, now);
@@ -99,6 +102,16 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
       paint(diff, mint),
     ].join("  ").trimEnd()}`);
     if (activity) lines.push(`    ${pad(activity, activityW).trimEnd().replace(/.+/, (x) => (health.tone === "bad" ? red(x) : health.tone === "warn" ? amber(x) : dim(x)))}`);
+    lines.push("");
+  }
+  if (completed.length) {
+    const done = { ticket: 12, title: 34, status: 10, cost: 13 };
+    lines.push(`${cream(bold("Completed"))} ${dim(`· ${completed.length}, shown for a day`)}`);
+    lines.push(dim(`  ${[pad("TICKET", done.ticket), pad("TITLE", done.title), pad("STATUS", done.status), pad("COST", done.cost), "AGE"].join("  ")}`));
+    for (const t of completed) {
+      const health = taskHealth(t, s.accounts, { workerAlive: false, logAgeMs: now - t.updatedAt }, now);
+      lines.push(steel(`  ${[pad(t.ticket.id, done.ticket), pad(t.ticket.title, done.title), pad(health.label, done.status), pad(costCell(t.cost), done.cost), `done ${ago(now - (t.finishedAt ?? t.updatedAt))} ago`].join("  ")}`));
+    }
     lines.push("");
   }
   const readAt = usage ? Math.max(0, ...[...usage.values()].map((u) => u.at)) : 0;

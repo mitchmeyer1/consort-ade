@@ -36,6 +36,8 @@ export const green = wrap("\x1b[38;2;109;204;133m");
 export const amber = wrap("\x1b[38;2;245;160;68m");
 export const red = wrap("\x1b[38;2;224;122;106m");
 export const blue = wrap("\x1b[38;2;100;173;255m");
+/** a pale steel green for finished work: there, but quiet */
+export const steel = wrap("\x1b[38;2;120;150;138m");
 export const ok = (s: string) => `${green("✓")} ${s}`;
 export const bad = (s: string) => `${red("✗")} ${s}`;
 export const head = (s: string) => `\n${cream(bold(s))}`;
