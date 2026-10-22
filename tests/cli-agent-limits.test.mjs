@@ -4,8 +4,8 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import ts from 'typescript';
 import * as seatPool from '../src/shared/seatPool.ts';
-import { slackMessage, slackStatus, STATUS_TAIL } from '../src/shared/headless.ts';
 import * as cliTurnPolicy from '../src/shared/cliTurnPolicy.ts';
+import { slackMessage, slackStatus, STATUS_TAIL } from '../src/shared/headless.ts';
 const require = createRequire(import.meta.url);
 const code = ts.transpileModule(readFileSync(new URL('../src/cli/agent.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText.replace(/import\.meta\.url/g, '"file:///virtual/cli/agent.js"');
 function load(runStreamed, onStart = () => {}, onNew = () => {}) {
