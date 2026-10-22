@@ -21,7 +21,7 @@ import { promisify } from "node:util";
 import { sourceFor } from "./sources";
 import { renderView, viewLoop } from "./view";
 import { readAllUsage } from "./usage";
-import { createAccount, runSetup, scannerName, setupDone } from "./setup";
+import { createAccount, runScannerWizard, runSetup, scannerName, setupDone } from "./setup";
 import { applyBundle, buildBundle } from "./transfer";
 import { cleanupEnvironment } from "./environment";
 import { alive, DAEMON_LOG, daemonPid, recordDaemon, startDetached, stopDaemon } from "./daemonctl";
@@ -60,13 +60,10 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
 
   ${mint("setup")}                                                                   the walk-through: tools, sources, accounts, Slack, permissions
 
-  ${cream("Add a scanner")} ${dim("(setup does the same interactively)")}
-  ${mint("scanners add --source clickup --space <id> --repo <path> --base <branch> --tag ai-handle")}
-                                                                          build ClickUp tickets into PRs (or --list / --folder <id>)
-  ${mint("scanners add --source review --repo <path> --reviewer <github-login>")}
-                                                                          review PRs assigned to that login or asking it for review
-  ${mint("scanners add --source sentry --repo <path> --sentry-org <org> --sentry-project <slug> --workspace <id> --list <id> --tag <tag>")}
-                                                                          turn grouped Sentry issues into ClickUp tickets (needs SENTRY_AUTH_TOKEN)
+  ${cream("Add a scanner")} ${dim("(step-by-step questions, the same as setup)")}
+  ${mint("scanners add clickup")}                                                    build ClickUp tickets into PRs
+  ${mint("scanners add review")}                                                     review PRs assigned to you or asking you for review
+  ${mint("scanners add sentry")}                                                     turn grouped Sentry issues into ClickUp tickets
 
   accounts add --provider claude|codex --name <label> [--api-key <key>]   add an AI account (a CLI login unless --api-key)
   accounts list | accounts remove <id>
@@ -184,6 +181,12 @@ async function main(argv: string[]) {
     case "prefix set": { s.branchPrefix = (rest[0] ?? "").replace(/^\/+|\/+$/g, ""); saveState(s); console.log(`Branch prefix: ${s.branchPrefix || "(none)"}`); return; }
 
     case "scanners add": {
+      // no flags: the step-by-step questions (the same as setup); flags stay for scripts
+      if (!str(a, "source")) {
+        const kind = rest[0]?.toLowerCase();
+        if (kind && !["clickup", "github", "review", "sentry"].includes(kind)) fail("scanners add takes clickup, github, review or sentry (or --source … flags)");
+        return runScannerWizard(kind);
+      }
       const source = need(a, "source") as Job["source"];
       if (source !== "clickup" && source !== "github" && source !== "sentry" && source !== "review") fail("--source must be clickup, github, sentry or review");
       const repo = resolve(need(a, "repo"));

@@ -161,6 +161,132 @@ export function createAccount(s: CliState, provider: Account["provider"], name: 
   return account;
 }
 
+
+/**
+ * The scanner questions, one kind after another until the owner stops: shared by `setup` and the
+ * `scanners add clickup|github|review|sentry` wizard. `first` skips the "which source" question once.
+ */
+async function addScanners(ask: Ask, first?: string): Promise<void> {
+  let s = loadState();
+  for (;;) {
+    const kind = (first ?? (await ask("Source: clickup, github, sentry or review (automatic PR reviews)", { default: "clickup" }))).toLowerCase();
+    first = undefined;
+    if (kind !== "clickup" && kind !== "github" && kind !== "sentry" && kind !== "review") { console.log(bad("type clickup, github, sentry or review")); continue; }
+    if (kind === "review") {
+      console.log(dim("A review scanner watches a repository's open PRs that are assigned to a GitHub login or ask it for a review. Each one gets a full review (Fable/Astra overview, an Opus/Sol reviewer swarm, verified findings posted as one GitHub review). Critical or High findings request changes; otherwise it asks you on Slack before approving."));
+      const repo = await repoChecks(ask);
+      if (!repo) continue;
+      const login = (await ask("GitHub login whose PRs to review (assigned or review requested)")).trim().replace(/^@/, "");
+      if (!login) { console.log(bad("a GitHub login is required")); continue; }
+      s = loadState();
+      const name = await ask("Name this scanner", { default: `reviews for @${login}` });
+      // each review runs its own swarm of agents; start with one at a time and raise it with scanners configure --max-open-tasks
+      const atOnce = Math.max(1, Number(await ask("PRs to review at once", { default: "1" })) || 1);
+      s.jobs.push({ id: newId("job"), name, source: "review", reviewer: login, repo: repo.repo, base: repo.base, filters: {}, everyMinutes: 5, maxParallel: 4, maxOpenTasks: atOnce, statuses: { ...DEFAULT_STATUSES }, enabled: true, createdAt: Date.now() } as Job);
+      saveState(s);
+      console.log(ok(`review scanner saved: PRs for @${login} in ${repo.repo}, ${atOnce} at a time, checked every 5 minutes`));
+      if (await yes(ask, "Add another scanner?", false)) continue;
+      break;
+    }
+    if (kind === "sentry") {
+      console.log(dim("Sentry plans bug bundles with existing AI accounts, then creates one ClickUp ticket per bundle. Select the shared GitHub checkout used for atomic duplicate reservations; existing worker scanners pick up the output list/tag."));
+      const repo = await repoChecks(ask);
+      if (!repo) continue;
+      try {
+        const configured = await configureSentryScanner(ask, loadState().clickupKey, repo, undefined, loadState().jobs);
+        s = loadState(); s.clickupKey = configured.clickupKey; s.jobs.push(configured.job); saveState(s);
+        console.log(ok(`Sentry scanner saved: ClickUp list ${configured.job.sentry!.listId}, tag ${configured.job.sentry!.tag}. Align a ClickUp worker scanner with that destination to implement the tickets.`));
+      } catch (e) { console.log(bad(`Sentry setup failed: ${(e as Error).message}`)); }
+      if (await yes(ask, "Add another scanner?", false)) continue;
+      break;
+    }
+    const job: Partial<Job> = { id: newId("job"), source: kind as Job["source"], filters: {}, everyMinutes: 1, maxParallel: 2, statuses: { ...DEFAULT_STATUSES }, enabled: true, createdAt: Date.now() };
+    if (kind === "clickup") {
+      s = loadState();
+      let key = s.clickupKey;
+      if (key) {
+        const who = await testClickupKey(key);
+        if (!(await keep(ask, "ClickUp API token", `${masked(key)} ${who ? ok(`works (${who})`) : bad("does not work any more")}`, !!who))) key = undefined;
+      }
+      if (!key) why("ClickUp API token", {
+        for: "finding tickets to work on, claiming them, moving their status and commenting progress and evidence.",
+        where: "ClickUp → your avatar (bottom left) → Settings → Apps → API Token → Generate. It is a personal token, so the comments appear as you.",
+        can: "read every list you can see; write comments, statuses and attachments on tasks in those lists.",
+        not: "see anything your own account cannot.",
+      });
+      while (!key || !(await testClickupKey(key))) {
+        key = await ask("ClickUp API token (pk_…)", { secret: true });
+        const who = await testClickupKey(key);
+        console.log(who ? ok(`key works (${who})`) : bad("ClickUp rejected that key"));
+        if (!who) key = undefined;
+      }
+      s.clickupKey = key; saveState(s);
+      let list: { name: string; lists: { id: string; name: string }[]; statuses: string[] } | undefined;
+      while (!list) {
+        const scope = clickupScopeFrom(await ask("ClickUp list, folder or space to watch (paste its URL from the sidebar, or an id)"));
+        if (!scope) { console.log(bad("that is not a ClickUp list, folder or space URL or id")); continue; }
+        list = await describeScope(key, scope);
+        if (!list) { console.log(bad(`ClickUp has no ${scope.kind} with that id for this key`)); continue; }
+        if (!list.lists.length) { console.log(bad(`${scope.kind} "${list.name}" has no lists`)); list = undefined; continue; }
+        job.scope = scope;
+        if (scope.kind === "list") job.listId = scope.id;
+        console.log(ok(`${scope.kind} "${list.name}": ${list.lists.length} list${list.lists.length === 1 ? "" : "s"}${scope.kind !== "list" ? ` (${list.lists.slice(0, 6).map((l) => l.name).join(", ")}${list.lists.length > 6 ? ", …" : ""})` : ""}; statuses: ${list.statuses.join(" · ")}`));
+      }
+      console.log(dim("This makes a scanner: it checks that place every minute and hands each ticket that matches to a worker agent. The name only tells scanners apart in lists and Slack."));
+      job.name = await ask("Name this scanner", { default: scannerName(s) });
+      const tags = await ask("Only tasks with one of these tags (comma-separated; empty for any)", { default: "ai-handle" });
+      job.filters!.tags = tags.split(",").map((t) => t.trim()).filter(Boolean);
+      console.log("Statuses the scanner picks tasks up from:"); list.statuses.forEach((st, i) => console.log(`  ${i + 1}. ${st}`));
+      job.filters!.statuses = chooseFrom(await ask("Pick by number or name (comma-separated; empty for any)", { default: "1" }), list.statuses);
+      job.statuses = {
+        progress: chooseFrom(await ask("Status to set while working", { default: list.statuses.find((x) => /progress/i.test(x)) ?? DEFAULT_STATUSES.progress }), list.statuses)[0] ?? DEFAULT_STATUSES.progress,
+        review: chooseFrom(await ask("Status to set when the PR is up", { default: list.statuses.find((x) => /review/i.test(x)) ?? DEFAULT_STATUSES.review }), list.statuses)[0] ?? DEFAULT_STATUSES.review,
+        done: chooseFrom(await ask("Status to set when the PR is merged", { default: list.statuses.find((x) => /complete|done|closed/i.test(x)) ?? DEFAULT_STATUSES.done }), list.statuses)[0] ?? DEFAULT_STATUSES.done,
+      };
+    } else {
+      console.log(dim("This makes a scanner: it checks the repo's issues every minute and hands each one that matches to a worker agent. The name only tells scanners apart in lists and Slack."));
+      job.name = await ask("Name this scanner", { default: scannerName(s) });
+      const labels = await ask("Only issues with one of these labels (comma-separated; empty for any)", { default: "ai-handle" });
+      job.filters!.tags = labels.split(",").map((t) => t.trim()).filter(Boolean);
+    }
+    const sub = await ask("Only titles containing this text (empty for any)");
+    if (sub) job.filters!.nameIncludes = [sub];
+    const repo = await repoChecks(ask);
+    if (!repo) { console.log("Skipping this source."); if (await yes(ask, "Try a different scanner?", false)) continue; break; }
+    job.repo = repo.repo; job.base = repo.base;
+    if (kind === "github") {
+      const n = await run("gh", ["issue", "list", "--state", "open", "--limit", "5", "--json", "number"], { cwd: job.repo, timeout: 30_000 }).then((r) => JSON.parse(r.stdout).length, () => -1);
+      console.log(n >= 0 ? ok(`gh can list issues here (${n} open among the first five)`) : bad("gh cannot list issues in this repo"));
+    }
+    job.everyMinutes = Number(await ask("Scan every N minutes", { default: "1" })) || 1;
+    job.maxParallel = Number(await ask("Tickets this scanner works on at once", { default: "2" })) || 2;
+    s = loadState(); s.jobs.push(job as Job); saveState(s);
+    console.log(ok(`scanner "${job.name}" saved`));
+    if (!(await yes(ask, "Add another scanner? (a ClickUp worker, GitHub worker, or Sentry ticket producer)", false))) break;
+  }
+}
+
+/** `consort-cli scanners add [clickup|github|review|sentry]`: the setup questions for one scanner, nothing else */
+export async function runScannerWizard(kind?: string): Promise<void> {
+  const { ask, close } = prompter();
+  try {
+    console.log(head(kind ? `Add a ${kind === "review" ? "PR review" : kind === "sentry" ? "Sentry" : kind === "github" ? "GitHub issues" : "ClickUp"} scanner` : "Add a scanner"));
+    await addScanners(ask, kind);
+    const s = loadState();
+    if (s.jobs.some((j) => j.source === "clickup" || j.source === "github") && !s.branchPrefix) {
+      const prefix = await ask("Branch prefix for the branches it creates (e.g. bot → bot/<slug>-<id>)", { default: "bot" });
+      const fresh = loadState(); fresh.branchPrefix = prefix.replace(/^\/+|\/+$/g, ""); saveState(fresh);
+    }
+    const after = loadState();
+    if (!after.accounts.length) console.log(bad("No AI accounts yet: consort-cli accounts add --provider claude|codex, or consort-cli setup"));
+    if (!after.slack) console.log(bad("Slack is not set up, so agents cannot ask you anything (and reviews never approve): consort-cli setup"));
+    console.log(dim(`The running daemon picks the new scanner up on its next pass; start it with consort-cli run -d if it is not running.`));
+  } catch (e) {
+    if (/readline was closed|closed/i.test(String((e as Error).message))) { console.log("\nStopped; any scanner already saved stays saved."); return; }
+    throw e;
+  } finally { close(); }
+}
+
 export async function runSetup(): Promise<void> {
   const { ask, close } = prompter();
   try {
@@ -179,99 +305,7 @@ export async function runSetup(): Promise<void> {
       }
     }
     if (!s.jobs.length || await yes(ask, "Add another scanner? (a ClickUp worker, GitHub worker, Sentry ticket producer, or automatic PR reviews)", false)) {
-      for (;;) {
-        const kind = (await ask("Source: clickup, github, sentry or review (automatic PR reviews)", { default: "clickup" })).toLowerCase();
-        if (kind !== "clickup" && kind !== "github" && kind !== "sentry" && kind !== "review") { console.log(bad("type clickup, github, sentry or review")); continue; }
-        if (kind === "review") {
-          console.log(dim("A review scanner watches a repository's open PRs that are assigned to a GitHub login or ask it for a review. Each one gets a full review (Fable/Astra overview, an Opus/Sol reviewer swarm, verified findings posted as one GitHub review). Critical or High findings request changes; otherwise it asks you on Slack before approving."));
-          const repo = await repoChecks(ask);
-          if (!repo) continue;
-          const login = (await ask("GitHub login whose PRs to review (assigned or review requested)")).trim().replace(/^@/, "");
-          if (!login) { console.log(bad("a GitHub login is required")); continue; }
-          s = loadState();
-          const name = await ask("Name this scanner", { default: `reviews for @${login}` });
-          s.jobs.push({ id: newId("job"), name, source: "review", reviewer: login, repo: repo.repo, base: repo.base, filters: {}, everyMinutes: 5, maxParallel: 4, statuses: { ...DEFAULT_STATUSES }, enabled: true, createdAt: Date.now() } as Job);
-          saveState(s);
-          console.log(ok(`review scanner saved: PRs for @${login} in ${repo.repo}, checked every 5 minutes`));
-          if (await yes(ask, "Add another scanner?", false)) continue;
-          break;
-        }
-        if (kind === "sentry") {
-          console.log(dim("Sentry plans bug bundles with existing AI accounts, then creates one ClickUp ticket per bundle. Select the shared GitHub checkout used for atomic duplicate reservations; existing worker scanners pick up the output list/tag."));
-          const repo = await repoChecks(ask);
-          if (!repo) continue;
-          try {
-            const configured = await configureSentryScanner(ask, loadState().clickupKey, repo, undefined, loadState().jobs);
-            s = loadState(); s.clickupKey = configured.clickupKey; s.jobs.push(configured.job); saveState(s);
-            console.log(ok(`Sentry scanner saved: ClickUp list ${configured.job.sentry!.listId}, tag ${configured.job.sentry!.tag}. Align a ClickUp worker scanner with that destination to implement the tickets.`));
-          } catch (e) { console.log(bad(`Sentry setup failed: ${(e as Error).message}`)); }
-          if (await yes(ask, "Add another scanner?", false)) continue;
-          break;
-        }
-        const job: Partial<Job> = { id: newId("job"), source: kind as Job["source"], filters: {}, everyMinutes: 1, maxParallel: 2, statuses: { ...DEFAULT_STATUSES }, enabled: true, createdAt: Date.now() };
-        if (kind === "clickup") {
-          s = loadState();
-          let key = s.clickupKey;
-          if (key) {
-            const who = await testClickupKey(key);
-            if (!(await keep(ask, "ClickUp API token", `${masked(key)} ${who ? ok(`works (${who})`) : bad("does not work any more")}`, !!who))) key = undefined;
-          }
-          if (!key) why("ClickUp API token", {
-            for: "finding tickets to work on, claiming them, moving their status and commenting progress and evidence.",
-            where: "ClickUp → your avatar (bottom left) → Settings → Apps → API Token → Generate. It is a personal token, so the comments appear as you.",
-            can: "read every list you can see; write comments, statuses and attachments on tasks in those lists.",
-            not: "see anything your own account cannot.",
-          });
-          while (!key || !(await testClickupKey(key))) {
-            key = await ask("ClickUp API token (pk_…)", { secret: true });
-            const who = await testClickupKey(key);
-            console.log(who ? ok(`key works (${who})`) : bad("ClickUp rejected that key"));
-            if (!who) key = undefined;
-          }
-          s.clickupKey = key; saveState(s);
-          let list: { name: string; lists: { id: string; name: string }[]; statuses: string[] } | undefined;
-          while (!list) {
-            const scope = clickupScopeFrom(await ask("ClickUp list, folder or space to watch (paste its URL from the sidebar, or an id)"));
-            if (!scope) { console.log(bad("that is not a ClickUp list, folder or space URL or id")); continue; }
-            list = await describeScope(key, scope);
-            if (!list) { console.log(bad(`ClickUp has no ${scope.kind} with that id for this key`)); continue; }
-            if (!list.lists.length) { console.log(bad(`${scope.kind} "${list.name}" has no lists`)); list = undefined; continue; }
-            job.scope = scope;
-            if (scope.kind === "list") job.listId = scope.id;
-            console.log(ok(`${scope.kind} "${list.name}": ${list.lists.length} list${list.lists.length === 1 ? "" : "s"}${scope.kind !== "list" ? ` (${list.lists.slice(0, 6).map((l) => l.name).join(", ")}${list.lists.length > 6 ? ", …" : ""})` : ""}; statuses: ${list.statuses.join(" · ")}`));
-          }
-          console.log(dim("This makes a scanner: it checks that place every minute and hands each ticket that matches to a worker agent. The name only tells scanners apart in lists and Slack."));
-          job.name = await ask("Name this scanner", { default: scannerName(s) });
-          const tags = await ask("Only tasks with one of these tags (comma-separated; empty for any)", { default: "ai-handle" });
-          job.filters!.tags = tags.split(",").map((t) => t.trim()).filter(Boolean);
-          console.log("Statuses the scanner picks tasks up from:"); list.statuses.forEach((st, i) => console.log(`  ${i + 1}. ${st}`));
-          job.filters!.statuses = chooseFrom(await ask("Pick by number or name (comma-separated; empty for any)", { default: "1" }), list.statuses);
-          job.statuses = {
-            progress: chooseFrom(await ask("Status to set while working", { default: list.statuses.find((x) => /progress/i.test(x)) ?? DEFAULT_STATUSES.progress }), list.statuses)[0] ?? DEFAULT_STATUSES.progress,
-            review: chooseFrom(await ask("Status to set when the PR is up", { default: list.statuses.find((x) => /review/i.test(x)) ?? DEFAULT_STATUSES.review }), list.statuses)[0] ?? DEFAULT_STATUSES.review,
-            done: chooseFrom(await ask("Status to set when the PR is merged", { default: list.statuses.find((x) => /complete|done|closed/i.test(x)) ?? DEFAULT_STATUSES.done }), list.statuses)[0] ?? DEFAULT_STATUSES.done,
-          };
-        } else {
-          console.log(dim("This makes a scanner: it checks the repo's issues every minute and hands each one that matches to a worker agent. The name only tells scanners apart in lists and Slack."));
-          job.name = await ask("Name this scanner", { default: scannerName(s) });
-          const labels = await ask("Only issues with one of these labels (comma-separated; empty for any)", { default: "ai-handle" });
-          job.filters!.tags = labels.split(",").map((t) => t.trim()).filter(Boolean);
-        }
-        const sub = await ask("Only titles containing this text (empty for any)");
-        if (sub) job.filters!.nameIncludes = [sub];
-        const repo = await repoChecks(ask);
-        if (!repo) { console.log("Skipping this source."); if (await yes(ask, "Try a different scanner?", false)) continue; break; }
-        job.repo = repo.repo; job.base = repo.base;
-        if (kind === "github") {
-          const n = await run("gh", ["issue", "list", "--state", "open", "--limit", "5", "--json", "number"], { cwd: job.repo, timeout: 30_000 }).then((r) => JSON.parse(r.stdout).length, () => -1);
-          console.log(n >= 0 ? ok(`gh can list issues here (${n} open among the first five)`) : bad("gh cannot list issues in this repo"));
-        }
-        job.everyMinutes = Number(await ask("Scan every N minutes", { default: "1" })) || 1;
-        job.maxParallel = Number(await ask("Tickets this scanner works on at once", { default: "2" })) || 2;
-        s = loadState(); s.jobs.push(job as Job); saveState(s);
-        console.log(ok(`scanner "${job.name}" saved`));
-        if (!(await yes(ask, "Add another scanner? (a ClickUp worker, GitHub worker, or Sentry ticket producer)", false))) break;
-      }
+      await addScanners(ask);
     }
     s = loadState();
     if (!s.branchPrefix || !(await keep(ask, "branch prefix", `${s.branchPrefix} (branches become ${s.branchPrefix}/<slug>-<id>)`))) {

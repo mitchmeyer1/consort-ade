@@ -187,10 +187,10 @@ After pulling new Consort code, run `consort-cli refresh` (or `consort-cli refre
 A review scanner reviews other people's PRs:
 
 ```bash
-consort-cli scanners add --name "reviews" --source review --repo ~/Work/aligned-mono --reviewer <your-github-login>
+consort-cli scanners add review
 ```
 
-(or pick `review` in `consort-cli setup`). Every 5 minutes it lists the repository's open PRs that are assigned to that login or ask it for a review; drafts and that login's own PRs are skipped. Each PR head gets one review task; new commits get a new review. The worker:
+It asks for the repository checkout, its base branch, the GitHub login whose PRs to review, a name, and how many PRs to review at once (default 1). `consort-cli scanners add clickup` and `consort-cli scanners add sentry` ask the same questions `setup` does for those scanners. The `--source …` flags still work for scripts. Every 5 minutes it lists the repository's open PRs that are assigned to that login or ask it for a review; drafts and that login's own PRs are skipped. Each PR head gets one review task; new commits get a new review. The worker:
 
 1. checks the PR head out in its own worktree, copies the repo root's `.env` files in (not `.env.example`), and sets up databases and services like a build task;
 2. has Fable or Astra read the repository, its conventions, `.ai-review-rules.md` and the diff, and write `.consort/review/OVERVIEW.md` and a plan of review areas;

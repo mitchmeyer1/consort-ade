@@ -155,10 +155,10 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   lines.push(`  ${mint("consort-cli tasks logs <ticket or task>")}  what an agent has been doing`);
   lines.push(`  ${mint("consort-cli help")}                         every command`);
   lines.push("");
-  lines.push(`${cream(bold("Add a scanner"))} ${dim("· or run consort-cli setup and pick one")}`);
-  lines.push(`  ${dim("ClickUp tickets → PRs")}   ${mint("consort-cli scanners add --source clickup --space <id> --repo <path> --base <branch> --tag ai-handle")}`);
-  lines.push(`  ${dim("PR reviews")}              ${mint("consort-cli scanners add --source review --repo <path> --reviewer <github-login>")}`);
-  lines.push(`  ${dim("Sentry → ClickUp")}        ${mint("consort-cli scanners add --source sentry --repo <path> --sentry-org <org> --sentry-project <slug> --workspace <id> --list <id> --tag <tag>")}`);
+  lines.push(`${cream(bold("Add a scanner"))} ${dim("· step-by-step questions")}`);
+  lines.push(`  ${mint("consort-cli scanners add clickup")}         build ClickUp tickets into PRs`);
+  lines.push(`  ${mint("consort-cli scanners add review")}          review PRs assigned to you or asking you for review`);
+  lines.push(`  ${mint("consort-cli scanners add sentry")}          turn grouped Sentry issues into ClickUp tickets`);
   return lines.join("\n");
 }
 
