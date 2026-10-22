@@ -130,6 +130,11 @@ async function ticketStatus(cwd: string, id: string, status: string) {
   const text = await readFile(file, "utf8").catch(() => undefined);
   if (text !== undefined) await writeFile(file, text.replace(/((?:^|\n)\s*(?:\*\*)?Status:(?:\*\*)?\s*)[^\n]+/i, `$1${status}`));
 }
+async function currentStatus(cwd: string, id: string): Promise<string | undefined> {
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) return undefined;
+  const text = await readFile(join(cwd, ".consort/ship/issues", `${id}.md`), "utf8").catch(() => undefined);
+  return text?.match(/(?:^|\n)\s*(?:\*\*)?Status:(?:\*\*)?\s*([^\n]+)/i)?.[1]?.replace(/[*`]/g, "").trim().toLowerCase();
+}
 /** Recover a crash between cherry-pick and checkpoint, without replaying completed work. */
 export async function recoverImplementation(cwd: string, directory: string): Promise<string[]> {
   const wave: Wave | undefined = await readFile(join(directory, "implementation.json"), "utf8").then(JSON.parse).catch(() => undefined);
@@ -142,7 +147,9 @@ export async function recoverImplementation(cwd: string, directory: string): Pro
     for (const task of wave.tasks) {
       const landed = messages.includes(`Consort-Parallel: ${task.id}`);
       if (landed) wave.integrated.push(task.id);
-      await ticketStatus(cwd, task.id, landed ? "done" : "ready-for-agent");
+      // only a ticket the crashed wave left in-progress goes back to ready; one finished since stays done
+      if (landed) await ticketStatus(cwd, task.id, "done");
+      else if (await currentStatus(cwd, task.id) === "in-progress") await ticketStatus(cwd, task.id, "ready-for-agent");
     }
     await saveWave(directory, wave);
     return wave.integrated;
@@ -192,7 +199,7 @@ export async function runImplementation(o: ParallelOptions & { check: (cwd: stri
     wave.checked = true; await saveWave(o.directory, wave);
     return { completed: prepared.map((r) => r.id), commits: prepared.map((r) => r.commit) };
   } finally {
-    for (const task of selected) if (!integrated.includes(task.id)) await ticketStatus(o.cwd, task.id, "ready-for-agent");
+    for (const task of selected) if (!integrated.includes(task.id) && await currentStatus(o.cwd, task.id) === "in-progress") await ticketStatus(o.cwd, task.id, "ready-for-agent");
     for (const ref of refs) await git(o.cwd, "update-ref", "-d", ref);
   }
 }

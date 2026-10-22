@@ -180,3 +180,17 @@ test('the real layout works: journal inside .consort/ship/parallel, child worktr
   assert.equal(r.reused, false);
   assert.equal(seen.length, 2);
 });
+
+test('recovering an old crashed wave never reverts a ticket finished since', async (t) => {
+  const { recoverImplementation } = await import('../src/cli/parallel.ts');
+  const o = await repository(t);
+  const issues = join(o.cwd, '.consort', 'ship', 'issues'); await mkdir(issues, { recursive: true });
+  await writeFile(join(issues, '12-a.md'), '# 12\n**Status:** done\n');
+  await writeFile(join(issues, '13-b.md'), '# 13\n**Status:** in-progress\n');
+  await mkdir(o.directory, { recursive: true });
+  const base = git(o.cwd, 'rev-parse', 'HEAD');
+  await writeFile(join(o.directory, 'implementation.json'), JSON.stringify({ base, tasks: [{ id: '12-a', ref: 'refs/consort/parallel/0', commit: '' }, { id: '13-b', ref: 'refs/consort/parallel/1', commit: '' }], integrated: [] }));
+  await recoverImplementation(o.cwd, o.directory);
+  assert.match(await readFile(join(issues, '12-a.md'), 'utf8'), /Status:\*\* done/);
+  assert.match(await readFile(join(issues, '13-b.md'), 'utf8'), /Status:\*\* ready-for-agent/);
+});
