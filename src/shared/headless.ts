@@ -249,10 +249,22 @@ export function isTaskStatusQuestion(text: string): boolean {
   return /^(?:(?:hey|hi) )?(?:how(?:s| is) (?:this|it|the task|this task|the ticket) (?:going|doing|progressing)|(?:what(?:s| is) )?(?:the |this tasks? )?status(?: update)?|any (?:updates?|progress)|(?:can you |could you |please )?(?:give me (?:a |an )?)?(?:status update|update me)|where are we(?: (?:at|on this))?)$/.test(question);
 }
 
-/** the Slack reply we wait for: the owner's first message in the thread after the question */
-export function replyAfter(messages: { ts: string; user?: string; text?: string; bot_id?: string }[], afterTs: string, userId: string): string | undefined {
+/**
+ * The owner's word on a review's approval question: "yes", "no", or undefined for anything else
+ * (a question about the PR, a remark), which the oversight agent answers while the approval waits.
+ */
+export function approvalReply(text: string): "yes" | "no" | undefined {
+  const t = text.replace(/<@[A-Z0-9]+>/gi, "").trim();
+  if (!t || /\?/.test(t)) return undefined;
+  if (/^(?:y|yes|yep|yeah|approve|approved|ok|okay|lgtm|ship it|go|go ahead|do it|sure)\b/i.test(t)) return "yes";
+  if (/^(?:n|no|nope|nah|not yet|don[’']?t|do not|hold|hold off|wait|reject|leave it|skip|request changes)\b/i.test(t)) return "no";
+  return undefined;
+}
+
+/** the Slack reply we wait for: the owner's first message in the thread after the question (that `accept` takes, when given) */
+export function replyAfter(messages: { ts: string; user?: string; text?: string; bot_id?: string }[], afterTs: string, userId: string, accept?: (text: string) => boolean): string | undefined {
   const after = Number(afterTs);
-  return messages.filter((m) => !m.bot_id && m.user === userId && Number(m.ts) > after && (m.text ?? "").trim() && !isTaskStatusQuestion(m.text ?? "")).sort((a, b) => Number(a.ts) - Number(b.ts))[0]?.text?.trim();
+  return messages.filter((m) => !m.bot_id && m.user === userId && Number(m.ts) > after && (m.text ?? "").trim() && !isTaskStatusQuestion(m.text ?? "") && (!accept || accept(m.text ?? ""))).sort((a, b) => Number(a.ts) - Number(b.ts))[0]?.text?.trim();
 }
 
 /** the one-line Slack messages the pipeline posts */

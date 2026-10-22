@@ -5,7 +5,7 @@
  * replies. When the message asks for a change, or carries files, it is also queued on the task as
  * an owner update for the worker to apply (cli/ownerUpdates.ts).
  */
-import { brief, isTaskStatusQuestion, slackMessage, slackStatus, taskHealth, taskStep, type SlackTaskStatus } from "../shared/headless.ts";
+import { approvalReply, brief, isTaskStatusQuestion, slackMessage, slackStatus, taskHealth, taskStep, type SlackTaskStatus } from "../shared/headless.ts";
 import { loadState, updateTask, type CliState, type Task } from "./state";
 import { Slack, type SlackThreadMessage } from "./slack";
 import { taskSlackLinks } from "./slackLinks";
@@ -57,7 +57,8 @@ async function handleOwnerMessage(slack: Slack, state: CliState, task: Task, mes
   const files = message.files ?? [];
   // the first owner message with text after a pending question is its answer (headless.ts replyAfter); the worker reads it
   const after = Number(task.pendingQuestion?.afterTs);
-  const isAnswer = !!task.pendingQuestion && !!text && !isTaskStatusQuestion(text) && Number(message.ts) > after && !(task.answeredTs ?? []).some(ts => Number(ts) > after);
+  // a review's approval question takes only a yes or a no; a question about the PR is answered here
+  const isAnswer = !!task.pendingQuestion && !!text && !isTaskStatusQuestion(text) && (task.kind !== "review" || !!approvalReply(text)) && Number(message.ts) > after && !(task.answeredTs ?? []).some(ts => Number(ts) > after);
   if (isAnswer) updateTask(task.id, t => ({ answeredTs: [...(t.answeredTs ?? []), message.ts].slice(-20) }), false);
   const links = await taskSlackLinks(task, state.jobs.find(j => j.id === task.jobId)?.repo);
   if (isAnswer || (!files.length && isAcknowledgement(text))) {

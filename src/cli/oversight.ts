@@ -4,7 +4,7 @@
  * task state, recent ticket comments and the thread so far. It answers, and flags a message that
  * also asks for a change so the daemon queues it as an owner update (cli/ownerUpdates.ts).
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { seedModels, taskStep } from "../shared/headless.ts";
 import { selectCliModel } from "../shared/cliModels.ts";
@@ -12,7 +12,7 @@ import type { Provider } from "../shared/types.ts";
 import { runTurn as realRunTurn, type Turn, type TurnOptions } from "./agent";
 import { usageFor } from "./usage";
 import { modelLoad, type ConnectorUsage } from "../shared/usage.ts";
-import { LOG_DIR, type Account, type CliState, type Task } from "./state";
+import { HOME, LOG_DIR, type Account, type CliState, type Task } from "./state";
 
 export type OversightContext = {
   task: Task;
@@ -122,7 +122,7 @@ export async function answerOwner(c: OversightContext, runTurn: (o: TurnOptions)
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
     try {
-      const turn = await runTurn({ trace: { taskId: c.task.id, ticket: c.task.ticket.id, title: c.task.ticket.title, scanner: job?.name, kind: "oversight", stage: c.task.feature.stage, step: "answer the owner", role: "oversight" }, cwd: c.task.worktree, prompt: oversightPrompt(c), model, account, readOnly: true, maxTurns: 25, effort: "medium", maxDelegates: 0, signal: abort.signal });
+      const turn = await runTurn({ trace: { taskId: c.task.id, ticket: c.task.ticket.id, title: c.task.ticket.title, scanner: job?.name, kind: "oversight", stage: c.task.feature.stage, step: "answer the owner", role: "oversight" }, cwd: existsSync(c.task.worktree) ? c.task.worktree : job?.repo ?? HOME, prompt: oversightPrompt(c), model, account, readOnly: true, maxTurns: 25, effort: "medium", maxDelegates: 0, signal: abort.signal });
       if (turn.limit || turn.error || !turn.text.trim()) { errors.push(`${account.name}: ${turn.error ?? (turn.limit ? "usage limit" : "empty reply")}`); continue; }
       return { ...parseOversight(turn.text), model };
     } catch (e) { errors.push(`${account.name}: ${(e as Error).message}`); }

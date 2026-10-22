@@ -77,12 +77,12 @@ export class Slack {
   }
 
   /** wait for the owner's reply in the thread after `afterTs`; polls, and gives up after `timeoutMs` when set */
-  async waitForReply(thread: string, afterTs: string, opts: { pollMs?: number; timeoutMs?: number; onTick?: () => void; onCheck?: (result: "answer" | "empty" | "error") => void } = {}): Promise<string | undefined> {
+  async waitForReply(thread: string, afterTs: string, opts: { pollMs?: number; timeoutMs?: number; accept?: (text: string) => boolean; onTick?: () => void; onCheck?: (result: "answer" | "empty" | "error") => void } = {}): Promise<string | undefined> {
     const poll = opts.pollMs ?? 10_000;
     const started = Date.now();
     for (;;) {
       const j = await this.api("conversations.replies", { channel: await this.channel(), ts: thread, limit: 200 }).catch(() => undefined);
-      const text = j ? replyAfter(j.messages ?? [], afterTs, this.cfg.userId) : undefined;
+      const text = j ? replyAfter(j.messages ?? [], afterTs, this.cfg.userId, opts.accept) : undefined;
       opts.onCheck?.(text ? "answer" : j ? "empty" : "error");
       if (text) return text;
       opts.onTick?.();

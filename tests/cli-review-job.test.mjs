@@ -67,6 +67,7 @@ test('the review file is the standard schema; Critical or High blocks approval; 
   assert.match(q, /\*Approve\?\* Reply \*yes\* to approve/);
   for (const y of ['yes', 'Yes please', 'approve', 'lgtm', 'ok']) assert.ok(saysYes(y), y);
   for (const n of ['no', 'wait', 'hold off', 'not yet']) assert.ok(!saysYes(n), n);
+  assert.match(q, /Ask anything else here and I'll answer/);
 });
 
 test('posting: one review with inline comments where the diff shows the line, and the rest in the body', async () => {
@@ -129,7 +130,7 @@ async function flow(t, findings, extraJobs = [], resume, opts = {}) {
     './oversight': { oversightModel: p => (p === 'claude' ? 'claude-opus-5' : 'gpt-5.6-sol') },
     './reviewPost': { postReview: async (r, f, event, body) => { posts.push({ event, n: f.length, body }); return { url: 'https://github.com/acme/mono/pull/9#review', event, inline: f.length, general: 0 }; } },
     './slackIdentity': { slackIdentityFor: title => ({ emoji: '📊', title }), takenEmojis: () => [] },
-    './slack': { Slack: class { async post(text) { slackPosts.push(text); return String(slackPosts.length); } async waitForReply() { return opts.reply ?? 'yes'; } } },
+    './slack': { Slack: class { async post(text) { slackPosts.push(text); return String(slackPosts.length); } async waitForReply(_t, _ts, o) { return (opts.replies ?? [opts.reply ?? 'yes']).find(r => !o?.accept || o.accept(r)); } } },
     './state': { WORK_DIR: root, HOME: root, newId: () => 'x', loadState: () => state, updateTask: (id, patch) => Object.assign(task, typeof patch === 'function' ? patch(task) : patch), touchAccount() {}, blockAccount() {} },
     './usage': { usageFor: async accts => new Map(accts.map(a => [a.id, { keyId: a.id, at: Date.now(), windows: [{ id: '5h', label: '5h', percent: a.provider === 'claude' ? 90 : 10 }] }])) },
     'node:util': { promisify: () => async () => ({ stdout: '' }) },
@@ -142,7 +143,7 @@ async function flow(t, findings, extraJobs = [], resume, opts = {}) {
   }
   const watches = [...(opts.watches ?? [{ state: 'MERGED' }])];
   const sleeps = [];
-  await reviewTask('t', async () => (watches.length > 1 ? watches.shift() : watches[0]), async ms => { sleeps.push(ms); });
+  await reviewTask('t', async () => (await opts.onWatch?.(wt), watches.length > 1 ? watches.shift() : watches[0]), async ms => { sleeps.push(ms); });
   return { task, turns, posts, slackPosts, wt, root, sleeps };
 }
 
@@ -184,6 +185,17 @@ test('after Request changes it watches the PR and runs another round when the au
   assert.equal(f.sleeps.length, 1, 'polled until the request came back');
 });
 
+test('a review folder deleted while watching is checked out again, and round 2 still checks the earlier findings', async (t) => {
+  let calls = 0, gone = false;
+  const high = [{ severity: 'high', category: 'scaling', title: 'Unbounded query', file: 'src/a.ts', line: 3, comment: 'Paginate.' }];
+  const f = await flow(t, () => (calls++ < 3 ? high : []), [], false, { onWatch: async wt => { if (!gone) { gone = true; await rm(wt, { recursive: true, force: true }); } }, watches: [
+    { state: 'OPEN', headRefOid: 'h', reviewRequests: [] },
+    { state: 'OPEN', headRefOid: 'h2', reviewRequests: [{ login: 'Mitch' }] },
+  ] });
+  assert.equal(f.task.review.round, 2); assert.equal(f.task.note, 'approved');
+  assert.match(await readFile(join(f.wt, '.consort', 'review', 'previous.json'), 'utf8'), /Unbounded query/, 'restored from the saved copy');
+});
+
 test('the owner saying no keeps watching; a request that never cleared does not loop on the same head', async (t) => {
   const f = await flow(t, [], [], false, { reply: 'no', watches: [
     { state: 'OPEN', headRefOid: 'h', reviewRequests: [{ login: 'mitch' }] },
@@ -192,6 +204,13 @@ test('the owner saying no keeps watching; a request that never cleared does not 
   ] });
   assert.equal(f.turns.filter(x => x.prompt.includes('step 1 of 3')).length, 1, 'one round only');
   assert.equal(f.task.status, 'done'); assert.equal(f.task.note, 'PR closed');
+});
+
+test('a question on the approval is not an answer: it waits on for a yes or no', async (t) => {
+  const f = await flow(t, [], [], false, { replies: ['Whats the point of this? Isnt the point of a view that its not real data?', 'ok so what changed', 'yes'] });
+  assert.deepEqual(f.posts.map(p => p.event), ['APPROVE']);
+  assert.ok(!f.slackPosts.some(p => /unapproved \(you said/.test(p)), 'the question was not read as a no');
+  assert.equal(f.task.note, 'approved');
 });
 
 test('a review uses the model settings of the build scanner on the same repository', async (t) => {

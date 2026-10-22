@@ -49,6 +49,16 @@ test('the oversight agent answers each owner question once, with the log, ticket
   assert.equal(h.task.status,'working');
   assert.ok(h.patches.every(touch=>touch===false),'poll cursors must not reset worker activity time');
 });
+test('approval replies: only a yes or a no answers a review; a question goes to the oversight agent', async () => {
+  for (const [text, want] of [['yes', 'yes'], ['LGTM ship it', 'yes'], ['no', 'no'], ['not yet', 'no'], ['hold off', 'no'], ['Whats the point of this? Isnt a view not real data?', undefined], ['yes?', undefined], ['why does it raise the timeout', undefined]]) assert.equal(headless.approvalReply(text), want, text);
+  const h=harness();
+  Object.assign(h.task,{kind:'review',status:'waiting',pendingQuestion:{questions:['Approve PR #9?'],afterTs:'1'}});
+  h.messages([{ts:'2',user:'owner',text:'Whats the point of this? Isnt a view not real data?'},{ts:'3',user:'owner',text:'yes'}]);
+  await h.run();
+  assert.equal(h.contexts.length,1,'the question is answered');
+  assert.equal(h.contexts[0].question,'Whats the point of this? Isnt a view not real data?');
+  assert.deepEqual(h.task.answeredTs,['3'],'only the yes is the answer');
+});
 test('when the agent is down, status questions get the saved status line and changes still reach the worker', async () => {
   const h=harness(down);
   h.messages([{ts:'2',user:'owner',text:'Hows this going'},{ts:'3',user:'owner',text:'Rename the button to Export'}]);

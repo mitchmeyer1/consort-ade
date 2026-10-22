@@ -21,7 +21,7 @@ import { execFile } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { addTurnCost, ENVIRONMENT_RULES, HEADLESS_RULES, seedModels, parseSlackIdentity, slackAsk, slackHeading, slackMessage, slackProgress, slackStatus, type SlackIdentity } from "../shared/headless.ts";
+import { addTurnCost, approvalReply, ENVIRONMENT_RULES, HEADLESS_RULES, seedModels, parseSlackIdentity, slackAsk, slackHeading, slackMessage, slackProgress, slackStatus, type SlackIdentity } from "../shared/headless.ts";
 import { selectCliModel } from "../shared/cliModels.ts";
 import { modelBlock, modelLoad, usageBlock } from "../shared/usage.ts";
 import { parseReview, serializeReview, type Finding, type Review, type ReviewEvent } from "../shared/review.ts";
@@ -119,7 +119,7 @@ export function buildReview(t: ReviewTarget, findings: RawFinding[], o: { tldr?:
 export const blocking = <F extends Pick<Finding, "severity">>(findings: F[]) => findings.filter((f) => f.severity === "critical" || f.severity === "high");
 export const counts = (findings: Pick<Finding, "severity">[]) => SEVERITY.map((s) => [s, findings.filter((f) => f.severity === s).length] as const).filter(([, n]) => n);
 export const countLine = (findings: Pick<Finding, "severity">[]) => counts(findings).map(([s, n]) => `${n} ${s}`).join(", ") || "no findings";
-export const saysYes = (reply: string) => /^\s*(?:y|yes|yep|yeah|approve|approved|ok|okay|lgtm|ship it|go|go ahead|do it|sure)\b/i.test(reply);
+export const saysYes = (reply: string) => approvalReply(reply) === "yes";
 
 /**
  * The approval question, under the thread's emoji heading: what the PR does in 1-2 sentences, the
@@ -132,7 +132,7 @@ export function approvalQuestion(t: ReviewTarget, review: Review, postedUrl: str
     ...flows.slice(0, 4).map((f) => `• ${f.trim()}`),
     "",
     `Findings: ${countLine(review.findings)}, nothing Critical or High${postedUrl ? ` · <${postedUrl}|comments posted>` : ""} · <${t.url}|PR #${t.pr}> by @${t.author}`,
-    `*Approve?* Reply *yes* to approve, or anything else to leave it unapproved.`,
+    `*Approve?* Reply *yes* to approve or *no* to leave it unapproved. Ask anything else here and I'll answer.`,
   ].join("\n");
 }
 
@@ -215,7 +215,8 @@ async function reviewRound(taskId: string, watch: (t: ReviewTarget, repo: string
   /** wait for the owner's word on Slack, then approve or leave it */
   /** "watch" when the owner did not approve: the caller stops the services, then watches the PR */
   const awaitApproval = async (review: Review, ts: string | undefined): Promise<"watch" | void> => {
-    const answer = slack && thread && ts ? await slack.waitForReply(thread, ts, { pollMs: 15_000 }) : undefined;
+    // only a yes or a no settles it; a question goes to the oversight agent (cli/slackStatus.ts) and the wait goes on
+    const answer = slack && thread && ts ? await slack.waitForReply(thread, ts, { pollMs: 15_000, accept: (text) => !!approvalReply(text) }) : undefined;
     updateTask(taskId, { pendingQuestion: undefined, status: "working" });
     if (answer && saysYes(answer)) {
       const approved = await postReview(review, [], "APPROVE", `Approved after an automatic review (${countLine(review.findings)}) and the reviewer's confirmation.`, task.worktree);
@@ -254,6 +255,15 @@ async function reviewRound(taskId: string, watch: (t: ReviewTarget, repo: string
           // keep this round's files for the record; the next round reads the findings to check them first
           const dir = join(task.worktree, ".consort", "review");
           const saved = join(dir, `pr-${t.pr}.review.json`);
+          // the worktree went missing while watching: check the old head out again and restore its review from the saved copy
+          if (!existsSync(task.worktree)) {
+            await sh("git", ["fetch", "origin", `pull/${t.pr}/head`, t.base], job.repo).catch(() => undefined);
+            await sh("git", ["worktree", "prune"], job.repo).catch(() => undefined);
+            await sh("git", ["worktree", "add", "--detach", task.worktree, t.head], job.repo);
+            mkdirSync(dir, { recursive: true });
+            const copy = join(HOME, "reviews", `${t.repo.replace("/", "-")}-pr-${t.pr}-${t.head.slice(0, 7)}.review.json`);
+            if (existsSync(copy)) copyFileSync(copy, saved);
+          }
           if (existsSync(saved)) writeFileSync(join(dir, "previous.json"), JSON.stringify(parseReview(readFileSync(saved, "utf8")).findings, null, 2));
           mkdirSync(join(dir, `round-${round - 1}`), { recursive: true });
           for (const f of ["OVERVIEW.md", "plan.json", "swarm.json", `pr-${t.pr}.review.json`]) if (existsSync(join(dir, f))) renameSync(join(dir, f), join(dir, `round-${round - 1}`, f));
