@@ -44,7 +44,9 @@ export type SlackConfig = { botToken: string; userId: string; channel?: string }
 export type StatusNames = { progress: string; review: string; done: string };
 export type Job = {
   id: string; name: string;
-  source: "clickup" | "github" | "sentry";
+  source: "clickup" | "github" | "sentry" | "review";
+  /** review scanners: the GitHub login whose assigned or requested PRs get an automatic review (cli/reviewJob.ts) */
+  reviewer?: string;
   sentry?: import("../shared/sentryScanner.ts").SentryScannerConfig;
   /** absolute path of the repository checkout on this machine (on its base branch) */
   repo: string;
@@ -113,6 +115,9 @@ export type Task = {
   childEnvironments?: { id: string; portBase: number; runCode: string; pid: number }[];
   environmentReservation?: { pid: number; at: number };
   reviewsDone: number;
+  /** a review task (from a review scanner) reviews someone else's PR instead of building a ticket */
+  kind?: "build" | "review";
+  review?: import("./reviewJob").ReviewTarget;
   /** the build graph was re-split once for parallel work (cli/buildGraph.ts) */
   graphResplitAt?: number;
   /** `consort-cli tasks split`: re-split the unfinished build tickets on the next build step, chain or not */

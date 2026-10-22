@@ -71,7 +71,8 @@ async function handleOwnerMessage(slack: Slack, state: CliState, task: Task, mes
     console.error(`Oversight agent for ${task.ticket.id} failed: ${(e as Error).message}`);
   }
   // without the agent: the plain status line, and anything that is not a status question still reaches the worker
-  const change = reply ? reply.update : isTaskStatusQuestion(text) ? undefined : text;
+  // a review task has no build to change: the oversight agent answers, nothing is queued
+  const change = task.kind === "review" ? undefined : reply ? reply.update : isTaskStatusQuestion(text) ? undefined : text;
   const queued = files.length || change ? await queueOwnerUpdate(state.slack!.botToken, task.id, message, change && change !== text ? `${text}\n\n(Read as: ${change})` : text, false) : undefined;
   const body = reply?.answer || `${statusOf(loadState(), task.id, alive)?.line ?? ""}${reply ? "" : "\n• I could not check the details just now; ask again in a minute."}`;
   await post(slack, task, [body, queued].filter(Boolean).join("\n\n"), links, alive);

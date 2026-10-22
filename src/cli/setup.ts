@@ -178,10 +178,24 @@ export async function runSetup(): Promise<void> {
         s = loadState(); s.jobs = s.jobs.filter((x) => x.id !== j.id); saveState(s); console.log(`scanner "${j.name}" removed`);
       }
     }
-    if (!s.jobs.length || await yes(ask, "Add another scanner? (a ClickUp worker, GitHub worker, or Sentry ticket producer)", false)) {
+    if (!s.jobs.length || await yes(ask, "Add another scanner? (a ClickUp worker, GitHub worker, Sentry ticket producer, or automatic PR reviews)", false)) {
       for (;;) {
-        const kind = (await ask("Source: clickup, github or sentry", { default: "clickup" })).toLowerCase();
-        if (kind !== "clickup" && kind !== "github" && kind !== "sentry") { console.log(bad("type clickup, github or sentry")); continue; }
+        const kind = (await ask("Source: clickup, github, sentry or review (automatic PR reviews)", { default: "clickup" })).toLowerCase();
+        if (kind !== "clickup" && kind !== "github" && kind !== "sentry" && kind !== "review") { console.log(bad("type clickup, github, sentry or review")); continue; }
+        if (kind === "review") {
+          console.log(dim("A review scanner watches a repository's open PRs that are assigned to a GitHub login or ask it for a review. Each one gets a full review (Fable/Astra overview, an Opus/Sol reviewer swarm, verified findings posted as one GitHub review). Critical or High findings request changes; otherwise it asks you on Slack before approving."));
+          const repo = await repoChecks(ask);
+          if (!repo) continue;
+          const login = (await ask("GitHub login whose PRs to review (assigned or review requested)")).trim().replace(/^@/, "");
+          if (!login) { console.log(bad("a GitHub login is required")); continue; }
+          s = loadState();
+          const name = await ask("Name this scanner", { default: `reviews for @${login}` });
+          s.jobs.push({ id: newId("job"), name, source: "review", reviewer: login, repo: repo.repo, base: repo.base, filters: {}, everyMinutes: 5, maxParallel: 4, statuses: { ...DEFAULT_STATUSES }, enabled: true, createdAt: Date.now() } as Job);
+          saveState(s);
+          console.log(ok(`review scanner saved: PRs for @${login} in ${repo.repo}, checked every 5 minutes`));
+          if (await yes(ask, "Add another scanner?", false)) continue;
+          break;
+        }
         if (kind === "sentry") {
           console.log(dim("Sentry creates grouped ClickUp tickets only. Select the shared GitHub checkout used for atomic duplicate reservations; existing worker scanners pick up the output list/tag."));
           const repo = await repoChecks(ask);

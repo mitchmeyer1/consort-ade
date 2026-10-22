@@ -182,6 +182,22 @@ When your message asks for a change, or carries files (needs the `files:read` sc
 
 After pulling new Consort code, run `consort-cli refresh` (or `consort-cli refresh --pull` to pull first). It installs dependencies when the lockfile changed, rebuilds the CLI, then stops the daemon and every worker, waits for each to save and exit, and starts the daemon again on the new build; the daemon restarts each open task's worker within 15 seconds. A failed install or build leaves everything running as it was. It will not restart while a parallel wave is running unless you add `--force` (the wave's work is saved and resumes). Reopen any `consort-cli view` window afterwards.
 
+### Automatic PR reviews
+
+A review scanner reviews other people's PRs:
+
+```bash
+consort-cli scanners add --name "reviews" --source review --repo ~/Work/aligned-mono --reviewer <your-github-login>
+```
+
+(or pick `review` in `consort-cli setup`). Every 5 minutes it lists the repository's open PRs that are assigned to that login or ask it for a review; drafts and that login's own PRs are skipped. Each PR head gets one review task; new commits get a new review. The worker:
+
+1. checks the PR head out in its own worktree, copies the repo root's `.env` files in (not `.env.example`), and sets up databases and services like a build task;
+2. has Fable or Astra read the repository, its conventions, `.ai-review-rules.md` and the diff, and write `.consort/review/OVERVIEW.md` and a plan of review areas;
+3. runs one read-only reviewer per area on Opus or Sol, in parallel (up to the scanner's `--max-parallel`, default 4), each crawling its files, their callers and similar code for bugs, scaling problems and convention breaks;
+4. has Fable or Astra verify every finding against the code, merge duplicates and settle severities (a rule in `.ai-review-rules.md` wins), saved as a standard `.review.json` (also under `~/.consort-cli/reviews/`);
+5. posts one GitHub review. Any Critical or High finding: **Request changes**, done. Otherwise it posts the comments, then asks you in the review's Slack thread with a TL;DR, the findings and the link, and approves only when you reply yes.
+
 ## Commands
 
 | Command | Does |

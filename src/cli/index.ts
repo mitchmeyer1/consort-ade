@@ -16,6 +16,7 @@ import { canStartWorker, handleWorkerExit, requestWorkerStop, workerStopMessage 
 import { answerTaskStatusQuestions } from "./slackStatus";
 import { saveLiveChildren } from "./parallel";
 import { refresh } from "./refresh";
+import { newReviewTask, reviewTask, scanReviews } from "./reviewJob";
 import { promisify } from "node:util";
 import { sourceFor } from "./sources";
 import { renderView, viewLoop } from "./view";
@@ -69,6 +70,9 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
            [--status-progress "in progress"] [--status-review "in review"] [--status-done complete]
            [--review-models claude:claude-fable-5-1,codex:gpt-6-astra]
   scanners add --name <n> --source github --repo <path> --base main [--tag ai-handle] …
+  scanners add --name <n> --source review --repo <path> --reviewer <github-login> [--every 5] [--max-parallel 4]
+           reviews open PRs assigned to that login or asking it for a review: Fable/Astra overview, Opus/Sol swarm,
+           Request changes on Critical/High, otherwise comments and a Slack yes before it approves
   scanners add --name <n> --source sentry --repo <shared-checkout> --sentry-org <org> --sentry-project <slug> --workspace <id> --list <id> --tag <tag>
            [--sentry-host https://sentry.io] [--environment production] [--query is:unresolved] [--create-status "to do"]
            reads SENTRY_AUTH_TOKEN from the environment; creates ClickUp tickets without starting workers
@@ -172,7 +176,7 @@ async function main(argv: string[]) {
 
     case "scanners add": {
       const source = need(a, "source") as Job["source"];
-      if (source !== "clickup" && source !== "github" && source !== "sentry") fail("--source must be clickup, github or sentry");
+      if (source !== "clickup" && source !== "github" && source !== "sentry" && source !== "review") fail("--source must be clickup, github, sentry or review");
       const repo = resolve(need(a, "repo"));
       if (!existsSync(join(repo, ".git"))) fail(`${repo} is not a git checkout`);
       const filters: SourceFilters = { tags: list(a, "tag"), statuses: list(a, "status"), nameIncludes: list(a, "name-includes"), nameExcludes: list(a, "name-excludes"), assignees: list(a, "assignee") };
@@ -190,6 +194,11 @@ async function main(argv: string[]) {
         job.maxParallel = 0;
         job.everyMinutes = Number(str(a, "every") ?? 15) || 15;
       }
+      if (source === "review") {
+        job.reviewer = need(a, "reviewer").replace(/^@/, "");
+        job.everyMinutes = Number(str(a, "every") ?? 5) || 5;
+        job.maxParallel = Number(str(a, "max-parallel") ?? 4) || 4; // the reviewer swarm runs this many agents at once
+      }
       if (source === "clickup" && !job.scope) fail("--list, --folder or --space <clickup id> is required for a clickup scanner");
       s.jobs.push(job); saveState(s);
       console.log(`Added scanner ${job.name} (${job.id}): ${source}${job.scope ? ` ${job.scope.kind} ${job.scope.id}` : ""} every ${job.everyMinutes} min → ${repo} on ${job.base}`);
@@ -197,7 +206,7 @@ async function main(argv: string[]) {
     }
     case "scanners list": {
       for (const j of s.jobs) {
-        const target = j.source === "sentry" ? ` ${j.sentry?.org}/${j.sentry?.projects.join(",")} → ClickUp list ${j.sentry?.listId} #${j.sentry?.tag} (${j.sentry?.status ?? "list default"})` : j.scope ? ` ${j.scope.kind} ${j.scope.id}` : j.listId ? ` list ${j.listId}` : "";
+        const target = j.source === "review" ? ` PRs for @${j.reviewer}` : j.source === "sentry" ? ` ${j.sentry?.org}/${j.sentry?.projects.join(",")} → ClickUp list ${j.sentry?.listId} #${j.sentry?.tag} (${j.sentry?.status ?? "list default"})` : j.scope ? ` ${j.scope.kind} ${j.scope.id}` : j.listId ? ` list ${j.listId}` : "";
         console.log(`${j.id}  ${j.enabled ? "on " : "off"}  ${j.name.padEnd(20)}  ${j.source}${target}  every ${j.everyMinutes}m  ${j.repo} (${j.base})  filters ${JSON.stringify(j.filters)}  last scan ${j.lastScanAt ? new Date(j.lastScanAt).toLocaleString() : "never"}`);
       }
       if (!s.jobs.length) console.log("No scanners."); return;
@@ -301,7 +310,7 @@ async function main(argv: string[]) {
         await notifyTask(id!, "stopped", reason);
         process.exit(0);
       });
-      await runTaskUntilFinished(id!, () => workTask(id!), stopAgents, () => stopping);
+      await runTaskUntilFinished(id!, () => (loadState().tasks.find((t) => t.id === id!)?.kind === "review" ? reviewTask(id!) : workTask(id!)), stopAgents, () => stopping);
       return;
     }
 
@@ -433,6 +442,20 @@ async function daemon() {
         if (job.source === "sentry") {
           const result = await scanSentry(job, s.clickupKey);
           statusEvent(result.reserved ? "warn" : "success", `${job.name}: ${result.issues} Sentry issues → ${result.groups} groups; ${result.created} ClickUp tickets created; ${result.existing} existing; ${result.reserved} reserved elsewhere or awaiting reconciliation`);
+          const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); j.scanStartedAt = undefined; saveState(after); }
+          continue;
+        }
+        if (job.source === "review") {
+          // PRs assigned to the reviewer or asking it for a review: one review task per PR head (cli/reviewJob.ts)
+          const prs = await scanReviews(job, availableTaskSlots(loadState(), job));
+          for (const pr of prs) {
+            const fresh = loadState();
+            const task = newReviewTask(job, pr, Date.now());
+            fresh.tasks.push(task); saveState(fresh);
+            spawnWorker(task);
+            statusEvent("success", `${job.name}: reviewing PR #${pr.number} — ${pr.title}`);
+          }
+          if (!prs.length) statusEvent("info", `${job.name}: no PRs waiting for @${job.reviewer}'s review`);
           const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); j.scanStartedAt = undefined; saveState(after); }
           continue;
         }
