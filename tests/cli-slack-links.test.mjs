@@ -30,6 +30,6 @@ test('ticket links switch from origin branch to PR and retry failed remote looku
   await mod.exports.taskSlackLinks(task, '/repo');
   assert.equal(calls, 2);
   task.feature.prs.push('https://github.com/team/project/pull/42');
-  assert.deepEqual(await mod.exports.taskSlackLinks(task, '/repo'), { ticket: task.ticket.url, github: task.feature.prs[0], heading: "📋 Map locations", progress: '▶ *Env* · ○ Grill · ○ Build · ○ Test · ○ Review · ○ Evidence · ○ PR' });
+  assert.deepEqual(await mod.exports.taskSlackLinks(task, '/repo'), { ticket: task.ticket.url, github: task.feature.prs[0], heading: "📋 Map locations", progress: '▸ *Env* · ○ Grill · ○ Build · ○ Test · ○ Review · ○ Evidence · ○ PR' });
   assert.equal(calls, 2);
 });

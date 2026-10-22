@@ -473,7 +473,7 @@ export function taskStep(t: { status: string; envReadyAt?: number; reviewsDone: 
  * The step tracker under a Slack post's STATUS line, one compact line: done steps ticked, the
  * current one bold with an arrow, the rest hollow. The build shows its tickets done and a ten-cell
  * bar; the review rounds fold into one step.
- *   ✓ Env · ✓ Grill · ▶ *Build 10/18* ▰▰▰▰▰▱▱▱▱▱ · ○ Test · ○ Review · ○ Evidence · ○ PR
+ *   ✓ Env · ✓ Grill · ▸ *Build 10/18* ▰▰▰▰▰▱▱▱▱▱ · ○ Test · ○ Review · ○ Evidence · ○ PR
  */
 export function slackProgress(t: Parameters<typeof taskStep>[0], build?: { done: number; total: number }, reviews = 3): string {
   const step = taskStep(t, reviews);
@@ -485,9 +485,9 @@ export function slackProgress(t: Parameters<typeof taskStep>[0], build?: { done:
   return short.map((name, i) => {
     if (i < at) return `✓ ${name}`;
     if (i > at) return `○ ${name}`;
-    if (name === "Build" && build?.total) return `▶ *Build ${build.done}/${build.total}* ${bar(build.done, build.total)}`;
-    if (name === "Review") return `▶ *Review ${Math.min(t.reviewsDone + 1, reviews)}/${reviews}*`;
-    return `▶ *${name}*`;
+    if (name === "Build" && build?.total) return `▸ *Build ${build.done}/${build.total}* ${bar(build.done, build.total)}`;
+    if (name === "Review") return `▸ *Review ${Math.min(t.reviewsDone + 1, reviews)}/${reviews}*`;
+    return `▸ *${name}*`;
   }).join(" · ");
 }
 
