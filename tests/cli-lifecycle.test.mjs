@@ -73,7 +73,7 @@ function harness(opts = {}) {
     return mod.exports;
   }
   mocks['./lifecycle'] = load(lifecycle);
-  return { task, accounts, events, messages, work: () => load(pipeline).workTask('t'), notify: mocks['./lifecycle'].notifyTask, run: (work, isStopping) => mocks['./lifecycle'].runTaskUntilFinished('t', work, () => events.push('stop agents'), isStopping) };
+  return { task, accounts, events, messages, advance: ms => { clock += ms; }, work: () => load(pipeline).workTask('t'), notify: mocks['./lifecycle'].notifyTask, run: (work, isStopping) => mocks['./lifecycle'].runTaskUntilFinished('t', work, () => events.push('stop agents'), isStopping) };
 }
 
 test('all providers exhausted: one pause, then a separate resume after reset', async () => {
@@ -817,4 +817,19 @@ test('a frontier turn picks Codex when the Claude account is nearly out of Fable
   // no tickets yet: the plan turn is frontier work, which goes to Codex (Astra) first; the network error moves it to Claude
   assert.deepEqual(seen, ['x:gpt-6-astra', 'c:claude-fable-5-1']);
   assert.ok(!h.events.includes('owner reply'));
+});
+
+test('a turn that goes quiet for 25 minutes is stopped, reported in Slack, and retried; a second silence asks the owner', async () => {
+  let h, calls = 0;
+  const hang = (o, interval) => new Promise(resolve => {
+    o.signal.addEventListener('abort', () => resolve({ text: '', error: 'aborted' }), { once: true });
+    o.onText('Dispatching reader 1 of 15');
+    h.advance(26 * 60_000);
+    interval();
+  });
+  h = harness({ sleep() {}, turn: (o, _task, interval) => { calls++; return hang(o, interval); } });
+  // the second silence is a problem for the owner; the worker's wrapper turns it into the Slack question
+  await assert.rejects(h.work(), /went quiet for 25 minutes twice/);
+  assert.equal(calls, 2, 'retried once, then gave up');
+  assert.ok(h.messages.some(m => /went quiet for 25 min .*last: Dispatching reader 1 of 15.*Restarting this step/.test(m.text)), 'the first silence is posted');
 });

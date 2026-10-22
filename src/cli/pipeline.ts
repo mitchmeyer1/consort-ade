@@ -47,6 +47,8 @@ import { blockAccount, loadState, processAlive, touchAccount, updateTask, WORK_D
 const run = promisify(execFile);
 const PR_POLL_MS = 3 * 60_000;
 const STUCK_AFTER = 3;
+/** an agent turn that prints nothing for this long is treated as hung and restarted on another account */
+export const SILENCE_MS = 25 * 60_000;
 
 const log = (task: Task, line: string) => console.log(`${new Date().toISOString()} [${task.ticket.id}] ${line}`);
 
@@ -174,6 +176,7 @@ export async function workTask(taskId: string): Promise<void> {
     const crashes = new Map<string, number>(); // failures in unrelated parallel jobs never combine
     // accounts that errored on this turn: the next attempt goes to a different account, on either provider
     const tried = new Set<string>();
+    let silences = 0;
     let lastCrash: string | undefined;
     let failedTurns = 0;
     let model = fixedModel ?? modelFor(provider, role);
@@ -249,7 +252,11 @@ export async function workTask(taskId: string): Promise<void> {
       let usageLimit: ReturnType<typeof usageBlock>;
       let checking = false;
       let active = true;
+      // a turn whose agent says nothing for SILENCE_MS is hung (a dropped API connection, most often): stop it and retry
+      let quietSince = Date.now();
+      let silenced = false;
       const checkUsage = async () => {
+        if (active && Date.now() - quietSince > SILENCE_MS) { silenced = true; abort.abort(); return; }
         if (checking) return;
         checking = true;
         try {
@@ -271,9 +278,10 @@ export async function workTask(taskId: string): Promise<void> {
       let startedAt = Date.now();
       try { res = await withAgentTurn(taskId, who.id, () => {
         startedAt = Date.now();
+        quietSince = Date.now();
         usageTimer = setInterval(checkUsage, 60_000);
         deadline = timeoutMs ? setTimeout(() => { timedOut = true; abort.abort(); }, timeoutMs) : undefined;
-        return runTurn({ cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}\n\n${ENVIRONMENT_RULES(turnEnv)}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: turnEnv, signal: abort.signal, readOnly, effort: role === "reader" ? "low" : role === "frontier" ? "high" : "medium", delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
+        return runTurn({ cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}\n\n${ENVIRONMENT_RULES(turnEnv)}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: turnEnv, signal: abort.signal, readOnly, effort: role === "reader" ? "low" : role === "frontier" ? "high" : "medium", delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { quietSince = Date.now(); const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
       }, reviewUnits); }
       catch (e) { if (e instanceof AccountUnavailableError) { continue; } throw e; }
       finally { active = false; mine.set(who.id, (mine.get(who.id) ?? 1) - 1); if (usageTimer) clearInterval(usageTimer); if (deadline) clearTimeout(deadline); }
@@ -282,6 +290,17 @@ export async function workTask(taskId: string): Promise<void> {
         ...(res.usage?.length ? { cost: addTurnCost(t.cost, res.usage) } : {}),
         turnHistory: [...(t.turnHistory ?? []), { at: startedAt, stage: feature.stage, role, provider, model, durationMs: Date.now() - startedAt, usage: res.usage, error: timedOut ? `Timed out after ${timeoutMs}ms` : res.error ?? res.limit?.text, escalated: !!escalationReason, escalationReason }],
       }));
+      if (silenced) {
+        silences++;
+        tried.add(who.id);
+        if (managesSession) updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: undefined } }));
+        const last = recent.at(-1);
+        const minutes = Math.round(SILENCE_MS / 60_000);
+        log(task, `${model} on ${who.name} went quiet for ${minutes} min; stopped it (${silences})`);
+        if (silences >= 2) throw new ProblemError({ where: feature.stage, what: `The agent went quiet for ${minutes} minutes twice and was stopped each time`, recent: [...recent], tried: `restarted once on another account after the first silence`, error: res?.error });
+        await say(slackMessage("update", `The agent went quiet for ${minutes} min (${model} on ${who.name}${last ? `; last: ${brief(last, 160)}` : ""}). Restarting this step on another account; nothing to do on your side`));
+        continue;
+      }
       if (timedOut) {
         const minutes = Math.round(timeoutMs! / 60_000);
         throw new ProblemError({ where: "", what: `The agent exceeded ${minutes} minutes on one turn and was stopped`, recent: [...recent], tried: recent.length ? undefined : `${minutes} minutes with no progress lines from the agent`, error: res?.error });
