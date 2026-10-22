@@ -154,6 +154,11 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   lines.push(`  ${mint("consort-cli tasks release <ticket>")}       stop one agent for good and forget the ticket (worktree stays)`);
   lines.push(`  ${mint("consort-cli tasks logs <ticket or task>")}  what an agent has been doing`);
   lines.push(`  ${mint("consort-cli help")}                         every command`);
+  lines.push("");
+  lines.push(`${cream(bold("Add a scanner"))} ${dim("· or run consort-cli setup and pick one")}`);
+  lines.push(`  ${dim("ClickUp tickets → PRs")}   ${mint("consort-cli scanners add --source clickup --space <id> --repo <path> --base <branch> --tag ai-handle")}`);
+  lines.push(`  ${dim("PR reviews")}              ${mint("consort-cli scanners add --source review --repo <path> --reviewer <github-login>")}`);
+  lines.push(`  ${dim("Sentry → ClickUp")}        ${mint("consort-cli scanners add --source sentry --repo <path> --sentry-org <org> --sentry-project <slug> --workspace <id> --list <id> --tag <tag>")}`);
   return lines.join("\n");
 }
 
