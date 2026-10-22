@@ -21,6 +21,7 @@ import { allocateEnvironment, cleanupEnvironment, withChildEnvironment } from ".
 import { flushTaskNotifications, notifyTask } from "./lifecycle";
 import { readUsage, saveUsage, usageFor } from "./usage";
 import { checkpoint } from "./checkpoint";
+import { draftBody, draftTitle, ensureDraftPr, updateDraftBody } from "./draftPr";
 import { stepLabel } from "./buildProgress";
 import type { TaskEnv } from "../shared/headless.ts";
 import { leastLoaded, modelLoad, usageBlock } from "../shared/usage.ts";
@@ -359,11 +360,29 @@ export async function workTask(taskId: string): Promise<void> {
     return true;
   };
   // after each step before the PR: commit what the turn left uncommitted and push the branch, so progress is on GitHub too
-  const saveProgress = async () => {
+  const progressLabel = () => {
     const step = stepLabel(feature.stage === "Implementing" ? "Build" : feature.stage, task.worktree);
-    const saved = await checkpoint(task.worktree, task.branch, `Consort checkpoint: ${feature.stage}${step.startsWith("Build ") ? ` (${step})` : ""}`);
+    return `${feature.stage}${step.startsWith("Build ") ? ` (${step})` : ""}`;
+  };
+  // the draft PR, from the first step on, so the Slack github link shows the diff and a summary (cli/draftPr.ts)
+  const draftOpen = () => !feature.built && !["In Review", "Merged", "Closed"].includes(feature.stage);
+  const openDraft = async () => {
+    if (feature.prs.length || !draftOpen()) return;
+    const pr = await ensureDraftPr({ cwd: task.worktree, base: job.base, branch: task.branch, title: draftTitle(task.ticket), body: draftBody(task.ticket, progressLabel(), ticketBody) });
+    if (!pr.url) { log(task, `draft PR not opened yet: ${pr.error}`); return; }
+    feature = { ...feature, prs: [pr.url] };
+    updateTask(task.id, { feature });
+    await say(slackLines.pr(pr.url));
+  };
+  const saveProgress = async () => {
+    const saved = await checkpoint(task.worktree, task.branch, `Consort checkpoint: ${progressLabel()}`);
     if (saved.error) log(task, `checkpoint failed: ${saved.error}`);
     else if (saved.committed || saved.pushed) log(task, `checkpoint${saved.committed ? " committed" : ""}${saved.pushed ? ` and pushed ${task.branch}` : ""}`);
+    if (!feature.prs.length) await openDraft();
+    else if (draftOpen() && !saved.error) {
+      const failed = await updateDraftBody(task.worktree, feature.prs[0], draftBody(task.ticket, progressLabel(), ticketBody));
+      if (failed) log(task, `draft PR description not updated: ${failed}`);
+    }
   };
   // waits between PR checks end early when the owner posts an update
   const nap = (ms: number) => new Promise<void>((resolve) => {
@@ -406,6 +425,7 @@ export async function workTask(taskId: string): Promise<void> {
     await say(slackLines.env(env.CONSORT_PORT_RANGE));
   }
   await applyOwnerUpdates();
+  await openDraft();
 
   const parallelDirectory = join(task.worktree, ".consort", "ship", "parallel");
   const parallelRun: ParallelRun = async child => {

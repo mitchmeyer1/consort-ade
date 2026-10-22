@@ -148,6 +148,10 @@ Each new agent (a fresh session, a review, a parallel worker, the oversight agen
 
 After every step before the PR (each grilling, spec and build turn), the worker commits whatever the agent left uncommitted in the task's worktree and pushes the task branch to `origin`. Commit messages look like `Consort checkpoint: Implementing (Build 9/18)`. `.env`, `.pem` and `.key` files are never staged; `.consort/` is already excluded. Checkpoints skip git hooks so a slow pre-commit or pre-push check cannot stall the worker; the real checks still run before the PR. A failed push is logged and retried after the next step.
 
+### Draft PR from the start
+
+As soon as a task has its branch, the worker opens a draft PR titled `[WIP] <ticket title>`, so the Slack "github" link shows the diff, the commits and a summary. GitHub needs one commit first, so a branch with none gets an empty `Consort: start …` commit. The description says the PR is not ready for review and carries the ticket link, the current step (for example `Implementing (Build 9/18)`) and the ticket text; the worker refreshes it at each checkpoint. When the build is done, the agent reuses this PR: it drops `[WIP]` and writes the real description instead of opening a second PR. An open PR that already exists for the branch is reused.
+
 ### Build progress
 
 The spec step splits the build into tickets under `.consort/ship/issues/`, each with a `Status:` line. While a task is building, `consort-cli view` and the Slack status line show how many are done, for example `Build 8/18`. Each task in `consort-cli view` takes three lines: the table row, what the worker is doing now at full width, and a blank line.

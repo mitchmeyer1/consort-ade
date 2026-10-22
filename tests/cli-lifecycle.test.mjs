@@ -40,6 +40,7 @@ function harness(opts = {}) {
     './ownerUpdates': ownerUpdates,
     './checkpoint': { checkpoint: async (cwd, branch, message) => { events.push(`checkpoint:${message}`); return { committed: true, pushed: true }; } },
     './buildProgress': { stepLabel: name => name },
+    './draftPr': { draftTitle: t => `[WIP] ${t.title}`, draftBody: (t, progress) => `Progress: ${progress}`, ensureDraftPr: async o => { events.push(`draft:${o.title}:${o.body}`); return opts.draftPr ?? { error: 'no commits yet' }; }, updateDraftBody: async (_, url, body) => { events.push(`draft body:${url}:${body}`); } },
     './slackLinks': { taskSlackLinks: async t => ({ ticket: t.ticket.url, github: t.feature?.prs?.at(-1) ?? 'https://github.com/a/b/tree/feature' }) },
     './statusLog': { statusEvent: (tone, text) => events.push(`status:${tone}:${text}`) },
     './state': {
@@ -732,4 +733,14 @@ test('each step ends with a checkpoint commit and push of the task branch', asyn
   const h = harness({ task: { feature: { stage: 'Implementing', prs: [], history: [] } }, turn: () => { if (++turns === 2) throw halt; return { text: 'landed ticket 03' }; } });
   await assert.rejects(h.work(), e => e === halt);
   assert.deepEqual(h.events.filter(e => e.startsWith('checkpoint:')), ['checkpoint:Consort checkpoint: Implementing']);
+});
+
+test('a draft PR opens before the first step, is linked in Slack, and its description follows each step', async () => {
+  let turns = 0;
+  const h = harness({ task: { feature: { stage: 'Grilling', prs: [], history: [] } }, draftPr: { url: 'https://github.com/a/b/pull/7', created: true }, shipPrompt: o => { if (++turns === 2) throw halt; return 'grill'; }, turn: () => ({ text: 'researched' }) });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.ok(h.events.includes('draft:[WIP] Example:Progress: Grilling'));
+  assert.deepEqual(h.task.feature.prs, ['https://github.com/a/b/pull/7']);
+  assert.ok(h.messages.some(m => /Draft PR: https:\/\/github.com\/a\/b\/pull\/7/.test(m.text)));
+  assert.ok(h.events.includes('draft body:https://github.com/a/b/pull/7:Progress: Grilling'), 'refreshed after the step');
 });
