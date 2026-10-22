@@ -140,9 +140,11 @@ Slack headings use a local formatter, so naming a task consumes no model call. E
 - `Ready to merge. Approved, no open threads, CI green: <PR>` — done.
 - `❌ Stuck at <stage>` / `❌ Evidence blocked. PR not handed off` — the stop report. Every stop (a turn past its time limit, three turns without progress, a failed evidence check, a crash, a broken PR watch) posts the same shape: one line on what went wrong, the reasons as bullets, the agent's last lines (`Last seen`, `Before that`), what was already retried, the raw error in a code block, and one line on how to reply. Reply in the thread; the task stays open. `consort-cli tasks logs <task>` has the full log.
 
-### Updates from the Slack thread
+### Talking to the bot in the Slack thread
 
-Anything you post in a task's Slack thread that is not a status question, a "thanks", or the answer to a pending question becomes an update. The daemon saves the text and any attached files (needs the `files:read` scope) under `.consort/ship/updates/<ts>/` in the worktree. Between steps the worker runs one agent turn that rewrites the ticket and changes the code to match. It then replaces the ClickUp or GitHub issue description, attaches the files, comments on the ticket, and replies in Slack. Posting an update on a finished task reopens it while its PR is still open.
+Every message you post in a task's thread gets a real answer while the worker keeps going, except a "thanks" or the answer to a question the worker asked. The `consort-cli run` process starts a read-only oversight agent for each message: Opus on Claude, Sol on Codex (override with the job's `modelPolicy.coordination`). It reads the worker log, turn timings, task state, recent ClickUp or GitHub comments, the thread, and the worktree, then replies. It doesn't take an AI slot from the workers. If the agent is down, you get the saved status line.
+
+When your message asks for a change, or carries files (needs the `files:read` scope), it is also queued for the worker. Files are saved under `.consort/ship/updates/<ts>/` in the worktree. Between steps the worker runs one agent turn that rewrites the ticket and changes the code to match. It then replaces the ClickUp or GitHub issue description, attaches the files, comments on the ticket, and replies in Slack. A change posted on a task that is ready to merge reopens it; a closed task says it can't apply it.
 
 ## Commands
 

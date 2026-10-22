@@ -59,20 +59,23 @@ function daemon(worktree) {
     './slack': { Slack: class { async threadMessages() { return messages; } async post(text, thread) { replies.push({ text, thread }); } } },
     './ownerUpdates': { ...owner, downloadSlackFiles: async (token, files, wt, ts) => { downloads.push({ token, ts }); return { saved: files.map(f => `.consort/ship/updates/${ts}/${f.name}`), failed: [] }; } },
     'node:fs': { existsSync: () => true },
+    './oversight': { workerLogTail: () => '' },
+    './sources': { sourceFor: () => ({ comments: async () => [] }) },
   };
   const mod = { exports: {} };
   new Function('require', 'module', 'exports', compile('slackStatus'))(n => mocks[n], mod, mod.exports);
-  return { task, replies, downloads, run: () => mod.exports.answerTaskStatusQuestions(() => true), messages: m => { messages = m; } };
+  return { task, replies, downloads, run: async () => { await mod.exports.answerTaskStatusQuestions(() => true, { answer: async c => ({ answer: `Checked: ${c.question}`, update: /add|rename|change|use/i.test(c.question) ? c.question : undefined, model: 'claude-opus-5' }) }); await mod.exports.settleOwnerReplies(); }, messages: m => { messages = m; } };
 }
 
-test('owner messages become queued updates with their files; status questions and thanks do not', async () => {
+test('change requests and files are queued; questions and thanks are not', async () => {
   const h = daemon('/wt');
   h.messages([{ ts: '2', user: 'owner', text: 'status' }, { ts: '3', user: 'owner', text: 'thanks' }, { ts: '4', user: 'other', text: 'add CSV' }, { ts: '5', user: 'owner', text: 'Use the attached spec', files: [{ name: 'spec.pdf' }] }]);
   await h.run();
   assert.deepEqual(h.task.ownerUpdates.map(u => [u.ts, u.text, u.files]), [['5', 'Use the attached spec', ['.consort/ship/updates/5/spec.pdf']]]);
   assert.deepEqual(h.downloads, [{ token: 'xoxb', ts: '5' }]);
   assert.equal(h.replies.length, 2);
-  assert.match(h.replies[1].text, /^✅ Got your update and 1 file\. I'll update the ticket and the code after the current step\./);
+  assert.match(h.replies[0].text, /^✅ Checked: status\n\n/);
+  assert.match(h.replies[1].text, /^✅ Checked: Use the attached spec\n\n\*Queued as a change with 1 file:\* I'll update the ticket and the code after the current step\./);
   assert.equal(h.task.slackStatusAfterTs, '5');
 });
 
@@ -84,6 +87,7 @@ test('the answer to a pending question stays with the worker; later messages and
   assert.deepEqual(h.task.ownerUpdates.map(u => [u.ts, u.files.length]), [['3', 1], ['4', 0]]);
   assert.match(h.task.ownerUpdates[0].text, /answer itself was already applied/);
   assert.equal(h.task.ownerUpdates[1].text, 'Also add a legend');
+  assert.match(h.replies[0].text, /^✅ Saved 1 file; I'll add it to the ticket after the current step\./);
   assert.equal(headless.replyAfter([{ ts: '3', user: 'owner', text: 'Blue' }, { ts: '4', user: 'owner', text: 'Also add a legend' }], '2', 'owner'), 'Blue', 'the worker takes the same first message');
 });
 
@@ -98,5 +102,5 @@ test('a ready task reopens for an update; a merged task says it cannot apply it'
   h.messages([{ ts: '3', user: 'owner', text: 'One more change' }]);
   await h.run();
   assert.deepEqual(h.task.ownerUpdates, []);
-  assert.match(h.replies[1].text, /^⏹️ This task is closed \(PR merged\), so I can't apply this update/);
+  assert.match(h.replies[1].text, /^⏹️ Checked: One more change\n\nThis task is closed \(PR merged\), so I can't apply changes here/);
 });

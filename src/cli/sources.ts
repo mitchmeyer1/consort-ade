@@ -12,7 +12,7 @@ import { uploadClickupAttachment } from "./evidence.ts";
  */
 export type Source = {
   scan(): Promise<ScannedTicket[]>;
-  comments(id: string): Promise<{ text: string; at?: number }[]>;
+  comments(id: string): Promise<{ text: string; at?: number; by?: string }[]>;
   /** post our claim marker; resolves to a handle `unclaim` can remove. Does not move the status: the daemon does that once the claim is confirmed held */
   claim(id: string, host: string, now: number): Promise<string>;
   /** take back a marker that lost the race */
@@ -122,7 +122,7 @@ export function clickupSource(key: string, job: Job): Source {
     },
     async comments(id) {
       const j = await clickup(key, `/task/${encodeURIComponent(id)}/comment`);
-      return ((j.comments ?? []) as any[]).map((c) => ({ text: String(c.comment_text ?? ""), at: Number(c.date) || undefined }));
+      return ((j.comments ?? []) as any[]).map((c) => ({ text: String(c.comment_text ?? ""), at: Number(c.date) || undefined, ...(c.user?.username || c.user?.email ? { by: c.user.username || c.user.email } : {}) }));
     },
     async claim(id, host, now) {
       const j = await clickup(key, `/task/${encodeURIComponent(id)}/comment`, { method: "POST", body: JSON.stringify({ comment_text: claimComment(host, now) }) });
@@ -162,7 +162,7 @@ export function githubSource(job: Job): Source {
     },
     async comments(id) {
       const j = JSON.parse(await gh(job.repo, ["issue", "view", id, "--json", "comments"]));
-      return ((j.comments ?? []) as any[]).map((c) => ({ text: String(c.body ?? ""), at: Date.parse(c.createdAt) || undefined }));
+      return ((j.comments ?? []) as any[]).map((c) => ({ text: String(c.body ?? ""), at: Date.parse(c.createdAt) || undefined, ...(c.author?.login ? { by: c.author.login } : {}) }));
     },
     async claim(id, host, now) {
       const url = (await gh(job.repo, ["issue", "comment", id, "--body", claimComment(host, now)])).trim();
