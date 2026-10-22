@@ -113,6 +113,10 @@ export type Task = {
   childEnvironments?: { id: string; portBase: number; runCode: string; pid: number }[];
   environmentReservation?: { pid: number; at: number };
   reviewsDone: number;
+  /** the build graph was re-split once for parallel work (cli/buildGraph.ts) */
+  graphResplitAt?: number;
+  /** the ticket set the last "Build plan" Slack line described */
+  buildPlanIds?: string;
   /** review thread ids already answered */
   threadsSeen: string[];
   reviewBatch?: { fingerprint: string; stableSince: number };

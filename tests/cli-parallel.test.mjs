@@ -18,9 +18,12 @@ async function repository(t) {
 }
 const tasks = [{ id: 'a', files: ['a.txt'], prompt: 'first' }, { id: 'b', files: ['b.txt'], prompt: 'second' }];
 
-test('frontier rejects overlapping files and unresolved dependencies; caps concurrency at two', () => {
+test('frontier rejects overlapping files and unresolved dependencies; caps concurrency at the asked size, at most six', () => {
   const input = [tasks[0], { id: 'overlap', files: ['a.txt'], prompt: '' }, { id: 'blocked', files: ['c'], blockedBy: ['a'], prompt: '' }, tasks[1], { id: 'c', files: ['d'], prompt: '' }];
-  assert.deepEqual(implementationFrontier(input, 20).map((x) => x.id), ['a', 'b']);
+  assert.deepEqual(implementationFrontier(input, 2).map((x) => x.id), ['a', 'b']);
+  assert.deepEqual(implementationFrontier(input).map((x) => x.id), ['a', 'b', 'c'], 'default allows more than two');
+  const many = Array.from({ length: 9 }, (_, i) => ({ id: `t${i}`, files: [`f${i}`], prompt: '' }));
+  assert.equal(implementationFrontier(many, 20).length, 6);
   assert.throws(() => implementationFrontier([{ id: 'bad', files: ['../other'], prompt: '' }]), /Unsafe/);
 });
 
@@ -164,4 +167,16 @@ test('recovery refuses an unrelated coordinator history before changing tickets'
   await assert.rejects(recoverImplementation(o.cwd, o.directory), /not an ancestor/);
   assert.equal(await readFile(join(issues, 'a.md'), 'utf8'), '**Status:** in-progress\n');
   assert.equal(git(o.cwd, 'for-each-ref', 'refs/consort/parallel'), '');
+});
+
+test('the real layout works: journal inside .consort/ship/parallel, child worktrees beside the task worktree', async (t) => {
+  const o = await repository(t);
+  await mkdir(join(o.cwd, '.consort', 'ship'), { recursive: true });
+  await writeFile(join(o.cwd, '.consort', 'ship', 'SPEC.md'), 'spec');
+  const directory = join(o.cwd, '.consort', 'ship', 'parallel');
+  const seen = [];
+  const run = async ({ cwd }) => { seen.push(cwd); assert.equal(await readFile(join(cwd, '.consort', 'ship', 'SPEC.md'), 'utf8'), 'spec'); assert.ok(!cwd.startsWith(o.cwd + '/'), 'child worktree is outside the task worktree'); return { text: 'ok' }; };
+  const r = await runResearch({ cwd: o.cwd, directory, tasks, run });
+  assert.equal(r.reused, false);
+  assert.equal(seen.length, 2);
 });

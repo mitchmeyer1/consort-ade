@@ -1,12 +1,14 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile, rm, copyFile, readdir, cp, rename, lstat, realpath } from "node:fs/promises";
-import { dirname, join, resolve, relative } from "node:path";
+import { basename, dirname, join, resolve, relative } from "node:path";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) => (await exec("git", args, { cwd, maxBuffer: 16 << 20 })).stdout;
-const cap = (n = 2) => Math.max(1, Math.min(2, Math.floor(n) || 1));
+/** tickets or readers at once; the AI-slot limits in cli/capacity.ts still apply to each one */
+export const MAX_PARALLEL = 6;
+const cap = (n = 4) => Math.max(1, Math.min(MAX_PARALLEL, Math.floor(n) || 1));
 const safe = (p: string) => p && !p.startsWith("/") && !p.split(/[\\/]/).includes("..") && p !== "." && !/[\\*?\[\]{}]/.test(p) && p !== ".git" && !p.startsWith(".git/") && p !== ".consort" && !p.startsWith(".consort/");
 const within = (file: string, scope: string) => file === scope || file.startsWith(scope.replace(/\/$/, "") + "/");
 const scopesOverlap = (a: string[], b: string[]) => a.some((x) => b.some((y) => within(x, y) || within(y, x)));
@@ -51,7 +53,8 @@ async function revision(cwd: string, tasks: ParallelTask[]): Promise<string> {
   return hash.digest("hex");
 }
 async function isolated<T>(o: ParallelOptions, task: ParallelTask, fn: (cwd: string, head: string) => Promise<T>): Promise<T> {
-  const cwd = join(resolve(o.directory), `work-${randomUUID()}`);
+  // beside the task's worktree, never inside it: copying .consort/ship into a folder within itself fails (EINVAL)
+  const cwd = join(dirname(resolve(o.cwd)), `.parallel-${basename(resolve(o.cwd))}`, `work-${randomUUID()}`);
   await mkdir(dirname(cwd), { recursive: true });
   await git(o.cwd, "worktree", "add", "--detach", cwd, "HEAD");
   try {
@@ -102,8 +105,8 @@ export async function runResearch(o: ParallelOptions): Promise<{ summary: string
   return { summary, results, reused: false };
 }
 
-/** At most two explicitly scoped, independent ready tickets can write concurrently. */
-export function implementationFrontier(tasks: ParallelTask[], concurrency = 2): ParallelTask[] {
+/** Explicitly scoped, independent ready tickets that can write at the same time (up to MAX_PARALLEL). */
+export function implementationFrontier(tasks: ParallelTask[], concurrency = 4): ParallelTask[] {
   validate(tasks);
   const selected: ParallelTask[] = [];
   for (const task of tasks) {

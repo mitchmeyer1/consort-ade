@@ -40,6 +40,7 @@ function harness(opts = {}) {
     './ownerUpdates': ownerUpdates,
     './checkpoint': { checkpoint: async (cwd, branch, message) => { events.push(`checkpoint:${message}`); return { committed: true, pushed: true }; } },
     './buildProgress': { stepLabel: name => name },
+    './buildGraph': { readGraph: async () => opts.graph?.tickets ?? [], planWaves: () => opts.graph?.plan ?? { waves: [], remaining: 0, done: 0, problems: [] }, tooSerial: () => !!opts.graph?.serial, graphSummary: g => `${g.remaining} left in ${g.waves.length} waves`, RESPLIT_PROMPT: () => 'RESPLIT THE GRAPH' },
     './draftPr': { draftTitle: t => `[WIP] ${t.title}`, draftBody: (t, progress) => `Progress: ${progress}`, ensureDraftPr: async o => { events.push(`draft:${o.title}:${o.body}`); return opts.draftPr ?? { error: 'no commits yet' }; }, updateDraftBody: async (_, url, body) => { events.push(`draft body:${url}:${body}`); } },
     './slackLinks': { taskSlackLinks: async t => ({ ticket: t.ticket.url, github: t.feature?.prs?.at(-1) ?? 'https://github.com/a/b/tree/feature' }) },
     './statusLog': { statusEvent: (tone, text) => events.push(`status:${tone}:${text}`) },
@@ -743,4 +744,16 @@ test('a draft PR opens before the first step, is linked in Slack, and its descri
   assert.deepEqual(h.task.feature.prs, ['https://github.com/a/b/pull/7']);
   assert.ok(h.messages.some(m => /Draft PR: https:\/\/github.com\/a\/b\/pull\/7/.test(m.text)));
   assert.ok(h.events.includes('draft body:https://github.com/a/b/pull/7:Progress: Grilling'), 'refreshed after the step');
+});
+
+test('a build graph that is mostly a chain gets one re-split turn, then the plan is posted', async () => {
+  const prompts = [];
+  const plan = { waves: [['11'], ['12'], ['13']], remaining: 7, done: 10, problems: [] };
+  const h = harness({ task: { feature: { stage: 'Implementing', prs: [], history: [] } }, graph: { tickets: [{ id: '11' }], plan, serial: true },
+    turn: o => { prompts.push(o.prompt); if (prompts.length === 2) throw halt; return { text: '' }; } });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.match(prompts[0], /RESPLIT THE GRAPH/);
+  assert.ok(h.task.graphResplitAt, 'only once per task');
+  assert.doesNotMatch(prompts[1], /RESPLIT THE GRAPH/);
+  assert.ok(h.messages.some(m => /Build plan: 7 left in 3 waves\. Starting together: 11/.test(m.text)));
 });

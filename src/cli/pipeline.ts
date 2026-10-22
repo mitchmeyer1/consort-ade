@@ -21,6 +21,7 @@ import { allocateEnvironment, cleanupEnvironment, withChildEnvironment } from ".
 import { flushTaskNotifications, notifyTask } from "./lifecycle";
 import { readUsage, saveUsage, usageFor } from "./usage";
 import { checkpoint } from "./checkpoint";
+import { graphSummary, planWaves, readGraph, RESPLIT_PROMPT, tooSerial } from "./buildGraph";
 import { draftBody, draftTitle, ensureDraftPr, updateDraftBody } from "./draftPr";
 import { stepLabel } from "./buildProgress";
 import type { TaskEnv } from "../shared/headless.ts";
@@ -441,7 +442,7 @@ export async function workTask(taskId: string): Promise<void> {
     if (feature.stage === "Grilling") {
       activity("researching business flows, tests and integrations");
       try {
-        const research = await runResearch({ cwd: task.worktree, directory: parallelDirectory, tasks: await prepareResearchTasks(task.worktree, ticketBody ?? task.ticket.title), concurrency: job.parallelResearch ?? 2, run: parallelRun });
+        const research = await runResearch({ cwd: task.worktree, directory: parallelDirectory, tasks: await prepareResearchTasks(task.worktree, ticketBody ?? task.ticket.title), concurrency: job.parallelResearch ?? 3, run: parallelRun });
         sharedResearch = research.summary;
         log(task, research.reused ? "reusing unchanged task research" : "parallel research complete");
       } catch (e) {
@@ -451,9 +452,27 @@ export async function workTask(taskId: string): Promise<void> {
       }
     }
     if (["Spec'd", "Implementing"].includes(feature.stage) && !feature.built) {
+      // the dependency graph, in code: post the waves when the ticket set changes; a graph that is mostly a chain gets one re-split
+      const tickets = await readGraph(task.worktree).catch(() => []);
+      const graph = planWaves(tickets);
+      if (graph.remaining) {
+        const ids = tickets.map((t) => t.id).join(",");
+        const current = loadState().tasks.find((t) => t.id === taskId);
+        if (tooSerial(graph) && !current?.graphResplitAt) {
+          updateTask(taskId, { graphResplitAt: Date.now() });
+          log(task, `build graph is mostly a chain (${graphSummary(graph)}); re-splitting for parallel work`);
+          activity("re-splitting the build into parallel tickets");
+          await completeReply(await turn(RESPLIT_PROMPT(graph, tickets), builderProvider, "planning"), undefined, "planning");
+          continue;
+        }
+        if (current?.buildPlanIds !== ids) {
+          updateTask(taskId, { buildPlanIds: ids });
+          await say(slackMessage("update", `Build plan: ${graphSummary(graph)}${graph.waves[0] ? `. Starting together: ${graph.waves[0].join(", ")}` : ""}${graph.problems.length ? `\n• ${graph.problems.slice(0, 3).join("\n• ")}` : ""}`));
+        }
+      }
       try {
         await recoverImplementation(task.worktree, parallelDirectory);
-        const wave = await runImplementation({ cwd: task.worktree, directory: parallelDirectory, tasks: await readImplementationTasks(task.worktree), concurrency: job.parallelImplementation ?? 2, run: parallelRun, check: async () => {
+        const wave = await runImplementation({ cwd: task.worktree, directory: parallelDirectory, tasks: await readImplementationTasks(task.worktree), concurrency: job.parallelImplementation ?? job.maxParallel ?? 4, run: parallelRun, check: async () => {
           const checked = await turn("The coordinator integrated parallel ticket commits. Read repository setup and each completed ticket. Run the relevant tests and typecheck together, fix any failures, and commit fixes. Do not push or move the ship stage. Return [parallel-check: pass] only after all required checks pass; include the commands and their results. If a real owner decision blocks verification, return [ask-user: ...].", builderProvider, "implementation", true, 15 * 60_000);
           if (!/\[parallel-check: pass\]/.test(checked) || parseAskUser(checked).length) throw new Error(checked || "Parallel implementation checks did not return passing proof");
         } });

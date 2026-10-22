@@ -34,6 +34,7 @@ for (const blockedAtStart of [true, false]) {
       './lifecycle': { notifyTask: async () => {} },
       './checkpoint': { checkpoint: async () => ({ committed: false, pushed: false }) },
       './buildProgress': { stepLabel: name => name },
+      './buildGraph': { readGraph: async () => [], planWaves: () => ({ waves: [], remaining: 0, done: 0, problems: [] }), tooSerial: () => false, graphSummary: () => '', RESPLIT_PROMPT: () => '' },
       './draftPr': { draftTitle: t => t.title, draftBody: () => '', ensureDraftPr: async () => ({ error: 'test' }), updateDraftBody: async () => {} },
       './usage': { readUsage: async () => ({ at: Date.now(), windows: [] }), saveUsage() {}, usageFor: async list => new Map(list.map(a => [a.id, { at: Date.now(), windows: [] }])) },
       '../shared/usage.ts': { usageBlock: () => undefined },
