@@ -59,6 +59,19 @@ test('approval replies: only a yes or a no answers a review; a question goes to 
   assert.equal(h.contexts[0].question,'Whats the point of this? Isnt a view not real data?');
   assert.deepEqual(h.task.answeredTs,['3'],'only the yes is the answer');
 });
+test('a question back while a build waits on the owner is answered, and the next plain reply is the answer', async () => {
+  for (const text of ['What does option B change?', 'Whats the point of this? Isnt a view not real data? Wha', 'which one is safer? not sure', 'can you use the default?']) assert.equal(headless.isClarifyingQuestion(text), true, text);
+  for (const text of ['Use option B', 'B, the default is fine', 'yes', 'Use B. Why? It is cheaper', 'no']) assert.equal(headless.isClarifyingQuestion(text), false, text);
+  assert.equal(headless.replyAfter([{ts:'2',user:'owner',text:'What does option B change?'},{ts:'3',user:'owner',text:'Use B'}],'1','owner'),'Use B');
+  const h=harness();
+  Object.assign(h.task,{status:'waiting',pendingQuestion:{questions:['Option A or B for the CSV column?'],afterTs:'1'}});
+  h.messages([{ts:'2',user:'owner',text:'What does option B change?'}]);
+  await h.run();
+  assert.equal(h.contexts.length,1,'the question back goes to the oversight agent');
+  assert.match(h.replies[0].text,/Checked: What does option B change\?\n\n• Still waiting on your answer to the question above\./);
+  assert.equal(h.task.answeredTs,undefined,'not taken as the answer');
+  assert.equal(h.task.ownerUpdates,undefined,'not queued as a change');
+});
 test('when the agent is down, status questions get the saved status line and changes still reach the worker', async () => {
   const h=harness(down);
   h.messages([{ts:'2',user:'owner',text:'Hows this going'},{ts:'3',user:'owner',text:'Rename the button to Export'}]);

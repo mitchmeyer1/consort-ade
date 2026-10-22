@@ -250,6 +250,16 @@ export function isTaskStatusQuestion(text: string): boolean {
 }
 
 /**
+ * A reply that asks something back ("what does option B change?") instead of answering: the
+ * oversight agent answers it in the thread and the worker keeps waiting for the real answer.
+ */
+export function isClarifyingQuestion(text: string): boolean {
+  const t = text.replace(/<@[A-Z0-9]+>/gi, "").replace(/[’]/g, "'").trim();
+  if (/\?$/.test(t)) return true;
+  return /\?/.test(t) && /^(?:what|what's|whats|why|how|how's|hows|which|where|who|when|is|isn't|isnt|are|aren't|does|doesn't|do|did|can|could|should|would|will|wait what)\b/i.test(t);
+}
+
+/**
  * The owner's word on a review's approval question: "yes", "no", or undefined for anything else
  * (a question about the PR, a remark), which the oversight agent answers while the approval waits.
  */
@@ -261,10 +271,10 @@ export function approvalReply(text: string): "yes" | "no" | undefined {
   return undefined;
 }
 
-/** the Slack reply we wait for: the owner's first message in the thread after the question (that `accept` takes, when given) */
+/** the Slack reply we wait for: the owner's first message in the thread after the question that is not a question back (and that `accept` takes, when given) */
 export function replyAfter(messages: { ts: string; user?: string; text?: string; bot_id?: string }[], afterTs: string, userId: string, accept?: (text: string) => boolean): string | undefined {
   const after = Number(afterTs);
-  return messages.filter((m) => !m.bot_id && m.user === userId && Number(m.ts) > after && (m.text ?? "").trim() && !isTaskStatusQuestion(m.text ?? "") && (!accept || accept(m.text ?? ""))).sort((a, b) => Number(a.ts) - Number(b.ts))[0]?.text?.trim();
+  return messages.filter((m) => !m.bot_id && m.user === userId && Number(m.ts) > after && (m.text ?? "").trim() && !isTaskStatusQuestion(m.text ?? "") && !isClarifyingQuestion(m.text ?? "") && (!accept || accept(m.text ?? ""))).sort((a, b) => Number(a.ts) - Number(b.ts))[0]?.text?.trim();
 }
 
 /** the one-line Slack messages the pipeline posts */

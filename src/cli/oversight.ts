@@ -77,6 +77,7 @@ export function oversightPrompt(c: OversightContext): string {
     "- Plain words, no headings, no preamble, under 180 words. Slack formatting: *bold*, `code`.",
     "- Never repeat a person's name, email, phone number, street address, date of birth or any patient detail, even if the ticket or data has them; say \"the patient\" or \"a user\". GitHub logins and Slack handles are fine.",
     "- If the owner asks for a change to the ticket, the spec or the code, or gives new requirements or feedback to act on (including \"go handle X's comments\"), end with one line: [queue-update: <the change, restated in one sentence>]. The worker will apply it after its current step. Do not add that line for pure questions.",
+    ...(c.task.pendingQuestion ? ["- The worker is paused on the question listed under Task below, and this message is not the answer: the owner wants it clarified. Explain what is being asked, the options and what each would change, so they can decide. If the message reads like an answer phrased as a question, say what you understood and ask them to reply with it plainly."] : []),
     "",
     "## The owner's message",
     c.question.trim(),

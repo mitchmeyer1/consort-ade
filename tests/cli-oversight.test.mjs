@@ -83,3 +83,10 @@ test('a task whose folder is gone still gets an answer, run from the repository'
   await answerOwner({ ...c, task: { ...c.task, worktree: '/gone' }, state: { ...c.state, jobs: [{ id: 'j', repo: '/repo' }] } }, undefined, async () => new Map());
   assert.deepEqual(calls, ['/repo']);
 });
+
+test('while the worker waits on the owner, the prompt says the message is a question back to clarify', () => {
+  const { oversightPrompt } = load();
+  const c = context();
+  assert.doesNotMatch(oversightPrompt(c), /this message is not the answer/);
+  assert.match(oversightPrompt({ ...c, task: { ...c.task, pendingQuestion: { questions: ['Option A or B?'], afterTs: '1' } } }), /this message is not the answer[\s\S]*Waiting on the owner for: Option A or B\?/);
+});
