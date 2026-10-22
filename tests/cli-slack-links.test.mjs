@@ -60,7 +60,7 @@ test('the thread card says at a glance: working, needs the owner, or done', asyn
   assert.equal(slackCard(base, links, { at: 5, byline: 'author: Mitch Meyer' }).key, working.key, 'the time alone never edits the post');
   const asking = slackCard({ ...base, status: 'waiting', pendingQuestion: { questions: ['⚠️ *Need you* (<https://t/1|ticket>)\n• Which design? — recommend: A\n_Reply in this thread._'] } }, links, { ownerId: 'U1', at: 1 });
   assert.match(asking.key, /\n🟠 \*Needs <@U1>\* · Step 3\/9 Build\n_Which design\? — recommend: A_\n/);
-  assert.match(slackCard({ ...base, status: 'ready' }, links, { at: 1 }).key, /\n✅ \*Ready to merge\*\n/);
+  assert.match(slackCard({ ...base, status: 'ready' }, links, { at: 1 }).key, /\n🎉🍭🎊 \*Ready to merge\*\n/);
   assert.match(slackCard({ ...base, status: 'monitoring' }, links, { at: 1 }).key, /🔵 \*Waiting on PR reviews and CI\*/);
   assert.match(slackCard(base, links, { at: 1, limited: true }).key, /🟡 \*Waiting for AI credits\*/);
 });

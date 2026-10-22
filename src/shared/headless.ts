@@ -542,8 +542,8 @@ export type SlackCardTask = Parameters<typeof taskStep>[0] & { kind?: string; li
 export function slackCardState(t: SlackCardTask, ownerId?: string, limited = false): { badge: string; detail?: string } {
   const owner = ownerId ? `<@${ownerId}>` : "you";
   const firstLine = (s?: string) => s?.split("\n").map((l) => l.replace(SLACK_MARKER, "").replace(/^[•\-\d.\s]*/u, "").replace(/\s*\(<[^>]*\|ticket>\)/, "").replace(/[*_`]/g, "").trim()).filter((l) => l && !/^(?:need you|reply in this thread\.?)$/i.test(l)).join(" · ");
-  if (t.status === "ready") return { badge: "✅ *Ready to merge*", detail: "Consort will not merge it." };
-  if (t.status === "done") return { badge: "✅ *Done*", detail: t.note };
+  if (t.status === "ready") return { badge: "🎉🍭🎊 *Ready to merge*", detail: "Consort will not merge it." };
+  if (t.status === "done") return { badge: "🎉🍭🎊 *Done*", detail: t.note };
   if (t.status === "released") return { badge: "⏹️ *Released*", detail: t.note };
   if (t.status === "failed") return { badge: "🔴 *Stopped*", detail: t.note };
   if (t.status === "waiting" || t.pendingQuestion) return { badge: `🟠 *Needs ${owner}*`, detail: brief(firstLine(t.pendingQuestion?.questions[0]) || (t.pauseReason ?? t.note ?? "Reply in the thread").replace(/^Waiting on you:\s*/i, ""), 200) };
