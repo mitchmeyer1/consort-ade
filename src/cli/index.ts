@@ -14,6 +14,7 @@ import { scanSentry, validateSentryConfig } from "./sentry";
 import { Slack } from "./slack";
 import { canStartWorker, handleWorkerExit, requestWorkerStop, workerStopMessage } from "./workerControl";
 import { answerTaskStatusQuestions } from "./slackStatus";
+import { refreshSlackCards } from "./slackCard";
 import { saveLiveChildren } from "./parallel";
 import { refresh } from "./refresh";
 import { historyTurns, readTurns, renderReport, sinceMs } from "./telemetry";
@@ -452,7 +453,10 @@ async function daemon() {
   };
   let statusCheck: Promise<void> | undefined;
   const checkStatusQuestions = () => {
-    if (!statusCheck) statusCheck = answerTaskStatusQuestions(alive).catch(e => console.error(`Slack status responder: ${e.message}`)).finally(() => { statusCheck = undefined; });
+    if (!statusCheck) statusCheck = Promise.all([
+      answerTaskStatusQuestions(alive).catch(e => console.error(`Slack status responder: ${e.message}`)),
+      refreshSlackCards().catch(e => console.error(`Slack status cards: ${e.message}`)),
+    ]).then(() => {}).finally(() => { statusCheck = undefined; });
   };
   checkStatusQuestions();
   setInterval(checkStatusQuestions, 15_000);

@@ -129,7 +129,7 @@ async function flow(t, findings, extraJobs = []) {
     './oversight': { oversightModel: p => (p === 'claude' ? 'claude-opus-5' : 'gpt-5.6-sol') },
     './reviewPost': { postReview: async (r, f, event, body) => { posts.push({ event, n: f.length, body }); return { url: 'https://github.com/acme/mono/pull/9#review', event, inline: f.length, general: 0 }; } },
     './slackIdentity': { slackIdentityFor: title => ({ emoji: '📊', title }), takenEmojis: () => [] },
-    './slack': { Slack: class { async post(text) { slackPosts.push(text); return String(slackPosts.length); } async waitForReply() { return 'yes'; } async retitle(ts, heading) { slackPosts.push(`retitle ${ts} ${heading}`); } } },
+    './slack': { Slack: class { async post(text) { slackPosts.push(text); return String(slackPosts.length); } async waitForReply() { return 'yes'; } } },
     './state': { WORK_DIR: root, HOME: root, newId: () => 'x', loadState: () => state, updateTask: (id, patch) => Object.assign(task, typeof patch === 'function' ? patch(task) : patch), touchAccount() {}, blockAccount() {} },
     './usage': { usageFor: async accts => new Map(accts.map(a => [a.id, { keyId: a.id, at: Date.now(), windows: [{ id: '5h', label: '5h', percent: a.provider === 'claude' ? 90 : 10 }] }])) },
     'node:util': { promisify: () => async () => ({ stdout: '' }) },
@@ -146,7 +146,7 @@ test('a clean review: frontier overview, swarm on Opus/Sol, frontier check, comm
   assert.ok(f.turns.at(-1).prompt.includes('step 3 of 3'));
   assert.deepEqual(f.posts.map(p => p.event), ['COMMENT', 'APPROVE']);
   assert.ok(f.slackPosts.some(p => /\*Approve\?\*/.test(p) && /^📤 \*CSV REPORT EXPORT\*\n⚠️ Adds a CSV export\./.test(p) && /• Exporting a report now downloads a CSV\./.test(p) && !/✅/.test(p)), 'asked on Slack first');
-  assert.ok(f.slackPosts.includes('retitle 1 📤 *CSV REPORT EXPORT*'), 'the thread parent takes the emoji the overview picked');
+  assert.deepEqual(f.task.slackIdentity, { emoji: '📤', title: 'CSV report export' }, 'the overview picks the emoji');
   assert.equal(f.task.status, 'done'); assert.equal(f.task.note, 'approved');
   assert.equal(await readFile(join(f.wt, '.env'), 'utf8'), 'DB=local\n', 'root .env copied');
   await assert.rejects(readFile(join(f.wt, '.env.example')), 'templates are not copied');

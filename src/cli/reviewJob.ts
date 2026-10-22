@@ -186,13 +186,8 @@ export async function reviewTask(taskId: string): Promise<void> {
   let identity = task.slackIdentity && task.slackIdentity.title !== "Task" ? task.slackIdentity : slackIdentityFor(t.title, takenEmojis(taskId));
   const links = () => { const now = loadState().tasks.find((x) => x.id === taskId); return { ticket: t.url, github: t.url, heading: slackHeading(t.title, identity), ...(now ? { progress: slackProgress(now) } : {}) }; };
   let thread = task.slackThread;
-  /** keep the identity, and swap the heading on the thread's first post so the channel shows it too */
-  const setIdentity = async (next: SlackIdentity) => {
-    identity = next;
-    updateTask(taskId, { slackIdentity: next });
-    const head = links().heading.replace(/^(\S+)\s+(.+)$/u, (_m, e: string, title: string) => `${e} *${title.toUpperCase()}*`);
-    if (slack && thread) await slack.retitle(thread, head).catch((e) => log(`slack retitle failed: ${e.message}`));
-  };
+  /** the daemon's status card on the thread's first post picks the new identity up (cli/slackCard.ts) */
+  const setIdentity = async (next: SlackIdentity) => { identity = next; updateTask(taskId, { slackIdentity: next }); };
   if (task.slackIdentity?.emoji !== identity.emoji || task.slackIdentity?.title !== identity.title) await setIdentity(identity);
   const say = async (text: string, status: "RUNNING" | "WAITING" | "COMPLETED" | "STOPPED" = "RUNNING", plain = false) => {
     log(text.replace(/\n/g, " ⏎ "));

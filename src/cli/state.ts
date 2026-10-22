@@ -98,6 +98,8 @@ export type Task = {
   /** the Slack thread every message about this task goes to */
   slackThread?: string;
   slackIdentity?: import("../shared/headless.ts").SlackIdentity;
+  /** what the thread's first post says now (headless.ts slackCard key); the daemon edits the post when it changes */
+  slackCard?: string;
   /** Last thread message inspected by the daemon status responder. */
   slackStatusAfterTs?: string;
   /** owner messages from the Slack thread, waiting for the worker to apply (cli/ownerUpdates.ts) */

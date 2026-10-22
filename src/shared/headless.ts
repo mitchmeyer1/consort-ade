@@ -530,6 +530,49 @@ export function taskHealth(
 }
 
 /**
+ * The thread's first post, kept current by the daemon (cli/slackCard.ts): the emoji heading, then
+ * one line that says at a glance whether the task is working, needs the owner, or is done, the
+ * step it is on, and when that last changed. Details and questions stay in the thread.
+ *   📦 *MIGRATE CURATION TO MONO*
+ *   🟠 *Needs @Mitch* · Step 5/9 Review 1 · updated 3:44 PM
+ *   _Which design?_
+ */
+export type SlackCardTask = Parameters<typeof taskStep>[0] & { kind?: string; lifecycle?: string; pauseReason?: string; note?: string; activity?: string; pendingQuestion?: { questions: string[] } };
+export function slackCardState(t: SlackCardTask, ownerId?: string, limited = false): { badge: string; detail?: string } {
+  const owner = ownerId ? `<@${ownerId}>` : "you";
+  const firstLine = (s?: string) => s?.split("\n").map((l) => l.replace(SLACK_MARKER, "").replace(/^[•\-\d.\s]*/u, "").replace(/\s*\(<[^>]*\|ticket>\)/, "").replace(/[*_`]/g, "").trim()).filter((l) => l && !/^(?:need you|reply in this thread\.?)$/i.test(l)).join(" · ");
+  if (t.status === "ready") return { badge: "✅ *Ready to merge*", detail: "Consort will not merge it." };
+  if (t.status === "done") return { badge: "✅ *Done*", detail: t.note };
+  if (t.status === "released") return { badge: "⏹️ *Released*", detail: t.note };
+  if (t.status === "failed" || t.lifecycle === "stopped") return { badge: "🔴 *Stopped*", detail: t.note };
+  if (t.status === "waiting" || t.pendingQuestion) return { badge: `🟠 *Needs ${owner}*`, detail: brief(firstLine(t.pendingQuestion?.questions[0]) || (t.pauseReason ?? t.note ?? "Reply in the thread").replace(/^Waiting on you:\s*/i, ""), 200) };
+  if (t.lifecycle === "paused") return { badge: "⏸️ *Paused*", detail: t.pauseReason ?? t.note };
+  if (limited) return { badge: "🟡 *Waiting for AI credits*", detail: "every account is at its usage limit" };
+  if (t.status === "monitoring") return { badge: "🔵 *Waiting on PR reviews and CI*" };
+  return { badge: "🟢 *Working*" };
+}
+export function slackCard(t: SlackCardTask, links: SlackTaskLinks, opts: { ownerId?: string; limited?: boolean; at: number }): { text: string; key: string } {
+  const { badge, detail } = slackCardState(t, opts.ownerId, opts.limited);
+  const step = taskStep(t);
+  const finished = ["ready", "done", "released"].includes(t.status);
+  const head = links.heading?.replace(/^(\S+)\s+(.+)$/u, (_m, emoji: string, title: string) => `${emoji} *${title.toUpperCase()}*`);
+  const safe = (url?: string) => url && /^https?:\/\//i.test(url) ? url.replace(/\|/g, "%7C").replace(/>/g, "%3E") : undefined;
+  const ticket = safe(links.ticket), github = safe(links.github);
+  const body = [
+    ...(head ? [head] : []),
+    `${badge}${finished ? "" : ` · Step ${step.n}/${step.total} ${step.name}`}`,
+    ...(detail ? [`_${brief(detail, 220).replace(/_/g, " ")}_`] : []),
+    ...(links.progress ? [links.progress] : []),
+    ...(ticket ? [`<${ticket}|ticket>${github && github !== ticket ? ` · <${github}|github>` : ""}`] : []),
+  ];
+  // key: what the card says, without the time, so the daemon edits the post only when that changes
+  const key = body.join("\n");
+  const sec = Math.floor(opts.at / 1000);
+  body[head ? 1 : 0] += ` · <!date^${sec}^updated {time}|updated ${new Date(opts.at).toISOString().slice(11, 16)} UTC>`;
+  return { text: body.join("\n"), key };
+}
+
+/**
  * What a task has spent so far: tokens summed over every agent turn, and dollars. The dollars are
  * an estimate: Claude Code reports its own per-turn estimate (costUSD per model), which is used as
  * is; Codex reports tokens only, priced here from PRICES. A model missing from PRICES counts its
