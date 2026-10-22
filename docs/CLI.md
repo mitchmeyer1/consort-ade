@@ -176,6 +176,10 @@ Every message you post in a task's thread gets a real answer while the worker ke
 
 When your message asks for a change, or carries files (needs the `files:read` scope), it is also queued for the worker. Files are saved under `.consort/ship/updates/<ts>/` in the worktree. Between steps the worker runs one agent turn that rewrites the ticket and changes the code to match. It then replaces the ClickUp or GitHub issue description, attaches the files, comments on the ticket, and replies in Slack. A change posted on a task that is ready to merge reopens it; a closed task says it can't apply it.
 
+### Updating Consort
+
+After pulling new Consort code, run `consort-cli refresh` (or `consort-cli refresh --pull` to pull first). It installs dependencies when the lockfile changed, rebuilds the CLI, then stops the daemon and every worker, waits for each to save and exit, and starts the daemon again on the new build; the daemon restarts each open task's worker within 15 seconds. A failed install or build leaves everything running as it was. It will not restart while a parallel wave is running unless you add `--force` (the wave's work is saved and resumes). Reopen any `consort-cli view` window afterwards.
+
 ## Commands
 
 | Command | Does |

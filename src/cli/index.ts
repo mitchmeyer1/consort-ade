@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 import { availableTaskSlots } from "./capacity";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { claimedByOther, claimHeld, claimOf, matchesFilters, type ReviewPick, type SourceFilters } from "../shared/headless.ts";
 import { cliStatus, updateCli } from "../main/cliRuntime";
-import { accountStatus, loginInteractive, runtimeDeps, stopAgents } from "./agent";
+import { accountStatus, loginInteractive, packageRoot, runtimeDeps, stopAgents } from "./agent";
 import { newTask, workTask } from "./pipeline";
 import { flushTaskNotifications, notifyTask, runTaskUntilFinished } from "./lifecycle";
 import { statusEvent } from "./statusLog";
@@ -15,6 +15,8 @@ import { Slack } from "./slack";
 import { canStartWorker, handleWorkerExit, requestWorkerStop, workerStopMessage } from "./workerControl";
 import { answerTaskStatusQuestions } from "./slackStatus";
 import { saveLiveChildren } from "./parallel";
+import { refresh } from "./refresh";
+import { promisify } from "node:util";
 import { sourceFor } from "./sources";
 import { renderView, viewLoop } from "./view";
 import { readAllUsage } from "./usage";
@@ -77,6 +79,8 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   accounts configure <id> --max-active-turns N
   run [-d]                                                                the daemon: scan, claim, dispatch, watch; -d runs it in the background
   stop [--all]                                                            stop the daemon; --all stops the agents too (they resume on the next run)
+  refresh [--pull] [--force] [--skip-install]                             after pulling new Consort code: install, build, stop every process, start the daemon again
+                                                                          (waits for running parallel waves unless --force; --pull pulls first)
   view [--once] [--width N] [--no-usage]                                  live table of agents, what they are doing, and each account's plan usage
   work <taskId>                                                           one worker (the daemon runs this)
   tasks list                                                              every task: id, status, ticket, stage, branch, note
@@ -254,6 +258,21 @@ async function main(argv: string[]) {
       }
       recordDaemon();
       return daemon();
+    }
+    case "refresh": {
+      // after pulling new Consort code: install if the lockfile changed, build, then restart the daemon and every worker on it
+      const exec = promisify(execFile);
+      await refresh({ root: packageRoot(), pull: !!a.pull, force: !!a.force, skipInstall: !!a["skip-install"] }, {
+        run: async (cmd, args, cwd) => { console.log(dim(`  $ ${cmd} ${args.join(" ")}`)); await exec(cmd, args, { cwd, maxBuffer: 64 << 20 }).catch((e) => { throw new Error(`${cmd} ${args.join(" ")} failed:\n${(e.stderr || e.stdout || e.message).toString().trim().split("\n").slice(-12).join("\n")}`); }); },
+        has: (cmd) => exec(cmd, ["--version"]).then(() => true, () => false),
+        tasks: () => loadState().tasks, alive, daemonPid,
+        stopAll: () => stopDaemon({ all: true }),
+        kill: (pid) => { try { process.kill(pid, "SIGKILL"); } catch {} },
+        startDaemon: (entry) => startDetached(entry),
+        wait: (ms) => new Promise((r) => setTimeout(r, ms)),
+        log: (line) => console.log(ok(line)),
+      });
+      return;
     }
     case "stop": {
       const r = stopDaemon({ all: !!a.all });

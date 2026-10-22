@@ -119,7 +119,11 @@ node out/cli/index.js stop        # Stop scanning; existing workers keep running
 node out/cli/index.js stop --all  # Stop scanning and workers; progress is saved.
 ```
 
-Start the daemon again with `node out/cli/index.js run -d` to resume saved tasks. Rebuild after pulling CLI changes; restart the daemon to load them. Existing workers load changes when restarted. See the [CLI reference](docs/CLI.md) for scanner filters, accounts, logs, and commands, and [Sentry scanner setup](docs/SENTRY-SCANNER.md) to feed Sentry issues into ClickUp.
+Start the daemon again with `node out/cli/index.js run -d` to resume saved tasks. After pulling new code, one command installs, rebuilds and restarts the daemon and every worker on it (it waits for running parallel waves unless you add `--force`):
+
+```bash
+git pull && node out/cli/index.js refresh   # or: node out/cli/index.js refresh --pull
+``` See the [CLI reference](docs/CLI.md) for scanner filters, accounts, logs, and commands, and [Sentry scanner setup](docs/SENTRY-SCANNER.md) to feed Sentry issues into ClickUp.
 
 For the desktop app: **Connect agents** (Settings › AI connectors, sign in to Claude Code or Codex, or paste an API key) and **Add projects**.
 
