@@ -34,6 +34,7 @@ Consort is running this feature unattended on a server. There is no user in the 
 
 ${AI_COST_POLICY}
 
+- No personal data in anything you write for Slack, ticket comments or questions: never repeat a person's name, email, phone number, street address, date of birth, record number or any patient detail from the ticket, the code or the data. Say "the patient", "the member" or "a user" instead. GitHub logins and Slack handles are fine.
 - Decide anything straightforward yourself: naming, file placement, which existing pattern to follow, test shape, obvious defaults. Record each such decision as one line under "Assumptions" in ${"`"}.consort/ship/GRILLING.md${"`"} and in the spec, so a reader can overturn it later.
 - If the business purpose, acceptance criteria, or design is materially unclear, ask the owner before building or changing behavior.
 - Ask only when the answer changes scope, cost outside the pre-authorized AI allowance, data, security, or user-facing behaviour in a way the ticket does not settle and the code does not imply. Put each such question on its own line as ${"`"}[ask-user: <the question, with your recommended answer>]${"`"}, then end your turn. Consort relays them over Slack and sends the answers back as the next message. Never block on anything you did not mark this way.
@@ -541,17 +542,17 @@ export type SlackCardTask = Parameters<typeof taskStep>[0] & { kind?: string; li
 export function slackCardState(t: SlackCardTask, ownerId?: string, limited = false): { badge: string; detail?: string } {
   const owner = ownerId ? `<@${ownerId}>` : "you";
   const firstLine = (s?: string) => s?.split("\n").map((l) => l.replace(SLACK_MARKER, "").replace(/^[•\-\d.\s]*/u, "").replace(/\s*\(<[^>]*\|ticket>\)/, "").replace(/[*_`]/g, "").trim()).filter((l) => l && !/^(?:need you|reply in this thread\.?)$/i.test(l)).join(" · ");
-  if (t.status === "ready") return { badge: "✅ *Ready to merge*", detail: "Consort will not merge it." };
-  if (t.status === "done") return { badge: "✅ *Done*", detail: t.note };
+  if (t.status === "ready") return { badge: "🎉🍭🎊 *Ready to merge*", detail: "Consort will not merge it." };
+  if (t.status === "done") return { badge: "🎉🍭🎊 *Done*", detail: t.note };
   if (t.status === "released") return { badge: "⏹️ *Released*", detail: t.note };
   if (t.status === "failed") return { badge: "🔴 *Stopped*", detail: t.note };
   if (t.status === "waiting" || t.pendingQuestion) return { badge: `🟠 *Needs ${owner}*`, detail: brief(firstLine(t.pendingQuestion?.questions[0]) || (t.pauseReason ?? t.note ?? "Reply in the thread").replace(/^Waiting on you:\s*/i, ""), 200) };
   if (t.lifecycle === "paused") return { badge: "⏸️ *Paused*", detail: t.pauseReason ?? t.note };
   if (limited) return { badge: "🟡 *Waiting for AI credits*", detail: "every account is at its usage limit" };
-  if (t.status === "monitoring") return { badge: "🔵 *Waiting on PR reviews and CI*" };
+  if (t.status === "monitoring") return t.kind === "review" ? { badge: "🔵 *Waiting on the author's fixes*", detail: t.note } : { badge: "🔵 *Waiting on PR reviews and CI*" };
   return { badge: "🟢 *Working*" };
 }
-export function slackCard(t: SlackCardTask, links: SlackTaskLinks, opts: { ownerId?: string; limited?: boolean; at: number }): { text: string; key: string } {
+export function slackCard(t: SlackCardTask, links: SlackTaskLinks, opts: { ownerId?: string; limited?: boolean; at: number; /** "author: Mitch Meyer", "reviewing: Will Lerner" */ byline?: string }): { text: string; key: string } {
   const { badge, detail } = slackCardState(t, opts.ownerId, opts.limited);
   const step = taskStep(t);
   const finished = ["ready", "done", "released"].includes(t.status);
@@ -563,13 +564,14 @@ export function slackCard(t: SlackCardTask, links: SlackTaskLinks, opts: { owner
     `${badge}${finished ? "" : ` · Step ${step.n}/${step.total} ${step.name}`}`,
     ...(detail ? [`_${brief(detail, 220).replace(/_/g, " ")}_`] : []),
     ...(links.progress ? [links.progress] : []),
-    ...(ticket ? [`<${ticket}|ticket>${github && github !== ticket ? ` · <${github}|github>` : ""}`] : []),
+    // a review has no ticket: its link is the PR
+    [t.kind === "review" ? (github ?? ticket) && `<${github ?? ticket}|github>` : ticket && `<${ticket}|ticket>${github && github !== ticket ? ` · <${github}|github>` : ""}`, opts.byline].filter(Boolean).join(" · "),
   ];
   // key: what the card says, without the time, so the daemon edits the post only when that changes
-  const key = body.join("\n");
+  const key = body.filter(Boolean).join("\n");
   const sec = Math.floor(opts.at / 1000);
   body[head ? 1 : 0] += ` · <!date^${sec}^updated {time}|updated ${new Date(opts.at).toISOString().slice(11, 16)} UTC>`;
-  return { text: body.join("\n"), key };
+  return { text: body.filter(Boolean).join("\n"), key };
 }
 
 /**

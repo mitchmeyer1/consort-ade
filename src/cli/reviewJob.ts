@@ -12,9 +12,13 @@
  *     severities, written as a standard .review.json the desktop app can open;
  *  5. posts one GitHub review: REQUEST_CHANGES when anything is Critical or High, otherwise the
  *     comments, then asks the owner on Slack with a short TL;DR before it approves.
+ *
+ * The task is finished only when the owner approves or the PR is merged or closed. After Request
+ * changes (or the owner saying no) it watches the PR; when the author asks for the review again it
+ * runs another round at the new head, which first checks whether the earlier findings were fixed.
  */
 import { execFile } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { addTurnCost, ENVIRONMENT_RULES, HEADLESS_RULES, seedModels, parseSlackIdentity, slackAsk, slackHeading, slackMessage, slackProgress, slackStatus, type SlackIdentity } from "../shared/headless.ts";
@@ -38,7 +42,9 @@ import { usageFor } from "./usage";
 const run = promisify(execFile);
 const sh = async (cmd: string, args: string[], cwd: string) => (await run(cmd, args, { cwd, timeout: 300_000, maxBuffer: 64 << 20 })).stdout;
 
-export type ReviewTarget = { repo: string; pr: number; url: string; title: string; author: string; head: string; base: string };
+export type ReviewTarget = { repo: string; pr: number; url: string; title: string; author: string; head: string; base: string; /** 1 for the first review, +1 each time the author asks again */ round?: number };
+export type PrWatch = { state: string; headRefOid: string; reviewRequests?: { login?: string }[] };
+const WATCH_MS = 2 * 60_000;
 export type OpenPr = { number: number; title: string; url: string; headRefOid: string; baseRefName: string; isDraft: boolean; author?: { login?: string }; assignees?: { login?: string }[]; reviewRequests?: { login?: string }[] };
 
 // ── scanning ───────────────────────────────────────────────────────────────────────────────
@@ -164,12 +170,22 @@ Reply with [review-findings] followed by a \`\`\`json array: [{"severity", "cate
 export const FINAL_PROMPT = (t: ReviewTarget, wt: string, reviewers: number) => `## Review step 3 of 3: verify and settle the findings
 
 ${reviewers} reviewers' raw findings for PR #${t.pr} are in .consort/review/swarm.json. ${RULES_NOTE(wt)}
-For each finding, open the file at that line and check it is real at the PR head. Drop false positives and anything a linter catches; merge duplicates; move file/line to a changed line where you can; settle the severity (a rule in .ai-review-rules.md wins; otherwise critical = breaks production, data or security; high = a real bug or a scaling or convention problem that must be fixed before merge; medium = should fix; low = worth a mention); tighten each comment so it is ready to post.
+${existsSync(join(wt, ".consort", "review", "previous.json")) ? `This is round ${t.round ?? 2}: the author changed the PR after an earlier review. The earlier findings are in .consort/review/previous.json. Check each one at the new head first: drop it if it is fixed; if it is not, keep it with its title starting "Still open: ".
+` : ""}For each finding, open the file at that line and check it is real at the PR head. Drop false positives and anything a linter catches; merge duplicates; move file/line to a changed line where you can; settle the severity (a rule in .ai-review-rules.md wins; otherwise critical = breaks production, data or security; high = a real bug or a scaling or convention problem that must be fixed before merge; medium = should fix; low = worth a mention); tighten each comment so it is ready to post.
 Reply with [review-final] followed by a \`\`\`json object: {"summary": "<1-2 plain sentences: the work this PR does>", "flows": ["<1 to 4 entries, one sentence each: a user or system flow this PR changes and what now happens in it>"], "headline": "<one-line verdict>", "findings": [same shape as the raw findings]}.`;
 
 // ── the worker ─────────────────────────────────────────────────────────────────────────────
 
-export async function reviewTask(taskId: string): Promise<void> {
+/** one review task: rounds until the owner approves or the PR is merged or closed */
+export async function reviewTask(taskId: string, watch: (t: ReviewTarget, repo: string) => Promise<PrWatch> = prWatch, sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))): Promise<void> {
+  while ((await reviewRound(taskId, watch, sleep)) === "again") { /* the author asked again: next round */ }
+}
+
+async function prWatch(t: ReviewTarget, repo: string): Promise<PrWatch> {
+  return JSON.parse(await sh("gh", ["pr", "view", String(t.pr), "--repo", t.repo, "--json", "state,headRefOid,reviewRequests"], repo)) as PrWatch;
+}
+
+async function reviewRound(taskId: string, watch: (t: ReviewTarget, repo: string) => Promise<PrWatch>, sleep: (ms: number) => Promise<void>): Promise<"again" | void> {
   const state = loadState();
   const task = state.tasks.find((t) => t.id === taskId);
   if (!task?.review) throw new Error(`No review task ${taskId}.`);
@@ -197,7 +213,8 @@ export async function reviewTask(taskId: string): Promise<void> {
     return ts;
   };
   /** wait for the owner's word on Slack, then approve or leave it */
-  const awaitApproval = async (review: Review, ts: string | undefined) => {
+  /** "watch" when the owner did not approve: the caller stops the services, then watches the PR */
+  const awaitApproval = async (review: Review, ts: string | undefined): Promise<"watch" | void> => {
     const answer = slack && thread && ts ? await slack.waitForReply(thread, ts, { pollMs: 15_000 }) : undefined;
     updateTask(taskId, { pendingQuestion: undefined, status: "working" });
     if (answer && saysYes(answer)) {
@@ -205,17 +222,59 @@ export async function reviewTask(taskId: string): Promise<void> {
       await say(approved.event === "APPROVE" ? `Approved <${t.url}|PR #${t.pr}>.` : `Could not approve <${t.url}|PR #${t.pr}> (it is your own PR); posted the note as a comment.`, "COMPLETED");
       updateTask(taskId, { status: "done", finishedAt: Date.now(), note: approved.event === "APPROVE" ? "approved" : "commented (own PR)", activity: "review done" });
     } else {
-      await say(`Left <${t.url}|PR #${t.pr}> unapproved${answer ? ` (you said: ${answer.slice(0, 80)})` : ""}.`, "COMPLETED");
-      updateTask(taskId, { status: "done", finishedAt: Date.now(), note: slack ? "not approved" : "not approved: approval needs Slack (consort-cli slack set …)", activity: "review done, not approved" });
+      if (!slack) { updateTask(taskId, { status: "done", finishedAt: Date.now(), note: "not approved: approval needs Slack (consort-cli slack set …)", activity: "review done, not approved" }); return; }
+      await say(`Left <${t.url}|PR #${t.pr}> unapproved${answer ? ` (you said: ${answer.slice(0, 80)})` : ""}. Watching it until @${t.author} asks for review again, or it merges.`);
+      return "watch";
     }
   };
+  /**
+   * Not approved yet: watch the PR until the author asks for this review again (another round at the
+   * new head), or the PR is merged or closed (done). A request that was already there when the watch
+   * began only counts once the head moves, so a PR whose request never cleared is not re-reviewed in a loop.
+   */
+  const waitForAuthor = async (why: string): Promise<"again" | void> => {
+    const me = (job.reviewer ?? "").toLowerCase();
+    updateTask(taskId, { status: "monitoring", pendingQuestion: undefined, reviewStep: 5, activity: `waiting for @${t.author} to push fixes and ask for review again`, note: why });
+    log(`watching PR #${t.pr}: ${why}`);
+    let cleared = false;
+    for (;;) {
+      const pr = await watch(t, job.repo).catch((e) => { log(`PR check failed; retrying: ${(e as Error).message}`); return undefined; });
+      if (pr?.state === "MERGED" || pr?.state === "CLOSED") {
+        const merged = pr.state === "MERGED";
+        await say(`<${t.url}|PR #${t.pr}> was ${merged ? "merged" : "closed"}; this review is finished.`, "COMPLETED");
+        updateTask(taskId, { status: "done", finishedAt: Date.now(), note: merged ? "merged" : "PR closed", activity: "review done" });
+        await sh("git", ["worktree", "remove", "--force", task.worktree], job.repo).catch(() => undefined);
+        return;
+      }
+      if (pr) {
+        const asked = !!me && (pr.reviewRequests ?? []).some((u) => u.login?.toLowerCase() === me);
+        if (!asked) cleared = true;
+        else if (cleared || pr.headRefOid !== t.head) {
+          const round = (t.round ?? 1) + 1;
+          // keep this round's files for the record; the next round reads the findings to check them first
+          const dir = join(task.worktree, ".consort", "review");
+          const saved = join(dir, `pr-${t.pr}.review.json`);
+          if (existsSync(saved)) writeFileSync(join(dir, "previous.json"), JSON.stringify(parseReview(readFileSync(saved, "utf8")).findings, null, 2));
+          mkdirSync(join(dir, `round-${round - 1}`), { recursive: true });
+          for (const f of ["OVERVIEW.md", "plan.json", "swarm.json", `pr-${t.pr}.review.json`]) if (existsSync(join(dir, f))) renameSync(join(dir, f), join(dir, `round-${round - 1}`, f));
+          updateTask(taskId, (x) => ({ status: "working", note: undefined, reviewStep: 1, activity: `round ${round}: @${t.author} asked again`, review: { ...x.review!, head: pr.headRefOid, round } }));
+          await say(`Round ${round}: @${t.author} asked for review again at \`${pr.headRefOid.slice(0, 7)}\`; checking the earlier findings first.`);
+          return "again";
+        }
+      }
+      await sleep(WATCH_MS);
+    }
+  };
+  if (task.status === "monitoring") return waitForAuthor(task.note ?? "changes requested");
+
   // restarted while the approval question was out: the review is posted; keep waiting for the answer, never review again
   const savedReview = join(task.worktree, ".consort", "review", `pr-${t.pr}.review.json`);
   if (task.pendingQuestion?.afterTs && existsSync(savedReview)) {
     activity("waiting for the owner's word to approve", 5);
     updateTask(taskId, { status: "waiting" });
-    try { await awaitApproval(parseReview(readFileSync(savedReview, "utf8")), task.pendingQuestion.afterTs); }
-    finally { if (loadState().tasks.find((x) => x.id === taskId)?.status === "done") await sh("git", ["worktree", "remove", "--force", task.worktree], job.repo).catch(() => undefined); }
+    const answer = await awaitApproval(parseReview(readFileSync(savedReview, "utf8")), task.pendingQuestion.afterTs);
+    if (answer === "watch") return waitForAuthor("not approved yet");
+    if (loadState().tasks.find((x) => x.id === taskId)?.status === "done") await sh("git", ["worktree", "remove", "--force", task.worktree], job.repo).catch(() => undefined);
     return;
   }
   if (!thread) await say(`Reviewing PR #${t.pr} by @${t.author} at \`${t.head.slice(0, 7)}\`: repo overview first, then a reviewer swarm`);
@@ -226,6 +285,10 @@ export async function reviewTask(taskId: string): Promise<void> {
     activity("checking out the PR head", 1);
     await sh("git", ["fetch", "origin", `pull/${t.pr}/head`, t.base], job.repo);
     await sh("git", ["worktree", "add", "--detach", wt, t.head], job.repo);
+  } else if ((await sh("git", ["rev-parse", "HEAD"], wt).catch(() => "")).trim() !== t.head) {
+    activity(`checking out the new PR head ${t.head.slice(0, 7)}`, 1);
+    await sh("git", ["fetch", "origin", `pull/${t.pr}/head`, t.base], job.repo);
+    await sh("git", ["checkout", "--detach", "--force", t.head], wt);
   }
   for (const f of readdirSync(job.repo).filter((n) => /^\.env(?:\..+)?$/.test(n) && !/\.(?:example|sample|template)$/.test(n))) {
     if (!existsSync(join(wt, f))) copyFileSync(join(job.repo, f), join(wt, f));
@@ -265,6 +328,8 @@ export async function reviewTask(taskId: string): Promise<void> {
     throw new Error(`The ${role} review step failed on every account`);
   };
 
+  let outcome: "again" | "watch" | void;
+  let requested = "";
   try {
     if (!loadState().tasks.find((x) => x.id === taskId)?.envReadyAt) {
       activity("setting up databases and services for the review", 1);
@@ -317,14 +382,16 @@ export async function reviewTask(taskId: string): Promise<void> {
     if (severe.length) {
       activity(`posting ${review.findings.length} comments with Request changes`, 5);
       const posted = await postReview(review, review.findings, "REQUEST_CHANGES", `Automatic review: ${countLine(review.findings)}. The Critical and High items need fixing before this merges.${summary ? `\n\n${summary}` : ""}`, wt);
-      await say(`Requested changes on <${t.url}|PR #${t.pr}>: ${countLine(review.findings)}.\n${severe.slice(0, 5).map((f) => `• ${f.severity}: ${f.title}`).join("\n")}\n• Review: <${posted.url}|on GitHub>`, "COMPLETED");
-      updateTask(taskId, { status: "done", finishedAt: Date.now(), note: `requested changes (${countLine(review.findings)})`, activity: "review posted: changes requested" });
+      await say(`Requested changes on <${t.url}|PR #${t.pr}>: ${countLine(review.findings)}.\n${severe.slice(0, 5).map((f) => `• ${f.severity}: ${f.title}`).join("\n")}\n• Review: <${posted.url}|on GitHub>\n• Watching the PR: the next round starts when @${t.author} asks for review again.`);
+      requested = `requested changes (${countLine(review.findings)})`;
+      outcome = "watch";
     } else {
       const posted = review.findings.length ? await postReview(review, review.findings, "COMMENT", `Automatic review: ${countLine(review.findings)}; nothing Critical or High.`, wt) : undefined;
       activity("waiting for the owner's word to approve", 5);
       const ts = await say(slackAsk(approvalQuestion(t, review, posted?.url, flows)), "WAITING", true);
       updateTask(taskId, { status: "waiting", pendingQuestion: { questions: [`Approve PR #${t.pr}?`], afterTs: ts ?? String(Date.now() / 1000) } });
-      await awaitApproval(review, ts);
+      outcome = await awaitApproval(review, ts);
+      requested = "not approved yet";
     }
   } finally {
     await cleanupEnvironment(env.CONSORT_RUN).catch(() => undefined);
@@ -334,5 +401,8 @@ export async function reviewTask(taskId: string): Promise<void> {
       updateTask(taskId, { portBase: undefined, envReadyAt: undefined });
     }
   }
+  // the services are down again; the watch only polls GitHub
+  if (outcome === "watch") return waitForAuthor(requested);
+  return outcome;
 }
 
