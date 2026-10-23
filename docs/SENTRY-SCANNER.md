@@ -1,6 +1,6 @@
 # Sentry → ClickUp scanner
 
-The Sentry scanner produces tickets. It does not claim work, change Sentry issue status, or start build/review agents. Existing ClickUp worker scanners pick up its tickets later when their list/folder/space, tag, and status filters match.
+The Sentry scanner produces tickets. It does not change Sentry issue status. Setup creates a linked ClickUp worker scanner that claims and implements its bundle tickets using the existing accounts and Slack connection.
 
 ## Configure in setup
 
@@ -16,14 +16,14 @@ Setup verifies read access and the chosen list/workspace, but creates no tickets
 
 ## Suggested routing
 
-Create/select a dedicated **Sentry Inbox** list inside whichever engineering folder you want. Use an output tag such as **sentry** and an initial status such as **to do**. Configure a separate ClickUp worker scanner to watch that list or parent folder with the same tag/status. You can instead select **ai-handle** if that is already the worker scanner's tag. Choose these during setup rather than changing code.
+Create/select a dedicated **Sentry Inbox** list inside whichever engineering folder you want. Use an output tag such as **sentry** and an initial status such as **to do**. Setup configures a dedicated linked worker for that list and tag; no second manual worker configuration is needed. You can instead select **ai-handle** if that is already the worker scanner's tag. Choose these during setup rather than changing code.
 
 Example:
 
 - Sentry producer: project node, production, destination Sentry Inbox, tag sentry, initial status to do.
 - ClickUp worker: watches the engineering folder containing Sentry Inbox, tag sentry, status to do.
 
-The producer creates the ticket on a scan. The ClickUp worker claims it on a later matching scan, using the existing multi-worker claim protocol.
+The producer creates the ticket on a scan. The linked ClickUp worker claims it on its next scan, using the existing multi-worker claim protocol.
 
 ## CLI configuration
 
@@ -35,7 +35,7 @@ consort-cli scanners add --name "Sentry intake" --source sentry \
   --sentry-org your-org --sentry-project node \
   --environment production --query is:unresolved \
   --workspace 123456 --list 234567 --tag sentry \
-  --create-status "to do" --every 15
+  --create-status "to do" --every 15 --max-parallel 1
 ```
 
 Multiple projects/environments can be comma-separated. For folder routing, setup is preferable because it lists and validates child lists; CLI configuration can pass both the selected list and its `--folder` ID.
@@ -48,7 +48,7 @@ Sentry already groups events into issues. Consort first fetches every page match
 
 The planner must assign every input group exactly once and explain each bundle. Missing, invented, or repeated groups, a failed AI turn, exhausted accounts, or an input too large to inspect in full stop ticket creation. No sample or truncated scan creates work. The scanner retries on its next scheduled scan after credits recover. Planning can use existing subscription logins or API keys and incurs normal provider usage; no second credentials or Slack connection is created.
 
-Each bundle creates one ClickUp ticket containing the shared-cause explanation and every related issue ID/link, count, location, and first/last-seen time. The matched ClickUp worker scanner claims that ticket using normal multi-worker deduplication, then uses the existing accounts, Slack task thread, review pipeline, and evidence checks. The worker must still reproduce and confirm the cause before implementing. Sentry diagnostic text is untrusted; credentials are not included in planner input or tickets.
+Each bundle creates one ClickUp ticket containing the shared-cause explanation and every related issue ID/link, count, location, and first/last-seen time. The linked, concurrency-limited ClickUp worker scanner claims that ticket using normal multi-worker deduplication, then uses the existing accounts, Slack task thread, review pipeline, and evidence checks. The worker must still reproduce and confirm the cause before implementing. Sentry diagnostic text is untrusted; credentials are not included in planner input or tickets.
 
 ## Duplicate protection
 
@@ -69,3 +69,11 @@ If a reservation exists without a ticket, first inspect the full workspace and s
 The implementation follows the existing `SentryClient` shape in `aligned-mono/packages/core/src/services/clients/sentry.client.ts` and its `sentry-daily.cron.ts` production/development digest. Those components read unresolved issues and post Slack digests; they do not create or deduplicate ClickUp tickets. The new scanner adds routing and ticket production in Consort without changing that service or cron.
 
 The new scanner uses the supported [Sentry organization issues API](https://docs.sentry.io/api/events/list-an-organizations-issues/), [ClickUp workspace task search](https://developer.clickup.com/reference/getfilteredteamtasks), [ClickUp task creation](https://developer.clickup.com/reference/createtask), and [GitHub reference creation](https://docs.github.com/en/rest/git/refs#create-a-reference).
+
+## Limit active Sentry tickets
+
+Setup asks “How many Sentry tickets may be worked on at once?” Default: **1**. Enter a positive whole number; CLI configuration uses `--max-parallel N`.
+
+This is a whole-ticket limit, not merely an AI-turn limit. Queued tickets, builds, user-answer waits, credit waits, PR review, and CI monitoring consume slots. Ready-to-merge, done, and released tasks free slots; failed tasks keep their slot pending recovery. A full scanner checks capacity without fetching Sentry or running the AI bundle planner. When a slot is free, the next scheduled scan considers all matching reports together but creates only enough bundle tickets to fill the free slots. Deferred bundles are left unreserved for a later scan.
+
+The linked worker has the same open-ticket, AI-turn, and environment limits. Bundle tickets carry the producer identity; broader ClickUp scanners on this installation skip them so they cannot bypass the cap. Existing producer-only setups gain a linked worker when the daemon restarts, defaulting to one slot. Existing workers already running are not terminated by a reduced limit. Cooperating installations should use the same scanner configuration; global multi-machine capacity is not an atomic workspace-wide semaphore.

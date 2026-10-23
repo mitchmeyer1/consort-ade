@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import ts from 'typescript';
 import * as headless from '../src/shared/headless.ts';
+import * as evidenceRetry from '../src/cli/evidenceRetry.ts';
 import * as seatPool from '../src/shared/seatPool.ts';
 import * as ship from '../src/shared/ship.ts';
 import * as cliModels from '../src/shared/cliModels.ts';
@@ -29,6 +30,7 @@ function harness(opts = {}) {
   const mocks = {
     'node:fs': { existsSync: () => true, readFileSync: f => opts.readFile?.(f) ?? '', mkdirSync() {}, writeFileSync() {}, rmSync() {} },
     'node:util': { promisify: () => async (cmd, args) => { events.push(args.join(' ')); return { stdout: '' }; } },
+    './evidenceRetry': evidenceRetry,
     '../shared/headless.ts': headless, '../shared/seatPool.ts': seatPool, '../shared/ship.ts': ship,
     '../shared/cliModels.ts': cliModels, '../shared/cliTurnPolicy.ts': cliTurnPolicy,
       './capacity': { AccountUnavailableError: class extends Error {}, withAgentTurn: async (_, __, fn) => fn(), withEnvironmentSlot: async (_, fn) => fn() },
@@ -135,7 +137,7 @@ test('restart waits for the original unanswered Slack question', async () => {
 
 test('two internal rounds precede two reviewer requests; human feedback resumes then pauses until approval', async () => {
   const h = harness({
-    readPr: (n, pr) => n === 1 ? { ...pr, isDraft: true } : n === 2 ? pr : n === 3 || n === 4 ? { ...pr, unresolved: [{ id: 'thread:1', author: 'ada', body: 'Fix label', url: 'url' }] } : { ...pr, approvals: ['ada', 'bob'], reviewDecision: 'APPROVED' },
+    readPr: (n, pr) => n <= 2 ? { ...pr, isDraft: true } : n === 3 ? pr : n === 4 || n === 5 ? { ...pr, unresolved: [{ id: 'thread:1', author: 'ada', body: 'Fix label', url: 'url' }] } : { ...pr, approvals: ['ada', 'bob'], reviewDecision: 'APPROVED' },
     sleep: () => {},
   });
   await h.work();
@@ -252,11 +254,15 @@ test('evidence publication failure pauses instead of marking evidence complete',
   assert.ok(h.messages.some(m => /not published to both/.test(m.text)));
 });
 
-test('a stalled capture is aborted and asks Slack for help after fifteen minutes', async () => {
+test('three timed out evidence attempts produce an actionable budget question', async () => {
   const h = harness({ task: { reviewsDone: 3, evidenceValidatedAt: undefined }, turn: (o, _, __, deadline) => { o.onText('CI shard 4 failed on the pushed commit'); o.onText('Rerunning that job and finishing the manifest'); deadline(); return { text: '', error: 'aborted' }; }, onReply: () => { throw halt; } });
   await assert.rejects(h.work(), e => e === halt);
-  const report = h.messages.find(m => /exceeded 15 minutes/.test(m.text));
-  assert.ok(report, 'the timeout is reported');
+  assert.equal(h.events.filter(e => e.startsWith('turn:')).length, 3);
+  assert.equal(h.messages.filter(m => /resuming saved files/.test(m.text)).length, 2);
+  const report = h.messages.find(m => /reached its time limit on three attempts/.test(m.text));
+  assert.ok(report, 'the exhausted retry budget is reported');
+  assert.match(report.text, /retry.*pause/);
+  assert.doesNotMatch(report.text, /If a key is missing/);
   // the owner sees what the agent was doing when it was stopped, newest first, and the raw error
   assert.match(report.text, /^⚠️ \*Evidence blocked\. PR not handed off\*/);
   assert.match(report.text, /\n• Last seen: Rerunning that job and finishing the manifest\n• Before that: CI shard 4 failed on the pushed commit\n/);
@@ -878,4 +884,67 @@ test('the planner sets the build effort for the writers, and a scanner-level eff
     assert.equal(h.task.plannedEffort.reason, 'crosses billing and the warehouse sync');
     assert.ok(h.messages.some(m => /Build effort: xhigh/.test(m.text)), 'the thread names the planner\'s choice');
   }
+});
+
+ test('one evidence timeout resumes and still validates, inspects and publishes before requesting reviewers', async () => {
+  let captures = 0;
+  const h = harness({ task: { reviewsDone: 3, evidenceValidatedAt: undefined }, turn: (o, _, __, deadline) => {
+    if (o.prompt.includes(headless.VERIFY_EVIDENCE_PROMPT)) return { text: '[evidence-approved]' };
+    if (++captures === 1) { deadline(); return { text: '', error: 'aborted', sessionId: 'saved-evidence-session' }; }
+    assert.match(o.prompt, /reuse valid completed checks/);
+    assert.equal(o.resume, 'saved-evidence-session');
+    return { text: '' };
+  } });
+  await h.work();
+  assert.equal(captures, 2);
+  assert.ok(!h.events.includes('owner reply'));
+  assert.ok(h.events.indexOf('validate evidence') < h.events.indexOf('publish evidence'));
+  assert.ok(h.events.indexOf('publish evidence') < h.events.indexOf('reviewers:ada,bob'));
+  assert.ok(h.task.evidenceValidatedAt);
+});
+
+test('restart resumes an obsolete evidence timeout without waiting for an owner reply', async () => {
+  const h = harness({ task: { reviewsDone: 3, evidenceValidatedAt: undefined, lifecycle: 'paused', pendingQuestion: { afterTs: '1', questions: ['Evidence blocked. PR not handed off · The agent exceeded 15 minutes on one turn and was stopped'] } } });
+  await h.work();
+  assert.ok(!h.events.includes('owner reply'));
+  assert.equal(h.task.pendingQuestion, undefined);
+  assert.ok(h.messages.some(m => /old 15-minute limit/.test(m.text) && /STATUS: RUNNING/.test(m.text)));
+  assert.ok(h.task.evidenceValidatedAt);
+});
+
+test('inspection timeout resumes inspection without repeating evidence capture', async () => {
+  let captures = 0, inspections = 0;
+  const h = harness({ task: { reviewsDone: 3, evidenceValidatedAt: undefined }, turn: (o, _, __, deadline) => {
+    if (!o.prompt.includes(headless.VERIFY_EVIDENCE_PROMPT)) { captures++; return { text: '' }; }
+    if (++inspections === 1) { deadline(); return { text: '', error: 'aborted' }; }
+    return { text: '[evidence-approved]' };
+  } });
+  await h.work();
+  assert.equal(captures, 1);
+  assert.equal(inspections, 2);
+  assert.ok(!h.events.includes('owner reply'));
+  assert.ok(h.task.evidenceValidatedAt);
+});
+
+test('local rounds and published evidence precede marking ready and requesting human reviewers', async () => {
+  const h = harness({ task: { reviewsDone: 0, evidenceValidatedAt: undefined, feature: { stage: 'In Review', prs: ['https://github.com/a/b/pull/1'] } },
+    readPr: (_, pr) => ({ ...pr, isDraft: !h.events.includes('pr ready 1'), approvals: ['ada', 'bob'], reviewDecision: 'APPROVED' }),
+  });
+  await h.work();
+  assert.equal(h.task.reviewsDone, 2);
+  const published = h.events.indexOf('publish evidence');
+  const ready = h.events.indexOf('pr ready 1');
+  const reviewers = h.events.indexOf('reviewers:ada,bob');
+  assert.ok(h.events.indexOf('validate evidence') < published);
+  assert.ok(published >= 0 && ready > published && reviewers > ready);
+  const turnsBeforeValidation = h.events.slice(0, h.events.indexOf('validate evidence')).filter(e => e.startsWith('turn:'));
+  assert.equal(turnsBeforeValidation.length, 3, 'configured local reviews followed by evidence gathering');
+});
+
+test('an older ready PR is returned to draft and stays draft if evidence publication fails', async () => {
+  const h = harness({ task: { reviewsDone: 3, evidenceValidatedAt: undefined }, publishEvidence: () => ({ items: 1, prComment: true, ticketComment: false }), onReply: () => { throw halt; } });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.ok(h.events.includes('pr ready 1 --undo'));
+  assert.ok(!h.events.includes('pr ready 1'));
+  assert.ok(!h.events.some(e => e.startsWith('reviewers:')));
 });

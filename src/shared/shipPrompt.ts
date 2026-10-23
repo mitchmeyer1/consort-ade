@@ -180,8 +180,8 @@ Nothing runs. Read ${SHIP_DIR}/TEST-REPORT.md and print its summary block, the r
 const APPROVE = (i: ShipPromptInput) => `## This turn: approve — the tests are blessed, put the PR up and hand it to Consort's self-review
 
 1. Confirm the branch is pushed and the draft PR exists${i.feature.prs.length ? ` (${i.feature.prs[0]})` : " (create one with gh pr create --draft against " + i.base.replace(/^origin\//, "") + " if it does not)"}. Update the PR body from ${SHIP_DIR}/TEST-REPORT.md: what was built, the verified stories table, follow-ups.
-2. \`gh pr ready <url>\`. Do not trigger any reviewer and do not review the PR yourself: the moment the stage moves, Consort queues its own AI self-review (the pr-writeup review) of this PR as the next turn of this very chat, and the step after that reads its findings. End your turn promptly so it can start.
-3. Emit [ship-pr: <url>], [ship-stage: In Review | PR ready; self-review round 1 starts.] and [ship-next: /ship pr-loop]. Print the PR link, one line saying the self-review is starting and that /ship pr-loop runs when it is done, and the footer.`;
+2. ${i.headless ? "Keep the PR in draft. Do not mark it ready: the CLI does that only after its local self-review rounds and verified evidence have been published to both the PR and ticket." : "`gh pr ready <url>`."} Do not trigger any reviewer and do not review the PR yourself: the moment the stage moves, Consort queues its own AI self-review (the pr-writeup review) of this PR as the next turn of this very chat, and the step after that reads its findings. End your turn promptly so it can start.
+3. Emit [ship-pr: <url>], [ship-stage: In Review | ${i.headless ? "PR stays draft" : "PR ready"}; self-review round 1 starts.] and [ship-next: /ship pr-loop]. Print the PR link, one line saying the self-review is starting and that /ship pr-loop runs when it is done, and the footer.`;
 
 const REVISING = (i: ShipPromptInput, from: "user" | "bot" | "teammate", feedback?: string) => `## This turn: Revising — gather, explain, then apply what the user approves
 

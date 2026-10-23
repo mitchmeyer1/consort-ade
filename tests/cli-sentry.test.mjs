@@ -65,7 +65,7 @@ test('Sentry collector creates one tagged ClickUp task per group and never start
   assert.match(body.markdown_content, /NODE-1/);
   assert.match(body.markdown_content, /NODE-2/);
   assert.ok(!body.markdown_content.includes('sentry-secret'));
-  assert.equal((await w.run()).existing, 1);
+  assert.equal((await w.run()).deferred, 1);
   assert.equal(w.tasks.length, 1);
   assert.throws(() => sourceFor(job, 'key'), /do not dispatch workers/);
 });
@@ -97,7 +97,7 @@ test('ambiguous task-creation timeout keeps reservation and avoids retry duplica
   const w = world({ createTimeout: true });
   await assert.rejects(w.run(), /connection lost/);
   assert.equal(w.locks.size, 3);
-  assert.equal((await w.run()).existing, 1);
+  assert.equal((await w.run()).deferred, 1);
   assert.equal(w.tasks.length, 1);
 });
 
@@ -149,6 +149,7 @@ test('generated tickets are picked up later by an independently configured Click
   const tasks = await worker.scan();
   assert.equal(tasks.length, 1);
   assert.deepEqual(tasks[0].tags, ['sentry']);
+  assert.equal(tasks[0].sentryScannerId, 'j');
 });
 
 test('invalid or unsafe configuration cannot send a token', () => {
@@ -179,11 +180,11 @@ test('atomic GitHub reference reservations admit one producer and retain the ref
   assert.ok(!calls.some(c => c.includes('DELETE')));
 });
 
-test('empty Sentry scan avoids workspace task enumeration and reservations', async () => {
+test('empty Sentry scan checks capacity but creates no reservations', async () => {
   const w = world({ issues: [] });
   const result = await w.run();
   assert.equal(result.groups, 0);
-  assert.ok(!w.calls.some(c => c.u.pathname.endsWith('/team/w/task')));
+  assert.ok(w.calls.some(c => c.u.pathname.endsWith('/team/w/task')));
   assert.equal(w.locks.size, 0);
 });
 
@@ -194,7 +195,7 @@ test('setup explicitly chooses a child list, tag and initial status without crea
     ['Sentry project slugs (comma-separated)', 'node,web'], ['Environments (comma-separated; empty for all)', 'production'], ['Sentry issue query', 'is:unresolved'],
     ['Sentry auth token (event:read for organization issue access; never a DSN)', 'secret'], ['ClickUp workspace ID (deduplication searches this entire workspace)', 'w'],
     ['Destination ClickUp list or folder URL/id (use folder:<id> for a bare folder ID)', 'folder:1234567'], ['Which list inside that folder receives the Sentry tickets?', '20'],
-    ['Tag to put on each created ticket (align with a ClickUp worker scanner)', 'ai-handle'], ['Initial ClickUp task status', 'ready'], ['Scan Sentry every N minutes', '15'],
+    ['Tag to put on each created ticket (align with a ClickUp worker scanner)', 'ai-handle'], ['Initial ClickUp task status', 'ready'], ['Scan Sentry every N minutes', '15'], ['How many Sentry tickets may be worked on at once?', '1'],
   ]);
   const calls = [];
   const fetcher = async (url, init) => {
@@ -208,7 +209,8 @@ test('setup explicitly chooses a child list, tag and initial status without crea
   assert.equal(result.job.sentry.folderId, '1234567');
   assert.equal(result.job.sentry.tag, 'ai-handle');
   assert.equal(result.job.sentry.status, 'ready');
-  assert.equal(result.job.maxParallel, 0);
+  assert.equal(result.job.maxParallel, 1);
+  assert.equal(result.worker.maxOpenTasks, 1);
   assert.ok(calls.every(c => c.method === 'GET'));
   const defaults = new Map();
   const reused = await configureSentryScanner(async (q, opts) => {
@@ -220,6 +222,7 @@ test('setup explicitly chooses a child list, tag and initial status without crea
   assert.equal(defaults.get('Sentry organization slug'), 'aligned');
   assert.equal(defaults.get('Destination ClickUp list or folder URL/id (use folder:<id> for a bare folder ID)'), 'folder:1234567');
   assert.equal(defaults.get('Tag to put on each created ticket (align with a ClickUp worker scanner)'), 'ai-handle');
+  await assert.rejects(configureSentryScanner(async q => q === 'How many Sentry tickets may be worked on at once?' ? '0' : answers.get(q), 'clickup-key', { repo: '/repo', base: 'main' }, fetcher, [result.job]), /positive whole number/);
 });
 
 test('the entire paginated scan is bundled before creating a ticket for differently named reports',async()=>{
@@ -251,4 +254,28 @@ test('new related reports attach to an existing task without spawning a duplicat
   assert.equal(w.calls.filter(c=>c.method==='PUT').length,1);
   assert.match(w.tasks[0].markdown_description,/NODE-2/);
   assert.equal(w.locks.size,0);
+});
+
+test('a scan with twenty independent bundles creates only the default one ticket',async()=>{
+  const w=world({issues:Array.from({length:20},(_,i)=>issue(String(i+1),{title:`Bug ${i+1}`,culprit:`file-${i}.ts`}))});
+  const result=await w.run();assert.equal(result.groups,20);assert.equal(result.created,1);assert.equal(result.deferred,19);assert.equal(w.tasks.length,1);
+  assert.match(w.tasks[0].markdown_description,/\[consort-sentry-scanner:j\]/);
+  w.calls.length=0;
+  const full=await w.run();assert.equal(full.created,0);assert.equal(full.deferred,1);
+  assert.ok(!w.calls.some(c=>c.u.hostname==='sentry.io'),'full capacity must not scan or invoke the AI planner');
+});
+test('a configured limit of two admits only two bundles and completes one before admitting another',async()=>{
+  const w=world({issues:[issue('1'),issue('2',{title:'second'}),issue('3',{title:'third'})]});
+  const bounded={...job,maxParallel:2};
+  const result=await scanSentry(bounded,'clickup-secret',{deps:w.deps});
+  assert.equal(result.created,2);assert.equal(result.deferred,1);
+  const next=await scanSentry(bounded,'clickup-secret',{deps:w.deps,workers:[{ticket:{id:w.tasks[0].id},status:'ready'}]});
+  assert.equal(next.created,1);assert.equal(w.tasks.length,3);
+});
+
+test('legacy queued Sentry tickets are adopted by the bounded linked worker',async()=>{
+  const w=world({tasks:[{id:'old',list:{id:'l'},markdown_description:'[consort-sentry-group:old]',status:{type:'open'}}]});
+  const result=await w.run();assert.equal(result.created,0);
+  assert.match(w.tasks[0].markdown_description,/consort-sentry-scanner:j/);
+  assert.ok(!w.calls.some(c=>c.u.hostname==='sentry.io'));
 });

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { canClaimSentryTicket, sentryWorkerJob } from "./sentryCapacity";
 import { availableTaskSlots } from "./capacity";
 import { EFFORT_LEVELS, isEffortLevel } from "../shared/cliTurnPolicy.ts";
 import { execFile, spawn } from "node:child_process";
@@ -82,9 +83,9 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   scanners add --name <n> --source review --repo <path> --reviewer <github-login> [--every 5] [--max-parallel 4]
            reviews open PRs that request that login's review: Fable/Astra overview, Opus/Sol swarm,
            Request changes on Critical/High, otherwise comments and a Slack yes before it approves
-  scanners add --name <n> --source sentry --repo <shared-checkout> --sentry-org <org> --sentry-project <slug> --workspace <id> --list <id> --tag <tag>
+  scanners add --name <n> --source sentry [--max-parallel 1] --repo <shared-checkout> --sentry-org <org> --sentry-project <slug> --workspace <id> --list <id> --tag <tag>
            [--sentry-host https://sentry.io] [--environment production] [--query is:unresolved] [--create-status "to do"]
-           reads SENTRY_AUTH_TOKEN from the environment; creates ClickUp tickets without starting workers
+           reads SENTRY_AUTH_TOKEN from the environment; creates bundles for a linked worker; default one open Sentry ticket
   scanners list | scanners remove <id> | scanners enable|disable <id> | scanners scan <id>   (scan: dry run)
                                                                           a scanner watches one place for tickets and hands each match to a worker agent
   scanners configure <id> [--max-parallel N] [--max-open-tasks N] [--max-environments N] [--planning-model provider:model] [--implementation-model provider:model] [--coordination-model provider:model] [--reader-model provider:model] [--frontier-model provider:model] [--<role>-effort low|medium|high|xhigh|max] [--parallel-research N] [--parallel-implementation N] [--max-model-attempts N]
@@ -208,7 +209,8 @@ async function main(argv: string[]) {
         job.sentry = { host: str(a, "sentry-host") ?? "https://sentry.io", org: need(a, "sentry-org"), projects: list(a, "sentry-project"), environments: list(a, "environment"), query: str(a, "query") ?? "is:unresolved", token: process.env.SENTRY_AUTH_TOKEN ?? "", workspaceId: need(a, "workspace"), listId: need(a, "list"), ...(str(a, "folder") ? { folderId: str(a, "folder") } : {}), tag: need(a, "tag").toLowerCase(), status: str(a, "create-status") };
         if (!s.clickupKey) fail("Configure ClickUp first: consort-cli clickup set-key <key>");
         validateSentryConfig(job.sentry);
-        job.maxParallel = 0;
+        job.maxParallel = Number(str(a, "max-parallel") ?? 1);
+        if (!Number.isSafeInteger(job.maxParallel) || job.maxParallel < 1) fail("Sentry --max-parallel must be a positive whole number");
         job.everyMinutes = Number(str(a, "every") ?? 15) || 15;
       }
       if (source === "review") {
@@ -220,7 +222,7 @@ async function main(argv: string[]) {
         if (!s.accounts.length) console.log(bad("No AI accounts yet: consort-cli accounts add --provider claude|codex"));
       }
       if (source === "clickup" && !job.scope) fail("--list, --folder or --space <clickup id> is required for a clickup scanner");
-      s.jobs.push(job); saveState(s);
+      s.jobs.push(job); if (job.source === "sentry") s.jobs.push(sentryWorkerJob(job)); saveState(s);
       console.log(`Added scanner ${job.name} (${job.id}): ${source}${job.scope ? ` ${job.scope.kind} ${job.scope.id}` : ""} every ${job.everyMinutes} min → ${repo} on ${job.base}`);
       return;
     }
@@ -477,6 +479,20 @@ async function daemon() {
       if (t.pid) await notifyTask(t.id, "stopped", "Worker vanished; restarting.");
       spawnWorker(t);
     }
+    // Old producer-only setups gain a bounded dedicated worker without new credentials.
+    for (const producer of s.jobs.filter(j => j.source === "sentry")) {
+      if (!s.jobs.some(j => j.sentryProducerId === producer.id)) {
+        const fresh = loadState();
+        if (!fresh.jobs.some(j => j.sentryProducerId === producer.id)) { fresh.jobs.push(sentryWorkerJob(producer)); saveState(fresh); }
+      } else {
+        const target = sentryWorkerJob(producer);
+        const existing = s.jobs.find(j => j.sentryProducerId === producer.id)!;
+        if (existing.maxOpenTasks !== target.maxOpenTasks || existing.enabled !== producer.enabled) {
+          const fresh = loadState(), worker = fresh.jobs.find(j => j.id === existing.id);
+          if (worker) { Object.assign(worker, { maxOpenTasks: target.maxOpenTasks, maxParallel: target.maxParallel, maxEnvironments: target.maxEnvironments, enabled: producer.enabled }); saveState(fresh); }
+        }
+      }
+    }
     for (const job of s.jobs.filter((j) => j.enabled)) {
       const due = !job.lastScanAt || Date.now() - job.lastScanAt >= job.everyMinutes * 60_000;
       if (!due) continue;
@@ -486,8 +502,8 @@ async function daemon() {
       statusEvent("info", `${job.name}: checking ${job.source} for eligible tickets to start`);
       try {
         if (job.source === "sentry") {
-          const result = await scanSentry(job, s.clickupKey);
-          statusEvent(result.reserved ? "warn" : "success", `${job.name}: ${result.issues} Sentry issues → ${result.groups} planned bug bundles; ${result.created} ClickUp tickets created; ${result.existing} existing; ${result.reserved} reserved elsewhere or awaiting reconciliation`);
+          const result = await scanSentry(job, s.clickupKey, { workers: loadState().tasks });
+          statusEvent(result.reserved || result.atCapacity ? "warn" : "success", result.atCapacity ? `${job.name}: ${result.activeTickets}/${result.ticketLimit} Sentry ticket slots occupied; no Sentry scan or new workers until a slot frees` : `${job.name}: ${result.issues} Sentry issues → ${result.groups} planned bug bundles; ${result.created} ClickUp tickets created; ${result.existing} existing; ${result.reserved} reserved elsewhere or awaiting reconciliation; ${result.deferred} deferred by the Sentry ticket limit`);
           const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); j.scanStartedAt = undefined; saveState(after); }
           continue;
         }
@@ -516,6 +532,7 @@ async function daemon() {
         for (const t of tickets) {
           if (slots <= 0) break;
           if (taken.has(t.id) || !matchesFilters(t, job.filters)) continue;
+          if (!canClaimSentryTicket(job, t)) continue;
           const comments = await source.comments(t.id).catch(() => []);
           const me = host();
           if (claimedByOther(comments, me, Date.now())) { console.log(`${t.id} claimed by ${claimOf(comments)?.host}; skipping`); continue; }

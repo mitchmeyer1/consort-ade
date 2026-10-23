@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import ts from 'typescript';
 import * as headless from '../src/shared/headless.ts';
+import * as evidenceRetry from '../src/cli/evidenceRetry.ts';
 import * as seatPool from '../src/shared/seatPool.ts';
 import * as cliModels from '../src/shared/cliModels.ts';
 import * as cliTurnPolicy from '../src/shared/cliTurnPolicy.ts';
@@ -24,7 +25,8 @@ for (const blockedAtStart of [true, false]) {
     const reachedCodex = new Error('Codex turn reached');
     const mocks = {
       'node:fs': { existsSync: () => true },
-      '../shared/headless.ts': headless,
+      './evidenceRetry': evidenceRetry,
+    '../shared/headless.ts': headless,
       '../shared/seatPool.ts': seatPool,
       '../shared/cliModels.ts': cliModels, '../shared/cliTurnPolicy.ts': cliTurnPolicy,
       './capacity': { AccountUnavailableError: class extends Error {}, withAgentTurn: async (_, __, fn) => fn(), withEnvironmentSlot: async (_, fn) => fn() },

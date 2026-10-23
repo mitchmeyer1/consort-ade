@@ -201,8 +201,8 @@ async function addScanners(ask: Ask, first?: string): Promise<void> {
       if (!repo) continue;
       try {
         const configured = await configureSentryScanner(ask, loadState().clickupKey, repo, undefined, loadState().jobs);
-        s = loadState(); s.clickupKey = configured.clickupKey; s.jobs.push(configured.job); saveState(s);
-        console.log(ok(`Sentry scanner saved: ClickUp list ${configured.job.sentry!.listId}, tag ${configured.job.sentry!.tag}. Align a ClickUp worker scanner with that destination to implement the tickets.`));
+        s = loadState(); s.clickupKey = configured.clickupKey; s.jobs.push(configured.job, configured.worker); saveState(s);
+        console.log(ok(`Sentry scanner saved: ClickUp list ${configured.job.sentry!.listId}, tag ${configured.job.sentry!.tag}. Linked worker enabled; at most ${configured.job.maxParallel} Sentry ticket(s) open at once.`));
       } catch (e) { console.log(bad(`Sentry setup failed: ${(e as Error).message}`)); }
       if (await yes(ask, "Add another scanner?", false)) continue;
       break;

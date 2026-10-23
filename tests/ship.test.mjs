@@ -279,3 +279,13 @@ test('Redo rewinds a finished stage: the command parses, only finished stages qu
   assert.match(shipPrompt({ feature: tests, form: { form: 'redo', stage: 'Ready to Test' }, worktree: '/w', branch: 'b', base: 'origin/main' }), /## Redo: Ready to Test[\s\S]*do the stage again properly/);
   assert.equal(canRedoStage(applyShipChange(f, { stage: 'Merged' }, 8000), 'Grilling'), false, 'nothing to redo once merged');
 });
+
+test('headless approval keeps the PR draft until the CLI publishes evidence', () => {
+  const feature = { ...newShipFeature(ticket, 'test-feature', 1000), stage: 'Ready to Test' };
+  const args = { feature, form: { form: 'approve' }, worktree: '/w', branch: 'b', base: 'origin/main' };
+  const headless = shipPrompt({ ...args, headless: true });
+  assert.match(headless, /Keep the PR in draft/);
+  assert.match(headless, /published to both the PR and ticket/);
+  assert.doesNotMatch(headless, /gh pr ready/);
+  assert.match(shipPrompt(args), /gh pr ready/);
+});

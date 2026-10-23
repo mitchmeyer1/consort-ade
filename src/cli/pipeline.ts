@@ -17,6 +17,7 @@ import type { Provider } from "../shared/types";
 import { runTurn, packageRoot } from "./agent";
 import { readPr, requestReviewers, reviewerSuggestions, validateReviewers, whoAmI } from "./prmonitor";
 import { findBrowser, publishEvidence, validateEvidence, writeScreenshotHelper } from "./evidence";
+import { EVIDENCE_TURN_MS, EVIDENCE_CHECK_MS, TurnTimeoutError, resumeEvidenceTurn, staleEvidenceTimeout } from "./evidenceRetry";
 import { allocateEnvironment, cleanupEnvironment, withChildEnvironment } from "./environment";
 import { flushTaskNotifications, notifyTask } from "./lifecycle";
 import { readUsage, saveUsage, usageFor } from "./usage";
@@ -262,11 +263,11 @@ export async function workTask(taskId: string): Promise<void> {
       let usageLimit: ReturnType<typeof usageBlock>;
       let checking = false;
       let active = true;
-      // a turn whose agent says nothing for SILENCE_MS is hung (a dropped API connection, most often): stop it and retry
+      // Respect explicit turn budgets: builds may produce no prose while tools run. Unbounded turns retain the silence watchdog.
       let quietSince = Date.now();
       let silenced = false;
       const checkUsage = async () => {
-        if (active && Date.now() - quietSince > SILENCE_MS) { silenced = true; trace.reason = "silenced"; abort.abort(); return; }
+        if (active && Date.now() - quietSince > Math.max(SILENCE_MS, timeoutMs ? timeoutMs + 60_000 : 0)) { silenced = true; trace.reason = "silenced"; abort.abort(); return; }
         if (checking) return;
         checking = true;
         try {
@@ -312,8 +313,9 @@ export async function workTask(taskId: string): Promise<void> {
         continue;
       }
       if (timedOut) {
+        if (res.sessionId && managesSession) updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: res.sessionId } }));
         const minutes = Math.round(timeoutMs! / 60_000);
-        throw new ProblemError({ where: "", what: `The agent exceeded ${minutes} minutes on one turn and was stopped`, recent: [...recent], tried: recent.length ? undefined : `${minutes} minutes with no progress lines from the agent`, error: res?.error });
+        throw new TurnTimeoutError({ where: "", what: `The agent exceeded ${minutes} minutes on one turn and was stopped`, recent: [...recent], tried: recent.length ? undefined : `${minutes} minutes with no progress lines from the agent`, error: res?.error });
       }
       if (res.limit) {
         blockAccount(who.id, res.limit.resetsAt, res.limit.text);
@@ -493,6 +495,13 @@ export async function workTask(taskId: string): Promise<void> {
     task.pendingQuestion = undefined;
     await say("• Ignore the question above: the evidence was approved. Continuing");
   }
+  if (task.pendingQuestion && staleEvidenceTimeout(task.pendingQuestion.questions)) {
+    log(task, "resuming evidence after the obsolete 15-minute timeout");
+    await notifyTask(taskId, "running", "Resuming evidence with a longer time budget; no owner action needed.");
+    updateTask(taskId, { pendingQuestion: undefined, status: "working", note: undefined });
+    task.pendingQuestion = undefined;
+    await say("✅ The previous evidence turn hit the old 15-minute limit. Resuming evidence with a longer budget; no action needed from you.");
+  }
   if (task.pendingQuestion) {
     const answer = await ask(task.pendingQuestion.questions);
     await completeReply(await turn(`The owner answered on Slack:\n${answer}\nContinue from where you stopped.`));
@@ -611,6 +620,12 @@ export async function workTask(taskId: string): Promise<void> {
   const pr = prUrl ? prNumberFromUrl(prUrl) : undefined;
   if (!pr) { await finish("failed", "In Review without a PR"); await say(slackLines.stuck("the feature reached In Review without a PR")); return; }
 
+  // Older workers could mark a PR ready before evidence. Restore draft while preparation is incomplete.
+  if (task.reviewsDone < rotation.length || !feature.evidenceAt || !task.evidenceValidatedAt) {
+    const preparing = await readPr(job.repo, pr);
+    if (!preparing.isDraft) await run("gh", ["pr", "ready", String(pr), "--undo"], { cwd: job.repo, timeout: 60_000 });
+  }
+
   // ── one review per configured provider, each followed by a fix turn ───────────────────
   for (let round = task.reviewsDone + 1; round <= rotation.length; round++) {
     await applyOwnerUpdates();
@@ -647,11 +662,14 @@ export async function workTask(taskId: string): Promise<void> {
         const browser = await findBrowser();
         const helper = browser ? writeScreenshotHelper(task.worktree, browser) : undefined;
         const prompt = EVIDENCE_PROMPT({ helper: helper ?? "(no browser installed: backend output may be text; frontend screenshots require a browser)", ticketUrl: task.ticket.url, prUrl: prUrl!, worktree: task.worktree, repoRoot: job.repo });
-        const text = await turn(`${prompt}\n\n${guidance}`, builderProvider, "implementation", true, 15 * 60_000);
-        await completeReply(text, 15 * 60_000, "implementation");
+        await resumeEvidenceTurn("Gathering evidence", async (continuation) => {
+          const text = await turn(`${prompt}\n\n${guidance}\n\n${continuation}`, builderProvider, "implementation", true, EVIDENCE_TURN_MS);
+          await completeReply(text, EVIDENCE_TURN_MS, "implementation");
+          return text;
+        }, say);
         validateEvidence(task.worktree);
         activity("checking evidence against acceptance criteria");
-        const verification = await turn(VERIFY_EVIDENCE_PROMPT, builderProvider, "coordination", false, 15 * 60_000);
+        const verification = await resumeEvidenceTurn("Checking evidence", (continuation) => turn(`${VERIFY_EVIDENCE_PROMPT}\n\n${continuation}`, builderProvider, "coordination", false, EVIDENCE_CHECK_MS), say);
         if (!evidenceApproved(verification)) throw new ProblemError({ where: "evidence", what: "The evidence check did not pass", why: blockerBullets(stripAskUser(verification) || parseAskUser(verification).join(" ") || "No approval was returned.") });
         const cost = loadState().tasks.find((t) => t.id === taskId)?.cost;
         const published = await publishEvidence({ worktree: task.worktree, repo: job.repo, ticket: task.ticket, pr, prUrl: prUrl!, source, clickupKey: state.clickupKey, cost, timing: { startedAt: task.startedAt, endedAt: Date.now() } });
@@ -665,7 +683,9 @@ export async function workTask(taskId: string): Promise<void> {
         // the validator and the publisher throw plain errors: their message is the reason, one sentence per bullet
         blocked = e instanceof ProblemError ? problemOf(e, "evidence", { recent: [...recent] }) : { where: "evidence", what: "Evidence was not accepted", why: blockerBullets((e as Error).message), recent: [...recent], ...(problemOf(e, "evidence").error ? { error: problemOf(e, "evidence").error } : {}) };
         blocked.lead ??= "Evidence blocked. PR not handed off";
-        blocked.ask ??= `If a key is missing: add it to \`${job.repo}/.env\` on this machine, then reply "done". Otherwise say what to do. No secrets in Slack.`;
+        blocked.ask ??= /API KEY REQUIRED|missing.{0,40}(?:key|credential)|(?:key|credential).{0,40}missing/i.test([blocked.what, ...(blocked.why ?? [])].join(" "))
+          ? `The evidence reports missing credentials. Confirm the required credentials are available in \`${job.repo}/.env\` on this machine, then reply "done". Never send secrets in Slack.`
+          : `Reply with guidance for the specific failure above, or "retry" to rerun the evidence checks. Acceptance checks are still required. Never send secrets in Slack.`;
         log(task, `Evidence blocked: ${[blocked.what, ...(blocked.why ?? [])].join(" ")}`);
       }
       const answer = await ask([slackLines.problem(blocked, task.ticket.url)], true);

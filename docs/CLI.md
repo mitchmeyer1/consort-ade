@@ -263,9 +263,11 @@ STATUS shows green `RUNNING` while the worker is active, yellow `WAITING` for a 
 
 ### Evidence must pass before human review
 
+The CLI keeps the PR in draft through local self-review rounds and evidence gathering. Only after verified evidence is published to both the PR and ticket does the CLI mark the PR ready and request external reviewers. Draft PRs remain visible, so unsolicited comments can still arrive before this handoff.
+
 The worker requires a manifest with every acceptance check passed, matching captures/output, and no blockers. Frontend changes require screenshots of the working feature. A separate agent inspects the actual files against the ticket and spec before publication. Missing/empty images, failed uploads, or a failed PR/ticket comment block completion. The worker marks evidence complete only after validation, inspection, and publication to both destinations succeed. Older evidence timestamps without this validation are rechecked when a worker resumes.
 
-If evidence fails, the worker pauses and asks the owner on Slack what is needed, then retries after the reply. A capture or inspection that runs beyond fifteen minutes is stopped and escalated to Slack. The owner's reply does not waive acceptance checks. Error pages, missing map tiles, missing API keys, and partially working flows must be fixed and captured again.
+If evidence fails, the worker pauses and asks the owner on Slack what is needed, then retries after the reply. Evidence gathering allows 90 minutes per turn; independent inspection allows 30 minutes. A timeout automatically resumes saved work up to twice, with a Slack update and no owner action required. Long-running tools do not trigger the shorter silence watchdog during these turns. After three timed-out attempts, the worker asks the owner whether to retry or pause rather than guessing that credentials are missing. Restarting a worker also clears the old fifteen-minute evidence timeout question and resumes evidence. The owner's reply does not waive acceptance checks. Error pages, missing map tiles, missing API keys, and partially working flows must be fixed and captured again.
 
 For a missing credential, the agent names the exact variable and the repository-root env file on the Consort machine. The owner adds the key there and confirms in Slack. Only then may the agent copy that specific variable into the worktree's appropriate ignored env file, preserving unrelated settings, restart the app, and rerun the flow. Secret values must never be sent through Slack, printed, captured, or committed.
 

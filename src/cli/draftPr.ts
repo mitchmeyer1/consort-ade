@@ -16,7 +16,7 @@ export const draftTitle = (ticket: ShipTicket) => `[WIP] ${ticket.title}`;
 export function draftBody(ticket: ShipTicket, progress: string, ticketBody?: string): string {
   const description = (ticketBody ?? "").trim();
   return [
-    "> Draft opened by Consort so the work in progress can be followed. Not ready for review; Consort marks it ready when the build and tests are done.",
+    "> Draft opened by Consort so the work in progress can be followed. Not ready for review; Consort marks it ready after local self-review rounds and verified evidence are published.",
     "",
     `**Ticket:** ${ticket.url}${ticket.source === "github" ? ` (Closes #${ticket.id})` : ""}`,
     `**Progress:** ${progress}`,

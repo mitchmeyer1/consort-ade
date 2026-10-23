@@ -47,6 +47,7 @@ export type Job = {
   source: "clickup" | "github" | "sentry" | "review";
   /** review scanners: the GitHub login whose assigned or requested PRs get an automatic review (cli/reviewJob.ts) */
   reviewer?: string;
+  sentryProducerId?: string;
   sentry?: import("../shared/sentryScanner.ts").SentryScannerConfig;
   /** absolute path of the repository checkout on this machine (on its base branch) */
   repo: string;

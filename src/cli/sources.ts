@@ -97,10 +97,10 @@ export function clickupSource(key: string, job: Job): Source {
       // call for everything inside it (per-list reads would be hundreds of requests against a 100/min limit).
       // The tag filter goes to the server too (ClickUp keeps tags lowercase); statuses are matched here.
       let base: string;
-      if (scope.kind === "list") base = `/list/${encodeURIComponent(scope.id)}/task?include_closed=false&subtasks=true`;
+      if (scope.kind === "list") base = `/list/${encodeURIComponent(scope.id)}/task?include_closed=false&subtasks=true&include_markdown_description=true`;
       else {
         const team = await clickupTeamFor(key, scope);
-        const q = new URLSearchParams({ include_closed: "false", subtasks: "true" });
+        const q = new URLSearchParams({ include_closed: "false", subtasks: "true", include_markdown_description: "true" });
         q.append(scope.kind === "space" ? "space_ids[]" : "project_ids[]", scope.id);
         for (const t of job.filters.tags ?? []) q.append("tags[]", t.toLowerCase());
         base = `/team/${encodeURIComponent(team)}/task?${q}`;
@@ -114,6 +114,7 @@ export function clickupSource(key: string, job: Job): Source {
           if (seen.has(String(t.id))) continue; // a task shown in several lists counts once
           seen.add(String(t.id));
           out.push({
+            ...( /\[consort-sentry-scanner:([^\]]+)\]/.exec(`${t.markdown_description ?? ""}\n${t.description ?? ""}`)?.[1] ? { sentryScannerId: /\[consort-sentry-scanner:([^\]]+)\]/.exec(`${t.markdown_description ?? ""}\n${t.description ?? ""}`)![1] } : {}),
             id: String(t.id), title: String(t.name ?? t.id), status: t.status?.status, url: t.url ?? `https://app.clickup.com/t/${t.id}`,
             tags: ((t.tags ?? []) as any[]).map((x) => String(x.name)), assignees: ((t.assignees ?? []) as any[]).flatMap((a) => [a.username, a.email].filter(Boolean).map(String)),
             updatedAt: Number(t.date_updated) || undefined,

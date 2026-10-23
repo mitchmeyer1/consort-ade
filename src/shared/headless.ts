@@ -41,6 +41,7 @@ ${AI_COST_POLICY}
 - A question is read on a phone: one line, under 200 characters, plain words, no background, no narration of what you did or will do, the recommended answer at the end ("… — recommend: yes"). Ask one thing per marker.
 - Where a handler tells you to ask the user for a go-ahead, confirmation, or to "present and wait", proceed instead, noting what you would have asked.
 - Apply reviewer requests that are clearly right. ${REVIEW_DECISION_RULES}
+- Keep the PR in draft through local self-review rounds and evidence gathering. Never mark it ready or request external reviewers from an agent turn; the CLI publishes verified evidence to the PR and ticket first, then marks it ready and requests reviewers.
 - Never merge. Never force-push. Never amend a pushed commit.
 - Research is allowed and expected: search and read the web (WebSearch and WebFetch, or Codex's web search) for library docs, APIs, error messages and prior art whenever the repo does not answer. Cite what you relied on in the spec or the PR body.
 - Nothing will ever ask you for permission here; every tool call runs. Act with that care: no destructive git, no secrets in commits, no changes outside this worktree.
@@ -81,7 +82,7 @@ export type SourceFilters = {
   /** only tickets assigned to one of these logins/emails */
   assignees?: string[];
 };
-export type ScannedTicket = { id: string; title: string; status?: string; tags: string[]; assignees: string[]; url: string; updatedAt?: number };
+export type ScannedTicket = { sentryScannerId?: string; id: string; title: string; status?: string; tags: string[]; assignees: string[]; url: string; updatedAt?: number };
 
 const norm = (s: string) => s.trim().toLowerCase();
 export function matchesFilters(t: ScannedTicket, f: SourceFilters): boolean {

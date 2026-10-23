@@ -1,11 +1,12 @@
 /** Configure the Sentry producer independently from ClickUp worker scanners. */
 import { clickupScopeFrom } from "../shared/headless.ts";
 import type { SentryScannerConfig } from "../shared/sentryScanner.ts";
+import { sentryWorkerJob } from "./sentryCapacity.ts";
 import { readSentryIssues } from "./sentry.ts";
 import { DEFAULT_STATUSES, newId, type Job } from "./state.ts";
 
 type Ask = (question: string, options?: { default?: string; secret?: boolean }) => Promise<string>;
-export async function configureSentryScanner(ask: Ask, existingKey: string | undefined, repo: { repo: string; base: string }, fetcher: typeof fetch = (...args) => fetch(...args), existingJobs: Job[] = []): Promise<{ job: Job; clickupKey: string }> {
+export async function configureSentryScanner(ask: Ask, existingKey: string | undefined, repo: { repo: string; base: string }, fetcher: typeof fetch = (...args) => fetch(...args), existingJobs: Job[] = []): Promise<{ job: Job; worker: Job; clickupKey: string }> {
   const previous = existingJobs.find(j => j.source === "sentry" && j.repo === repo.repo)?.sentry;
   const worker = existingJobs.find(j => j.source === "clickup" && j.repo === repo.repo);
   const savedScope = previous?.folderId ? `folder:${previous.folderId}` : previous?.listId ? `list:${previous.listId}` : worker?.scope?.kind === "folder" ? `folder:${worker.scope.id}` : worker?.scope?.kind === "list" ? `list:${worker.scope.id}` : worker?.listId ? `list:${worker.listId}` : undefined;
@@ -46,11 +47,14 @@ export async function configureSentryScanner(ask: Ask, existingKey: string | und
   console.log(`Destination: ${list.name} (${listId}); statuses: ${statuses.join(", ")}`);
   const status = await ask("Initial ClickUp task status", { default: previous?.status ?? worker?.filters.statuses?.[0] ?? statuses[0] });
   if (!statuses.includes(status)) throw new Error("Choose one of the destination list's statuses.");
+  const maxParallel = Number(await ask("How many Sentry tickets may be worked on at once?", { default: "1" }));
+  if (!Number.isSafeInteger(maxParallel) || maxParallel < 1) throw new Error("Sentry ticket limit must be a positive whole number.");
   const everyMinutes = Number(await ask("Scan Sentry every N minutes", { default: "15" }));
   if (!Number.isFinite(everyMinutes) || everyMinutes < 1) throw new Error("Scan interval must be at least one minute.");
   const config: SentryScannerConfig = { host, org, projects, environments, query, token, workspaceId, listId, ...(scope.kind === "folder" ? { folderId: scope.id } : {}), tag, status };
   const issues = await readSentryIssues(config, fetcher);
   console.log(`Sentry connection verified: ${issues.length} matching issues. No tickets created during setup. Shared deduplication uses the GitHub repository at ${repo.repo}; all producers must use this same repository.`);
-  const job: Job = { id: newId("job"), name, source: "sentry", sentry: config, ...repo, filters: {}, everyMinutes, maxParallel: 0, statuses: { ...DEFAULT_STATUSES }, enabled: true, createdAt: Date.now() };
-  return { job, clickupKey };
+  const workflowStatuses = Object.fromEntries(Object.entries(worker?.statuses ?? DEFAULT_STATUSES).map(([key, value]) => [key, statuses.includes(value) ? value : key === "done" ? ((list.statuses ?? []).find((s: any) => ["closed", "done"].includes(s.type))?.status ?? status) : status])) as Job["statuses"];
+  const job: Job = { id: newId("job"), name, source: "sentry", sentry: config, ...repo, filters: {}, everyMinutes, maxParallel, statuses: workflowStatuses, enabled: true, createdAt: Date.now() };
+  return { job, worker: sentryWorkerJob(job), clickupKey };
 }
