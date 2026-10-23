@@ -1,4 +1,5 @@
 import type { CliModelRole } from "./cliModels.ts";
+import type { ShipFeature } from "./ship.ts";
 
 /** A task can ask for deeper reasoning without asking the owner to solve a code problem. */
 export const MODEL_ROLE_RULES = (role: CliModelRole) => `## Model budget: ${role}
@@ -15,6 +16,27 @@ export const parseBuildEffort = (text: string): { level: EffortLevel; reason?: s
 
 export const parseModelEscalation = (text: string): string | undefined =>
   /\[model-escalate:\s*([^\]\n]+)\]/i.exec(text)?.[1]?.trim() || undefined;
+
+/**
+ * Whether a turn moved the feature. Markers that restate it ([ship-built], the same [ship-pr],
+ * [ship-next: /ship] every turn) are not progress, so a turn that only says "already built" counts
+ * toward the stuck guard; new commits are, since a serial build adds one ticket per turn.
+ */
+export function turnMoved(before: ShipFeature, after: ShipFeature, headMoved: boolean): boolean {
+  return headMoved
+    || after.stage !== before.stage
+    || Boolean(after.built) !== Boolean(before.built)
+    || after.prs.length !== before.prs.length
+    || after.spec !== before.spec
+    || after.report !== before.report
+    || after.tests?.pass !== before.tests?.pass || after.tests?.total !== before.tests?.total
+    || Boolean(after.paused) !== Boolean(before.paused)
+    || after.reviewRound !== before.reviewRound
+    || after.feedbackFrom !== before.feedbackFrom;
+}
+
+/** Turns at one stage before Consort asks the owner even when each turn moved something: a loop that commits every turn still stops. */
+export const MAX_STAGE_TURNS = 30;
 
 /** A settled spec is implementation work even before its first stage transition. */
 export function stageModelRole(stage: string, stalled = 0): CliModelRole {

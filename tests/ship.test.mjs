@@ -75,6 +75,7 @@ test('the handler follows the stage and the form; the prompt carries the state, 
   const f = newShipFeature(ticket, 'hris-address', 1000);
   assert.equal(shipHandler(f, { form: 'resume' }), 'grilling');
   assert.equal(shipHandler({ ...f, stage: "Spec'd" }, { form: 'resume' }), 'implementing');
+  assert.equal(shipHandler({ ...f, stage: "Spec'd", built: true }, { form: 'resume' }), 'test');
   assert.equal(shipHandler({ ...f, stage: 'Implementing', built: true }, { form: 'resume' }), 'test');
   assert.equal(shipHandler({ ...f, stage: 'Ready to Test' }, { form: 'resume' }), 'reentry');
   assert.equal(shipHandler({ ...f, stage: 'Ready to Test' }, { form: 'approve' }), 'approve');

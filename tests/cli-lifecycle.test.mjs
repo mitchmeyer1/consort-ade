@@ -956,3 +956,13 @@ test('restart recovers the legacy publication network question without an owner 
   assert.ok(h.events.includes('publish evidence'));
   assert.ok(h.task.evidenceValidatedAt);
 });
+
+test('a reply that only repeats its markers counts as no progress: three in a row ask the owner instead of looping', async () => {
+  let turns = 0;
+  const repeat = '[ship-built]\n[ship-pr: https://github.com/a/b/pull/1]\n[ship-next: /ship]';
+  const h = harness({ task: { feature: { stage: 'Implementing', prs: ['https://github.com/a/b/pull/1'], built: true, history: [] } }, turn: () => { if (++turns > 3) throw halt; return { text: `Already built; nothing changed this turn.\n${repeat}` }; } });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.equal(turns, 4, 'the fourth turn runs only after the owner answers');
+  assert.ok(h.events.includes('owner reply'));
+  assert.ok(h.messages.some(m => /3 turns in a row did not move the stage/.test(m.text)));
+});
