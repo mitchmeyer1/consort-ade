@@ -4,6 +4,7 @@ import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { HOME, host, newId, type Account, type CliState, type Job } from "./state.ts";
 import type { Resource } from "../shared/resources.ts";
+import { describeKeyRef, type CoveredKeyRef, type PhiSettings } from "../shared/phi.ts";
 
 const run = promisify(execFile);
 
@@ -11,13 +12,15 @@ const run = promisify(execFile);
  * Moving scanners to another machine. `export` writes one file with everything a box needs
  * to run the same scanners: the ClickUp token, Slack, the branch prefix, every account (API
  * key, or the login's credential file), every scanner with its repo's remote URL, and every
- * project info resource with its remote URL, so the other box can clone them. `import` reads that file into a fresh or existing install. Tasks in
+ * project info resource with its remote URL, so the other box can clone them. The PHI/PII
+ * guard's settings and the covered key's reference travel; the covered key itself never does,
+ * since Consort never holds it. `import` reads that file into a fresh or existing install. Tasks in
  * flight are not moved: their worktrees live on the box that started them.
  */
 export type BundleAccount = { name: string; provider: Account["provider"]; auth: Account["auth"]; apiKey?: string; maxActiveTurns?: number; credentials?: { file: string; content: string } };
 export type BundleScanner = Omit<Job, "id" | "lastScanAt" | "scanStartedAt" | "repo"> & { repoPath: string; repoRemote?: string };
 export type BundleResource = { name: string; kind: Resource["kind"]; path: string; remote?: string };
-export type Bundle = { kind: "consort-cli-bundle"; version: 1; exportedAt: number; host: string; capacity?: CliState["capacity"]; clickupKey?: string; slack?: CliState["slack"]; branchPrefix?: string; accounts: BundleAccount[]; scanners: BundleScanner[]; resources?: BundleResource[] };
+export type Bundle = { kind: "consort-cli-bundle"; version: 1; exportedAt: number; host: string; capacity?: CliState["capacity"]; clickupKey?: string; slack?: CliState["slack"]; branchPrefix?: string; accounts: BundleAccount[]; scanners: BundleScanner[]; resources?: BundleResource[]; covered?: CoveredKeyRef; phi?: Partial<PhiSettings> };
 
 /** the credential file a login keeps in its own directory (Claude Code on macOS keeps it in the Keychain instead, so there may be none) */
 export const credentialFile = (provider: Account["provider"]) => (provider === "claude" ? ".credentials.json" : "auth.json");
@@ -36,7 +39,7 @@ export async function buildBundle(s: CliState, opts: { only?: string[]; readFile
   }
   const resources: BundleResource[] = [];
   for (const r of s.resources ?? []) resources.push({ name: r.name, kind: r.kind, path: r.path, remote: await remoteOf(r.path) });
-  return { kind: "consort-cli-bundle", version: 1, exportedAt: Date.now(), host: s.hostId ?? host(), capacity: s.capacity, clickupKey: s.clickupKey, slack: s.slack, branchPrefix: s.branchPrefix, accounts, scanners, ...(resources.length ? { resources } : {}) };
+  return { kind: "consort-cli-bundle", version: 1, exportedAt: Date.now(), host: s.hostId ?? host(), capacity: s.capacity, clickupKey: s.clickupKey, slack: s.slack, branchPrefix: s.branchPrefix, accounts, scanners, ...(resources.length ? { resources } : {}), ...(s.covered ? { covered: s.covered } : {}), ...(s.phi ? { phi: s.phi } : {}) };
 }
 
 /** `notes`: what was imported without a piece it needed, and how to finish it by hand */
@@ -89,6 +92,12 @@ export async function applyBundle(s: CliState, b: Bundle, opts: { repoDir?: stri
     if (!path) { r.notes.push(`resource ${res.name}: ${res.path} is not here and could not be cloned; imported without it (consort-cli resources add --name ${res.name} --markdown <path>)`); continue; }
     (s.resources ??= []).push({ id: newId("res"), name: res.name, kind: res.kind, path });
     r.added.push(`resource ${res.name}`);
+  }
+  if (b.phi && (opts.replace || !s.phi)) { s.phi = b.phi; r.added.push("PHI/PII guard settings"); }
+  if (b.covered && (opts.replace || !s.covered)) {
+    s.covered = b.covered;
+    r.notes.push(`covered key reference imported (${describeKeyRef(b.covered)}); the key itself is not in the export: put it there on this machine${b.covered.kind === "keychain" ? " with consort-cli phi key store" : " (a file only you can read)"}, or point elsewhere with phi key ref`);
+    if (b.covered.kind === "keychain" && process.platform !== "darwin") r.notes.push("a Keychain reference needs macOS; on this machine use consort-cli phi key ref --file <path>");
   }
   s.setupCompletedAt ??= Date.now();
   return r;

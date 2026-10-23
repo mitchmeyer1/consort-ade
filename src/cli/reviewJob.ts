@@ -18,6 +18,7 @@
  * runs another round at the new head, which first checks whether the earlier findings were fixed.
  */
 import { execFile } from "node:child_process";
+import { turnAccounts, turnPhi } from "../shared/phi.ts";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -313,7 +314,8 @@ async function reviewRound(taskId: string, watch: (t: ReviewTarget, repo: string
     const tried = new Set<string>();
     for (let attempt = 0; attempt < 8; attempt++) {
       const now = Date.now();
-      const open = loadState().accounts.filter((a) => !(a.blockedUntil && a.blockedUntil > now) && !tried.has(a.id));
+      const live = loadState();
+      const open = turnAccounts(live).filter((a) => !(a.blockedUntil && a.blockedUntil > now) && !tried.has(a.id));
       if (!open.length) { tried.clear(); await new Promise((r) => setTimeout(r, 60_000)); continue; }
       const modelOn = (a: Account) => role === "frontier" ? selectCliModel(a.provider, models[a.provider], "frontier", policy) : role === "swarm" ? oversightModel(a.provider, policy) : selectCliModel(a.provider, models[a.provider], "implementation", policy);
       const usage = await usageFor(open);
@@ -327,7 +329,7 @@ async function reviewRound(taskId: string, watch: (t: ReviewTarget, repo: string
       const timer = setTimeout(() => { trace.reason = "timeout"; abort.abort(); }, timeoutMs);
       const started = Date.now();
       try {
-        const res = await withAgentTurn(taskId, who.id, () => runTurn({ trace, cwd: wt, model, account: who, readOnly, signal: abort.signal, maxDelegates: 0, effort: role === "frontier" ? "high" : "medium", env: env as unknown as Record<string, string>,
+        const res = await withAgentTurn(taskId, who.id, () => runTurn({ trace, phi: turnPhi(live), cwd: wt, model, account: who, readOnly, signal: abort.signal, maxDelegates: 0, effort: role === "frontier" ? "high" : "medium", env: env as unknown as Record<string, string>,
           prompt: `${HEADLESS_RULES}\n\n${prompt}\n\n${ENVIRONMENT_RULES(env)}` }));
         updateTask(taskId, (x) => ({ ...(res.usage?.length ? { cost: addTurnCost(x.cost, res.usage) } : {}), turnHistory: [...(x.turnHistory ?? []), { at: started, stage: `review ${role}`, role, provider: who.provider as Provider, model, durationMs: Date.now() - started, usage: res.usage, error: res.error ?? res.limit?.text }] }));
         if (res.limit) { blockAccount(who.id, res.limit.resetsAt, res.limit.text); tried.add(who.id); continue; }

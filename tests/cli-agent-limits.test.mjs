@@ -5,13 +5,14 @@ import { createRequire } from 'node:module';
 import ts from 'typescript';
 import * as seatPool from '../src/shared/seatPool.ts';
 import * as cliTurnPolicy from '../src/shared/cliTurnPolicy.ts';
+import * as phi from '../src/shared/phi.ts';
 import { slackMessage, slackStatus, STATUS_TAIL } from '../src/shared/headless.ts';
 import { redactPii } from '../src/shared/redact.ts';
 const require = createRequire(import.meta.url);
 const code = ts.transpileModule(readFileSync(new URL('../src/cli/agent.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText.replace(/import\.meta\.url/g, '"file:///virtual/cli/agent.js"');
 function load(runStreamed, onStart = () => {}, onNew = () => {}) {
   const mocks = {
-    './state': { HOME: '/virtual' }, './telemetry': { recordTurn() {}, sumUsage: () => ({ usd: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }) }, '../shared/seatPool.ts': seatPool, '../shared/cliTurnPolicy.ts': cliTurnPolicy,
+    './state': { HOME: '/virtual' }, './telemetry': { recordTurn() {}, sumUsage: () => ({ usd: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }) }, '../shared/seatPool.ts': seatPool, '../shared/cliTurnPolicy.ts': cliTurnPolicy, '../shared/phi.ts': phi,
     '../main/cliRuntime': { cliBinary: () => '/virtual/codex' },
     '@openai/codex-sdk': { Codex: class { constructor(o) { onNew(o); } startThread(o) { onStart(o); return { runStreamed }; } } },
   };
@@ -152,4 +153,16 @@ test('an offline turn gets no network and no web search on Codex; an ordinary tu
   assert.equal(options.networkAccessEnabled, true);
   assert.equal(options.webSearchEnabled, true);
   assert.equal(options.webSearchMode, 'live');
+});
+
+test('every uncovered environment drops the covered variables, and Codex refuses to run under the guard', async () => {
+  const name = phi.COVERED_VARIABLES[0];
+  process.env[name] = 'value';
+  try {
+    const agent = load(async () => ({ events: (async function* () {})() }));
+    const env = agent.envFor({ provider: 'claude', auth: 'login', configDir: '/logins/a' });
+    assert.equal(env[name], undefined);
+    assert.equal(env.CLAUDE_CONFIG_DIR, '/logins/a');
+    await assert.rejects(agent.runTurn({ ...opts, phi: { guard: true } }), /Codex turns do not run while the PHI\/PII guard is on/);
+  } finally { delete process.env[name]; }
 });

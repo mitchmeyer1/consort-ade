@@ -15,7 +15,7 @@ npm link --ignore-scripts          # or: alias consort-cli="node $PWD/out/cli/in
 
 Needs Node 22.12+, git, and the GitHub CLI (`gh auth login`) for PRs and issues. The Claude Code and Codex binaries come with the install as platform packages; `consort-cli cli update` fetches newer ones.
 
-State lives in `~/.consort-cli/state.json` (mode 600; it holds API keys), logins in `~/.consort-cli/logins/<account>/`, worktrees in `~/.consort-cli/worktrees/`, logs in `~/.consort-cli/logs/`. Set `CONSORT_CLI_HOME` to move it.
+State lives in `~/.consort-cli/state.json` (mode 600; it holds account API keys, never the covered key, which stays in the Keychain or a file the PHI/PII guard points at), logins in `~/.consort-cli/logins/<account>/`, worktrees in `~/.consort-cli/worktrees/`, logs in `~/.consort-cli/logs/`. Set `CONSORT_CLI_HOME` to move it.
 
 ## Sentry ticket producer
 
@@ -27,7 +27,7 @@ A third scanner type, `sentry`, groups unresolved Sentry issues and creates tagg
 consort-cli setup
 ```
 
-The walk-through does everything below in order and tests each piece as it goes: the tools on the box (git, a signed-in `gh`, the Claude Code and Codex binaries), the issue sources (a ClickUp key checked against the API, the list looked up so you pick statuses from its own names, or a GitHub repo checked with `gh`), the repository path and base branch (verified on origin), optional project info resources (each checked as a git checkout that is not a scanner's repository), the AI accounts (each CLI login into this tool's own directory, separate from Consort desktop; API keys checked against the provider), Slack (a DM is sent and you confirm it arrived), and the permissions it needs (worktree directory writable, `git push --dry-run` to origin, the ClickUp list readable). Every step saves, so you can stop and rerun. On a rerun each step shows what is saved (scanners, the ClickUp token, branch prefix, accounts, Slack; secrets masked) and `y` or Enter keeps it, `n` replaces it or, for a scanner or account, removes it. Until it finishes, every command except `setup`, `status`, `cli …` and `help` refuses and says so.
+The walk-through does everything below in order and tests each piece as it goes: the tools on the box (git, a signed-in `gh`, the Claude Code and Codex binaries), the issue sources (a ClickUp key checked against the API, the list looked up so you pick statuses from its own names, or a GitHub repo checked with `gh`), the repository path and base branch (verified on origin), optional project info resources (each checked as a git checkout that is not a scanner's repository), the AI accounts (each CLI login into this tool's own directory, separate from Consort desktop; API keys checked against the provider), the PHI/PII guard and where the covered key lives (see [PHI/PII guard](#phipii-guard)), Slack (a DM is sent and you confirm it arrived), and the permissions it needs (worktree directory writable, `git push --dry-run` to origin, the ClickUp list readable). Every step saves, so you can stop and rerun. On a rerun each step shows what is saved (scanners, the ClickUp token, branch prefix, accounts, Slack; secrets masked) and `y` or Enter keeps it, `n` replaces it or, for a scanner or account, removes it. Until it finishes, every command except `setup`, `status`, `cli …` and `help` refuses and says so.
 
 The same things one at a time, if you prefer:
 
@@ -249,6 +249,31 @@ The file holds everything the scanners need: the ClickUp token, Slack, the branc
 Add as many accounts per provider as you have (`accounts add` once per login or key). A task sticks to one account per provider; when that account hits a usage limit the worker blocks it until the provider's reset time (or an hour when it does not say), logs the switch, and continues on the least recently used account of the same provider, starting a fresh session (the stage handlers pick up from the files on disk). With every account of a provider out, the worker tries the other provider with its own model and session. Only when neither provider has a usable account does the worker wait; it checks again every 30 seconds, including for newly added accounts. `accounts list` shows blocks; `accounts unblock <id>` clears one by hand.
 
 Nothing asks for permission: Claude Code runs with permissions bypassed and Codex with approvals off and full access on the box, so run consort-cli on a machine you dedicate to it. Both agents may search and read the web for research.
+
+## PHI/PII guard
+
+The organisation's BAA with Anthropic covers its API key, not Claude subscriptions, and OpenAI has none. With the guard on, no subscription or Codex session reads member-level data: member-data questions go to one covered turn on the API key, and only an answer that passed a PII gate comes back. Turn it on in setup (step 5) or with `consort-cli phi guard on`.
+
+**What changes with the guard on.**
+- Every turn starts with the member-data rules: the ladder (aggregates; then deriving over identifier columns without selecting them; then hashed identifiers inside predicates or joins only; then the covered analyst), schema discovery as the agent's own work, warehouses read-only, tests and evidence from the task's seeded local database only, and no personal data in anything that leaves the machine.
+- Codex accounts sit idle for every turn (build, review, oversight). Codex has no hook that can refuse a command before it runs, and OpenAI has no BAA with the organisation, so a Codex turn can be neither guarded nor covered. `accounts list` marks them, and review rotation is Claude-only.
+- An agent that needs member data writes one line, `[covered-analyst: <question>; tables: <db.schema.table, …>; shape: <the aggregate you want back>]`, and ends its turn. The worker runs the covered analyst and starts the agent's next turn with "Covered analyst answer": the gated answer, or "withheld by the PII gate (ssn ×1)" with an instruction to narrow the question, or why the analyst is unavailable. Logs record the outcome and categories only. Released answers are kept in `.consort/ship/COVERED.md`; a withheld or unavailable answer is posted to the thread as a ⚠️ line.
+
+**The covered analyst.** One Claude turn, the only session allowed to read member-level data. It runs in a scratch folder under `~/.consort-cli`, removed afterwards, with only Bash. Its hook lets through one granted warehouse command at a time: no pipes, redirects, chains or background runs, and a read-only statement after `-q` over the tables the question named. It has no web, no file tools, no MCP servers, no settings from anywhere, no saved transcript, and its own empty Claude config, so it cannot fall back to a subscription login. It is told to answer in the requested shape only, suppress cells under 11, bin ages 90 and over, cut ZIP codes to three digits, and end with the SQL it ran. Its final message is scanned before anything else sees it by `src/shared/piiGate.ts`, a port of the organisation's pii-gate: SSN, payment card, Medicare beneficiary identifier, medical record number, email outside the internal domains, phone, labelled date of birth and street address block it, and pasted rows are a warning. On any finding nothing is released. Names have no shape to check, so `redactPii` masks those in what is released.
+
+**The covered key.** Consort never reads or stores it. State keeps a reference: a macOS Keychain item (`phi key ref --keychain`, service `anthropic-phi-api-key` by default) or a file only you can read (`phi key ref --file <path>`, chmod 600, the way on Linux). The covered turn's own Claude Code fetches the key through an `apiKeyHelper` command, and the turn stops unless the session reports that helper as its credential. So the key is in no environment variable, and nothing falls back: no key, no covered turn. `phi key store` puts a key in the Keychain; `security` asks for it, so Consort never sees it.
+
+There is deliberately no environment-variable reference: a key exported in a variable reaches every process that inherits it. For the same reason Consort removes `COVERED_ANTHROPIC_API_KEY` and `CLAUDE_PII_COVERED` from every other agent's environment, and `phi status` checks whether your shell startup files put one back. zsh reads `~/.zshenv` for every shell, the agents' included, so an export there undoes the removal inside each agent's own shell. Export and import carry the reference and the guard's settings, never the key.
+
+| Command | Does |
+|---|---|
+| `phi status` | guard on or off, where the key is (never its value), what an agent's shell gets from your startup files |
+| `phi guard on\|off` | switch the guard; restart the daemon to apply it to running workers |
+| `phi key ref --keychain [service] [--account a]` / `--file <path>` / `phi key store` / `phi key clear` | point at the key, put it in the Keychain, or forget the reference |
+| `phi configure …` | `--grant` (the analyst's commands), `--warehouse-commands`, `--domains` (internal email), `--contact` (compliance contact), `--model`, `--min-cell`, `--max-active` (covered turns at once; one by default, on its own capacity lease) |
+| `phi smoke [--echo-shape]` | one covered turn: `released: ready`, or with `--echo-shape` a made-up identifier shape the gate must withhold |
+
+The first covered turn on a Mac may show a Keychain access prompt for `security`; choose Always Allow so later turns do not wait on it.
 
 ## Watching it
 

@@ -9,6 +9,7 @@ import * as seatPool from '../src/shared/seatPool.ts';
 import * as ship from '../src/shared/ship.ts';
 import * as cliModels from '../src/shared/cliModels.ts';
 import * as cliTurnPolicy from '../src/shared/cliTurnPolicy.ts';
+import * as phi from '../src/shared/phi.ts';
 import { usageBlock } from '../src/shared/usage.ts';
 import * as usageMod from '../src/shared/usage.ts';
 import * as ownerUpdates from '../src/cli/ownerUpdates.ts';
@@ -22,7 +23,7 @@ function harness(opts = {}) {
   const events = [], messages = [];
   const task = { id: 't', jobId: 'j', ticket: { id: 'T1', title: 'Example', url: 'https://ticket/1' }, worktree: '/virtual', branch: 'feature', accountIds: {}, sessions: {}, reviewsDone: 0, threadsSeen: [], envReadyAt: 1, evidenceValidatedAt: 1, feature: { stage: 'In Review', prs: ['https://github.com/a/b/pull/1'], evidenceAt: 1 }, ...opts.task };
   const accounts = opts.accounts ?? [{ id: 'c', provider: 'claude', name: 'Claude' }, { id: 'x', provider: 'codex', name: 'Codex' }];
-  const state = { tasks: [task], jobs: [{ id: 'j', repo: '/virtual', base: 'main', ...opts.job }], accounts, slack: { userId: 'owner' }, resources: opts.resources };
+  const state = { tasks: [task], jobs: [{ id: 'j', repo: '/virtual', base: 'main', ...opts.job }], accounts, slack: { userId: 'owner' }, resources: opts.resources, phi: opts.phi, covered: opts.covered };
   let interval, deadline;
   let clock = Date.now();
   class Clock extends Date { static now() { return clock; } }
@@ -33,7 +34,8 @@ function harness(opts = {}) {
     'node:util': { promisify: () => async (cmd, args) => { events.push(args.join(' ')); return opts.exec ? opts.exec(cmd, args) : { stdout: '' }; } },
     './evidenceRetry': evidenceRetry,
     '../shared/headless.ts': headless, '../shared/seatPool.ts': seatPool, '../shared/ship.ts': ship,
-    '../shared/cliModels.ts': cliModels, '../shared/cliTurnPolicy.ts': cliTurnPolicy,
+    '../shared/cliModels.ts': cliModels, '../shared/cliTurnPolicy.ts': cliTurnPolicy, '../shared/phi.ts': phi,
+    './covered': { runCoveredTurn: async r => { events.push(`covered:${r.ask.question}`); return opts.covered ? opts.covered(r) : { status: 'unavailable', reason: 'no covered key in tests' }; } },
       './capacity': { AccountUnavailableError: class extends Error {}, withAgentTurn: async (_, __, fn) => fn(), withEnvironmentSlot: async (_, fn) => fn() },
       './parallel': { runResourceResearch: async o => opts.runResourceResearch ? opts.runResourceResearch(o) : ({ summary: '', sections: [], failed: [] }), prepareResearchTasks: async () => [], recoverImplementation: async () => [], readImplementationTasks: async () => [], runImplementation: async o => opts.runImplementation?.(o) ?? ({ completed: [], commits: [], failed: [] }), runResearch: async o => opts.runResearch?.(o) ?? ({ summary: 'No conflicting flows found', results: [], reused: false }) }, '../shared/usage.ts': usageMod,
     '../shared/shipPrompt.ts': { shipPrompt: o => opts.shipPrompt?.(o) ?? 'fix findings' },
@@ -1032,4 +1034,37 @@ test('a task rebooted at Grilling grills again with fresh research and resource 
   assert.equal(forms[0].resources, true);
   assert.equal(h.task.rebootedAt, undefined);
   assert.ok(h.messages.some(m => /Rebooted by you at \*Grilling\*\. Grilling again with fresh research/.test(m.text)));
+});
+
+const marker = '[covered-analyst: How many members replied uncertain?; tables: analytics.consent.appended_phone; shape: a count and a share]';
+const coveredRun = async (extra) => {
+  const seen = [];
+  const h = harness({ task: grilling, runResearch: async () => ({ summary: 'research', reused: false, results: [] }), shipPrompt: () => 'coordinate stage',
+    turn: o => { seen.push(o); if (seen.length === 1) return { text: marker }; throw halt; }, ...extra });
+  await assert.rejects(h.work(), e => e === halt);
+  return { h, seen };
+};
+
+test('a covered-analyst marker runs the covered turn, and the next turn gets only the gated answer', async () => {
+  const { h, seen } = await coveredRun({ phi: { guard: true }, covered: () => ({ status: 'released', text: 'About a third of members replied uncertain.', warnings: [] }) });
+  assert.ok(h.events.includes('covered:How many members replied uncertain?'));
+  assert.match(seen[1].prompt, /## Covered analyst answer\nAbout a third of members replied uncertain\.\nUse it as given/);
+  assert.ok(seen.every(o => o.phi?.guard === true), 'every turn knows the guard is on');
+  assert.ok(seen.every(o => o.account.provider === 'claude'), 'Codex sits out');
+});
+
+test('a withheld answer reaches the agent and the owner as categories only; with the guard off no covered turn runs', async () => {
+  const withheld = await coveredRun({ phi: { guard: true }, covered: () => ({ status: 'withheld', categories: 'ssn ×1', shapes: 'ssn:NNN-NN-NNNN' }) });
+  assert.match(withheld.seen[1].prompt, /Withheld by the PII gate \(ssn ×1\)/);
+  assert.ok(withheld.h.messages.some(m => /Covered analyst answer withheld by the PII gate \(ssn ×1\)/.test(m.text)));
+  const off = await coveredRun({});
+  assert.ok(!off.h.events.some(e => e.startsWith('covered:')));
+  assert.match(off.seen[1].prompt, /## Covered analyst unavailable\nthe PHI\/PII guard is off on this machine/);
+  assert.ok(off.seen.every(o => o.phi?.guard === false));
+});
+
+test('with the guard on a Claude usage limit waits instead of falling back to Codex', async () => {
+  const h = harness({ phi: { guard: true }, task: { envReadyAt: undefined, feature: { stage: 'Implementing' } }, turn: o => { if (o.account.provider === 'claude') return { text: '', limit: { text: 'quota exhausted' } }; throw halt; } });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.deepEqual(h.events.filter(e => e.startsWith('turn:')), ['turn:claude']);
 });

@@ -120,3 +120,20 @@ test('a resource whose clone fails is left out with a note, one already here by 
   const plain = await buildBundle(state(), { readFile: () => undefined, remoteOf: async () => 'git@github.com:you/roster.git' });
   assert.equal('resources' in plain, false);
 });
+
+test('the guard settings and the covered key reference travel; the key never does, and import says where to put it', async () => {
+  const s = state();
+  s.phi = { guard: true, minCell: 11 };
+  s.covered = { kind: 'keychain', service: 'anthropic-phi-api-key', account: 'consort-cli' };
+  const b = await buildBundle(s, { readFile: () => undefined, remoteOf: async () => 'git@github.com:you/roster.git' });
+  assert.deepEqual(b.covered, s.covered);
+  assert.deepEqual(b.phi, s.phi);
+  const fresh = { version: 1, accounts: [], jobs: [], tasks: [] };
+  const r = await applyBundle(fresh, b, { repoDir: '/home/b/repos', exists: () => true, clone: async () => {}, writeCred() {}, create: createAccountStub });
+  assert.deepEqual(fresh.covered, s.covered);
+  assert.equal(fresh.phi.guard, true);
+  assert.ok(r.notes.some((n) => /covered key reference imported \(Keychain item anthropic-phi-api-key \(account consort-cli\)\); the key itself is not in the export/.test(n)));
+  const kept = { version: 1, accounts: [], jobs: [], tasks: [], covered: { kind: 'file', path: '/srv/key' } };
+  await applyBundle(kept, b, { repoDir: '/home/b/repos', exists: () => true, clone: async () => {}, writeCred() {}, create: createAccountStub });
+  assert.deepEqual(kept.covered, { kind: 'file', path: '/srv/key' }, 'a reference already here is kept unless --replace');
+});

@@ -10,6 +10,7 @@ import { hostname } from "node:os";
 import { isCodexLimitText, isUsageLimitText, limitFromRateEvent, type LimitHit } from "../shared/seatPool.ts";
 import type { TurnUsage } from "../shared/headless.ts";
 import { codexEffort, type EffortLevel } from "../shared/cliTurnPolicy.ts";
+import { COVERED_VARIABLES, PHI_RULES } from "../shared/phi.ts";
 import type { HookCallback, SettingSource } from "@anthropic-ai/claude-agent-sdk";
 
 /**
@@ -40,22 +41,35 @@ export const binaryFor = (provider: Provider): string => {
   return bin;
 };
 
-export type TurnOptions = { /** labels for the telemetry log; without it the turn is not recorded */ trace?: TurnTrace; cwd: string; prompt: string; model: string; account: Account; resume?: string; maxTurns?: number; onText?: (t: string) => void; signal?: AbortSignal; readOnly?: boolean; /** no web search or fetch, so what the turn read never leaves this machine except in its reply */ offline?: boolean; /** where Claude Code loads settings, CLAUDE.md and MCP servers from; a project info resource reader skips the notes repo's own */ settingSources?: SettingSource[]; effort?: EffortLevel; delegateModel?: string; maxDelegates?: number; /** the task's own ports and Docker names, on top of the process env */ env?: Record<string, string> };
+export type TurnOptions = { /** labels for the telemetry log; without it the turn is not recorded */ trace?: TurnTrace; cwd: string; prompt: string; model: string; account: Account; resume?: string; maxTurns?: number; onText?: (t: string) => void; signal?: AbortSignal; readOnly?: boolean; /** no web search or fetch, so what the turn read never leaves this machine except in its reply */ offline?: boolean; /** where Claude Code loads settings, CLAUDE.md and MCP servers from; a project info resource reader skips the notes repo's own */ settingSources?: SettingSource[]; effort?: EffortLevel; delegateModel?: string; maxDelegates?: number; /** the task's own ports and Docker names, on top of the process env */ env?: Record<string, string>; /** the PHI/PII guard (shared/phi.ts): on, every turn carries PHI_RULES and Codex does not run */ phi?: { guard: boolean } };
 export type Turn = { text: string; sessionId?: string; error?: string; limit?: LimitHit; /** what the turn spent, per model (Claude Code prices its own; Codex gives tokens only) */ usage?: TurnUsage[] };
 
 export const envFor = (account: Account, extra: Record<string, string> = {}): Record<string, string | undefined> => {
   const env: Record<string, string | undefined> = { ...process.env, ...extra };
   delete env.ANTHROPIC_API_KEY; delete env.OPENAI_API_KEY;
+  // the covered key belongs to the covered analyst alone, whatever the daemon inherited from its shell
+  for (const name of COVERED_VARIABLES) delete env[name];
   if (account.auth === "key" && account.apiKey) env[account.provider === "claude" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"] = account.apiKey;
   if (account.auth === "login" && account.configDir) env[account.provider === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME"] = account.configDir;
   return env;
 };
+
+/** what a Claude Code result message says the turn spent, per model; one query() is one turn here, so its totals are this turn's spend */
+export function resultUsage(m: any, model: string): TurnUsage[] | undefined {
+  const mu = m.modelUsage as Record<string, { inputTokens?: number; outputTokens?: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number; costUSD?: number }> | undefined;
+  if (mu && Object.keys(mu).length) return Object.entries(mu).map(([name, u]) => ({ model: name, tokens: { input: u.inputTokens ?? 0, output: u.outputTokens ?? 0, cacheRead: u.cacheReadInputTokens ?? 0, cacheWrite: u.cacheCreationInputTokens ?? 0 }, usd: typeof u.costUSD === "number" ? u.costUSD : undefined }));
+  if (m.usage) return [{ model, tokens: { input: m.usage.input_tokens ?? 0, output: m.usage.output_tokens ?? 0, cacheRead: m.usage.cache_read_input_tokens ?? 0, cacheWrite: m.usage.cache_creation_input_tokens ?? 0 }, usd: typeof m.total_cost_usd === "number" ? m.total_cost_usd : undefined }];
+  return undefined;
+}
 
 /** the turn in flight, so a stop signal can end the agent process instead of orphaning it */
 const inFlight = new Set<() => void>();
 export const stopAgents = () => { for (const stop of inFlight) { try { stop(); } catch {} } inFlight.clear(); };
 
 export async function runTurn(o: TurnOptions): Promise<Turn> {
+  // every caller picks accounts through turnAccounts; this is the backstop: Codex has no hook that can refuse a command and no BAA
+  if (o.phi?.guard && o.account.provider === "codex") throw new Error("Codex turns do not run while the PHI/PII guard is on");
+  if (o.phi?.guard) o = { ...o, prompt: `${PHI_RULES}\n\n${o.prompt}` };
   const at = Date.now();
   let res: Turn | undefined;
   try {
@@ -127,10 +141,7 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
       if ((m.error === "rate_limit" || m.error === "billing_error") && isUsageLimitText(said)) limitText = said;
       else for (const b of m.message?.content ?? []) if (b.type === "text" && b.text) { chunks.push(b.text); o.onText?.(b.text); }
     } else if (m.type === "result") {
-      // one query() is one turn here, so its per-model totals are this turn's spend
-      const mu = m.modelUsage as Record<string, { inputTokens?: number; outputTokens?: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number; costUSD?: number }> | undefined;
-      if (mu && Object.keys(mu).length) usage = Object.entries(mu).map(([model, u]) => ({ model, tokens: { input: u.inputTokens ?? 0, output: u.outputTokens ?? 0, cacheRead: u.cacheReadInputTokens ?? 0, cacheWrite: u.cacheCreationInputTokens ?? 0 }, usd: typeof u.costUSD === "number" ? u.costUSD : undefined }));
-      else if (m.usage) usage = [{ model: o.model, tokens: { input: m.usage.input_tokens ?? 0, output: m.usage.output_tokens ?? 0, cacheRead: m.usage.cache_read_input_tokens ?? 0, cacheWrite: m.usage.cache_creation_input_tokens ?? 0 }, usd: typeof m.total_cost_usd === "number" ? m.total_cost_usd : undefined }];
+      usage = resultUsage(m, o.model) ?? usage;
       // a usage limit ends the turn as a "success" flagged is_error, with the limit notice as its result
       const said = [m.result, ...(m.errors ?? [])].find(isUsageLimitText);
       if (said) limitText = said;

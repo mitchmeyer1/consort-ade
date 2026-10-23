@@ -21,6 +21,9 @@ import { DEFAULT_STATUSES, loadState, LOGINS_DIR, newId, saveState, STATE_FILE, 
 
 import { bad, banner, dim, head, mint, ok } from "./theme";
 import { resourceProblem } from "../shared/resources.ts";
+import { DEFAULT_COVERED_SERVICE, describeKeyRef, phiSettings, type CoveredKeyRef } from "../shared/phi.ts";
+import { checkCoveredKey } from "./covered";
+import { shellExposure, storeKeychainKey } from "./phiCommands";
 import { findBrowser } from "./evidence";
 
 const run = promisify(execFile);
@@ -297,8 +300,49 @@ async function resourceSteps(ask: Ask): Promise<void> {
   }
 }
 
+/** the PHI/PII guard: on or off, and where the covered key lives; Consort stores the reference only */
+async function phiSteps(ask: Ask, terminal: { pause: () => void; resume: () => void }): Promise<void> {
+  why("PHI/PII guard", {
+    for: "keeping member-level data out of sessions the organisation's BAA does not cover: subscription logins and Codex. On, every agent gets the member-data rules, Codex sits out, and a member-data question goes to one covered analyst turn whose answer passes a PII gate before anything else sees it.",
+    where: "the covered (BAA) Anthropic key stays where you keep it: a Keychain item on macOS, or a file only you can read. Consort stores only that reference; the covered turn's own Claude Code fetches the key, so it is in no environment variable an agent could print.",
+    can: "run read-only warehouse queries (snow, snowsql) over the tables a question names, in a scratch folder with no web, no files and no saved transcript.",
+    not: "be exported, printed, or reach any other agent.",
+  });
+  let s = loadState();
+  const phi = phiSettings(s);
+  if (s.phi && await keep(ask, "PHI/PII guard", `${phi.guard ? "on" : "off"} · covered key ${describeKeyRef(s.covered)}`)) return;
+  const on = await yes(ask, "Turn the PHI/PII guard on?", phi.guard);
+  s = loadState(); s.phi = { ...s.phi, guard: on }; saveState(s);
+  if (!on) { console.log(dim("Guard off: agents are not told to keep member data out, and Codex runs.")); return; }
+  for (;;) {
+    const kind = (await ask("Where is the covered key: keychain or file", { default: process.platform === "darwin" ? "keychain" : "file" })).toLowerCase();
+    let ref: CoveredKeyRef;
+    if (kind === "keychain") {
+      const service = await ask("Keychain service", { default: s.covered?.kind === "keychain" ? s.covered.service : DEFAULT_COVERED_SERVICE });
+      const account = await ask("Keychain account (empty for the first item with that service)");
+      ref = { kind: "keychain", service, ...(account ? { account } : {}) };
+    } else if (kind === "file") ref = { kind: "file", path: resolve(await ask("Path of a file holding only the key (chmod 600)")) };
+    else { console.log(bad("type keychain or file")); continue; }
+    let found = await checkCoveredKey(ref);
+    if (!found.ok && ref.kind === "keychain" && await yes(ask, `${found.reason}. Store the key there now? security asks for it; Consort never sees it`, true)) {
+      terminal.pause();
+      const stored = await storeKeychainKey(ref.service, ref.account ?? "consort-cli");
+      terminal.resume();
+      if (stored) { ref = { ...ref, account: ref.account ?? "consort-cli" }; found = await checkCoveredKey(ref); }
+    }
+    s = loadState(); s.covered = ref; saveState(s);
+    console.log(found.ok ? ok(`covered key: ${describeKeyRef(ref)} (found; its value is never read here)`) : bad(`covered key: ${describeKeyRef(ref)} saved, but ${found.reason}; the covered analyst stays unavailable until it is there`));
+    break;
+  }
+  const exposed = await shellExposure();
+  if (exposed.length) console.log(bad(`your shell startup files export ${exposed.join(", ")} into every new shell, the agents' included. Consort strips them from each agent's environment, but the agent's own shell gets them back; drop that export and keep the key in the reference above.`));
+  const domains = await ask("Internal email domains the gate lets through (comma-separated)", { default: phi.internalEmailDomains.join(",") });
+  const contact = await ask("Compliance contact named in the owner's alert (empty for none)", { default: phi.complianceContact });
+  s = loadState(); s.phi = { ...s.phi, internalEmailDomains: domains.split(",").map((d) => d.trim()).filter(Boolean), ...(contact ? { complianceContact: contact } : {}) }; saveState(s);
+}
+
 export async function runSetup(): Promise<void> {
-  const { ask, close } = prompter();
+  const { ask, close, pause, resume } = prompter();
   try {
     console.log(banner("setup", [dim("Gets this machine ready to pick up tickets"), dim("and ship them unattended. Each step saves"), dim("as it goes; rerun setup any time.")]));
     const toolsFine = await checkTools();
@@ -364,7 +408,11 @@ export async function runSetup(): Promise<void> {
     }
 
     // ── slack ──────────────────────────────────────────────────────────────────────────────
-    console.log(head("5. Slack, where it asks you things"));
+    // ── PHI/PII guard ─────────────────────────────────────────────────────────────────
+    console.log(head("5. PHI/PII guard"));
+    await phiSteps(ask, { pause, resume });
+
+    console.log(head("6. Slack, where it asks you things"));
     why("Slack bot token", {
       for: "the only way consort-cli talks to you: one DM thread per ticket with progress, the few questions it cannot decide, and the ready-to-merge ping. You answer in the thread.",
       where: "a Slack app with a bot user, yours or an existing one: api.slack.com/apps → your app → OAuth & Permissions → Bot User OAuth Token (starts xoxb-). A user token (xoxp-) or a webhook URL will not do.",
@@ -417,7 +465,7 @@ export async function runSetup(): Promise<void> {
     }
 
     // ── permissions on the box ──────────────────────────────────────────────────────────────
-    console.log(head("6. Permissions"));
+    console.log(head("7. Permissions"));
     s = loadState();
     for (const job of s.jobs) {
       const probe = join(WORK_DIR, `.probe-${process.pid}`);

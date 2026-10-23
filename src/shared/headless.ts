@@ -35,7 +35,7 @@ Consort is running this feature unattended on a server. There is no user in the 
 
 ${AI_COST_POLICY}
 
-- No personal data in anything you write for Slack, ticket comments or questions: never repeat a person's name, email, phone number, street address, date of birth, record number or any patient detail from the ticket, the code or the data. Say "the patient", "the member" or "a user" instead. GitHub logins and Slack handles are fine.
+- No personal data in anything you write for Slack, ticket comments, questions, PR titles and bodies, review comments, commit messages, code, fixtures or evidence: never repeat a person's name, email, phone number, street address, date of birth, record number or any patient detail from the ticket, the code or the data. Say "the patient", "the member" or "a user" instead. GitHub logins and Slack handles are fine.
 - Decide anything straightforward yourself: naming, file placement, which existing pattern to follow, test shape, obvious defaults. Record each such decision as one line under "Assumptions" in ${"`"}.consort/ship/GRILLING.md${"`"} and in the spec, so a reader can overturn it later.
 - If the business purpose, acceptance criteria, or design is materially unclear, ask the owner before building or changing behavior.
 - Ask only when the answer changes scope, cost outside the pre-authorized AI allowance, data, security, or user-facing behaviour in a way the ticket does not settle and the code does not imply. Put each such question on its own line as ${"`"}[ask-user: <the question, with your recommended answer>]${"`"}, then end your turn. Consort relays them over Slack and sends the answers back as the next message. Never block on anything you did not mark this way.
@@ -771,7 +771,7 @@ export function evidenceProblems(m: EvidenceManifest | undefined): string[] {
   return issues;
 }
 
-export const EVIDENCE_PROMPT = (i: { helper: string; ticketUrl: string; prUrl: string; worktree: string; repoRoot?: string }) => `## This turn: evidence the feature works, for the people who will merge it
+export const EVIDENCE_PROMPT = (i: { helper: string; ticketUrl: string; prUrl: string; worktree: string; repoRoot?: string; /** the PHI/PII guard is on: rows come from the task's own seeded database only */ phi?: boolean }) => `## This turn: evidence the feature works, for the people who will merge it
 
 The PR has been through Consort's review rounds. Before it goes to human reviewers, produce proof a reviewer can look at without running anything, and write it to ${EVIDENCE_DIR}/ in this worktree with a manifest at ${EVIDENCE_MANIFEST}.
 
@@ -783,7 +783,7 @@ An existing required key covered by the sub-dollar allowance can be used without
 
 Decide from SPEC.md and the diff whether a frontend is involved.
 - **Frontend involved:** seed a local database with data that exercises the feature (use the repo's own seed or fixture scripts, migrations and docker-compose if it has them; invent plausible data where it has none), start the app locally, and take screenshots of the feature in use: the before state where it helps, each step, the result. Take them with the helper: \`node ${i.helper} <url> [width height]\` captures a page to a PNG and prints its path; move or copy each PNG into ${EVIDENCE_DIR}/ with a descriptive file name. Stop the app and any containers when done.
-- **No frontend:** run the feature end to end and capture what proves it: the commands and their output, database queries and their rows, API calls and responses, test runs. Save each as text in the manifest, and also as a picture: pipe the text to \`node ${i.helper} --text "<title>" > ${EVIDENCE_DIR}/<name>.png\`, which renders it as a terminal image.
+- **No frontend:** run the feature end to end and capture what proves it: the commands and their output, database queries and their rows${i.phi ? " (from this task's seeded local database only, never a warehouse or real member rows)" : ""}, API calls and responses, test runs. Save each as text in the manifest, and also as a picture: pipe the text to \`node ${i.helper} --text "<title>" > ${EVIDENCE_DIR}/<name>.png\`, which renders it as a terminal image.
 - Both when both apply.
 
 Manifest schema (JSON):

@@ -9,9 +9,11 @@ import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { selectCliModel, type CliModelRole } from "../shared/cliModels.ts";
 import { MODEL_ROLE_RULES, BUILD_EFFORT_RULE, parseBuildEffort, parseModelEscalation, roleEffort, stageModelRole } from "../shared/cliTurnPolicy.ts";
-import { AccountUnavailableError, withAgentTurn, withEnvironmentSlot } from "./capacity";
+import { AccountUnavailableError, COVERED_ACCOUNT, withAgentTurn, withEnvironmentSlot } from "./capacity";
 import { prepareResearchTasks, readImplementationTasks, recoverImplementation, runImplementation, runResearch, runResourceResearch, type ParallelRun } from "./parallel";
 import type { Resource } from "../shared/resources.ts";
+import { coveredAnswerPrompt, parseCoveredAnalyst, phiSettings, turnAccounts, turnPhi, type CoveredAsk } from "../shared/phi.ts";
+import { runCoveredTurn } from "./covered";
 import { excludeConsortDir, fetchTicket, writeTicketFile } from "../main/ship";
 import { addWorktree } from "../main/git";
 import type { Provider } from "../shared/types";
@@ -66,7 +68,7 @@ export async function workTask(taskId: string): Promise<void> {
   if (!job) throw new Error(`Task ${taskId} belongs to a job that no longer exists.`);
   const source = sourceFor(job, state.clickupKey);
   const slack = state.slack ? new Slack(state.slack) : undefined;
-  const have = providersOf(state.accounts);
+  const have = providersOf(turnAccounts(state));
   const builderProvider: Provider | undefined = have.claude ? "claude" : have.codex ? "codex" : undefined;
   if (!builderProvider) throw new Error("No AI accounts: run `consort-cli accounts add` first.");
   const models = seedModels();
@@ -224,7 +226,7 @@ export async function workTask(taskId: string): Promise<void> {
       const pickAny = async (): Promise<Account | undefined> => {
         const now = Date.now();
         const providers: Provider[] = fixedModel ? [provider] : ["claude", "codex"];
-        const open = live.accounts.filter((a) => providers.includes(a.provider) && !(a.blockedUntil && a.blockedUntil > now));
+        const open = turnAccounts(live).filter((a) => providers.includes(a.provider) && !(a.blockedUntil && a.blockedUntil > now));
         // every account already failed once this turn: start over rather than report a usage limit that is not there
         if (open.length && open.every((a) => tried.has(a.id))) tried.clear();
         const usable = open.filter((a) => !tried.has(a.id));
@@ -304,7 +306,7 @@ export async function workTask(taskId: string): Promise<void> {
         quietSince = Date.now();
         usageTimer = setInterval(checkUsage, 60_000);
         deadline = timeoutMs ? setTimeout(() => { timedOut = true; trace.reason = "timeout"; abort.abort(); }, timeoutMs) : undefined;
-        return runTurn({ trace, cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}${feature.stage === "Grilling" && !resourceTurn ? `\n${BUILD_EFFORT_RULE}` : ""}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}${resourceTurn ? "" : `\n\n${ENVIRONMENT_RULES(turnEnv)}`}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: turnEnv, signal: abort.signal, readOnly, ...(resourceTurn ? { offline: true, settingSources: ["user" as const] } : {}), effort, delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { quietSince = Date.now(); const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
+        return runTurn({ trace, cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}${feature.stage === "Grilling" && !resourceTurn ? `\n${BUILD_EFFORT_RULE}` : ""}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}${resourceTurn ? "" : `\n\n${ENVIRONMENT_RULES(turnEnv)}`}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: turnEnv, signal: abort.signal, readOnly, ...(resourceTurn ? { offline: true, settingSources: ["user" as const] } : {}), phi: turnPhi(live), effort, delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { quietSince = Date.now(); const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
       }, reviewUnits); }
       catch (e) { if (e instanceof AccountUnavailableError) { continue; } throw e; }
       finally { active = false; mine.set(who.id, (mine.get(who.id) ?? 1) - 1); if (usageTimer) clearInterval(usageTimer); if (deadline) clearTimeout(deadline); }
@@ -339,7 +341,7 @@ export async function workTask(taskId: string): Promise<void> {
       if (res.error) {
         tried.add(who.id);
         if (managesSession) updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: undefined } }));
-        const untried = live.accounts.some((a) => (fixedModel ? a.provider === provider : true) && !tried.has(a.id) && !(a.blockedUntil && a.blockedUntil > Date.now()));
+        const untried = turnAccounts(live).some((a) => (fixedModel ? a.provider === provider : true) && !tried.has(a.id) && !(a.blockedUntil && a.blockedUntil > Date.now()));
         // a network error says nothing about the model: try another account now; when every one has failed, wait and start over
         if (/ENOTFOUND|EAI_AGAIN|ECONNRESET|ETIMEDOUT|ECONNREFUSED|socket hang up|Can't reach the API|network error|fetch failed/i.test(res.error)) {
           lastCrash = `${who.name} (${provider} ${model}): ${res.error}`;
@@ -386,6 +388,21 @@ export async function workTask(taskId: string): Promise<void> {
     const file = join(task.worktree, ".consort", "pr-review", `pr-${pr}.review.json`);
     try { return reviewSummary(parseReview(readFileSync(file, "utf8"))); } catch { return undefined; }
   };
+  /** a member-data question from an uncovered turn: the covered analyst answers it, and only what passed the PII gate comes back */
+  const askCovered = async (request: CoveredAsk | { error: string }): Promise<string> => {
+    if ("error" in request) return `## Covered analyst not asked\nThe [covered-analyst: …] marker was malformed: ${request.error}. Write it as [covered-analyst: <question>; tables: <db.schema.table, …>; shape: <the aggregate you want back>].`;
+    const live = loadState();
+    const phi = phiSettings(live);
+    if (!phi.guard) return coveredAnswerPrompt({ status: "unavailable", reason: "the PHI/PII guard is off on this machine, so no covered analyst is set up" });
+    activity("covered analyst: answering a member-data question");
+    const result = await withAgentTurn(taskId, COVERED_ACCOUNT, () => runCoveredTurn({ taskId, ask: request, phi, ref: live.covered }));
+    if (result.usage?.length) updateTask(taskId, (t) => ({ cost: addTurnCost(t.cost, result.usage!) }));
+    // logs carry the outcome and categories only, never the answer
+    log(task, result.status === "released" ? `covered analyst: released (${result.text.length} chars)` : result.status === "withheld" ? `covered analyst: withheld by the PII gate (${result.categories})` : `covered analyst unavailable: ${result.reason}`);
+    if (result.status === "released") writeFileSync(join(task.worktree, ".consort", "ship", "COVERED.md"), `## ${new Date().toISOString()}\nQuestion: ${request.question}\n\n${result.text}\n\n`, { flag: "a" });
+    else await say(`⚠️ Covered analyst ${result.status === "withheld" ? `answer withheld by the PII gate (${result.categories}); the agent will narrow its question` : `unavailable: ${result.reason}`}.`);
+    return coveredAnswerPrompt(result);
+  };
   const applyReply = async (text: string) => {
     const change = parseShipMarkers(text);
     // the spec's turns set the build effort; a review or an escalated build turn never resets it
@@ -399,8 +416,11 @@ export async function workTask(taskId: string): Promise<void> {
       if (feature.stage === "In Review") await source.setStatus(task.ticket.id, "review").catch((e) => log(task, `status failed: ${e.message}`));
     }
     for (const pr of feature.prs) if (!before.prs.includes(pr)) await say(slackLines.pr(pr));
+    const covered = parseCoveredAnalyst(text);
+    const coveredBlock = covered ? await askCovered(covered) : "";
     const questions = parseAskUser(text);
-    if (questions.length) { const answer = await ask(questions); pendingUser = `The owner answered on Slack:\n\n${answer}\n\nContinue from where you stopped; apply the answers and do not ask these again.`; idle = 0; return true; }
+    if (questions.length) { const answer = await ask(questions); pendingUser = `${coveredBlock ? `${coveredBlock}\n\n` : ""}The owner answered on Slack:\n\n${answer}\n\nContinue from where you stopped; apply the answers and do not ask these again.`; idle = 0; return true; }
+    if (coveredBlock) { pendingUser = `${coveredBlock}\n\nContinue from where you stopped.`; idle = 0; return true; }
     idle = feature.stage === before.stage && !change ? idle + 1 : 0;
     return false;
   };
@@ -688,7 +708,7 @@ export async function workTask(taskId: string): Promise<void> {
       try {
         const browser = await findBrowser();
         const helper = browser ? writeScreenshotHelper(task.worktree, browser) : undefined;
-        const prompt = EVIDENCE_PROMPT({ helper: helper ?? "(no browser installed: backend output may be text; frontend screenshots require a browser)", ticketUrl: task.ticket.url, prUrl: prUrl!, worktree: task.worktree, repoRoot: job.repo });
+        const prompt = EVIDENCE_PROMPT({ phi: phiSettings(loadState()).guard, helper: helper ?? "(no browser installed: backend output may be text; frontend screenshots require a browser)", ticketUrl: task.ticket.url, prUrl: prUrl!, worktree: task.worktree, repoRoot: job.repo });
         await resumeEvidenceTurn("Gathering evidence", async (continuation) => {
           const text = await turn(`${prompt}\n\n${guidance}\n\n${continuation}`, builderProvider, "implementation", true, EVIDENCE_TURN_MS);
           await completeReply(text, EVIDENCE_TURN_MS, "implementation");

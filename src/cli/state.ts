@@ -159,6 +159,10 @@ export type Task = {
   cost?: TaskCost;
 };
 export type CliState = { capacity?: { maxActiveTurns?: number; maxOpenTasks?: number; maxEnvironments?: number }; version: 1; accounts: Account[]; slack?: SlackConfig; clickupKey?: string; branchPrefix?: string; jobs: Job[]; tasks: Task[];
+  /** where the covered (BAA) Anthropic key lives; Consort never stores the key itself (shared/phi.ts) */
+  covered?: import("../shared/phi.ts").CoveredKeyRef;
+  /** the PHI/PII guard's settings; absent means off */
+  phi?: Partial<import("../shared/phi.ts").PhiSettings>;
   /** notes checkouts every Grilling reads before asking the owner (shared/resources.ts); set by setup or `resources add` */
   resources?: import("../shared/resources.ts").Resource[];
   /** set by `consort-cli setup` at the end of the walk-through; every other command checks it */
