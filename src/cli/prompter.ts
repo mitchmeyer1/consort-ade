@@ -33,5 +33,6 @@ export function createPrompter(input: Readable & { isTTY?: boolean } = process.s
       output.write("\n");
     }
   };
-  return { ask, close: () => rl.close() };
+  // while another program owns the terminal (security asking for a key), readline must not read its keystrokes
+  return { ask, close: () => rl.close(), pause: () => rl.pause(), resume: () => rl.resume() };
 }

@@ -5,6 +5,9 @@ import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkpoint } from '../src/cli/checkpoint.ts';
+import { pushGuard } from '../src/cli/phiGate.ts';
+import { phiSettings } from '../src/shared/phi.ts';
+import * as pii from './helpers/fake-pii.mjs';
 
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 async function repo(t) {
@@ -64,4 +67,21 @@ test('checkpoints work when .env is gitignored, and never stage a new secret fil
   const r = await checkpoint(work, 'feature', 'with ignored files');
   assert.deepEqual(r, { committed: true, pushed: true });
   assert.deepEqual(git(remote, 'show', '--name-only', '--format=', 'feature').split('\n').sort(), ['.gitignore', 'a.txt']);
+});
+
+test('under the PHI/PII guard a checkpoint commits but does not push lines carrying an identifier', async (t) => {
+  const { remote, work } = await repo(t);
+  const gate = { phi: phiSettings({ phi: { guard: true } }), record() {} };
+  const base = git(work, 'rev-parse', 'HEAD');
+  await writeFile(join(work, 'fixture.ts'), `export const member = "${pii.ssn()}";\n`);
+  const held = await checkpoint(work, 'feature', 'Consort checkpoint: Implementing', undefined, pushGuard(base, gate));
+  assert.equal(held.committed, true);
+  assert.equal(held.pushed, false);
+  assert.equal(held.withheld, true);
+  assert.match(held.error, /^Not pushed, by the PII gate: fixture\.ts:1 ssn ×1\./);
+  assert.equal(git(remote, 'branch', '--list', 'feature'), '');
+  git(work, 'reset', '-q', '--soft', base);
+  await writeFile(join(work, 'fixture.ts'), `export const member = "${pii.placeholderSsn()}";\n`);
+  const clean = await checkpoint(work, 'feature', 'Consort checkpoint: Implementing', undefined, pushGuard(base, gate));
+  assert.equal(clean.pushed, true);
 });

@@ -16,6 +16,8 @@ import type { ShipFeature, ShipTicket } from "../shared/ship";
 export const HOME = process.env.CONSORT_CLI_HOME ?? join(homedir(), ".consort-cli");
 export const STATE_FILE = join(HOME, "state.json");
 export const LOG_DIR = join(HOME, "logs");
+/** what the PII gate caught in an uncovered context: one JSON line each, categories and masked shapes only (cli/phiGate.ts) */
+export const PHI_INCIDENTS = join(LOG_DIR, "phi-incidents.jsonl");
 export const LOGINS_DIR = join(HOME, "logins");
 export const WORK_DIR = join(HOME, "worktrees");
 /**
@@ -159,6 +161,12 @@ export type Task = {
   cost?: TaskCost;
 };
 export type CliState = { capacity?: { maxActiveTurns?: number; maxOpenTasks?: number; maxEnvironments?: number }; version: 1; accounts: Account[]; slack?: SlackConfig; clickupKey?: string; branchPrefix?: string; jobs: Job[]; tasks: Task[];
+  /** where the covered (BAA) Anthropic key lives; Consort never stores the key itself (shared/phi.ts) */
+  covered?: import("../shared/phi.ts").CoveredKeyRef;
+  /** the PHI/PII guard's settings; absent means off */
+  phi?: Partial<import("../shared/phi.ts").PhiSettings>;
+  /** notes checkouts every Grilling reads before asking the owner (shared/resources.ts); set by setup or `resources add` */
+  resources?: import("../shared/resources.ts").Resource[];
   /** set by `consort-cli setup` at the end of the walk-through; every other command checks it */
   setupCompletedAt?: number;
   /** this install's claim name: hostname plus a random suffix, minted on first use */

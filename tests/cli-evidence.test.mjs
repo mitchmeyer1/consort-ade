@@ -7,6 +7,9 @@ import { createRequire } from 'node:module';
 import ts from 'typescript';
 import * as headless from '../src/shared/headless.ts';
 import * as ship from '../src/shared/ship.ts';
+import * as phiGate from '../src/cli/phiGate.ts';
+import { phiSettings } from '../src/shared/phi.ts';
+import * as pii from './helpers/fake-pii.mjs';
 const require = createRequire(import.meta.url);
 const code = ts.transpileModule(readFileSync(new URL('../src/cli/evidence.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 function fixture(t, options = {}) {
@@ -20,7 +23,7 @@ function fixture(t, options = {}) {
   writeFileSync(join(dir, 'map.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jT1sAAAAASUVORK5CYII=', 'base64'));
   const calls = [];
   const comments = [];
-  const mocks = { '../shared/headless.ts': headless, '../shared/ship.ts': ship,
+  const mocks = { '../shared/headless.ts': headless, '../shared/ship.ts': ship, './phiGate.ts': phiGate,
     'node:util': { promisify: () => async (cmd, args) => { calls.push(args); if (options.prFails) throw new Error('PR comment rejected'); return { stdout: '' }; } },
   };
   const mod = { exports: {} };
@@ -129,4 +132,16 @@ test('changed image contents invalidate a saved upload receipt', async t => {
   writeFileSync(join(f.dir, 'map.png'), Buffer.from('changed image fixture'));
   await f.api.publishEvidence(f.args);
   assert.equal(f.calls.filter(c => c === 'upload').length, 2);
+});
+
+test('under the PHI/PII guard, evidence text carrying an identifier stops before any upload or comment', async t => {
+  const f = fixture(t);
+  f.manifest.summary = `Map loads for the member at ${pii.address()}`;
+  f.save();
+  const gate = { phi: phiSettings({ phi: { guard: true } }), record() {} };
+  await assert.rejects(f.api.publishEvidence({ ...f.args, gate }), (e) => e instanceof phiGate.PiiWithheldError && /^address ×\d$/.test(e.categories));
+  assert.equal(f.calls.length, 0);
+  f.manifest.summary = 'Map loads and shows the selected group.';
+  f.save();
+  assert.equal((await f.api.publishEvidence({ ...f.args, gate })).prComment, true);
 });

@@ -3,19 +3,24 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { HOME, host, newId, type Account, type CliState, type Job } from "./state.ts";
+import type { Resource } from "../shared/resources.ts";
+import { describeKeyRef, type CoveredKeyRef, type PhiSettings } from "../shared/phi.ts";
 
 const run = promisify(execFile);
 
 /**
  * Moving scanners to another machine. `export` writes one file with everything a box needs
  * to run the same scanners: the ClickUp token, Slack, the branch prefix, every account (API
- * key, or the login's credential file), and every scanner with its repo's remote URL so the
- * other box can clone it. `import` reads that file into a fresh or existing install. Tasks in
+ * key, or the login's credential file), every scanner with its repo's remote URL, and every
+ * project info resource with its remote URL, so the other box can clone them. The PHI/PII
+ * guard's settings and the covered key's reference travel; the covered key itself never does,
+ * since Consort never holds it. `import` reads that file into a fresh or existing install. Tasks in
  * flight are not moved: their worktrees live on the box that started them.
  */
 export type BundleAccount = { name: string; provider: Account["provider"]; auth: Account["auth"]; apiKey?: string; maxActiveTurns?: number; credentials?: { file: string; content: string } };
 export type BundleScanner = Omit<Job, "id" | "lastScanAt" | "scanStartedAt" | "repo"> & { repoPath: string; repoRemote?: string };
-export type Bundle = { kind: "consort-cli-bundle"; version: 1; exportedAt: number; host: string; capacity?: CliState["capacity"]; clickupKey?: string; slack?: CliState["slack"]; branchPrefix?: string; accounts: BundleAccount[]; scanners: BundleScanner[] };
+export type BundleResource = { name: string; kind: Resource["kind"]; path: string; remote?: string };
+export type Bundle = { kind: "consort-cli-bundle"; version: 1; exportedAt: number; host: string; capacity?: CliState["capacity"]; clickupKey?: string; slack?: CliState["slack"]; branchPrefix?: string; accounts: BundleAccount[]; scanners: BundleScanner[]; resources?: BundleResource[]; covered?: CoveredKeyRef; phi?: Partial<PhiSettings> };
 
 /** the credential file a login keeps in its own directory (Claude Code on macOS keeps it in the Keychain instead, so there may be none) */
 export const credentialFile = (provider: Account["provider"]) => (provider === "claude" ? ".credentials.json" : "auth.json");
@@ -32,15 +37,20 @@ export async function buildBundle(s: CliState, opts: { only?: string[]; readFile
     const { id: _id, lastScanAt: _l, scanStartedAt: _scan, repo, ...rest } = j;
     scanners.push({ ...rest, repoPath: repo, repoRemote: await remoteOf(repo) });
   }
-  return { kind: "consort-cli-bundle", version: 1, exportedAt: Date.now(), host: s.hostId ?? host(), capacity: s.capacity, clickupKey: s.clickupKey, slack: s.slack, branchPrefix: s.branchPrefix, accounts, scanners };
+  const resources: BundleResource[] = [];
+  for (const r of s.resources ?? []) resources.push({ name: r.name, kind: r.kind, path: r.path, remote: await remoteOf(r.path) });
+  return { kind: "consort-cli-bundle", version: 1, exportedAt: Date.now(), host: s.hostId ?? host(), capacity: s.capacity, clickupKey: s.clickupKey, slack: s.slack, branchPrefix: s.branchPrefix, accounts, scanners, ...(resources.length ? { resources } : {}), ...(s.covered ? { covered: s.covered } : {}), ...(s.phi ? { phi: s.phi } : {}) };
 }
 
-export type ImportReport = { added: string[]; kept: string[]; needLogin: string[]; cloned: string[] };
+/** `notes`: what was imported without a piece it needed, and how to finish it by hand */
+export type ImportReport = { added: string[]; kept: string[]; needLogin: string[]; cloned: string[]; notes: string[] };
 
 /**
  * Fold a bundle into this box's state: settings fill gaps (or replace, with `replace`), accounts
  * and scanners are added unless one with the same name is here already, and a scanner's repo is
- * used where the bundle's path exists here, else cloned from its remote under `repoDir`.
+ * used where the bundle's path exists here, else cloned from its remote under `repoDir`. A project
+ * info resource is found or cloned the same way; one that is neither is left out with a note,
+ * since a task runs without it.
  */
 export async function applyBundle(s: CliState, b: Bundle, opts: { repoDir?: string; replace?: boolean; exists?: (p: string) => boolean; clone?: (remote: string, into: string) => Promise<void>; writeCred?: (p: string, content: string) => void; create: (s: CliState, provider: Account["provider"], name: string, apiKey?: string) => Account }): Promise<ImportReport> {
   if (b.kind !== "consort-cli-bundle") throw new Error("not a consort-cli export file");
@@ -49,7 +59,15 @@ export async function applyBundle(s: CliState, b: Bundle, opts: { repoDir?: stri
   const writeCred = opts.writeCred ?? ((p: string, content: string) => { mkdirSync(join(p, ".."), { recursive: true, mode: 0o700 }); writeFileSync(p, content, { mode: 0o600 }); });
   const create = opts.create;
   const repoDir = opts.repoDir ?? join(HOME, "repos");
-  const r: ImportReport = { added: [], kept: [], needLogin: [], cloned: [] };
+  const r: ImportReport = { added: [], kept: [], needLogin: [], cloned: [], notes: [] };
+  // a checkout the bundle names: that path when it exists here, else a clone of its remote under repoDir
+  const checkout = async (path: string, remote: string | undefined): Promise<string | undefined> => {
+    if (exists(join(path, ".git"))) return path;
+    if (!remote) return undefined;
+    const into = join(repoDir, basename(remote).replace(/\.git$/, ""));
+    if (!exists(join(into, ".git"))) { await clone(remote, into); r.cloned.push(`${remote} → ${into}`); }
+    return into;
+  };
   const take = (k: "clickupKey" | "slack" | "branchPrefix") => { if (b[k] && (opts.replace || !s[k])) { (s as Record<string, unknown>)[k] = b[k]; r.added.push(k === "clickupKey" ? "ClickUp token" : k === "slack" ? "Slack" : "branch prefix"); } else if (b[k]) r.kept.push(k === "clickupKey" ? "ClickUp token" : k === "slack" ? "Slack" : "branch prefix"); };
   take("clickupKey"); take("slack"); take("branchPrefix");
   if (b.capacity && (opts.replace || !s.capacity)) s.capacity = b.capacity;
@@ -63,14 +81,23 @@ export async function applyBundle(s: CliState, b: Bundle, opts: { repoDir?: stri
   for (const sc of b.scanners) {
     if (s.jobs.some((x) => x.name === sc.name)) { r.kept.push(`scanner ${sc.name}`); continue; }
     const { repoPath, repoRemote, ...rest } = sc;
-    let repo = repoPath;
-    if (!exists(join(repoPath, ".git"))) {
-      if (!repoRemote) throw new Error(`scanner ${sc.name}: ${repoPath} is not here and the export has no remote URL to clone from`);
-      repo = join(repoDir, basename(repoRemote).replace(/\.git$/, ""));
-      if (!exists(join(repo, ".git"))) { await clone(repoRemote, repo); r.cloned.push(`${repoRemote} → ${repo}`); }
-    }
+    const repo = await checkout(repoPath, repoRemote);
+    if (!repo) throw new Error(`scanner ${sc.name}: ${repoPath} is not here and the export has no remote URL to clone from`);
     s.jobs.push({ ...rest, id: newId("job"), repo } as Job);
     r.added.push(`scanner ${sc.name}`);
+  }
+  for (const res of b.resources ?? []) {
+    if ((s.resources ?? []).some((x) => x.name === res.name)) { r.kept.push(`resource ${res.name}`); continue; }
+    const path = await checkout(res.path, res.remote).catch(() => undefined);
+    if (!path) { r.notes.push(`resource ${res.name}: ${res.path} is not here and could not be cloned; imported without it (consort-cli resources add --name ${res.name} --markdown <path>)`); continue; }
+    (s.resources ??= []).push({ id: newId("res"), name: res.name, kind: res.kind, path });
+    r.added.push(`resource ${res.name}`);
+  }
+  if (b.phi && (opts.replace || !s.phi)) { s.phi = b.phi; r.added.push("PHI/PII guard settings"); }
+  if (b.covered && (opts.replace || !s.covered)) {
+    s.covered = b.covered;
+    r.notes.push(`covered key reference imported (${describeKeyRef(b.covered)}); the key itself is not in the export: put it there on this machine${b.covered.kind === "keychain" ? " with consort-cli phi key store" : " (a file only you can read)"}, or point elsewhere with phi key ref`);
+    if (b.covered.kind === "keychain" && process.platform !== "darwin") r.notes.push("a Keychain reference needs macOS; on this machine use consort-cli phi key ref --file <path>");
   }
   s.setupCompletedAt ??= Date.now();
   return r;

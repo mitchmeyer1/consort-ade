@@ -2,6 +2,7 @@ import { replyAfter, slackMessage, slackStatus, STATUS_TAIL } from "../shared/he
 import type { SlackConfig } from "./state";
 import { redactPii } from "../shared/redact.ts";
 import type { SlackFile } from "./ownerUpdates";
+import { slackGate } from "./phiGate.ts";
 
 export type SlackThreadMessage = { ts: string; user?: string; text?: string; bot_id?: string; files?: SlackFile[] };
 
@@ -19,13 +20,15 @@ export type SlackThreadMessage = { ts: string; user?: string; text?: string; bot
 export class Slack {
   private cfg: SlackConfig;
   private fetchImpl: typeof fetch;
-  constructor(cfg: SlackConfig, fetchImpl: typeof fetch = (...a) => fetch(...a)) { this.cfg = cfg; this.fetchImpl = fetchImpl; }
+  private gate?: (text: string) => string;
+  /** `gate` turns a message into what may be posted; by default the PHI/PII guard's, read from state (cli/phiGate.ts slackGate) */
+  constructor(cfg: SlackConfig, fetchImpl: typeof fetch = (...a) => fetch(...a), gate: ((text: string) => string) | undefined = slackGate) { this.cfg = cfg; this.fetchImpl = fetchImpl; this.gate = gate; }
 
   private async api(method: string, body: Record<string, unknown>): Promise<any> {
     // form fields, not JSON: Slack's read methods (conversations.replies, conversations.history…) answer
     // invalid_arguments to a JSON body; every method accepts form encoding
-    // no names, emails, phone numbers or addresses leave for Slack (shared/redact.ts)
-    if (typeof body.text === "string") body = { ...body, text: redactPii(body.text) };
+    // no names, emails, phone numbers or addresses leave for Slack (shared/redact.ts); with the guard on, a message carrying an identifier is replaced by a notice
+    if (typeof body.text === "string") body = { ...body, text: this.gate ? this.gate(body.text) : redactPii(body.text) };
     const form = new URLSearchParams();
     for (const [k, v] of Object.entries(body)) if (v !== undefined) form.set(k, typeof v === "string" ? v : JSON.stringify(v));
     const res = await this.fetchImpl(`https://slack.com/api/${method}`, {
