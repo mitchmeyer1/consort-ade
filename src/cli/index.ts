@@ -29,7 +29,8 @@ import { createAccount, runScannerWizard, runSetup, scannerName, setupDone } fro
 import { resourceProblem } from "../shared/resources.ts";
 import { DEFAULT_COVERED_SERVICE, describeKeyRef, phiSettings } from "../shared/phi.ts";
 import { checkCoveredKey } from "./covered";
-import { keyRefFrom, phiSmoke, phiStatusLines, storeKeychainKey } from "./phiCommands";
+import { keyRefFrom, phiSmoke, phiSmokeUncovered, phiStatusLines, storeKeychainKey } from "./phiCommands";
+import { inbound, readIncidents } from "./phiGate";
 import { applyBundle, buildBundle } from "./transfer";
 import { cleanupEnvironment } from "./environment";
 import { alive, DAEMON_LOG, daemonPid, recordDaemon, startDetached, stopDaemon } from "./daemonctl";
@@ -96,12 +97,14 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   resources add --name <n> --markdown <path>                              a project info resource: a git checkout of notes Grilling reads
   resources list | resources remove <id or name>                          (no patient or personal data in it: agents may quote it)
   phi status                                                              the PHI/PII guard: on or off, where the covered key is, what an agent shell sees
-  phi guard on|off                                                        on: member-data rules on every turn, Codex idle, member data only via the covered analyst
+  phi guard on|off                                                        on: member-data rules and hooks on every turn, outbound text gated, Codex idle, member data only via the covered analyst
   phi key ref --keychain [service] [--account a] | --file <path>          where the covered (BAA) key lives; Consort never reads or stores it
   phi key store [--keychain [service]]                                    put the key in the Keychain: security asks for it, Consort never sees it
   phi key clear                                                           forget the reference (the Keychain item or file stays)
-  phi configure [--grant snow,snowsql] [--warehouse-commands a,b] [--domains d] [--contact who] [--model m] [--min-cell N] [--max-active N]
+  phi configure [--grant snow,snowsql] [--warehouse-commands a,b] [--identifier-columns a,b] [--person-tables a,b] [--domains d] [--contact who] [--model m] [--min-cell N] [--max-active N]
   phi smoke [--model m] [--echo-shape]                                    one covered turn: "ready" back, or with --echo-shape a made-up SSN shape the gate must withhold
+  phi smoke --uncovered --command "<cmd>"                                 the guard's decision on cmd, then one uncovered turn asked to run it (use a query that returns no rows)
+  phi incidents [--last N]                                                what the PII gate caught in uncovered turns: categories and masked shapes, never values
   capacity configure [--max-active-turns N] [--max-open-tasks N] [--max-environments N]
   accounts configure <id> --max-active-turns N
   run [-d]                                                                the daemon: scan, claim, dispatch, watch; -d runs it in the background
@@ -305,7 +308,7 @@ async function main(argv: string[]) {
       const on = rest[0] === "on" ? true : rest[0] === "off" ? false : fail("phi guard on|off");
       s.phi = { ...s.phi, guard: on }; saveState(s);
       const key = await checkCoveredKey(s.covered);
-      console.log(on ? ok(`PHI/PII guard on: every turn gets the member-data rules, Codex sits out, and member-data questions go to the covered analyst${key.ok ? "" : ` (unavailable until the key is set: ${key.reason})`}. Restart the daemon to apply it to running workers.`) : bad("PHI/PII guard off: agents are no longer told to keep member data out, and Codex runs again."));
+      console.log(on ? ok(`PHI/PII guard on: every turn gets the member-data rules and the guard's hooks, Codex sits out, what leaves for Slack, tickets and GitHub is gated, and member-data questions go to the covered analyst${key.ok ? "" : ` (unavailable until the key is set: ${key.reason})`}. Restart the daemon to apply it to running workers.`) : bad("PHI/PII guard off: agents run without the member-data rules or the guard's hooks, nothing outbound is gated, and Codex accounts take turns."));
       return;
     }
     case "phi key": {
@@ -330,7 +333,7 @@ async function main(argv: string[]) {
       return;
     }
     case "phi configure": {
-      const lists = { grant: "coveredGrant", "warehouse-commands": "warehouseCommands", domains: "internalEmailDomains" } as const;
+      const lists = { grant: "coveredGrant", "warehouse-commands": "warehouseCommands", domains: "internalEmailDomains", "identifier-columns": "identifierColumns", "person-tables": "personTables" } as const;
       const phi = { ...s.phi };
       for (const [flag, field] of Object.entries(lists)) { const v = list(a, flag); if (v.length) phi[field] = v; }
       if (str(a, "contact")) phi.complianceContact = str(a, "contact");
@@ -342,7 +345,21 @@ async function main(argv: string[]) {
       }
       s.phi = phi; saveState(s); console.log("Updated the PHI/PII guard settings."); return;
     }
+    case "phi incidents": {
+      const raw = str(a, "last") ?? "20";
+      const last = Number(raw); if (!Number.isInteger(last) || last < 1) fail("--last must be a positive integer");
+      const incidents = readIncidents(last);
+      if (!incidents.length) { console.log("No incidents: the PII gate has caught nothing in an uncovered context."); return; }
+      for (const i of incidents) console.log(`${i.ts}  ${i.op}${i.ticket ? `  ticket ${i.ticket}` : ""}  ${i.categories}${i.shapes ? `  ${dim(i.shapes)}` : ""}`);
+      return;
+    }
     case "phi smoke": {
+      if (a.uncovered) {
+        const r = await phiSmokeUncovered(s, need(a, "command"));
+        for (const line of r.lines) console.log(line);
+        if (!r.ok) process.exit(3);
+        return;
+      }
       const r = await phiSmoke(s, { model: str(a, "model"), echoShape: !!a["echo-shape"] });
       console.log(r.ok ? ok(r.line) : bad(r.line));
       if (!r.ok) process.exit(3);
@@ -587,7 +604,7 @@ async function daemon() {
       statusEvent("info", `${job.name}: checking ${job.source} for eligible tickets to start`);
       try {
         if (job.source === "sentry") {
-          const result = await scanSentry(job, s.clickupKey, { workers: loadState().tasks });
+          const result = await scanSentry(job, s.clickupKey, { workers: loadState().tasks, mask: (text) => inbound(text, phiSettings(loadState())).text });
           statusEvent(result.reserved || result.atCapacity ? "warn" : "success", result.atCapacity ? `${job.name}: ${result.activeTickets}/${result.ticketLimit} Sentry ticket slots occupied; no Sentry scan or new workers until a slot frees` : `${job.name}: ${result.issues} Sentry issues → ${result.groups} planned bug bundles; ${result.created} ClickUp tickets created; ${result.existing} existing; ${result.reserved} reserved elsewhere or awaiting reconciliation; ${result.deferred} deferred by the Sentry ticket limit`);
           const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); j.scanStartedAt = undefined; saveState(after); }
           continue;

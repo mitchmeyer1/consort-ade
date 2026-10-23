@@ -1,8 +1,14 @@
 import { execFile, spawn } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { promisify } from "node:util";
-import { COVERED_VARIABLES, describeKeyRef, phiSettings, type CoveredKeyRef } from "../shared/phi.ts";
+import { COVERED_VARIABLES, describeKeyRef, phiSettings, turnAccounts, type CoveredKeyRef } from "../shared/phi.ts";
+import { selectCliModel } from "../shared/cliModels.ts";
+import { seedModels } from "../shared/headless.ts";
 import { checkCoveredKey, runCoveredTurn } from "./covered";
-import type { CliState } from "./state";
+import { runTurn } from "./agent";
+import { phiHooks } from "./phiHooks";
+import { HOME, type CliState } from "./state";
 
 /**
  * `consort-cli phi …`: the PHI/PII guard's commands. Nothing here reads the covered key: status
@@ -67,6 +73,29 @@ export async function phiSmoke(s: CliState, o: { model?: string; echoShape?: boo
   if (result.status === "released") return { line: `released: ${result.text}`, ok: !o.echoShape };
   if (result.status === "withheld") return { line: `withheld by the PII gate (${result.categories}): nothing from this run was released`, ok: !!o.echoShape };
   return { line: `covered turn unavailable: ${result.reason}`, ok: false };
+}
+
+/**
+ * The guard on one command, end to end: its decision, read straight from the Bash hook, then one
+ * uncovered Claude turn on a subscription login, in a scratch folder under the guard, asked to
+ * run the command. A guard that fails would let the command run, so test with a query that
+ * returns no rows (`where 1=0`).
+ */
+export async function phiSmokeUncovered(s: CliState, command: string): Promise<{ lines: string[]; ok: boolean }> {
+  const settings = { ...phiSettings(s), guard: true };
+  const account = turnAccounts({ ...s, phi: settings }).find((a) => a.provider === "claude");
+  if (!account) return { lines: ["no Claude account to run an uncovered turn on (consort-cli accounts add --provider claude)"], ok: false };
+  const cwd = mkdtempSync(join(HOME, "smoke-uncovered-"));
+  try {
+    const bash = phiHooks({ phi: settings }).PreToolUse![0].hooks[0];
+    const decision = await bash({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command }, tool_use_id: "smoke", session_id: "smoke", transcript_path: "", cwd } as never, "smoke", { signal: new AbortController().signal });
+    const reason = (decision as { hookSpecificOutput?: { permissionDecisionReason?: string } }).hookSpecificOutput?.permissionDecisionReason;
+    const turn = await runTurn({ cwd, account, model: selectCliModel("claude", seedModels().claude, "reader"), maxTurns: 3, phi: { guard: true, settings },
+      prompt: `This is a test of a command guard. Run exactly this command with the Bash tool, once, then reply in one line: whether it ran, or the reason it was refused.\n\n${command}` });
+    return { lines: [`guard: ${reason ? `denied: ${reason}` : "allowed"}`, `turn: ${turn.error ? `failed: ${turn.error}` : turn.text.trim().split("\n").at(-1) ?? ""}`], ok: !turn.error };
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 }
 
 /** a reference from the flags: --keychain [service] [--account a] or --file <path> */

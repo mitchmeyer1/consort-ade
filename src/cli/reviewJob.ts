@@ -18,7 +18,7 @@
  * runs another round at the new head, which first checks whether the earlier findings were fixed.
  */
 import { execFile } from "node:child_process";
-import { turnAccounts, turnPhi } from "../shared/phi.ts";
+import { phiSettings, turnAccounts, turnPhi } from "../shared/phi.ts";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -329,7 +329,7 @@ async function reviewRound(taskId: string, watch: (t: ReviewTarget, repo: string
       const timer = setTimeout(() => { trace.reason = "timeout"; abort.abort(); }, timeoutMs);
       const started = Date.now();
       try {
-        const res = await withAgentTurn(taskId, who.id, () => runTurn({ trace, phi: turnPhi(live), cwd: wt, model, account: who, readOnly, signal: abort.signal, maxDelegates: 0, effort: role === "frontier" ? "high" : "medium", env: env as unknown as Record<string, string>,
+        const res = await withAgentTurn(taskId, who.id, () => runTurn({ trace, phi: { ...turnPhi(live), task: taskId, alert: (line: string) => say(line) }, cwd: wt, model, account: who, readOnly, signal: abort.signal, maxDelegates: 0, effort: role === "frontier" ? "high" : "medium", env: env as unknown as Record<string, string>,
           prompt: `${HEADLESS_RULES}\n\n${prompt}\n\n${ENVIRONMENT_RULES(env)}` }));
         updateTask(taskId, (x) => ({ ...(res.usage?.length ? { cost: addTurnCost(x.cost, res.usage) } : {}), turnHistory: [...(x.turnHistory ?? []), { at: started, stage: `review ${role}`, role, provider: who.provider as Provider, model, durationMs: Date.now() - started, usage: res.usage, error: res.error ?? res.limit?.text }] }));
         if (res.limit) { blockAccount(who.id, res.limit.resetsAt, res.limit.text); tried.add(who.id); continue; }
@@ -391,19 +391,31 @@ async function reviewRound(taskId: string, watch: (t: ReviewTarget, repo: string
     // 5. post, then approve only on the owner's word
     const severe = blocking(review.findings);
     const summary = `${review.whatItDoes ?? plan.tldr ?? ""}`.trim();
+    // with the PHI/PII guard on, a review that carries an identifier is not posted: the owner hears why, and the PR is watched
+    const gate = { phi: phiSettings(loadState()), task: taskId, alert: (line: string) => say(line) };
+    const notPosted = async (e: unknown) => {
+      if ((e as Error).name !== "PiiWithheldError") throw e;
+      await say(`⚠️ Review of <${t.url}|PR #${t.pr}> not posted: ${(e as Error).message}. It is saved at ${reviewPath}.`);
+      return undefined;
+    };
     if (severe.length) {
       activity(`posting ${review.findings.length} comments with Request changes`, 5);
-      const posted = await postReview(review, review.findings, "REQUEST_CHANGES", `Automatic review: ${countLine(review.findings)}. The Critical and High items need fixing before this merges.${summary ? `\n\n${summary}` : ""}`, wt);
-      await say(`Requested changes on <${t.url}|PR #${t.pr}>: ${countLine(review.findings)}.\n${severe.slice(0, 5).map((f) => `• ${f.severity}: ${f.title}`).join("\n")}\n• Review: <${posted.url}|on GitHub>\n• Watching the PR: the next round starts when @${t.author} asks for review again.`);
-      requested = `requested changes (${countLine(review.findings)})`;
+      const posted = await postReview(review, review.findings, "REQUEST_CHANGES", `Automatic review: ${countLine(review.findings)}. The Critical and High items need fixing before this merges.${summary ? `\n\n${summary}` : ""}`, wt, undefined, gate).catch(notPosted);
+      if (posted) await say(`Requested changes on <${t.url}|PR #${t.pr}>: ${countLine(review.findings)}.\n${severe.slice(0, 5).map((f) => `• ${f.severity}: ${f.title}`).join("\n")}\n• Review: <${posted.url}|on GitHub>\n• Watching the PR: the next round starts when @${t.author} asks for review again.`);
+      requested = posted ? `requested changes (${countLine(review.findings)})` : "review withheld by the PII gate";
       outcome = "watch";
     } else {
-      const posted = review.findings.length ? await postReview(review, review.findings, "COMMENT", `Automatic review: ${countLine(review.findings)}; nothing Critical or High.`, wt) : undefined;
-      activity("waiting for the owner's word to approve", 5);
-      const ts = await say(slackAsk(approvalQuestion(t, review, posted?.url, flows)), "WAITING", true);
-      updateTask(taskId, { status: "waiting", pendingQuestion: { questions: [`Approve PR #${t.pr}?`], afterTs: ts ?? String(Date.now() / 1000) } });
-      outcome = await awaitApproval(review, ts);
-      requested = "not approved yet";
+      const posted = review.findings.length ? await postReview(review, review.findings, "COMMENT", `Automatic review: ${countLine(review.findings)}; nothing Critical or High.`, wt, undefined, gate).catch(notPosted) : undefined;
+      if (review.findings.length && !posted) {
+        requested = "review withheld by the PII gate";
+        outcome = "watch";
+      } else {
+        activity("waiting for the owner's word to approve", 5);
+        const ts = await say(slackAsk(approvalQuestion(t, review, posted?.url, flows)), "WAITING", true);
+        updateTask(taskId, { status: "waiting", pendingQuestion: { questions: [`Approve PR #${t.pr}?`], afterTs: ts ?? String(Date.now() / 1000) } });
+        outcome = await awaitApproval(review, ts);
+        requested = "not approved yet";
+      }
     }
   } finally {
     await cleanupEnvironment(env.CONSORT_RUN).catch(() => undefined);

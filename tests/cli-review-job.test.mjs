@@ -91,6 +91,17 @@ test('posting: one review with inline comments where the diff shows the line, an
   assert.match(sent.body, /Fix the High item\.[\s\S]*\*\*src\/z\.ts:40\*\* — not in the diff/);
 });
 
+test('under the PHI/PII guard a review whose comments carry an identifier is not posted at all', async () => {
+  const { postReview } = await import('../src/cli/reviewPost.ts');
+  const { phiSettings } = await import('../src/shared/phi.ts');
+  const pii = await import('./helpers/fake-pii.mjs');
+  const calls = [];
+  const gh = async (args) => { calls.push(args.join(' ')); return JSON.stringify(args[1].includes('/compare/') ? { files: [{ filename: 'src/a.ts', patch: '@@ -1,1 +1,2 @@\n a\n+b' }] } : { html_url: 'u' }); };
+  const r = review.parseReview(JSON.stringify({ repo: 'acme/mono', pr: 9, url: 'u', head: 'h', base: 'b', findings: [{ id: 'F1', kind: 'defect', severity: 'high', title: 't1', file: 'src/a.ts', line: 2, comment: `the fixture holds ${pii.card()}`, status: 'approved' }] }));
+  await assert.rejects(postReview(r, r.findings, 'COMMENT', 'Review.', '/wt', gh, { phi: phiSettings({ phi: { guard: true } }), record() {} }), (e) => e.name === 'PiiWithheldError' && e.categories === 'card ×1');
+  assert.ok(!calls.some((c) => c.includes('/reviews')));
+});
+
 test('approving your own PR falls back to a comment instead of failing', async () => {
   const { postReview } = await import('../src/cli/reviewPost.ts');
   const events = [];

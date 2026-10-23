@@ -10,8 +10,9 @@ import { hostname } from "node:os";
 import { isCodexLimitText, isUsageLimitText, limitFromRateEvent, type LimitHit } from "../shared/seatPool.ts";
 import type { TurnUsage } from "../shared/headless.ts";
 import { codexEffort, type EffortLevel } from "../shared/cliTurnPolicy.ts";
-import { COVERED_VARIABLES, PHI_RULES } from "../shared/phi.ts";
+import { COVERED_VARIABLES, DEFAULT_PHI, PHI_RULES, type PhiSettings } from "../shared/phi.ts";
 import type { HookCallback, SettingSource } from "@anthropic-ai/claude-agent-sdk";
+import { mergeHooks, phiHooks } from "./phiHooks";
 
 /**
  * One agent turn, headless: Claude Code through the agent SDK, Codex through its SDK, each on the
@@ -41,7 +42,9 @@ export const binaryFor = (provider: Provider): string => {
   return bin;
 };
 
-export type TurnOptions = { /** labels for the telemetry log; without it the turn is not recorded */ trace?: TurnTrace; cwd: string; prompt: string; model: string; account: Account; resume?: string; maxTurns?: number; onText?: (t: string) => void; signal?: AbortSignal; readOnly?: boolean; /** no web search or fetch, so what the turn read never leaves this machine except in its reply */ offline?: boolean; /** where Claude Code loads settings, CLAUDE.md and MCP servers from; a project info resource reader skips the notes repo's own */ settingSources?: SettingSource[]; effort?: EffortLevel; delegateModel?: string; maxDelegates?: number; /** the task's own ports and Docker names, on top of the process env */ env?: Record<string, string>; /** the PHI/PII guard (shared/phi.ts): on, every turn carries PHI_RULES and Codex does not run */ phi?: { guard: boolean } };
+export type TurnOptions = { /** labels for the telemetry log; without it the turn is not recorded */ trace?: TurnTrace; cwd: string; prompt: string; model: string; account: Account; resume?: string; maxTurns?: number; onText?: (t: string) => void; signal?: AbortSignal; readOnly?: boolean; /** no web search or fetch, so what the turn read never leaves this machine except in its reply */ offline?: boolean; /** where Claude Code loads settings, CLAUDE.md and MCP servers from; a project info resource reader skips the notes repo's own */ settingSources?: SettingSource[]; effort?: EffortLevel; delegateModel?: string; maxDelegates?: number; /** the task's own ports and Docker names, on top of the process env */ env?: Record<string, string>; /** the PHI/PII guard (shared/phi.ts): on, every turn carries PHI_RULES, runs under the guard's hooks (cli/phiHooks.ts) with no MCP servers, and Codex does not run */ phi?: TurnPhi };
+/** the guard as a turn sees it: its settings, the task an incident is filed under, the push base, and where the owner hears of one */
+export type TurnPhi = { guard: boolean; settings?: PhiSettings; task?: string; ticket?: string; base?: string; alert?: (line: string) => unknown };
 export type Turn = { text: string; sessionId?: string; error?: string; limit?: LimitHit; /** what the turn spent, per model (Claude Code prices its own; Codex gives tokens only) */ usage?: TurnUsage[] };
 
 export const envFor = (account: Account, extra: Record<string, string> = {}): Record<string, string | undefined> => {
@@ -119,6 +122,8 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
   inFlight.add(stop);
   let stderr = ""; // the CLI's own complaints: a usage limit or a crash arrives here, not in the message stream
   const flat = (content: unknown) => Array.isArray(content) ? content.map((b: any) => (b?.type === "text" ? b.text : "")).join("") : typeof content === "string" ? content : "";
+  const guard = o.phi?.guard ? phiHooks({ phi: o.phi.settings ?? { ...DEFAULT_PHI, guard: true }, task: o.phi.task, ticket: o.phi.ticket, base: o.phi.base, alert: o.phi.alert }) : undefined;
+  const hooks = mergeHooks((o.maxDelegates ?? 0) > 0 ? delegateBudget(1) : undefined, guard);
   try {
   q = query({
     prompt: o.prompt,
@@ -127,7 +132,9 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
       stderr: (d: string) => { stderr = (stderr + d).slice(-4000); },
       env: envFor(o.account, { ...o.env, ...(o.delegateModel ? { CLAUDE_CODE_SUBAGENT_MODEL: o.delegateModel } : {}) }), settingSources: o.settingSources ?? ["user", "project", "local"],
       permissionMode: o.readOnly ? "plan" : "bypassPermissions", allowDangerouslySkipPermissions: !o.readOnly,
-      ...((o.maxDelegates ?? 0) > 0 ? { hooks: delegateBudget(1) } : {}),
+      ...(hooks ? { hooks } : {}),
+      // an MCP server's output is a door the guard's Bash checks never see, so none run; the output hook is a second layer for any that would
+      ...(o.phi?.guard ? { strictMcpConfig: true, mcpServers: {} } : {}),
       disallowedTools: [...((o.maxDelegates ?? 0) > 0 ? [] : ["Agent", "Task"]), ...(o.offline ? ["WebSearch", "WebFetch"] : [])],
       ...(o.effort ? { effort: o.effort } : {}),
       ...(o.maxTurns ? { maxTurns: o.maxTurns } : {}),

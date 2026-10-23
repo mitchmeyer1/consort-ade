@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { draftBody, draftTitle, ensureDraftPr } from '../src/cli/draftPr.ts';
+import { phiSettings } from '../src/shared/phi.ts';
+import * as pii from './helpers/fake-pii.mjs';
 
 const ticket = { id: '42', title: 'Add CSV export', url: 'https://github.com/a/b/issues/42', source: 'github' };
 const fake = (answers) => { const calls = []; return { calls, run: async (cmd, args) => { calls.push([cmd, ...args].join(' ')); const hit = answers.find(([re]) => re.test([cmd, ...args].join(' '))); if (hit?.[1] instanceof Error) throw hit[1]; return hit?.[1] ?? ''; } }; };
@@ -29,4 +31,17 @@ test('an open PR for the branch is reused; a refusal is reported, not thrown', a
   const refused = fake([[/^gh pr list/, '[]'], [/rev-list/, '2'], [/^gh pr create/, Object.assign(new Error('fail'), { stderr: 'GraphQL: draft PRs are not supported\n' })]]);
   assert.deepEqual(await ensureDraftPr({ cwd: '/wt', base: 'main', branch: 'x', title: 't', body: 'b' }, refused.run), { error: 'GraphQL: draft PRs are not supported' });
   assert.ok(!refused.calls.some(c => c.includes('--allow-empty')), 'no start commit when the branch has work');
+});
+
+test('under the PHI/PII guard a ticket carrying an identifier stays out of the draft, and a withheld push opens nothing', async () => {
+  const gate = { phi: phiSettings({ phi: { guard: true } }), record() {} };
+  const ssn = pii.ssn();
+  const body = draftBody(ticket, 'Spec\'d', `Member ${ssn} cannot export`, gate);
+  assert.match(body, /## Ticket\n\(description withheld by the PII gate: ssn ×1; read it on the ticket\)/);
+  assert.ok(!body.includes(ssn));
+  assert.match(draftBody(ticket, 'Spec\'d', 'Users need CSV.', gate), /## Ticket\nUsers need CSV\./);
+  const f = fake([[/^gh pr list/, '[]'], [/rev-list/, '1']]);
+  const r = await ensureDraftPr({ cwd: '/wt', base: 'main', branch: 'x', title: 't', body: 'b', guard: async () => 'Not pushed, by the PII gate: a.ts:1 ssn ×1.' }, f.run);
+  assert.deepEqual(r, { error: 'Not pushed, by the PII gate: a.ts:1 ssn ×1.' });
+  assert.ok(!f.calls.some((c) => c.startsWith('git push') || c.startsWith('gh pr create')));
 });

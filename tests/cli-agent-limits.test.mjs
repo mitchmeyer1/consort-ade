@@ -6,13 +6,15 @@ import ts from 'typescript';
 import * as seatPool from '../src/shared/seatPool.ts';
 import * as cliTurnPolicy from '../src/shared/cliTurnPolicy.ts';
 import * as phi from '../src/shared/phi.ts';
+import * as phiHooks from '../src/cli/phiHooks.ts';
 import { slackMessage, slackStatus, STATUS_TAIL } from '../src/shared/headless.ts';
 import { redactPii } from '../src/shared/redact.ts';
 const require = createRequire(import.meta.url);
 const code = ts.transpileModule(readFileSync(new URL('../src/cli/agent.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText.replace(/import\.meta\.url/g, '"file:///virtual/cli/agent.js"');
-function load(runStreamed, onStart = () => {}, onNew = () => {}) {
+function load(runStreamed, onStart = () => {}, onNew = () => {}, sdk) {
   const mocks = {
-    './state': { HOME: '/virtual' }, './telemetry': { recordTurn() {}, sumUsage: () => ({ usd: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }) }, '../shared/seatPool.ts': seatPool, '../shared/cliTurnPolicy.ts': cliTurnPolicy, '../shared/phi.ts': phi,
+    ...(sdk ? { '@anthropic-ai/claude-agent-sdk': sdk } : {}),
+    './state': { HOME: '/virtual' }, './telemetry': { recordTurn() {}, sumUsage: () => ({ usd: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }) }, '../shared/seatPool.ts': seatPool, '../shared/cliTurnPolicy.ts': cliTurnPolicy, '../shared/phi.ts': phi, './phiHooks': phiHooks,
     '../main/cliRuntime': { cliBinary: () => '/virtual/codex' },
     '@openai/codex-sdk': { Codex: class { constructor(o) { onNew(o); } startThread(o) { onStart(o); return { runStreamed }; } } },
   };
@@ -165,4 +167,21 @@ test('every uncovered environment drops the covered variables, and Codex refuses
     assert.equal(env.CLAUDE_CONFIG_DIR, '/logins/a');
     await assert.rejects(agent.runTurn({ ...opts, phi: { guard: true } }), /Codex turns do not run while the PHI\/PII guard is on/);
   } finally { delete process.env[name]; }
+});
+
+test('under the guard a Claude turn carries the guard hooks beside the reader budget, and no MCP servers', async () => {
+  let options, prompt;
+  const sdk = { query: (args) => { options = args.options; prompt = args.prompt; return (async function* () {})(); } };
+  const agent = load(async () => ({}), () => {}, () => {}, sdk);
+  const claude = { ...opts, model: 'claude', account: { provider: 'claude', auth: 'key', apiKey: 'test' } };
+  await agent.runTurn({ ...claude, maxDelegates: 2, phi: { guard: true, settings: phi.phiSettings({ phi: { guard: true } }) } });
+  assert.ok(prompt.startsWith(phi.PHI_RULES));
+  assert.equal(options.strictMcpConfig, true);
+  assert.deepEqual(options.mcpServers, {});
+  assert.deepEqual(options.hooks.PreToolUse.map((m) => m.matcher), ['^(Agent|Task)$', '^Bash$', '^(Read|Grep|Glob|NotebookRead)$']);
+  assert.deepEqual(options.hooks.PostToolUse.map((m) => m.matcher), ['^(Agent|Task)$', '^Bash$|^mcp__']);
+  await agent.runTurn(claude);
+  assert.equal(options.hooks, undefined);
+  assert.equal(options.strictMcpConfig, undefined);
+  assert.equal(prompt, 'work');
 });

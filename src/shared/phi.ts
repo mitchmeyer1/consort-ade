@@ -19,8 +19,11 @@ export const DEFAULT_COVERED_SERVICE = "anthropic-phi-api-key";
 export type PhiSettings = {
   /** on: PHI_RULES on every turn, Codex idle, member-data questions only through the covered analyst */
   guard: boolean;
-  /** the warehouse CLIs the guard watches */
+  /** the warehouse CLIs the guard watches, on top of shared/warehouse.ts's baseline */
   warehouseCommands: string[];
+  /** identifier columns and person tables the query guard adds to its baselines (shared/warehouse.ts) */
+  identifierColumns?: string[];
+  personTables?: string[];
   /** the commands the covered analyst may run */
   coveredGrant: string[];
   /** colleagues' mail is not PHI, so the gate lets these domains through */
@@ -42,7 +45,7 @@ export const phiSettings = (s: { phi?: Partial<PhiSettings> }): PhiSettings => (
 /** variables that may carry the covered key or mark a covered session; no uncovered agent's environment has them */
 export const COVERED_VARIABLES = ["COVERED_ANTHROPIC_API_KEY", "CLAUDE_PII_COVERED"];
 /** what every uncovered turn is told about the guard (cli/agent.ts TurnOptions.phi) */
-export const turnPhi = (s: { phi?: Partial<PhiSettings> }) => ({ guard: phiSettings(s).guard });
+export const turnPhi = (s: { phi?: Partial<PhiSettings> }) => { const settings = phiSettings(s); return { guard: settings.guard, settings }; };
 /** the accounts a turn may run on: Codex has no hook that can refuse a command and no BAA, so it sits out while the guard is on */
 export const turnAccounts = <A extends { provider: string }>(s: { accounts: A[]; phi?: Partial<PhiSettings> }): A[] => (phiSettings(s).guard ? s.accounts.filter((a) => a.provider !== "codex") : s.accounts);
 
@@ -54,7 +57,8 @@ This session may not read member-level personal or health data: no names, contac
 - Minimise exposure, never rigor: do not widen a question to save a round trip, and never run an identifier-bearing query here to save tokens.
 - Warehouses are read-only for Consort: never insert, update, create, copy or unload.
 - Tests, fixtures, evidence and screenshots use this task's seeded local database only. Never copy warehouse credentials into the worktree's env files.
-- Nothing personal leaves this machine: not in Slack, ticket comments, questions, PR titles or bodies, review comments, commit messages, code, fixtures or evidence.`;
+- Nothing personal leaves this machine: not in Slack, ticket comments, questions, PR titles or bodies, review comments, commit messages, code, fixtures or evidence.
+- Run each git push, gh post and upload as its own command, first on its line: Consort checks what it sends before it runs, so a commit, a copy or a cd before it on the same line is refused.`;
 
 export type CoveredAsk = { question: string; tables: string[]; shape: string };
 export type CoveredResult = { status: "released"; text: string; warnings: string[] } | { status: "withheld"; categories: string; shapes: string } | { status: "unavailable"; reason: string };

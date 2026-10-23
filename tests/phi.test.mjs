@@ -45,7 +45,7 @@ test('with the guard on Codex sits out and every turn knows it; off, nothing cha
   const accounts = [{ id: 'c', provider: 'claude' }, { id: 'x', provider: 'codex' }];
   assert.deepEqual(turnAccounts({ accounts, phi: { guard: true } }).map((a) => a.id), ['c']);
   assert.deepEqual(turnAccounts({ accounts }).map((a) => a.id), ['c', 'x']);
-  assert.deepEqual(turnPhi({ phi: { guard: true } }), { guard: true });
+  assert.deepEqual(turnPhi({ phi: { guard: true } }), { guard: true, settings: phiSettings({ phi: { guard: true } }) });
   assert.equal(phiSettings({}).guard, false);
   assert.equal(phiSettings({ phi: { minCell: 20 } }).minCell, 20);
 });

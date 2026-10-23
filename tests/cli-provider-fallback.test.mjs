@@ -9,6 +9,7 @@ import * as seatPool from '../src/shared/seatPool.ts';
 import * as cliModels from '../src/shared/cliModels.ts';
 import * as cliTurnPolicy from '../src/shared/cliTurnPolicy.ts';
 import * as phi from '../src/shared/phi.ts';
+import * as phiGate from '../src/cli/phiGate.ts';
 
 const require = createRequire(import.meta.url);
 const compiled = ts.transpileModule(readFileSync(new URL('../src/cli/pipeline.ts', import.meta.url), 'utf8'), {
@@ -29,7 +30,7 @@ for (const blockedAtStart of [true, false]) {
       './evidenceRetry': evidenceRetry,
     '../shared/headless.ts': headless,
       '../shared/seatPool.ts': seatPool,
-      '../shared/cliModels.ts': cliModels, '../shared/cliTurnPolicy.ts': cliTurnPolicy, '../shared/phi.ts': phi, './covered': { runCoveredTurn: async () => ({ status: 'unavailable', reason: 'no covered key in tests' }) },
+      '../shared/cliModels.ts': cliModels, '../shared/cliTurnPolicy.ts': cliTurnPolicy, '../shared/phi.ts': phi, './phiGate': phiGate, './covered': { runCoveredTurn: async () => ({ status: 'unavailable', reason: 'no covered key in tests' }) },
       './capacity': { AccountUnavailableError: class extends Error {}, withAgentTurn: async (_, __, fn) => fn(), withEnvironmentSlot: async (_, fn) => fn() },
       './parallel': { prepareResearchTasks: async () => [], recoverImplementation: async () => [], readImplementationTasks: async () => [], runImplementation: async () => ({ completed: [], commits: [] }), runResearch: async () => ({ summary: 'No conflicting flows found', results: [], reused: false }) },
       '../main/ship': { excludeConsortDir: async () => {}, fetchTicket: async () => ({}), writeTicketFile: () => '' },

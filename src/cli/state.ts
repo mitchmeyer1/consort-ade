@@ -16,6 +16,8 @@ import type { ShipFeature, ShipTicket } from "../shared/ship";
 export const HOME = process.env.CONSORT_CLI_HOME ?? join(homedir(), ".consort-cli");
 export const STATE_FILE = join(HOME, "state.json");
 export const LOG_DIR = join(HOME, "logs");
+/** what the PII gate caught in an uncovered context: one JSON line each, categories and masked shapes only (cli/phiGate.ts) */
+export const PHI_INCIDENTS = join(LOG_DIR, "phi-incidents.jsonl");
 export const LOGINS_DIR = join(HOME, "logins");
 export const WORK_DIR = join(HOME, "worktrees");
 /**

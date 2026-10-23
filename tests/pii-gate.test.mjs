@@ -63,6 +63,7 @@ test('redaction replaces block spans, merges overlaps and leaves the rest; shape
   const text = `first ${ssn} then ${mail} done`;
   assert.equal(redactSpans(text, piiSpans(text, 'release')), 'first [REDACTED:ssn] then [REDACTED:email] done');
   assert.equal(maskShape('x'.repeat(50)).length, 41);
+  assert.equal(maskShape('Ab 12-x'), 'AA_NN-A');
   const scan = scanPii(text, 'release');
   assert.equal(categoryLine(scan), 'ssn ×1, email ×1');
   assert.doesNotMatch(shapeLine(scan), /[0-9]/);

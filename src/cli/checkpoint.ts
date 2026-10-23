@@ -6,6 +6,7 @@
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import type { PushGuard } from "./phiGate";
 
 export type Git = (args: string[], cwd: string) => Promise<string>;
 const realGit: Git = async (args, cwd) => (await promisify(execFile)("git", args, { cwd, timeout: 120_000, maxBuffer: 16 * 1024 * 1024 })).stdout;
@@ -21,9 +22,10 @@ export async function stageSafely(git: Git, cwd: string): Promise<void> {
   await git(["reset", "-q", "--", ...NEVER_STAGE], cwd);
 }
 
-export type Checkpoint = { committed: boolean; pushed: boolean; error?: string };
+/** `withheld`: the PHI/PII guard stopped the push, and `error` says which lines (cli/phiGate.ts pushGuard) */
+export type Checkpoint = { committed: boolean; pushed: boolean; error?: string; withheld?: boolean };
 
-export async function checkpoint(cwd: string, branch: string, message: string, git: Git = realGit): Promise<Checkpoint> {
+export async function checkpoint(cwd: string, branch: string, message: string, git: Git = realGit, guard?: PushGuard): Promise<Checkpoint> {
   let committed = false;
   try {
     if ((await git(["status", "--porcelain"], cwd)).trim()) {
@@ -34,6 +36,8 @@ export async function checkpoint(cwd: string, branch: string, message: string, g
     // push when the branch is new on GitHub or has commits GitHub does not
     const ahead = await git(["rev-list", "--count", "@{u}..HEAD"], cwd).then((n) => Number(n.trim()), () => 1);
     if (!ahead) return { committed, pushed: false };
+    const withheld = await guard?.(git, cwd);
+    if (withheld) return { committed, pushed: false, error: withheld, withheld: true };
     await git(["push", "--no-verify", "-u", "origin", `HEAD:refs/heads/${branch}`], cwd);
     return { committed, pushed: true };
   } catch (e) {

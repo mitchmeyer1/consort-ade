@@ -40,6 +40,7 @@ import { ensureSlackIdentity } from "./slackIdentity";
 import { taskSlackLinks } from "./slackLinks";
 import { ownerUpdatePrompt, parseUpdateSummary, updateDir } from "./ownerUpdates";
 import { sourceFor, type Source } from "./sources";
+import { gatedSource, inbound, PiiWithheldError, pushGuard, type GateContext } from "./phiGate";
 import { blockAccount, loadState, processAlive, touchAccount, updateTask, WORK_DIR, type Account, type Job, type Task } from "./state";
 
 /**
@@ -66,7 +67,11 @@ export async function workTask(taskId: string): Promise<void> {
   if (!task) throw new Error(`No task ${taskId}.`);
   const job = state.jobs.find((j) => j.id === task!.jobId);
   if (!job) throw new Error(`Task ${taskId} belongs to a job that no longer exists.`);
-  const source = sourceFor(job, state.clickupKey);
+  // the PHI/PII guard: what leaves for the ticket, the PR and GitHub is gated, what comes in is masked, and an incident is filed under this task
+  const phi = phiSettings(state);
+  const gate: GateContext = { phi, task: taskId, ticket: task.ticket.id, alert: (line) => say(line) };
+  const guardPush = pushGuard(`origin/${job.base}`, gate);
+  const source = gatedSource(sourceFor(job, state.clickupKey), gate);
   const slack = state.slack ? new Slack(state.slack) : undefined;
   const have = providersOf(turnAccounts(state));
   const builderProvider: Provider | undefined = have.claude ? "claude" : have.codex ? "codex" : undefined;
@@ -113,12 +118,15 @@ export async function workTask(taskId: string): Promise<void> {
     resources.push(resource);
   }
   const resourcePaths = new Set(resources.map((r) => r.path));
+  // agents read the ticket with every identifier the gate knows masked
+  const maskTicket = (f: { body: string; status?: string } | undefined) => f && { ...f, body: inbound(f.body, phi).text };
   const fetched = await fetchTicket(task.ticket, { repoPath: job.repo, clickupKey: state.clickupKey });
-  let ticketBody = writeTicketFile(task.worktree, task.ticket, fetched);
+  const ticketMasked = fetched ? inbound(fetched.body, phi).masked : 0;
+  let ticketBody = writeTicketFile(task.worktree, task.ticket, maskTicket(fetched));
   // the ClickUp subtasks, so the build tickets can name them and the worker can move them (cli/subtasks.ts)
   const claimed = task!;
   const subtasks = await source.subtasks(claimed.ticket.id).catch((e) => { log(claimed, `subtasks not read: ${(e as Error).message}`); return [] as Subtask[]; });
-  if (subtasks.length) writeSubtaskFile(claimed.worktree, subtasks);
+  if (subtasks.length) writeSubtaskFile(claimed.worktree, subtasks.map((s) => ({ ...s, name: inbound(s.name, phi).text, ...(s.description ? { description: inbound(s.description, phi).text } : {}) })));
   const syncSubtaskStatus = async (force?: SubtaskState) => {
     if (!subtasks.length) return;
     const tickets = await readGraph(claimed.worktree).catch(() => []);
@@ -141,6 +149,7 @@ export async function workTask(taskId: string): Promise<void> {
   }
   const say = async (text: string) => { log(task, text.replace(/\n/g, " ⏎ ")); if (slack && thread) await slack.post(slackStatus(text, text.trimStart().startsWith("🎉🍭🎊") ? "COMPLETED" : loadState().tasks.find((t) => t.id === taskId)?.lifecycle === "paused" ? "WAITING" : "RUNNING", await taskSlackLinks(loadState().tasks.find((t) => t.id === taskId)!, job.repo)), thread).catch((e) => log(task, `slack failed: ${e.message}`)); };
   if (!task.pendingQuestion && task.status !== "monitoring" && task.lifecycle !== "paused") await notifyTask(taskId, "running", "Worker started; preparing the task.");
+  if (ticketMasked) await say(`⚠️ The ticket carries ${ticketMasked} identifier${ticketMasked === 1 ? "" : "s"} the PII gate masks; agents read it masked. Take them out of the ticket.`);
   const finish = async (status: Task["status"], note?: string) => {
     updateTask(task.id, { status, note, finishedAt: Date.now(), activity: note ?? status });
     await notifyTask(taskId, status === "ready" ? "completed" : "stopped", note ?? status);
@@ -170,7 +179,7 @@ export async function workTask(taskId: string): Promise<void> {
     updateTask(task.id, { status: "working", note: undefined, pendingQuestion: undefined });
     await notifyTask(taskId, "running", "Answer received.");
     lastWorkingAt = 0; // the first agent line after an answer posts right away, so the owner sees it is on it
-    return reply ?? "";
+    return inbound(reply ?? "", phi).text;
   };
 
   /**
@@ -187,6 +196,8 @@ export async function workTask(taskId: string): Promise<void> {
   let nextStep: string | undefined;
   let feature: ShipFeature = task.feature;
   let pendingUser: string | undefined;
+  // a push the PHI/PII guard withheld at the last checkpoint: the next stage turn is told what to rewrite
+  let guardGuidance = "";
   let idle = 0;
   const turn = async (prompt: string | ((provider: Provider) => string), provider: Provider = builderProvider, role: CliModelRole = "planning", resume = true, timeoutMs?: number, cwd = task.worktree, fixedModel?: string, turnEnv: TaskEnv = env): Promise<string> => {
     const crashes = new Map<string, number>(); // failures in unrelated parallel jobs never combine
@@ -306,7 +317,7 @@ export async function workTask(taskId: string): Promise<void> {
         quietSince = Date.now();
         usageTimer = setInterval(checkUsage, 60_000);
         deadline = timeoutMs ? setTimeout(() => { timedOut = true; trace.reason = "timeout"; abort.abort(); }, timeoutMs) : undefined;
-        return runTurn({ trace, cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}${feature.stage === "Grilling" && !resourceTurn ? `\n${BUILD_EFFORT_RULE}` : ""}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}${resourceTurn ? "" : `\n\n${ENVIRONMENT_RULES(turnEnv)}`}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: turnEnv, signal: abort.signal, readOnly, ...(resourceTurn ? { offline: true, settingSources: ["user" as const] } : {}), phi: turnPhi(live), effort, delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { quietSince = Date.now(); const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
+        return runTurn({ trace, cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}${feature.stage === "Grilling" && !resourceTurn ? `\n${BUILD_EFFORT_RULE}` : ""}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}${resourceTurn ? "" : `\n\n${ENVIRONMENT_RULES(turnEnv)}`}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: turnEnv, signal: abort.signal, readOnly, ...(resourceTurn ? { offline: true, settingSources: ["user" as const] } : {}), phi: { ...turnPhi(live), task: taskId, ticket: task.ticket.id, base: `origin/${job.base}`, alert: (line: string) => say(line) }, effort, delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { quietSince = Date.now(); const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
       }, reviewUnits); }
       catch (e) { if (e instanceof AccountUnavailableError) { continue; } throw e; }
       finally { active = false; mine.set(who.id, (mine.get(who.id) ?? 1) - 1); if (usageTimer) clearInterval(usageTimer); if (deadline) clearTimeout(deadline); }
@@ -445,7 +456,7 @@ export async function workTask(taskId: string): Promise<void> {
     rmSync(join(task.worktree, ticketFile), { force: true });
     activity(`applying ${updates.length} owner update${updates.length === 1 ? "" : "s"} from Slack`);
     nextStep = "owner update";
-    const text = await turn(ownerUpdatePrompt(updates, { stage: feature.stage, built: !!feature.built, prUrl: feature.prs.at(-1), ticketFile }), builderProvider, "implementation");
+    const text = await turn(inbound(ownerUpdatePrompt(updates, { stage: feature.stage, built: !!feature.built, prUrl: feature.prs.at(-1), ticketFile }), phi).text, builderProvider, "implementation");
     await completeReply(text, undefined, "implementation");
     const applied = new Set(updates.map((u) => u.ts));
     updateTask(taskId, (t) => ({ ownerUpdates: (t.ownerUpdates ?? []).filter((u) => !applied.has(u.ts)) }));
@@ -456,7 +467,7 @@ export async function workTask(taskId: string): Promise<void> {
     if (revised && revised !== (ticketBody ?? "").trim()) {
       try {
         await source.updateBody(task.ticket.id, revised);
-        ticketBody = writeTicketFile(task.worktree, task.ticket, await fetchTicket(task.ticket, { repoPath: job.repo, clickupKey: state.clickupKey }).catch(() => undefined) ?? { body: revised });
+        ticketBody = writeTicketFile(task.worktree, task.ticket, maskTicket(await fetchTicket(task.ticket, { repoPath: job.repo, clickupKey: state.clickupKey }).catch(() => undefined) ?? { body: revised }));
         notes.push("Ticket description updated");
       } catch (e) { notes.push(`Ticket description not updated: ${(e as Error).message}`); }
     } else if (revised) notes.push("Ticket description already matched");
@@ -482,20 +493,22 @@ export async function workTask(taskId: string): Promise<void> {
   const draftOpen = () => !feature.built && !["In Review", "Merged", "Closed"].includes(feature.stage);
   const openDraft = async () => {
     if (feature.prs.length || !draftOpen()) return;
-    const pr = await ensureDraftPr({ cwd: task.worktree, base: job.base, branch: task.branch, title: draftTitle(task.ticket), body: draftBody(task.ticket, progressLabel(), ticketBody) });
+    const pr = await ensureDraftPr({ cwd: task.worktree, base: job.base, branch: task.branch, title: draftTitle(task.ticket), body: draftBody(task.ticket, progressLabel(), ticketBody, gate), guard: guardPush });
     if (!pr.url) { log(task, `draft PR not opened yet: ${pr.error}`); return; }
     feature = { ...feature, prs: [pr.url] };
     updateTask(task.id, { feature });
     await say(slackLines.pr(pr.url));
   };
   const saveProgress = async () => {
-    const saved = await checkpoint(task.worktree, task.branch, `Consort checkpoint: ${progressLabel()}`);
+    const saved = await checkpoint(task.worktree, task.branch, `Consort checkpoint: ${progressLabel()}`, undefined, guardPush);
     if (saved.error) log(task, `checkpoint failed: ${saved.error}`);
     else if (saved.committed || saved.pushed) log(task, `checkpoint${saved.committed ? " committed" : ""}${saved.pushed ? ` and pushed ${task.branch}` : ""}`);
+    // the next turn rewrites what the gate stopped; nothing reaches GitHub until it does
+    if (saved.withheld) guardGuidance = saved.error ?? "";
     await syncSubtaskStatus();
     if (!feature.prs.length) await openDraft();
     else if (draftOpen() && !saved.error) {
-      const failed = await updateDraftBody(task.worktree, feature.prs[0], draftBody(task.ticket, progressLabel(), ticketBody));
+      const failed = await updateDraftBody(task.worktree, feature.prs[0], draftBody(task.ticket, progressLabel(), ticketBody, gate));
       if (failed) log(task, `draft PR description not updated: ${failed}`);
     }
   };
@@ -568,6 +581,7 @@ export async function workTask(taskId: string): Promise<void> {
   // the readers' reports on the project info resources, kept apart so a failed repo research never drops them
   let resourceReport = "";
   let parallelGuidance = "";
+  const parallelPushGuard = (base: string) => pushGuard(base, gate);
 
   // ── the stages, Grilling through In Review ──────────────────────────────────────────────
   for (let n = 0; feature.stage !== "In Review" && feature.stage !== "Merged" && feature.stage !== "Closed"; n++) {
@@ -627,8 +641,8 @@ export async function workTask(taskId: string): Promise<void> {
         }
       }
       try {
-        await recoverImplementation(task.worktree, parallelDirectory);
-        const wave = await runImplementation({ cwd: task.worktree, directory: parallelDirectory, tasks: await readImplementationTasks(task.worktree), onStart: async (ids) => { log(task, `wave started: ${ids.join(", ")}`); await say(slackMessage("update", `Building ${ids.length} tickets in parallel: ${ids.join(", ")}`)); await syncSubtaskStatus(); }, concurrency: job.parallelImplementation ?? job.maxParallel ?? 4, run: parallelRun, check: async () => {
+        await recoverImplementation(task.worktree, parallelDirectory, parallelPushGuard);
+        const wave = await runImplementation({ cwd: task.worktree, directory: parallelDirectory, tasks: await readImplementationTasks(task.worktree), pushGuard: parallelPushGuard, onStart: async (ids) => { log(task, `wave started: ${ids.join(", ")}`); await say(slackMessage("update", `Building ${ids.length} tickets in parallel: ${ids.join(", ")}`)); await syncSubtaskStatus(); }, concurrency: job.parallelImplementation ?? job.maxParallel ?? 4, run: parallelRun, check: async () => {
           nextStep = "wave check";
           const checked = await turn("The coordinator integrated parallel ticket commits. Read repository setup and each completed ticket. Run the relevant tests and typecheck together, fix any failures, and commit fixes. Do not push or move the ship stage. Return [parallel-check: pass] only after all required checks pass; include the commands and their results. If a real owner decision blocks verification, return [ask-user: ...].", builderProvider, "implementation", true, 45 * 60_000);
           if (!/\[parallel-check: pass\]/.test(checked) || parseAskUser(checked).length) throw new Error(checked || "Parallel implementation checks did not return passing proof");
@@ -645,9 +659,10 @@ export async function workTask(taskId: string): Promise<void> {
     }
     const form = feature.stage === "Ready to Test" ? "approve" as const : "resume" as const;
     const stagePrompt = pendingUser ?? shipPrompt({ feature, form: { form }, worktree: task.worktree, branch: task.branch, base: `origin/${job.base}`, ticketBody, headless: true, runtimeParallel: true, resources: !!resourceReport });
-    const prompt = `${stagePrompt}\n\n${sharedResearch ? `## Shared research (verify changed code before relying on it)\n${sharedResearch}\n` : ""}${resourceReport ? `${resourceReport}\n` : ""}${parallelGuidance}`;
+    const prompt = `${stagePrompt}\n\n${sharedResearch ? `## Shared research (verify changed code before relying on it)\n${sharedResearch}\n` : ""}${resourceReport ? `${resourceReport}\n` : ""}${parallelGuidance}${guardGuidance ? `\n\n${guardGuidance}` : ""}`;
     pendingUser = undefined;
     parallelGuidance = "";
+    guardGuidance = "";
     // writing the build plan (no tickets yet) is the turn that decides how parallel the build can be: Fable or Astra
     const writesPlan = ["Spec'd", "Implementing"].includes(feature.stage) && !feature.built && !(await readGraph(task.worktree).catch(() => [])).length;
     const role = writesPlan ? "frontier" : stageModelRole(feature.stage, idle);
@@ -702,6 +717,8 @@ export async function workTask(taskId: string): Promise<void> {
     feature = { ...feature, evidenceAt: undefined };
     updateTask(taskId, { feature, evidenceValidatedAt: undefined });
     let guidance = "";
+    // evidence the PII gate withheld is recaptured without asking the owner, twice; after that the owner hears of it
+    let withheldRetries = 0;
     for (;;) {
       activity("gathering evidence");
       let blocked: Problem;
@@ -721,7 +738,7 @@ export async function workTask(taskId: string): Promise<void> {
         const cost = loadState().tasks.find((t) => t.id === taskId)?.cost;
         const evidenceTiming = { startedAt: task.startedAt, endedAt: Date.now() };
         activity("publishing verified evidence to GitHub and the ticket");
-        const published = await retryEvidencePublication(() => publishEvidence({ worktree: task.worktree, repo: job.repo, ticket: task.ticket, pr, prUrl: prUrl!, source, clickupKey: state.clickupKey, cost, timing: evidenceTiming }), say);
+        const published = await retryEvidencePublication(() => publishEvidence({ worktree: task.worktree, repo: job.repo, ticket: task.ticket, pr, prUrl: prUrl!, source, clickupKey: state.clickupKey, cost, timing: evidenceTiming, gate }), say);
         if (!published?.items || !published.prComment || !published.ticketComment) throw new ProblemError({ where: "evidence", what: "Evidence was not published to both the PR and ticket", why: [`PR comment: ${published?.prComment ? "posted" : "missing"}`, `Ticket comment: ${published?.ticketComment ? "posted" : "missing"}`, `Items: ${published?.items ?? 0}`] });
         const at = Date.now();
         feature = { ...feature, evidenceAt: at };
@@ -729,6 +746,11 @@ export async function workTask(taskId: string): Promise<void> {
         await say(slackLines.evidence(published.items, published.images, cost ? shortUsd(cost) : undefined));
         break;
       } catch (e) {
+        if (e instanceof PiiWithheldError && withheldRetries++ < 2) {
+          guidance = `The evidence was withheld by the PII gate (${e.categories}); nothing was posted. Recapture it from the seeded local database without personal data: synthetic names, example.com addresses, 555-01xx numbers, sequential identifiers.`;
+          log(task, `evidence withheld by the PII gate (${e.categories}); recapturing`);
+          continue;
+        }
         // the validator and the publisher throw plain errors: their message is the reason, one sentence per bullet
         blocked = e instanceof ProblemError ? problemOf(e, "evidence", { recent: [...recent] }) : { where: "evidence", what: "Evidence was not accepted", why: blockerBullets((e as Error).message), recent: [...recent], ...(problemOf(e, "evidence").error ? { error: problemOf(e, "evidence").error } : {}) };
         blocked.lead ??= "Evidence blocked. PR not handed off";
@@ -813,7 +835,7 @@ export async function workTask(taskId: string): Promise<void> {
       if (fresh.length) {
         log(task, `${fresh.length} new review thread(s)`);
         activity(`answering ${fresh.length} review thread${fresh.length === 1 ? "" : "s"}`);
-        const text = await turn(RESPOND_TO_REVIEW(fresh), builderProvider, "implementation");
+        const text = await turn(inbound(RESPOND_TO_REVIEW(fresh), phi).text, builderProvider, "implementation");
         await completeReply(text, undefined, "implementation");
         const afterFix = await readPr(job.repo, pr);
         const remaining = new Set(afterFix.unresolved.map((t) => t.threadId).filter(Boolean));

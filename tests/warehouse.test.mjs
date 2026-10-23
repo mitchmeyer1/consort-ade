@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { invokesWarehouse, readOnlyStatement, sameTable, shellWords, tablesReferenced } from '../src/shared/warehouse.ts';
+import { invokesWarehouse, readOnlyStatement, sameTable, tablesReferenced } from '../src/shared/warehouse.ts';
+import { shellWords } from '../src/shared/shellCommands.ts';
 
 const names = ['snow', 'snowsql', 'hex'];
 

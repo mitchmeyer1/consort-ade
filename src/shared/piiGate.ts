@@ -76,7 +76,8 @@ export function redactSpans(text: string, spans: PiiSpan[], replace = (s: PiiSpa
 
 /** the structural skeleton of a match: digit N, letter A, whitespace _, the rest kept; capped at 40 */
 export const maskShape = (s: string) => {
-  const shape = s.replace(/[0-9]/g, "N").replace(/\p{L}/gu, "A").replace(/\s/g, "_");
+  // one pass, so the N a digit becomes is not then read as a letter
+  const shape = s.replace(/[0-9]|\p{L}|\s/gu, (c) => (/[0-9]/.test(c) ? "N" : /\s/.test(c) ? "_" : "A"));
   return shape.length > 40 ? `${shape.slice(0, 40)}…` : shape;
 };
 

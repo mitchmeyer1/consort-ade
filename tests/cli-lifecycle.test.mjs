@@ -10,10 +10,12 @@ import * as ship from '../src/shared/ship.ts';
 import * as cliModels from '../src/shared/cliModels.ts';
 import * as cliTurnPolicy from '../src/shared/cliTurnPolicy.ts';
 import * as phi from '../src/shared/phi.ts';
+import * as phiGate from '../src/cli/phiGate.ts';
 import { usageBlock } from '../src/shared/usage.ts';
 import * as usageMod from '../src/shared/usage.ts';
 import * as ownerUpdates from '../src/cli/ownerUpdates.ts';
 import { RESOURCE_HEADING } from '../src/shared/resources.ts';
+import * as pii from './helpers/fake-pii.mjs';
 
 const require = createRequire(import.meta.url);
 const compile = file => ts.transpileModule(readFileSync(new URL(`../src/cli/${file}.ts`, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -34,16 +36,16 @@ function harness(opts = {}) {
     'node:util': { promisify: () => async (cmd, args) => { events.push(args.join(' ')); return opts.exec ? opts.exec(cmd, args) : { stdout: '' }; } },
     './evidenceRetry': evidenceRetry,
     '../shared/headless.ts': headless, '../shared/seatPool.ts': seatPool, '../shared/ship.ts': ship,
-    '../shared/cliModels.ts': cliModels, '../shared/cliTurnPolicy.ts': cliTurnPolicy, '../shared/phi.ts': phi,
+    '../shared/cliModels.ts': cliModels, '../shared/cliTurnPolicy.ts': cliTurnPolicy, '../shared/phi.ts': phi, './phiGate': phiGate,
     './covered': { runCoveredTurn: async r => { events.push(`covered:${r.ask.question}`); return opts.covered ? opts.covered(r) : { status: 'unavailable', reason: 'no covered key in tests' }; } },
       './capacity': { AccountUnavailableError: class extends Error {}, withAgentTurn: async (_, __, fn) => fn(), withEnvironmentSlot: async (_, fn) => fn() },
       './parallel': { runResourceResearch: async o => opts.runResourceResearch ? opts.runResourceResearch(o) : ({ summary: '', sections: [], failed: [] }), prepareResearchTasks: async () => [], recoverImplementation: async () => [], readImplementationTasks: async () => [], runImplementation: async o => opts.runImplementation?.(o) ?? ({ completed: [], commits: [], failed: [] }), runResearch: async o => opts.runResearch?.(o) ?? ({ summary: 'No conflicting flows found', results: [], reused: false }) }, '../shared/usage.ts': usageMod,
     '../shared/shipPrompt.ts': { shipPrompt: o => opts.shipPrompt?.(o) ?? 'fix findings' },
     '../shared/review.ts': { parseReview: () => ({}), reviewSummary: () => opts.missingReport ? undefined : opts.summary ?? { total: 0 } },
-    '../main/ship': { excludeConsortDir: async () => {}, fetchTicket: async () => ({}), writeTicketFile: () => '' },
+    '../main/ship': { excludeConsortDir: async () => {}, fetchTicket: async () => opts.ticket ?? ({}), writeTicketFile: (_, __, fetched) => { if (fetched?.body) events.push(`ticket file:${fetched.body}`); return fetched?.body ?? ''; } },
     './slackIdentity': { ensureSlackIdentity: async () => {} },
     './ownerUpdates': ownerUpdates,
-    './checkpoint': { checkpoint: async (cwd, branch, message) => { events.push(`checkpoint:${message}`); return { committed: true, pushed: true }; } },
+    './checkpoint': { checkpoint: async (cwd, branch, message, git, guard) => { events.push(`checkpoint:${message}`); return opts.checkpoint?.(guard) ?? { committed: true, pushed: true }; } },
     './buildProgress': { stepLabel: name => name },
     './repoEnv': { environmentPrompt: (_, __, env) => headless.ENVIRONMENT_PROMPT(env), saveRepoEnv: () => { events.push('repo env saved'); return true; } },
     './buildGraph': { readGraph: async () => opts.graph?.tickets ?? [], planWaves: () => opts.graph?.plan ?? { waves: [], remaining: 0, done: 0, problems: [] }, tooSerial: () => !!opts.graph?.serial, graphSummary: g => `${g.remaining} left in ${g.waves.length} waves`, RESPLIT_PROMPT: () => 'RESPLIT THE GRAPH' },
@@ -1067,4 +1069,23 @@ test('with the guard on a Claude usage limit waits instead of falling back to Co
   const h = harness({ phi: { guard: true }, task: { envReadyAt: undefined, feature: { stage: 'Implementing' } }, turn: o => { if (o.account.provider === 'claude') return { text: '', limit: { text: 'quota exhausted' } }; throw halt; } });
   await assert.rejects(h.work(), e => e === halt);
   assert.deepEqual(h.events.filter(e => e.startsWith('turn:')), ['turn:claude']);
+});
+
+test('under the PHI/PII guard the ticket reaches the agent masked, every turn carries the task, and a withheld push becomes the next turn\'s instruction', async () => {
+  const ssn = pii.ssn();
+  const turns = [];
+  let guarded;
+  const withheld = 'Not pushed, by the PII gate: src/a.ts:3 ssn ×1. Replace them with synthetic placeholders.';
+  const h = harness({ phi: { guard: true }, ticket: { body: `Member ${ssn} cannot log in` }, task: { feature: { stage: 'Implementing', prs: [] } },
+    checkpoint: (guard) => { guarded = guard; return { committed: true, pushed: false, withheld: true, error: withheld }; },
+    turn: (o) => { turns.push(o); if (turns.length > 1) throw halt; return { text: '' }; } });
+  await assert.rejects(h.work(), (e) => e === halt);
+  assert.ok(h.events.includes('ticket file:Member [REDACTED:ssn] cannot log in'));
+  assert.ok(!JSON.stringify([h.events, h.messages, turns.map((t) => t.prompt)]).includes(ssn));
+  assert.ok(h.messages.some((m) => /The ticket carries 1 identifier the PII gate masks/.test(m.text)));
+  assert.deepEqual(turns.map((t) => t.account.provider), ['claude', 'claude']);
+  assert.deepEqual({ guard: turns[0].phi.guard, task: turns[0].phi.task, ticket: turns[0].phi.ticket, base: turns[0].phi.base }, { guard: true, task: 't', ticket: 'T1', base: 'origin/main' });
+  assert.equal(typeof guarded, 'function');
+  assert.ok(!turns[0].prompt.includes(withheld));
+  assert.ok(turns[1].prompt.includes(withheld));
 });
