@@ -491,9 +491,12 @@ export async function workTask(taskId: string): Promise<void> {
     // `consort-cli reboot`: the owner stopped the last worker; open by working out where it got to
     log(task, "rebooted by the owner; picking up after the last run");
     await say(slackLines.rebooted(feature.stage));
-    activity("rebooted: checking where the last run got to");
-    nextStep = "reboot pickup";
-    await completeReply(await turn(REBOOT_PROMPT));
+    // at Grilling nothing is half-built: grill again with fresh research and resource reports, rather than let one recovery turn write the spec without them and settle the dropped questions itself
+    if (feature.stage !== "Grilling") {
+      activity("rebooted: checking where the last run got to");
+      nextStep = "reboot pickup";
+      await completeReply(await turn(REBOOT_PROMPT));
+    }
     updateTask(taskId, { rebootedAt: undefined });
   }
   if (task.recoveryGuidance) {

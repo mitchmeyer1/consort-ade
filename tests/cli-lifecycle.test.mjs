@@ -1016,3 +1016,20 @@ test('a resource that fails to pull is still read; one that fails to read leaves
   assert.ok(!none.h.events.some(e => e.includes('pull')));
   assert.equal(none.forms[0].resources, false);
 });
+
+test('a task rebooted at Grilling grills again with fresh research and resource reports instead of a pickup turn', async () => {
+  const seen = [], forms = [];
+  const h = harness({ resources: [vault], task: { ...grilling, rebootedAt: 5 },
+    runResearch: async () => ({ summary: 'Flow export preserves archived records', reused: false, results: [] }),
+    runResourceResearch: resourceReport,
+    shipPrompt: o => { forms.push(o); return 'coordinate stage'; },
+    turn: o => { seen.push(o); if (o.cwd === '/vault') return { text: 'Support tickets are opened by the messaging platform (decisions/2026-07-24-ticketing.md, 2026-07-24)' }; throw halt; },
+  });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.ok(!seen.some(o => o.prompt.includes(headless.REBOOT_PROMPT)), 'no pickup turn at Grilling');
+  const planner = seen.find(o => o.cwd === '/virtual');
+  assert.ok(planner.prompt.includes(RESOURCE_HEADING), 'the first planner turn has the resource report');
+  assert.equal(forms[0].resources, true);
+  assert.equal(h.task.rebootedAt, undefined);
+  assert.ok(h.messages.some(m => /Rebooted by you at \*Grilling\*\. Grilling again with fresh research/.test(m.text)));
+});

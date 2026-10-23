@@ -382,7 +382,7 @@ export const slackLines = {
   answered: (n: number, open: number) => `✅ Answered ${n} review comment${n === 1 ? "" : "s"}${open ? `; ${open} still open` : ""}`,
   reviewerPick: (logins: string[]) => `✅ Reviewers from the changed files' contributors: ${logins.map((l) => `@${l}`).join(", ")}`,
   prClosed: (state: string) => `✅ PR ${state}. Done`,
-  rebooted: (stage: string) => `✅ Rebooted by you at *${stage}*. Checking where the last run got to, then continuing`,
+  rebooted: (stage: string) => `✅ Rebooted by you at *${stage}*. ${stage === "Grilling" ? "Grilling again with fresh research" : "Checking where the last run got to, then continuing"}`,
   working: (line: string) => `✅ Working: ${brief(line, 200)}`,
   conflicts: (base: string, attempt: number) => `✅ Merge conflicts with \`${base}\`${attempt > 1 ? ` (try ${attempt})` : ""}. Resolving them and pushing; not ready to merge until GitHub says clean`,
 };
