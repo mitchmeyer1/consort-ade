@@ -3,8 +3,12 @@
  * people's names, emails, phone numbers, street addresses, SSNs and labelled patient details
  * (DOB, MRN, "patient: …") become ****. Slack mentions (<@U…>), @handles, GitHub logins, URLs
  * and code identifiers are left alone. It is a pattern filter, so agents are also told not to
- * write PII (headless.ts HEADLESS_RULES); this catches what slips through.
+ * write PII (headless.ts HEADLESS_RULES); this catches what slips through. The PII gate's shape
+ * checks (piiGate.ts: payment cards, Medicare beneficiary identifiers, E.164 and labelled phones)
+ * run first; the broader patterns below over-mask on purpose, since a masked word costs nothing.
  */
+import { piiSpans, redactSpans } from "./piiGate.ts";
+
 export const MASK = "****";
 
 // common US first names; a name is one of these followed by a capitalised word ("Will Lerner", "MARY SMITH")
@@ -21,6 +25,8 @@ const STREET = String.raw`(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln
 const ADDRESS = new RegExp(String.raw`\b\d{1,6}\s+(?:[NSEW]\.?\s+)?(?:[A-Z0-9][A-Za-z0-9'’-]*\.?\s+){1,4}${STREET}\b\.?(?:,?\s*(?:Apt|Apartment|Suite|Ste|Unit|#)\.?\s*[\w-]+)?(?:,\s*[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,2})?(?:,?\s*[A-Z]{2})?(?:\s+\d{5}(?:-\d{4})?)?`, "g");
 const PO_BOX = /\bP\.?\s?O\.?\s+Box\s+\d+\b/gi;
 
+const GATE_SHAPES = new Set(["card", "mbi", "phone-anchored"]);
+
 /** Slack tokens to keep as they are: mentions, dates, and the URL half of a link (its label is still checked) */
 const KEEP = /<(?:[@#!][^>]*|https?:[^|>]*)(?=[|>])/g;
 
@@ -28,6 +34,9 @@ export function redactPii(text: string): string {
   if (!text) return text;
   const kept: string[] = [];
   let out = text.replace(KEEP, (m) => { kept.push(m); return `\u0000${kept.length - 1}\u0000`; });
+  // only the shapes the patterns below miss; a labelled phone keeps its label, like the labelled values do
+  const before = out;
+  out = redactSpans(before, piiSpans(before, "release").filter((s) => GATE_SHAPES.has(s.category)), (s) => (s.category === "phone-anchored" ? before.slice(s.start, s.end).replace(/\+?\d[\d .-]*\d/, MASK) : MASK));
   out = out
     .replace(EMAIL, MASK)
     .replace(SSN, MASK)

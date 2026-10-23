@@ -8,11 +8,12 @@ import * as cliModels from '../src/shared/cliModels.ts';
 import * as usage from '../src/shared/usage.ts';
 import * as review from '../src/shared/review.ts';
 import * as ship from '../src/shared/ship.ts';
+import * as phi from '../src/shared/phi.ts';
 
 const require = createRequire(import.meta.url);
 const compile = name => ts.transpileModule(readFileSync(new URL(`../src/cli/${name}.ts`, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 function load(name, extra = {}) {
-  const mocks = { '../shared/headless.ts': headless, '../shared/cliModels.ts': cliModels, '../shared/usage.ts': usage, '../shared/review.ts': review, '../shared/ship.ts': ship,
+  const mocks = { '../shared/phi.ts': phi, '../shared/headless.ts': headless, '../shared/cliModels.ts': cliModels, '../shared/usage.ts': usage, '../shared/review.ts': review, '../shared/ship.ts': ship,
     './state': { WORK_DIR: '/wt', HOME: '/home', newId: p => `${p}-1`, loadState: () => ({ tasks: extra.tasks ?? [], accounts: [], jobs: [] }) }, ...extra.mocks };
   const mod = { exports: {} };
   new Function('require', 'module', 'exports', compile(name))(n => mocks[n] ?? (n.startsWith('.') ? {} : require(n)), mod, mod.exports);
@@ -88,6 +89,17 @@ test('posting: one review with inline comments where the diff shows the line, an
   assert.equal(sent.event, 'REQUEST_CHANGES');
   assert.deepEqual(sent.comments, [{ path: 'src/a.ts', line: 2, side: 'RIGHT', body: 'inline one' }]);
   assert.match(sent.body, /Fix the High item\.[\s\S]*\*\*src\/z\.ts:40\*\* — not in the diff/);
+});
+
+test('under the PHI/PII guard a review whose comments carry an identifier is not posted at all', async () => {
+  const { postReview } = await import('../src/cli/reviewPost.ts');
+  const { phiSettings } = await import('../src/shared/phi.ts');
+  const pii = await import('./helpers/fake-pii.mjs');
+  const calls = [];
+  const gh = async (args) => { calls.push(args.join(' ')); return JSON.stringify(args[1].includes('/compare/') ? { files: [{ filename: 'src/a.ts', patch: '@@ -1,1 +1,2 @@\n a\n+b' }] } : { html_url: 'u' }); };
+  const r = review.parseReview(JSON.stringify({ repo: 'acme/mono', pr: 9, url: 'u', head: 'h', base: 'b', findings: [{ id: 'F1', kind: 'defect', severity: 'high', title: 't1', file: 'src/a.ts', line: 2, comment: `the fixture holds ${pii.card()}`, status: 'approved' }] }));
+  await assert.rejects(postReview(r, r.findings, 'COMMENT', 'Review.', '/wt', gh, { phi: phiSettings({ phi: { guard: true } }), record() {} }), (e) => e.name === 'PiiWithheldError' && e.categories === 'card ×1');
+  assert.ok(!calls.some((c) => c.includes('/reviews')));
 });
 
 test('approving your own PR falls back to a comment instead of failing', async () => {

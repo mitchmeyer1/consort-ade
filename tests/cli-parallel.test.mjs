@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, readFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { implementationFrontier, runResearch, runImplementation, readImplementationTasks } from '../src/cli/parallel.ts';
+import { implementationFrontier, runResearch, runImplementation, readImplementationTasks, runResourceResearch } from '../src/cli/parallel.ts';
 
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 async function repository(t) {
@@ -281,4 +281,79 @@ test('a child commits even when .consort and .env are gitignored', async (t) => 
   const r = await runImplementation({ ...o, tasks, run, check: async () => {} });
   assert.deepEqual(r.completed.sort(), ['a', 'b']);
   assert.ok(!git(o.cwd, 'log', '--name-only', '--format=', '-2').includes('.env'));
+});
+
+async function notesRepo(t) {
+  const root = await mkdtemp(join(tmpdir(), 'consort-notes-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = join(root, 'vault'); await mkdir(join(cwd, 'decisions'), { recursive: true });
+  git(cwd, 'init'); git(cwd, 'config', 'user.email', 'test@example.com'); git(cwd, 'config', 'user.name', 'Test');
+  await writeFile(join(cwd, 'README.md'), '# Team notes\n\n- decisions/2026-07-24-ticketing.md\n');
+  await writeFile(join(cwd, 'decisions', '2026-07-24-ticketing.md'), '# Support tickets are opened by the messaging platform, not the app\n');
+  git(cwd, 'add', '.'); git(cwd, 'commit', '-m', 'notes');
+  return { cwd, directory: join(root, 'parallel') };
+}
+
+test('resource readers read each checkout in place, report to the planner with paths and dates, and reuse an unchanged report', async (t) => {
+  const notes = await notesRepo(t);
+  const calls = [];
+  const run = async (job) => { calls.push(job); return { text: 'Relevant: support tickets are opened by the messaging platform (2026-07-24, decisions/2026-07-24-ticketing.md)' }; };
+  const o = { resources: [{ id: 'res_1', name: 'team-notes', kind: 'markdown', path: notes.cwd }], directory: notes.directory, ticketBody: 'Open a support ticket from the app', run };
+  const first = await runResourceResearch(o);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].cwd, notes.cwd, 'read in place, not in a worktree');
+  assert.equal(calls[0].kind, 'resource');
+  assert.match(calls[0].prompt, /read-only/);
+  assert.match(calls[0].prompt, /Open a support ticket from the app/);
+  assert.match(first.summary, /^## Prior decisions \(project info resources\)\n### team-notes\nRelevant: support tickets/);
+  assert.equal(first.sections[0].reused, false);
+  const report = await readFile(join(notes.directory, 'RESOURCES.md'), 'utf8');
+  assert.match(report, /## team-notes/);
+  assert.ok(report.includes(git(notes.cwd, 'rev-parse', 'HEAD')), 'the report names the commit it read');
+
+  const again = await runResourceResearch(o);
+  assert.equal(calls.length, 1, 'same checkout and ticket: the report is reused');
+  assert.equal(again.sections[0].reused, true);
+  assert.equal(again.summary, first.summary);
+  await runResourceResearch({ ...o, ticketBody: 'Something else' });
+  assert.equal(calls.length, 2, 'a different ticket is read again');
+  await writeFile(join(notes.cwd, 'decisions', 'draft.md'), 'not committed yet\n');
+  await runResourceResearch(o);
+  assert.equal(calls.length, 3, 'an uncommitted edit is read again');
+  git(notes.cwd, 'add', '.'); git(notes.cwd, 'commit', '-m', 'draft');
+  await runResourceResearch(o);
+  assert.equal(calls.length, 4, 'a new commit is read again');
+  assert.equal(git(notes.cwd, 'status', '--porcelain'), '', 'nothing was written into the notes');
+  assert.equal(git(notes.cwd, 'worktree', 'list').split('\n').length, 1, 'no worktree was made');
+});
+
+test('a resource that cannot be read is reported as failed while the others still count; nothing relevant adds no section; failures are not cached', async (t) => {
+  const quiet = await notesRepo(t), broken = await notesRepo(t);
+  const calls = [];
+  const run = async (job) => { calls.push(job.cwd); return job.cwd === quiet.cwd ? { text: '[resource: none]' } : { text: '', error: 'reader crashed' }; };
+  const resources = [
+    { id: 'r1', name: 'quiet', kind: 'markdown', path: quiet.cwd },
+    { id: 'r2', name: 'broken', kind: 'markdown', path: broken.cwd },
+    { id: 'r3', name: 'missing', kind: 'markdown', path: join(quiet.cwd, 'nope') },
+    { id: 'r4', name: 'relative', kind: 'markdown', path: 'notes' },
+  ];
+  const o = { resources, directory: quiet.directory, ticketBody: 'ticket', run };
+  const r = await runResourceResearch(o);
+  assert.equal(r.summary, '', 'no section when nothing bore on the ticket');
+  assert.deepEqual(r.sections.map((s) => [s.name, s.empty]), [['quiet', true]]);
+  assert.deepEqual(r.failed.map((f) => f.name), ['broken', 'missing', 'relative']);
+  assert.match(r.failed[0].error, /reader crashed/);
+  assert.match(r.failed[1].error, /not a git checkout/);
+  assert.match(r.failed[2].error, /not an absolute path/);
+  await runResourceResearch(o);
+  // readers run concurrently, so count per checkout rather than in order
+  assert.deepEqual([calls.filter((c) => c === quiet.cwd).length, calls.filter((c) => c === broken.cwd).length], [1, 2], 'the empty report is reused, the failed one is asked again');
+});
+
+test('a resource report is masked before it reaches the planner', async (t) => {
+  const notes = await notesRepo(t);
+  const address = ['someone', 'example.org'].join('@');
+  const r = await runResourceResearch({ resources: [{ id: 'r1', name: 'team-notes', kind: 'markdown', path: notes.cwd }], directory: notes.directory, ticketBody: 'ticket', run: async () => ({ text: `Relevant: escalations go to ${address}` }) });
+  assert.ok(!r.summary.includes(address));
+  assert.match(r.summary, /escalations go to \*\*\*\*/);
 });

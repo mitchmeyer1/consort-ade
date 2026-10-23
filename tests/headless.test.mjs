@@ -559,3 +559,16 @@ test('both grilling handlers run the impact check and ask before breaking a live
     assert.match(p, /Impact check/);
   }
 });
+
+test('headless Grilling carries the resource rules only when resource reports are appended', () => {
+  const f = newShipFeature(ticket, 'export-roster', 1000);
+  const base = { feature: f, form: { form: 'resume' }, worktree: '/w', branch: 'b', base: 'origin/main' };
+  const withReports = shipPrompt({ ...base, headless: true, resources: true });
+  assert.match(withReports, /Prior decisions \(project info resources\)/);
+  assert.match(withReports, /Do not ask the owner what a report already answers/);
+  assert.match(withReports, /do not recommend reversing the decision/);
+  assert.match(withReports, /is a lead, not a fact/);
+  assert.doesNotMatch(shipPrompt({ ...base, headless: true }), /project info resources/);
+  assert.doesNotMatch(shipPrompt({ ...base, resources: true }), /project info resources/, 'the desktop interview is unchanged');
+  assert.doesNotMatch(shipPrompt({ ...base, feature: { ...f, stage: 'Implementing' }, headless: true, resources: true }), /project info resources/);
+});

@@ -8,6 +8,9 @@ export const openTaskLimit = (job: Job) => positive(job.maxOpenTasks, Math.max(8
 export const environmentLimit = (job: Job) => positive(job.maxEnvironments, openTaskLimit(job));
 export const availableTaskSlots = (state: CliState, job: Job) => Math.max(0, Math.min(openTaskLimit(job) - state.tasks.filter(t => t.jobId === job.id && open(t)).length, positive(state.capacity?.maxOpenTasks, 32) - state.tasks.filter(open).length));
 
+/** the lease the covered analyst takes (cli/covered.ts); it is not one of the subscription accounts */
+export const COVERED_ACCOUNT = "covered";
+
 export class AccountUnavailableError extends Error {
   constructor(public accountId: string) { super(`Account ${accountId} reached its usage limit while waiting for capacity.`); this.name = "AccountUnavailableError"; }
 }
@@ -28,7 +31,8 @@ export function tryAcquireAgentTurn(taskId: string, accountId: string, units = 1
     const task = state.tasks.find(t => t.id === taskId);
     if (!task || !open(task)) throw new Error(`Task ${taskId} cannot start an agent turn.`);
     const job = state.jobs.find(j => j.id === task.jobId);
-    const account = state.accounts.find(a => a.id === accountId);
+    // the covered analyst is not a subscription account: it has its own installation-wide limit and no usage block
+    const account = accountId === COVERED_ACCOUNT ? { maxActiveTurns: state.phi?.coveredMaxActive ?? 1, blockedUntil: undefined } : state.accounts.find(a => a.id === accountId);
     if (!job || !account) throw new Error(`Missing job or account for task ${taskId}.`);
     if (account.blockedUntil && account.blockedUntil > Date.now()) throw new AccountUnavailableError(accountId);
     const active = state.tasks.flatMap(t => (t.activeTurns ?? []).map(turn => ({ ...turn, jobId: t.jobId })));

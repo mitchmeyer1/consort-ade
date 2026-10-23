@@ -5,6 +5,7 @@
  * also asks for a change so the daemon queues it as an owner update (cli/ownerUpdates.ts).
  */
 import { existsSync, readFileSync } from "node:fs";
+import { turnAccounts, turnPhi } from "../shared/phi.ts";
 import { join } from "node:path";
 import { seedModels, taskStep } from "../shared/headless.ts";
 import { selectCliModel } from "../shared/cliModels.ts";
@@ -116,14 +117,15 @@ export function parseOversight(text: string): { answer: string; update?: string 
 export async function answerOwner(c: OversightContext, runTurn: (o: TurnOptions) => Promise<Turn> = realRunTurn, getUsage: (accounts: Account[]) => Promise<Map<string, ConnectorUsage>> = (a) => usageFor(a)): Promise<OversightAnswer> {
   const job = c.state.jobs.find((j) => j.id === c.task.jobId);
   const errors: string[] = [];
-  const usable = c.state.accounts.filter((a) => !a.blockedUntil || a.blockedUntil <= (c.now ?? Date.now()));
+  const accounts = turnAccounts(c.state);
+  const usable = accounts.filter((a) => !a.blockedUntil || a.blockedUntil <= (c.now ?? Date.now()));
   const usage = await getUsage(usable).catch(() => new Map<string, ConnectorUsage>());
-  for (const account of oversightAccounts(c.state.accounts, c.now, usage, job?.modelPolicy)) {
+  for (const account of oversightAccounts(accounts, c.now, usage, job?.modelPolicy)) {
     const model = oversightModel(account.provider, job?.modelPolicy);
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
     try {
-      const turn = await runTurn({ trace: { taskId: c.task.id, ticket: c.task.ticket.id, title: c.task.ticket.title, scanner: job?.name, kind: "oversight", stage: c.task.feature.stage, step: "answer the owner", role: "oversight" }, cwd: existsSync(c.task.worktree) ? c.task.worktree : job?.repo ?? HOME, prompt: oversightPrompt(c), model, account, readOnly: true, maxTurns: 25, effort: "medium", maxDelegates: 0, signal: abort.signal });
+      const turn = await runTurn({ phi: turnPhi(c.state), trace: { taskId: c.task.id, ticket: c.task.ticket.id, title: c.task.ticket.title, scanner: job?.name, kind: "oversight", stage: c.task.feature.stage, step: "answer the owner", role: "oversight" }, cwd: existsSync(c.task.worktree) ? c.task.worktree : job?.repo ?? HOME, prompt: oversightPrompt(c), model, account, readOnly: true, maxTurns: 25, effort: "medium", maxDelegates: 0, signal: abort.signal });
       if (turn.limit || turn.error || !turn.text.trim()) { errors.push(`${account.name}: ${turn.error ?? (turn.limit ? "usage limit" : "empty reply")}`); continue; }
       return { ...parseOversight(turn.text), model };
     } catch (e) { errors.push(`${account.name}: ${(e as Error).message}`); }
