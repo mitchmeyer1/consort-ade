@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative, isAbsolute } from "node:path";
@@ -149,12 +150,29 @@ export async function publishEvidence(o: { worktree: string; repo: string; ticke
   const m = validateEvidence(o.worktree);
   const dir = join(o.worktree, EVIDENCE_DIR);
   const wanted = [...new Set(m.items.map((i) => i.image).filter((f): f is string => !!f))].filter((f) => existsSync(join(dir, f)));
+  // Save successful transfers so a later network failure does not upload every image again.
+  const receiptFile = join(dir, ".publication.json");
+  type Receipt = { images: Record<string, { hash: string; url: string }>; pr?: string; ticket?: string };
+  let receipt: Receipt = { images: {} };
+  const destination = JSON.stringify([o.ticket.source, o.ticket.id, o.prUrl]);
+  try {
+    const saved = JSON.parse(readFileSync(receiptFile, "utf8"));
+    if (saved.destination === destination && saved.images && typeof saved.images === "object") receipt = saved;
+  } catch { /* first publication */ }
+  const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+  const saveReceipt = () => writeFileSync(receiptFile, JSON.stringify({ ...receipt, destination }));
   let images: Record<string, string> = {};
   let hosting: Published["hosting"] = "none";
   if (wanted.length) {
     if (o.ticket.source === "clickup" && o.clickupKey) {
       hosting = "clickup";
-      for (const f of wanted) images[f] = await uploadClickupAttachment(o.clickupKey, o.ticket.id, join(dir, f));
+      for (const f of wanted) {
+        const hash = digest(readFileSync(join(dir, f)));
+        const saved = receipt.images[f];
+        images[f] = saved?.hash === hash && typeof saved.url === "string" ? saved.url : await uploadClickupAttachment(o.clickupKey, o.ticket.id, join(dir, f));
+        receipt.images[f] = { hash, url: images[f] };
+        saveReceipt();
+      }
     } else {
       hosting = "branch";
       images = await pushEvidenceBranch(o.repo, o.ticket.id, wanted.map((f) => join(dir, f)));
@@ -165,8 +183,21 @@ export async function publishEvidence(o: { worktree: string; repo: string; ticke
   const bodyFile = join(dir, ".pr-comment.md");
   writeFileSync(bodyFile, prBody);
   let prComment = false, ticketComment = false;
-  await gh(o.repo, ["pr", "comment", String(o.pr), "--body-file", bodyFile]); prComment = true;
-  await o.source.comment(o.ticket.id, evidenceTextForTicket(m, images, o.prUrl, o.cost, o.timing)); ticketComment = true;
+  const prHash = digest(prBody);
+  if (receipt.pr !== prHash) {
+    await gh(o.repo, ["pr", "comment", String(o.pr), "--body-file", bodyFile]);
+    receipt.pr = prHash;
+    saveReceipt();
+  }
+  prComment = true;
+  const ticketBody = evidenceTextForTicket(m, images, o.prUrl, o.cost, o.timing);
+  const ticketHash = digest(ticketBody);
+  if (receipt.ticket !== ticketHash) {
+    await o.source.comment(o.ticket.id, ticketBody);
+    receipt.ticket = ticketHash;
+    saveReceipt();
+  }
+  ticketComment = true;
   return { items: m.items.length, images: Object.keys(images).length, prComment, ticketComment, hosting };
 }
 

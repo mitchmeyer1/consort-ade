@@ -17,7 +17,7 @@ import type { Provider } from "../shared/types";
 import { runTurn, packageRoot } from "./agent";
 import { readPr, requestReviewers, reviewerSuggestions, validateReviewers, whoAmI } from "./prmonitor";
 import { findBrowser, publishEvidence, validateEvidence, writeScreenshotHelper } from "./evidence";
-import { EVIDENCE_TURN_MS, EVIDENCE_CHECK_MS, TurnTimeoutError, resumeEvidenceTurn, staleEvidenceTimeout } from "./evidenceRetry";
+import { EVIDENCE_TURN_MS, EVIDENCE_CHECK_MS, TurnTimeoutError, resumeEvidenceTurn, staleEvidenceTimeout, retryEvidencePublication, staleEvidenceNetworkQuestion } from "./evidenceRetry";
 import { allocateEnvironment, cleanupEnvironment, withChildEnvironment } from "./environment";
 import { flushTaskNotifications, notifyTask } from "./lifecycle";
 import { readUsage, saveUsage, usageFor } from "./usage";
@@ -495,12 +495,12 @@ export async function workTask(taskId: string): Promise<void> {
     task.pendingQuestion = undefined;
     await say("• Ignore the question above: the evidence was approved. Continuing");
   }
-  if (task.pendingQuestion && staleEvidenceTimeout(task.pendingQuestion.questions)) {
-    log(task, "resuming evidence after the obsolete 15-minute timeout");
-    await notifyTask(taskId, "running", "Resuming evidence with a longer time budget; no owner action needed.");
+  if (task.pendingQuestion && (staleEvidenceTimeout(task.pendingQuestion.questions) || staleEvidenceNetworkQuestion(task.pendingQuestion.questions))) {
+    log(task, "resuming evidence after a recoverable timeout or publication network failure");
+    await notifyTask(taskId, "running", "Resuming evidence after a recoverable interruption; no owner action needed.");
     updateTask(taskId, { pendingQuestion: undefined, status: "working", note: undefined });
     task.pendingQuestion = undefined;
-    await say("✅ The previous evidence turn hit the old 15-minute limit. Resuming evidence with a longer budget; no action needed from you.");
+    await say("✅ Resuming evidence after the old 15-minute limit or a publication network failure. No action needed from you.");
   }
   if (task.pendingQuestion) {
     const answer = await ask(task.pendingQuestion.questions);
@@ -672,7 +672,9 @@ export async function workTask(taskId: string): Promise<void> {
         const verification = await resumeEvidenceTurn("Checking evidence", (continuation) => turn(`${VERIFY_EVIDENCE_PROMPT}\n\n${continuation}`, builderProvider, "coordination", false, EVIDENCE_CHECK_MS), say);
         if (!evidenceApproved(verification)) throw new ProblemError({ where: "evidence", what: "The evidence check did not pass", why: blockerBullets(stripAskUser(verification) || parseAskUser(verification).join(" ") || "No approval was returned.") });
         const cost = loadState().tasks.find((t) => t.id === taskId)?.cost;
-        const published = await publishEvidence({ worktree: task.worktree, repo: job.repo, ticket: task.ticket, pr, prUrl: prUrl!, source, clickupKey: state.clickupKey, cost, timing: { startedAt: task.startedAt, endedAt: Date.now() } });
+        const evidenceTiming = { startedAt: task.startedAt, endedAt: Date.now() };
+        activity("publishing verified evidence to GitHub and the ticket");
+        const published = await retryEvidencePublication(() => publishEvidence({ worktree: task.worktree, repo: job.repo, ticket: task.ticket, pr, prUrl: prUrl!, source, clickupKey: state.clickupKey, cost, timing: evidenceTiming }), say);
         if (!published?.items || !published.prComment || !published.ticketComment) throw new ProblemError({ where: "evidence", what: "Evidence was not published to both the PR and ticket", why: [`PR comment: ${published?.prComment ? "posted" : "missing"}`, `Ticket comment: ${published?.ticketComment ? "posted" : "missing"}`, `Items: ${published?.items ?? 0}`] });
         const at = Date.now();
         feature = { ...feature, evidenceAt: at };

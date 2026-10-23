@@ -30,3 +30,29 @@ export async function resumeEvidenceTurn(
     }
   }
 }
+
+/** Only transport failures and retryable HTTP responses resume without a human decision. */
+export function transientEvidencePublication(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|network error|timed? ?out|ClickUp(?: attachment)?:? (?:429|5\d\d)\b|HTTP (?:429|5\d\d)\b/i.test(message);
+}
+
+export async function retryEvidencePublication<T>(
+  publish: () => Promise<T>,
+  notify: (message: string) => Promise<unknown>,
+  wait: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms)),
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try { return await publish(); }
+    catch (error) {
+      if (!transientEvidencePublication(error)) throw error;
+      if (attempt === 1 || attempt % 5 === 0) await notify("✅ Evidence passed verification. A network request failed while publishing it; retrying saved uploads and comments automatically. No action needed from you.");
+      await wait(Math.min(attempt * 15_000, 60_000));
+    }
+  }
+}
+
+export function staleEvidenceNetworkQuestion(questions: string[]): boolean {
+  return questions.length === 1 && /Evidence blocked\. PR not handed off/.test(questions[0]) &&
+    /• Evidence was not accepted\n• fetch failed(?:\n|$)/.test(questions[0]);
+}

@@ -24,7 +24,7 @@ function fixture(t, options = {}) {
     'node:util': { promisify: () => async (cmd, args) => { calls.push(args); if (options.prFails) throw new Error('PR comment rejected'); return { stdout: '' }; } },
   };
   const mod = { exports: {} };
-  new Function('require', 'module', 'exports', 'fetch', code)(n => mocks[n] ?? require(n), mod, mod.exports, async () => { calls.push('upload'); return options.uploadFails ? { ok: false, status: 403, text: async () => 'Upload denied' } : { ok: true, text: async () => JSON.stringify({ url: 'https://image.example/map.png' }) }; });
+  new Function('require', 'module', 'exports', 'fetch', code)(n => mocks[n] ?? require(n), mod, mod.exports, async () => { calls.push('upload'); if (options.fetch) return options.fetch(); return options.uploadFails ? { ok: false, status: 403, text: async () => 'Upload denied' } : { ok: true, text: async () => JSON.stringify({ url: 'https://image.example/map.png' }) }; });
   const args = { worktree: root, repo: root, ticket: { source: 'clickup', id: '1', title: 'Map', url: 'https://ticket/1' }, pr: 1, prUrl: 'https://pr/1', clickupKey: 'test', source: { comment: async (_, text) => { comments.push(text); calls.push('ticket'); if (options.ticketFails) throw new Error('Ticket unavailable'); } } };
   return { api: mod.exports, root, dir, manifest, save, args, calls, comments };
 }
@@ -94,4 +94,39 @@ test('credential recovery names the root path and requires confirmation without 
   assert.match(prompt, /Never ask for a secret in Slack/);
   assert.match(prompt, /never copy the entire root env file/i);
   assert.match(headless.VERIFY_EVIDENCE_PROMPT, /Read every image using image tools/);
+});
+
+test('publication resumes completed uploads after a later image upload fails', async t => {
+  let uploads = 0;
+  const f = fixture(t, { fetch: async () => {
+    if (++uploads === 2) throw new TypeError('fetch failed');
+    return { ok: true, text: async () => JSON.stringify({ url: `https://image.example/${uploads}.png` }) };
+  } });
+  f.manifest.items.push({ title: 'Second view', image: 'second.png' });
+  writeFileSync(join(f.dir, 'second.png'), readFileSync(join(f.dir, 'map.png')));
+  f.save();
+  await assert.rejects(f.api.publishEvidence(f.args), /fetch failed/);
+  assert.equal(f.comments.length, 0);
+  const result = await f.api.publishEvidence(f.args);
+  assert.equal(result.images, 2);
+  assert.equal(uploads, 3, 'the first successful upload is reused');
+});
+
+test('ticket comment retry reuses images and does not repost the successful PR comment', async t => {
+  const f = fixture(t);
+  let attempts = 0;
+  f.args.source.comment = async () => { if (++attempts === 1) throw new TypeError('fetch failed'); };
+  await assert.rejects(f.api.publishEvidence(f.args), /fetch failed/);
+  await f.api.publishEvidence(f.args);
+  assert.equal(f.calls.filter(c => c === 'upload').length, 1);
+  assert.equal(f.calls.filter(c => Array.isArray(c) && c[0] === 'pr' && c[1] === 'comment').length, 1);
+  assert.equal(attempts, 2);
+});
+
+test('changed image contents invalidate a saved upload receipt', async t => {
+  const f = fixture(t);
+  await f.api.publishEvidence(f.args);
+  writeFileSync(join(f.dir, 'map.png'), Buffer.from('changed image fixture'));
+  await f.api.publishEvidence(f.args);
+  assert.equal(f.calls.filter(c => c === 'upload').length, 2);
 });

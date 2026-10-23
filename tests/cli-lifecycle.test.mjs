@@ -948,3 +948,11 @@ test('an older ready PR is returned to draft and stays draft if evidence publica
   assert.ok(!h.events.includes('pr ready 1'));
   assert.ok(!h.events.some(e => e.startsWith('reviewers:')));
 });
+
+test('restart recovers the legacy publication network question without an owner reply', async () => {
+  const h = harness({ task: { reviewsDone: 3, evidenceValidatedAt: undefined, lifecycle: 'paused', pendingQuestion: { afterTs: '1', questions: ['❌ Evidence blocked. PR not handed off\n• Evidence was not accepted\n• fetch failed\n• Last seen: 122 tests passed'] } } });
+  await h.work();
+  assert.ok(!h.events.includes('owner reply'));
+  assert.ok(h.events.includes('publish evidence'));
+  assert.ok(h.task.evidenceValidatedAt);
+});
