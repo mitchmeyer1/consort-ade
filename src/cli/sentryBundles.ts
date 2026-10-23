@@ -2,6 +2,7 @@
 import { loadState } from "./state.ts";
 import { statusEvent } from "./statusLog";
 import { runTurn, type TurnOptions } from "./agent";
+import { turnPhi } from "../shared/phi.ts";
 import { pickTurnAccount, seedModels } from "../shared/headless.ts";
 import { modelTiers } from "../shared/modelTiers.ts";
 import { applySentryBundlePlan, type SentryGroup } from "../shared/sentryScanner.ts";
@@ -34,7 +35,7 @@ export async function planSentryBundles(job: Job, groups: SentryGroup[], onProgr
     const progress = setInterval(report, 60_000);
     const deadline = setTimeout(() => { timedOut = true; abort.abort(); }, SENTRY_PLAN_TIMEOUT_MS);
     try {
-      const result = await runTurn({ ...options, signal: abort.signal, onText: () => { updates++; } });
+      const result = await runTurn({ ...options, phi: turnPhi(state), signal: abort.signal, onText: () => { updates++; } });
       if (timedOut) throw new Error("Sentry grouping exceeded five minutes and was stopped; no tickets created. Other scanner passes can continue; the next scheduled scan retries.");
       return result;
     } finally { clearInterval(progress); clearTimeout(deadline); }

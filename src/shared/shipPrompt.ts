@@ -1,6 +1,6 @@
 import { SHIP_DIR, SHIP_REVIEW_ROUNDS, SHIP_STAGES, TICKET_FILE, shipFooter, shipStep, stageIndex, ticketRef, type ShipFeature, type ShipForm } from "./ship.ts";
 import type { ReviewSummary } from "./review.ts";
-import { BREAK_CHECK, GRILLING_HEADLESS, HEADLESS_RULES } from "./headless.ts";
+import { BREAK_CHECK, GRILLING_HEADLESS, HEADLESS_RULES, RESOURCE_GRILLING_RULES } from "./headless.ts";
 
 /**
  * The prompt for one /ship turn: the rules every stage shares, the feature's state, and the
@@ -27,6 +27,8 @@ export type ShipPromptInput = {
   headless?: boolean;
   /** CLI runtime schedules isolated research/writer waves between coordinator turns. */
   runtimeParallel?: boolean;
+  /** consort-cli: project info resource reports are appended to this turn, so headless Grilling gets the rules for using them */
+  resources?: boolean;
 };
 
 const REVIEW_FILE = (f: ShipFeature) => `.consort/pr-review/pr-${f.review?.pr ?? "<n>"}.review.json`;
@@ -238,8 +240,9 @@ export function shipHandler(f: ShipFeature, form: ShipForm): string {
   if (f.stage === "Closed") return "closed";
   if (form.form === "feedback") return "revising";
   if (f.stage === "Grilling") return "grilling";
-  if (f.stage === "Spec'd" || (f.stage === "Implementing" && !f.built)) return "implementing";
-  if (f.stage === "Implementing" && f.built && !f.report) return "test";
+  if ((f.stage === "Spec'd" || f.stage === "Implementing") && !f.built) return "implementing";
+  // an agent can build straight from the spec without moving to Implementing; built is built, so test it rather than ask for the build again
+  if ((f.stage === "Spec'd" || f.stage === "Implementing") && f.built && !f.report) return "test";
   if (f.stage === "Implementing") return "reentry";
   if (f.stage === "Ready to Test") return form.form === "approve" ? "approve" : "reentry";
   if (f.stage === "Revising") return "revising";
@@ -253,7 +256,7 @@ export function shipPrompt(i: ShipPromptInput): string {
   const body =
     handler === "pause" ? PAUSE(i)
     : handler === "closed" ? CLOSED()
-    : handler === "grilling" ? (i.headless ? GRILLING_HEADLESS : GRILLING(i))
+    : handler === "grilling" ? (i.headless ? (i.resources ? `${GRILLING_HEADLESS}\n\n${RESOURCE_GRILLING_RULES}` : GRILLING_HEADLESS) : GRILLING(i))
     : handler === "implementing" ? IMPLEMENTING(i)
     : handler === "test" ? TEST_SESSION(i)
     : handler === "approve" ? APPROVE(i)

@@ -8,9 +8,12 @@ import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUs
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { selectCliModel, type CliModelRole } from "../shared/cliModels.ts";
-import { MODEL_ROLE_RULES, BUILD_EFFORT_RULE, parseBuildEffort, parseModelEscalation, roleEffort, stageModelRole } from "../shared/cliTurnPolicy.ts";
-import { AccountUnavailableError, withAgentTurn, withEnvironmentSlot } from "./capacity";
-import { prepareResearchTasks, readImplementationTasks, recoverImplementation, runImplementation, runResearch, type ParallelRun } from "./parallel";
+import { MAX_STAGE_TURNS, turnMoved, MODEL_ROLE_RULES, BUILD_EFFORT_RULE, parseBuildEffort, parseModelEscalation, roleEffort, stageModelRole } from "../shared/cliTurnPolicy.ts";
+import { AccountUnavailableError, COVERED_ACCOUNT, withAgentTurn, withEnvironmentSlot } from "./capacity";
+import { prepareResearchTasks, readImplementationTasks, recoverImplementation, runImplementation, runResearch, runResourceResearch, type ParallelRun } from "./parallel";
+import type { Resource } from "../shared/resources.ts";
+import { coveredAnswerPrompt, parseCoveredAnalyst, phiSettings, turnAccounts, turnPhi, type CoveredAsk } from "../shared/phi.ts";
+import { runCoveredTurn } from "./covered";
 import { excludeConsortDir, fetchTicket, writeTicketFile } from "../main/ship";
 import { addWorktree } from "../main/git";
 import type { Provider } from "../shared/types";
@@ -37,6 +40,7 @@ import { ensureSlackIdentity } from "./slackIdentity";
 import { taskSlackLinks } from "./slackLinks";
 import { ownerUpdatePrompt, parseUpdateSummary, updateDir } from "./ownerUpdates";
 import { sourceFor, type Source } from "./sources";
+import { gatedSource, inbound, PiiWithheldError, pushGuard, type GateContext } from "./phiGate";
 import { blockAccount, loadState, processAlive, touchAccount, updateTask, WORK_DIR, type Account, type Job, type Task } from "./state";
 
 /**
@@ -63,9 +67,13 @@ export async function workTask(taskId: string): Promise<void> {
   if (!task) throw new Error(`No task ${taskId}.`);
   const job = state.jobs.find((j) => j.id === task!.jobId);
   if (!job) throw new Error(`Task ${taskId} belongs to a job that no longer exists.`);
-  const source = sourceFor(job, state.clickupKey);
+  // the PHI/PII guard: what leaves for the ticket, the PR and GitHub is gated, what comes in is masked, and an incident is filed under this task
+  const phi = phiSettings(state);
+  const gate: GateContext = { phi, task: taskId, ticket: task.ticket.id, alert: (line) => say(line) };
+  const guardPush = pushGuard(`origin/${job.base}`, gate);
+  const source = gatedSource(sourceFor(job, state.clickupKey), gate);
   const slack = state.slack ? new Slack(state.slack) : undefined;
-  const have = providersOf(state.accounts);
+  const have = providersOf(turnAccounts(state));
   const builderProvider: Provider | undefined = have.claude ? "claude" : have.codex ? "codex" : undefined;
   if (!builderProvider) throw new Error("No AI accounts: run `consort-cli accounts add` first.");
   const models = seedModels();
@@ -102,12 +110,23 @@ export async function workTask(taskId: string): Promise<void> {
     await addWorktree(job.repo, shipFolder(shipSlug(task.ticket.title), task.ticket.id), task.branch, `origin/${job.base}`, WORK_DIR);
   }
   await excludeConsortDir(task.worktree).catch(() => {});
+  // project info resources are read in place by Grilling's readers; pulled on every start, since a stale copy would replay decisions the team has since changed
+  const resources: Resource[] = [];
+  for (const resource of state.resources ?? []) {
+    if (!existsSync(join(resource.path, ".git"))) { log(task, `resource ${resource.name}: ${resource.path} is not a git checkout here; Grilling runs without it`); continue; }
+    await run("git", ["-C", resource.path, "pull", "--ff-only", "--quiet"], { timeout: 60_000 }).then(() => log(task!, `resource ${resource.name} pulled`), (e: Error) => log(task!, `resource ${resource.name} not pulled (${String(e.message).split("\n")[0]}); reading it as it is`));
+    resources.push(resource);
+  }
+  const resourcePaths = new Set(resources.map((r) => r.path));
+  // agents read the ticket with every identifier the gate knows masked
+  const maskTicket = (f: { body: string; status?: string } | undefined) => f && { ...f, body: inbound(f.body, phi).text };
   const fetched = await fetchTicket(task.ticket, { repoPath: job.repo, clickupKey: state.clickupKey });
-  let ticketBody = writeTicketFile(task.worktree, task.ticket, fetched);
+  const ticketMasked = fetched ? inbound(fetched.body, phi).masked : 0;
+  let ticketBody = writeTicketFile(task.worktree, task.ticket, maskTicket(fetched));
   // the ClickUp subtasks, so the build tickets can name them and the worker can move them (cli/subtasks.ts)
   const claimed = task!;
   const subtasks = await source.subtasks(claimed.ticket.id).catch((e) => { log(claimed, `subtasks not read: ${(e as Error).message}`); return [] as Subtask[]; });
-  if (subtasks.length) writeSubtaskFile(claimed.worktree, subtasks);
+  if (subtasks.length) writeSubtaskFile(claimed.worktree, subtasks.map((s) => ({ ...s, name: inbound(s.name, phi).text, ...(s.description ? { description: inbound(s.description, phi).text } : {}) })));
   const syncSubtaskStatus = async (force?: SubtaskState) => {
     if (!subtasks.length) return;
     const tickets = await readGraph(claimed.worktree).catch(() => []);
@@ -130,6 +149,7 @@ export async function workTask(taskId: string): Promise<void> {
   }
   const say = async (text: string) => { log(task, text.replace(/\n/g, " ⏎ ")); if (slack && thread) await slack.post(slackStatus(text, text.trimStart().startsWith("🎉🍭🎊") ? "COMPLETED" : loadState().tasks.find((t) => t.id === taskId)?.lifecycle === "paused" ? "WAITING" : "RUNNING", await taskSlackLinks(loadState().tasks.find((t) => t.id === taskId)!, job.repo)), thread).catch((e) => log(task, `slack failed: ${e.message}`)); };
   if (!task.pendingQuestion && task.status !== "monitoring" && task.lifecycle !== "paused") await notifyTask(taskId, "running", "Worker started; preparing the task.");
+  if (ticketMasked) await say(`⚠️ The ticket carries ${ticketMasked} identifier${ticketMasked === 1 ? "" : "s"} the PII gate masks; agents read it masked. Take them out of the ticket.`);
   const finish = async (status: Task["status"], note?: string) => {
     updateTask(task.id, { status, note, finishedAt: Date.now(), activity: note ?? status });
     await notifyTask(taskId, status === "ready" ? "completed" : "stopped", note ?? status);
@@ -159,7 +179,7 @@ export async function workTask(taskId: string): Promise<void> {
     updateTask(task.id, { status: "working", note: undefined, pendingQuestion: undefined });
     await notifyTask(taskId, "running", "Answer received.");
     lastWorkingAt = 0; // the first agent line after an answer posts right away, so the owner sees it is on it
-    return reply ?? "";
+    return inbound(reply ?? "", phi).text;
   };
 
   /**
@@ -176,7 +196,12 @@ export async function workTask(taskId: string): Promise<void> {
   let nextStep: string | undefined;
   let feature: ShipFeature = task.feature;
   let pendingUser: string | undefined;
+  // a push the PHI/PII guard withheld at the last checkpoint: the next stage turn is told what to rewrite
+  let guardGuidance = "";
   let idle = 0;
+  let stageTurns = 0;
+  const headOf = () => run("git", ["rev-parse", "HEAD"], { cwd: task.worktree }).then((r) => r.stdout.trim(), () => undefined);
+  let head = await headOf(); // new commits since the last reply count as progress for the stuck guard
   const turn = async (prompt: string | ((provider: Provider) => string), provider: Provider = builderProvider, role: CliModelRole = "planning", resume = true, timeoutMs?: number, cwd = task.worktree, fixedModel?: string, turnEnv: TaskEnv = env): Promise<string> => {
     const crashes = new Map<string, number>(); // failures in unrelated parallel jobs never combine
     // accounts that errored on this turn: the next attempt goes to a different account, on either provider
@@ -190,6 +215,9 @@ export async function workTask(taskId: string): Promise<void> {
     let model = fixedModel ?? modelFor(provider, role);
     const readOnly = role === "reader";
     const managesSession = cwd === task.worktree && !fixedModel && !readOnly;
+    // a resource is read in place, so nothing but a read-only, offline reader may run there
+    const resourceTurn = resourcePaths.has(cwd);
+    if (resourceTurn && !readOnly) throw new Error(`only a read-only reader may run in a project info resource (${cwd})`);
     let roleFailures = 0;
     let escalationReason: string | undefined;
     const ordinaryRole = role;
@@ -212,7 +240,7 @@ export async function workTask(taskId: string): Promise<void> {
       const pickAny = async (): Promise<Account | undefined> => {
         const now = Date.now();
         const providers: Provider[] = fixedModel ? [provider] : ["claude", "codex"];
-        const open = live.accounts.filter((a) => providers.includes(a.provider) && !(a.blockedUntil && a.blockedUntil > now));
+        const open = turnAccounts(live).filter((a) => providers.includes(a.provider) && !(a.blockedUntil && a.blockedUntil > now));
         // every account already failed once this turn: start over rather than report a usage limit that is not there
         if (open.length && open.every((a) => tried.has(a.id))) tried.clear();
         const usable = open.filter((a) => !tried.has(a.id));
@@ -292,7 +320,7 @@ export async function workTask(taskId: string): Promise<void> {
         quietSince = Date.now();
         usageTimer = setInterval(checkUsage, 60_000);
         deadline = timeoutMs ? setTimeout(() => { timedOut = true; trace.reason = "timeout"; abort.abort(); }, timeoutMs) : undefined;
-        return runTurn({ trace, cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}${feature.stage === "Grilling" ? `\n${BUILD_EFFORT_RULE}` : ""}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}\n\n${ENVIRONMENT_RULES(turnEnv)}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: turnEnv, signal: abort.signal, readOnly, effort, delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { quietSince = Date.now(); const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
+        return runTurn({ trace, cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}${feature.stage === "Grilling" && !resourceTurn ? `\n${BUILD_EFFORT_RULE}` : ""}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}${resourceTurn ? "" : `\n\n${ENVIRONMENT_RULES(turnEnv)}`}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: turnEnv, signal: abort.signal, readOnly, ...(resourceTurn ? { offline: true, settingSources: ["user" as const] } : {}), phi: { ...turnPhi(live), task: taskId, ticket: task.ticket.id, base: `origin/${job.base}`, alert: (line: string) => say(line) }, effort, delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { quietSince = Date.now(); const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
       }, reviewUnits); }
       catch (e) { if (e instanceof AccountUnavailableError) { continue; } throw e; }
       finally { active = false; mine.set(who.id, (mine.get(who.id) ?? 1) - 1); if (usageTimer) clearInterval(usageTimer); if (deadline) clearTimeout(deadline); }
@@ -327,7 +355,7 @@ export async function workTask(taskId: string): Promise<void> {
       if (res.error) {
         tried.add(who.id);
         if (managesSession) updateTask(task.id, (t) => ({ sessions: { ...t.sessions, [provider]: undefined } }));
-        const untried = live.accounts.some((a) => (fixedModel ? a.provider === provider : true) && !tried.has(a.id) && !(a.blockedUntil && a.blockedUntil > Date.now()));
+        const untried = turnAccounts(live).some((a) => (fixedModel ? a.provider === provider : true) && !tried.has(a.id) && !(a.blockedUntil && a.blockedUntil > Date.now()));
         // a network error says nothing about the model: try another account now; when every one has failed, wait and start over
         if (/ENOTFOUND|EAI_AGAIN|ECONNRESET|ETIMEDOUT|ECONNREFUSED|socket hang up|Can't reach the API|network error|fetch failed/i.test(res.error)) {
           lastCrash = `${who.name} (${provider} ${model}): ${res.error}`;
@@ -374,6 +402,21 @@ export async function workTask(taskId: string): Promise<void> {
     const file = join(task.worktree, ".consort", "pr-review", `pr-${pr}.review.json`);
     try { return reviewSummary(parseReview(readFileSync(file, "utf8"))); } catch { return undefined; }
   };
+  /** a member-data question from an uncovered turn: the covered analyst answers it, and only what passed the PII gate comes back */
+  const askCovered = async (request: CoveredAsk | { error: string }): Promise<string> => {
+    if ("error" in request) return `## Covered analyst not asked\nThe [covered-analyst: …] marker was malformed: ${request.error}. Write it as [covered-analyst: <question>; tables: <db.schema.table, …>; shape: <the aggregate you want back>].`;
+    const live = loadState();
+    const phi = phiSettings(live);
+    if (!phi.guard) return coveredAnswerPrompt({ status: "unavailable", reason: "the PHI/PII guard is off on this machine, so no covered analyst is set up" });
+    activity("covered analyst: answering a member-data question");
+    const result = await withAgentTurn(taskId, COVERED_ACCOUNT, () => runCoveredTurn({ taskId, ask: request, phi, ref: live.covered }));
+    if (result.usage?.length) updateTask(taskId, (t) => ({ cost: addTurnCost(t.cost, result.usage!) }));
+    // logs carry the outcome and categories only, never the answer
+    log(task, result.status === "released" ? `covered analyst: released (${result.text.length} chars)` : result.status === "withheld" ? `covered analyst: withheld by the PII gate (${result.categories})` : `covered analyst unavailable: ${result.reason}`);
+    if (result.status === "released") writeFileSync(join(task.worktree, ".consort", "ship", "COVERED.md"), `## ${new Date().toISOString()}\nQuestion: ${request.question}\n\n${result.text}\n\n`, { flag: "a" });
+    else await say(`⚠️ Covered analyst ${result.status === "withheld" ? `answer withheld by the PII gate (${result.categories}); the agent will narrow its question` : `unavailable: ${result.reason}`}.`);
+    return coveredAnswerPrompt(result);
+  };
   const applyReply = async (text: string) => {
     const change = parseShipMarkers(text);
     // the spec's turns set the build effort; a review or an escalated build turn never resets it
@@ -387,9 +430,15 @@ export async function workTask(taskId: string): Promise<void> {
       if (feature.stage === "In Review") await source.setStatus(task.ticket.id, "review").catch((e) => log(task, `status failed: ${e.message}`));
     }
     for (const pr of feature.prs) if (!before.prs.includes(pr)) await say(slackLines.pr(pr));
+    const now = await headOf();
+    const headMoved = Boolean(head && now && now !== head);
+    head = now ?? head;
+    const covered = parseCoveredAnalyst(text);
+    const coveredBlock = covered ? await askCovered(covered) : "";
     const questions = parseAskUser(text);
-    if (questions.length) { const answer = await ask(questions); pendingUser = `The owner answered on Slack:\n\n${answer}\n\nContinue from where you stopped; apply the answers and do not ask these again.`; idle = 0; return true; }
-    idle = feature.stage === before.stage && !change ? idle + 1 : 0;
+    if (questions.length) { const answer = await ask(questions); pendingUser = `${coveredBlock ? `${coveredBlock}\n\n` : ""}The owner answered on Slack:\n\n${answer}\n\nContinue from where you stopped; apply the answers and do not ask these again.`; idle = 0; return true; }
+    if (coveredBlock) { pendingUser = `${coveredBlock}\n\nContinue from where you stopped.`; idle = 0; return true; }
+    idle = turnMoved(before, feature, headMoved) ? 0 : idle + 1;
     return false;
   };
 
@@ -413,7 +462,7 @@ export async function workTask(taskId: string): Promise<void> {
     rmSync(join(task.worktree, ticketFile), { force: true });
     activity(`applying ${updates.length} owner update${updates.length === 1 ? "" : "s"} from Slack`);
     nextStep = "owner update";
-    const text = await turn(ownerUpdatePrompt(updates, { stage: feature.stage, built: !!feature.built, prUrl: feature.prs.at(-1), ticketFile }), builderProvider, "implementation");
+    const text = await turn(inbound(ownerUpdatePrompt(updates, { stage: feature.stage, built: !!feature.built, prUrl: feature.prs.at(-1), ticketFile }), phi).text, builderProvider, "implementation");
     await completeReply(text, undefined, "implementation");
     const applied = new Set(updates.map((u) => u.ts));
     updateTask(taskId, (t) => ({ ownerUpdates: (t.ownerUpdates ?? []).filter((u) => !applied.has(u.ts)) }));
@@ -424,7 +473,7 @@ export async function workTask(taskId: string): Promise<void> {
     if (revised && revised !== (ticketBody ?? "").trim()) {
       try {
         await source.updateBody(task.ticket.id, revised);
-        ticketBody = writeTicketFile(task.worktree, task.ticket, await fetchTicket(task.ticket, { repoPath: job.repo, clickupKey: state.clickupKey }).catch(() => undefined) ?? { body: revised });
+        ticketBody = writeTicketFile(task.worktree, task.ticket, maskTicket(await fetchTicket(task.ticket, { repoPath: job.repo, clickupKey: state.clickupKey }).catch(() => undefined) ?? { body: revised }));
         notes.push("Ticket description updated");
       } catch (e) { notes.push(`Ticket description not updated: ${(e as Error).message}`); }
     } else if (revised) notes.push("Ticket description already matched");
@@ -450,20 +499,22 @@ export async function workTask(taskId: string): Promise<void> {
   const draftOpen = () => !feature.built && !["In Review", "Merged", "Closed"].includes(feature.stage);
   const openDraft = async () => {
     if (feature.prs.length || !draftOpen()) return;
-    const pr = await ensureDraftPr({ cwd: task.worktree, base: job.base, branch: task.branch, title: draftTitle(task.ticket), body: draftBody(task.ticket, progressLabel(), ticketBody) });
+    const pr = await ensureDraftPr({ cwd: task.worktree, base: job.base, branch: task.branch, title: draftTitle(task.ticket), body: draftBody(task.ticket, progressLabel(), ticketBody, gate), guard: guardPush });
     if (!pr.url) { log(task, `draft PR not opened yet: ${pr.error}`); return; }
     feature = { ...feature, prs: [pr.url] };
     updateTask(task.id, { feature });
     await say(slackLines.pr(pr.url));
   };
   const saveProgress = async () => {
-    const saved = await checkpoint(task.worktree, task.branch, `Consort checkpoint: ${progressLabel()}`);
+    const saved = await checkpoint(task.worktree, task.branch, `Consort checkpoint: ${progressLabel()}`, undefined, guardPush);
     if (saved.error) log(task, `checkpoint failed: ${saved.error}`);
     else if (saved.committed || saved.pushed) log(task, `checkpoint${saved.committed ? " committed" : ""}${saved.pushed ? ` and pushed ${task.branch}` : ""}`);
+    // the next turn rewrites what the gate stopped; nothing reaches GitHub until it does
+    if (saved.withheld) guardGuidance = saved.error ?? "";
     await syncSubtaskStatus();
     if (!feature.prs.length) await openDraft();
     else if (draftOpen() && !saved.error) {
-      const failed = await updateDraftBody(task.worktree, feature.prs[0], draftBody(task.ticket, progressLabel(), ticketBody));
+      const failed = await updateDraftBody(task.worktree, feature.prs[0], draftBody(task.ticket, progressLabel(), ticketBody, gate));
       if (failed) log(task, `draft PR description not updated: ${failed}`);
     }
   };
@@ -479,9 +530,12 @@ export async function workTask(taskId: string): Promise<void> {
     // `consort-cli reboot`: the owner stopped the last worker; open by working out where it got to
     log(task, "rebooted by the owner; picking up after the last run");
     await say(slackLines.rebooted(feature.stage));
-    activity("rebooted: checking where the last run got to");
-    nextStep = "reboot pickup";
-    await completeReply(await turn(REBOOT_PROMPT));
+    // at Grilling nothing is half-built: grill again with fresh research and resource reports, rather than let one recovery turn write the spec without them and settle the dropped questions itself
+    if (feature.stage !== "Grilling") {
+      activity("rebooted: checking where the last run got to");
+      nextStep = "reboot pickup";
+      await completeReply(await turn(REBOOT_PROMPT));
+    }
     updateTask(taskId, { rebootedAt: undefined });
   }
   if (task.recoveryGuidance) {
@@ -523,28 +577,41 @@ export async function workTask(taskId: string): Promise<void> {
 
   const parallelDirectory = join(task.worktree, ".consort", "ship", "parallel");
   const parallelRun: ParallelRun = async child => {
-    // a parallel ticket gets 90 minutes (saved every 5, so a timeout resumes); research stays short
-    childSteps.set(child.cwd, `parallel ${child.kind === "research" ? "research" : "ticket"} ${child.id}`);
-    const execute = async (childEnv: TaskEnv) => ({ text: await turn(child.prompt, builderProvider, child.kind === "research" ? "reader" : "implementation", false, child.kind === "research" ? 15 * 60_000 : 90 * 60_000, child.cwd, undefined, childEnv) });
-    return child.kind === "implementation" ? withChildEnvironment(taskId, child.id, execute) : execute(env);
+    // a parallel ticket gets 90 minutes (saved every 5, so a timeout resumes); research and resource readers stay short, and only tickets write
+    const writes = child.kind === "implementation";
+    childSteps.set(child.cwd, `parallel ${writes ? "ticket" : child.kind} ${child.id}`);
+    const execute = async (childEnv: TaskEnv) => ({ text: await turn(child.prompt, builderProvider, writes ? "implementation" : "reader", false, writes ? 90 * 60_000 : 15 * 60_000, child.cwd, undefined, childEnv) });
+    return writes ? withChildEnvironment(taskId, child.id, execute) : execute(env);
   };
   let sharedResearch = "";
+  // the readers' reports on the project info resources, kept apart so a failed repo research never drops them
+  let resourceReport = "";
   let parallelGuidance = "";
+  const parallelPushGuard = (base: string) => pushGuard(base, gate);
 
   // ── the stages, Grilling through In Review ──────────────────────────────────────────────
   for (let n = 0; feature.stage !== "In Review" && feature.stage !== "Merged" && feature.stage !== "Closed"; n++) {
     if (await applyOwnerUpdates()) continue;
     if (feature.stage === "Grilling") {
-      activity("researching business flows, tests and integrations");
-      try {
-        const research = await runResearch({ cwd: task.worktree, directory: parallelDirectory, tasks: await prepareResearchTasks(task.worktree, ticketBody ?? task.ticket.title), concurrency: job.parallelResearch ?? 3, run: parallelRun });
-        sharedResearch = research.summary;
-        log(task, research.reused ? "reusing unchanged task research" : "parallel research complete");
-      } catch (e) {
+      activity(resources.length ? "researching business flows, tests, integrations and project info resources" : "researching business flows, tests and integrations");
+      const [research, notes] = await Promise.allSettled([
+        (async () => runResearch({ cwd: task.worktree, directory: parallelDirectory, tasks: await prepareResearchTasks(task.worktree, ticketBody ?? task.ticket.title), concurrency: job.parallelResearch ?? 3, run: parallelRun }))(),
+        resources.length ? runResourceResearch({ resources, directory: parallelDirectory, ticketBody: ticketBody ?? task.ticket.title, run: parallelRun, concurrency: job.parallelResearch ?? 3 }) : Promise.resolve(undefined),
+      ]);
+      if (research.status === "fulfilled") {
+        sharedResearch = research.value.summary;
+        log(task, research.value.reused ? "reusing unchanged task research" : "parallel research complete");
+      } else {
         // The coordinator can still do serial research, retaining any real owner questions.
-        parallelGuidance = `Research collection needs follow-up: ${(e as Error).message}. Complete the missing research before the spec, and relay any owner decision with [ask-user: ...].`;
+        parallelGuidance = `Research collection needs follow-up: ${(research.reason as Error).message}. Complete the missing research before the spec, and relay any owner decision with [ask-user: ...].`;
         log(task, parallelGuidance);
       }
+      // the planner cannot open a resource, so a failed reader just leaves its section out
+      if (notes.status === "fulfilled" && notes.value) {
+        resourceReport = notes.value.summary;
+        for (const s of notes.value.sections) log(task, `resource ${s.name}: ${s.empty ? "nothing bears on the ticket" : s.reused ? "reusing unchanged report" : "report complete"}`);
+        for (const f of notes.value.failed) log(task, `resource ${f.name} not read: ${f.error}`);
+      } else if (notes.status === "rejected") log(task, `project info resources not read: ${(notes.reason as Error).message}`);
     }
     if (["Spec'd", "Implementing"].includes(feature.stage) && !feature.built) {
       // the dependency graph, in code: post the waves when the ticket set changes; a graph that is mostly a chain gets one re-split
@@ -580,8 +647,8 @@ export async function workTask(taskId: string): Promise<void> {
         }
       }
       try {
-        await recoverImplementation(task.worktree, parallelDirectory);
-        const wave = await runImplementation({ cwd: task.worktree, directory: parallelDirectory, tasks: await readImplementationTasks(task.worktree), onStart: async (ids) => { log(task, `wave started: ${ids.join(", ")}`); await say(slackMessage("update", `Building ${ids.length} tickets in parallel: ${ids.join(", ")}`)); await syncSubtaskStatus(); }, concurrency: job.parallelImplementation ?? job.maxParallel ?? 4, run: parallelRun, check: async () => {
+        await recoverImplementation(task.worktree, parallelDirectory, parallelPushGuard);
+        const wave = await runImplementation({ cwd: task.worktree, directory: parallelDirectory, tasks: await readImplementationTasks(task.worktree), pushGuard: parallelPushGuard, onStart: async (ids) => { log(task, `wave started: ${ids.join(", ")}`); await say(slackMessage("update", `Building ${ids.length} tickets in parallel: ${ids.join(", ")}`)); await syncSubtaskStatus(); }, concurrency: job.parallelImplementation ?? job.maxParallel ?? 4, run: parallelRun, check: async () => {
           nextStep = "wave check";
           const checked = await turn("The coordinator integrated parallel ticket commits. Read repository setup and each completed ticket. Run the relevant tests and typecheck together, fix any failures, and commit fixes. Do not push or move the ship stage. Return [parallel-check: pass] only after all required checks pass; include the commands and their results. If a real owner decision blocks verification, return [ask-user: ...].", builderProvider, "implementation", true, 45 * 60_000);
           if (!/\[parallel-check: pass\]/.test(checked) || parseAskUser(checked).length) throw new Error(checked || "Parallel implementation checks did not return passing proof");
@@ -597,22 +664,27 @@ export async function workTask(taskId: string): Promise<void> {
       }
     }
     const form = feature.stage === "Ready to Test" ? "approve" as const : "resume" as const;
-    const stagePrompt = pendingUser ?? shipPrompt({ feature, form: { form }, worktree: task.worktree, branch: task.branch, base: `origin/${job.base}`, ticketBody, headless: true, runtimeParallel: true });
-    const prompt = `${stagePrompt}\n\n${sharedResearch ? `## Shared research (verify changed code before relying on it)\n${sharedResearch}\n` : ""}${parallelGuidance}`;
+    const stagePrompt = pendingUser ?? shipPrompt({ feature, form: { form }, worktree: task.worktree, branch: task.branch, base: `origin/${job.base}`, ticketBody, headless: true, runtimeParallel: true, resources: !!resourceReport });
+    const prompt = `${stagePrompt}\n\n${sharedResearch ? `## Shared research (verify changed code before relying on it)\n${sharedResearch}\n` : ""}${resourceReport ? `${resourceReport}\n` : ""}${parallelGuidance}${guardGuidance ? `\n\n${guardGuidance}` : ""}`;
     pendingUser = undefined;
     parallelGuidance = "";
+    guardGuidance = "";
     // writing the build plan (no tickets yet) is the turn that decides how parallel the build can be: Fable or Astra
     const writesPlan = ["Spec'd", "Implementing"].includes(feature.stage) && !feature.built && !(await readGraph(task.worktree).catch(() => [])).length;
     const role = writesPlan ? "frontier" : stageModelRole(feature.stage, idle);
     turnTag = `t${n + 1} · `; activity(`${turnTag}starting`);
     const text = await turn(prompt, builderProvider, role);
     log(task, `turn ${n + 1} at ${feature.stage}: ${stripAskUser(stripShipMarkers(text)).slice(0, 300).replace(/\n/g, " ")}`);
+    const stageBefore = feature.stage;
     await applyReply(text);
     await saveProgress();
-    if (idle >= STUCK_AFTER) {
-      const answer = await ask([slackLines.problem({ where: feature.stage, what: `${idle} turns in a row did not move the stage`, why: [`Last reply: ${brief(stripAskUser(stripShipMarkers(text)), 300)}`], recent: [...recent], ask: "Reply with what to do next." }, task.ticket.url)], true);
+    stageTurns = feature.stage === stageBefore ? stageTurns + 1 : 0;
+    if (idle >= STUCK_AFTER || stageTurns >= MAX_STAGE_TURNS) {
+      const what = idle >= STUCK_AFTER ? `${idle} turns in a row did not move the stage` : `${stageTurns} turns at ${feature.stage} without reaching the next stage`;
+      const answer = await ask([slackLines.problem({ where: feature.stage, what, why: [`Last reply: ${brief(stripAskUser(stripShipMarkers(text)), 300)}`], recent: [...recent], ask: "Reply with what to do next." }, task.ticket.url)], true);
       pendingUser = `The owner says: ${answer}`;
       idle = 0;
+      stageTurns = 0;
     }
   }
   if (feature.stage !== "In Review") { await finish("done", `PR was ${feature.stage.toLowerCase()} outside Consort`); return; }
@@ -655,13 +727,15 @@ export async function workTask(taskId: string): Promise<void> {
     feature = { ...feature, evidenceAt: undefined };
     updateTask(taskId, { feature, evidenceValidatedAt: undefined });
     let guidance = "";
+    // evidence the PII gate withheld is recaptured without asking the owner, twice; after that the owner hears of it
+    let withheldRetries = 0;
     for (;;) {
       activity("gathering evidence");
       let blocked: Problem;
       try {
         const browser = await findBrowser();
         const helper = browser ? writeScreenshotHelper(task.worktree, browser) : undefined;
-        const prompt = EVIDENCE_PROMPT({ helper: helper ?? "(no browser installed: backend output may be text; frontend screenshots require a browser)", ticketUrl: task.ticket.url, prUrl: prUrl!, worktree: task.worktree, repoRoot: job.repo });
+        const prompt = EVIDENCE_PROMPT({ phi: phiSettings(loadState()).guard, helper: helper ?? "(no browser installed: backend output may be text; frontend screenshots require a browser)", ticketUrl: task.ticket.url, prUrl: prUrl!, worktree: task.worktree, repoRoot: job.repo });
         await resumeEvidenceTurn("Gathering evidence", async (continuation) => {
           const text = await turn(`${prompt}\n\n${guidance}\n\n${continuation}`, builderProvider, "implementation", true, EVIDENCE_TURN_MS);
           await completeReply(text, EVIDENCE_TURN_MS, "implementation");
@@ -674,7 +748,7 @@ export async function workTask(taskId: string): Promise<void> {
         const cost = loadState().tasks.find((t) => t.id === taskId)?.cost;
         const evidenceTiming = { startedAt: task.startedAt, endedAt: Date.now() };
         activity("publishing verified evidence to GitHub and the ticket");
-        const published = await retryEvidencePublication(() => publishEvidence({ worktree: task.worktree, repo: job.repo, ticket: task.ticket, pr, prUrl: prUrl!, source, clickupKey: state.clickupKey, cost, timing: evidenceTiming }), say);
+        const published = await retryEvidencePublication(() => publishEvidence({ worktree: task.worktree, repo: job.repo, ticket: task.ticket, pr, prUrl: prUrl!, source, clickupKey: state.clickupKey, cost, timing: evidenceTiming, gate }), say);
         if (!published?.items || !published.prComment || !published.ticketComment) throw new ProblemError({ where: "evidence", what: "Evidence was not published to both the PR and ticket", why: [`PR comment: ${published?.prComment ? "posted" : "missing"}`, `Ticket comment: ${published?.ticketComment ? "posted" : "missing"}`, `Items: ${published?.items ?? 0}`] });
         const at = Date.now();
         feature = { ...feature, evidenceAt: at };
@@ -682,6 +756,11 @@ export async function workTask(taskId: string): Promise<void> {
         await say(slackLines.evidence(published.items, published.images, cost ? shortUsd(cost) : undefined));
         break;
       } catch (e) {
+        if (e instanceof PiiWithheldError && withheldRetries++ < 2) {
+          guidance = `The evidence was withheld by the PII gate (${e.categories}); nothing was posted. Recapture it from the seeded local database without personal data: synthetic names, example.com addresses, 555-01xx numbers, sequential identifiers.`;
+          log(task, `evidence withheld by the PII gate (${e.categories}); recapturing`);
+          continue;
+        }
         // the validator and the publisher throw plain errors: their message is the reason, one sentence per bullet
         blocked = e instanceof ProblemError ? problemOf(e, "evidence", { recent: [...recent] }) : { where: "evidence", what: "Evidence was not accepted", why: blockerBullets((e as Error).message), recent: [...recent], ...(problemOf(e, "evidence").error ? { error: problemOf(e, "evidence").error } : {}) };
         blocked.lead ??= "Evidence blocked. PR not handed off";
@@ -766,7 +845,7 @@ export async function workTask(taskId: string): Promise<void> {
       if (fresh.length) {
         log(task, `${fresh.length} new review thread(s)`);
         activity(`answering ${fresh.length} review thread${fresh.length === 1 ? "" : "s"}`);
-        const text = await turn(RESPOND_TO_REVIEW(fresh), builderProvider, "implementation");
+        const text = await turn(inbound(RESPOND_TO_REVIEW(fresh), phi).text, builderProvider, "implementation");
         await completeReply(text, undefined, "implementation");
         const afterFix = await readPr(job.repo, pr);
         const remaining = new Set(afterFix.unresolved.map((t) => t.threadId).filter(Boolean));

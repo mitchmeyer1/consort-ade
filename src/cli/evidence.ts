@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { EVIDENCE_DIR, EVIDENCE_MANIFEST, evidenceMarkdownForPr, evidenceTextForTicket, evidenceProblems, parseEvidenceManifest, type EvidenceManifest, type EvidenceTiming, type TaskCost } from "../shared/headless.ts";
 import { ticketRef, type ShipTicket } from "../shared/ship.ts";
 import type { Source } from "./sources";
+import { gateText, PiiWithheldError, type GateContext } from "./phiGate.ts";
 
 /**
  * The evidence step's plumbing: a screenshot helper the agent can call (system Chrome,
@@ -145,9 +146,16 @@ export async function pushEvidenceBranch(repo: string, ticketId: string, files: 
 
 export type Published = { items: number; images: number; prComment: boolean; ticketComment: boolean; hosting: "clickup" | "branch" | "none" };
 
-/** post the manifest to the PR and the ticket, images hosted where they will render */
-export async function publishEvidence(o: { worktree: string; repo: string; ticket: ShipTicket; pr: number; prUrl: string; source: Source; clickupKey?: string; /** what the task has spent, printed with the evidence */ cost?: TaskCost; timing?: EvidenceTiming }): Promise<Published> {
+/**
+ * Post the manifest to the PR and the ticket, images hosted where they will render. With the
+ * PHI/PII guard on (`gate`), the manifest's text is checked before anything is uploaded or posted,
+ * and a finding throws PiiWithheldError; images are not scanned, so EVIDENCE_PROMPT holds them to
+ * the seeded local database.
+ */
+export async function publishEvidence(o: { worktree: string; repo: string; ticket: ShipTicket; pr: number; prUrl: string; source: Source; clickupKey?: string; /** what the task has spent, printed with the evidence */ cost?: TaskCost; timing?: EvidenceTiming; gate?: GateContext }): Promise<Published> {
   const m = validateEvidence(o.worktree);
+  const verdict = o.gate ? gateText("evidence", `${evidenceMarkdownForPr(m, {}, o.ticket.url, ticketRef(o.ticket), o.cost, o.timing)}\n\n${evidenceTextForTicket(m, {}, o.prUrl, o.cost, o.timing)}`, o.gate) : undefined;
+  if (verdict && !verdict.ok) throw new PiiWithheldError("evidence", verdict.categories);
   const dir = join(o.worktree, EVIDENCE_DIR);
   const wanted = [...new Set(m.items.map((i) => i.image).filter((f): f is string => !!f))].filter((f) => existsSync(join(dir, f)));
   // Save successful transfers so a later network failure does not upload every image again.

@@ -6,11 +6,12 @@ import ts from 'typescript';
 import * as headless from '../src/shared/headless.ts';
 import * as cliModels from '../src/shared/cliModels.ts';
 import * as usageMod from '../src/shared/usage.ts';
+import * as phi from '../src/shared/phi.ts';
 
 const require = createRequire(import.meta.url);
 const compile = name => ts.transpileModule(readFileSync(new URL(`../src/cli/${name}.ts`, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 function load(runTurn = async () => ({ text: '' })) {
-  const mocks = { '../shared/headless.ts': headless, '../shared/cliModels.ts': cliModels, './agent': { runTurn }, './state': { LOG_DIR: '/no/such/dir' }, './usage': { usageFor: async () => new Map() }, '../shared/usage.ts': usageMod, 'node:fs': { ...require('node:fs'), existsSync: p => p === '/wt' || require('node:fs').existsSync(p) } };
+  const mocks = { '../shared/headless.ts': headless, '../shared/cliModels.ts': cliModels, '../shared/phi.ts': phi, './agent': { runTurn }, './state': { LOG_DIR: '/no/such/dir' }, './usage': { usageFor: async () => new Map() }, '../shared/usage.ts': usageMod, 'node:fs': { ...require('node:fs'), existsSync: p => p === '/wt' || require('node:fs').existsSync(p) } };
   const mod = { exports: {} };
   new Function('require', 'module', 'exports', compile('oversight'))(n => mocks[n] ?? require(n), mod, mod.exports);
   return mod.exports;

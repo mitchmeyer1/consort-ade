@@ -26,6 +26,11 @@ import { sourceFor } from "./sources";
 import { renderView, viewLoop } from "./view";
 import { readAllUsage } from "./usage";
 import { createAccount, runScannerWizard, runSetup, scannerName, setupDone } from "./setup";
+import { resourceProblem } from "../shared/resources.ts";
+import { DEFAULT_COVERED_SERVICE, describeKeyRef, phiSettings } from "../shared/phi.ts";
+import { checkCoveredKey } from "./covered";
+import { keyRefFrom, phiSmoke, phiSmokeUncovered, phiStatusLines, storeKeychainKey } from "./phiCommands";
+import { inbound, readIncidents } from "./phiGate";
 import { applyBundle, buildBundle } from "./transfer";
 import { cleanupEnvironment } from "./environment";
 import { alive, DAEMON_LOG, daemonPid, recordDaemon, startDetached, stopDaemon } from "./daemonctl";
@@ -89,6 +94,17 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   scanners list | scanners remove <id> | scanners enable|disable <id> | scanners scan <id>   (scan: dry run)
                                                                           a scanner watches one place for tickets and hands each match to a worker agent
   scanners configure <id> [--max-parallel N] [--max-open-tasks N] [--max-environments N] [--planning-model provider:model] [--implementation-model provider:model] [--coordination-model provider:model] [--reader-model provider:model] [--frontier-model provider:model] [--<role>-effort low|medium|high|xhigh|max] [--parallel-research N] [--parallel-implementation N] [--max-model-attempts N]
+  resources add --name <n> --markdown <path>                              a project info resource: a git checkout of notes Grilling reads
+  resources list | resources remove <id or name>                          (no patient or personal data in it: agents may quote it)
+  phi status                                                              the PHI/PII guard: on or off, where the covered key is, what an agent shell sees
+  phi guard on|off                                                        on: member-data rules and hooks on every turn, outbound text gated, Codex idle, member data only via the covered analyst
+  phi key ref --keychain [service] [--account a] | --file <path>          where the covered (BAA) key lives; Consort never reads or stores it
+  phi key store [--keychain [service]]                                    put the key in the Keychain: security asks for it, Consort never sees it
+  phi key clear                                                           forget the reference (the Keychain item or file stays)
+  phi configure [--grant snow,snowsql] [--warehouse-commands a,b] [--identifier-columns a,b] [--person-tables a,b] [--domains d] [--contact who] [--model m] [--min-cell N] [--max-active N]
+  phi smoke [--model m] [--echo-shape]                                    one covered turn: "ready" back, or with --echo-shape a made-up SSN shape the gate must withhold
+  phi smoke --uncovered --command "<cmd>"                                 the guard's decision on cmd, then one uncovered turn asked to run it (use a query that returns no rows)
+  phi incidents [--last N]                                                what the PII gate caught in uncovered turns: categories and masked shapes, never values
   capacity configure [--max-active-turns N] [--max-open-tasks N] [--max-environments N]
   accounts configure <id> --max-active-turns N
   run [-d]                                                                the daemon: scan, claim, dispatch, watch; -d runs it in the background
@@ -109,8 +125,8 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   accounts unblock <id>                                                   clear a usage block early
   cli status | cli update                                                 the Claude Code and Codex binaries
   status
-  export [--out <file>] [--scanner <id or name>]                          one file with the tokens, accounts and scanners this box runs
-  import <file> [--repo-dir <dir>] [--replace]                            set up this box from that file; clones repos it lacks
+  export [--out <file>] [--scanner <id or name>]                          one file with the tokens, accounts, scanners and resources this box runs
+  import <file> [--repo-dir <dir>] [--replace]                            set up this box from that file; clones repos and resources it lacks
   accounts login <id>                                                     sign an account in again (after an import without credentials)`;
 
 async function main(argv: string[]) {
@@ -134,11 +150,12 @@ async function main(argv: string[]) {
       console.log(`Added ${account.name} (${account.id}).`);
       if (!apiKey) { console.log(`Signing in; this runs the ${provider === "claude" ? "Claude Code" : "Codex"} login in your terminal.`); await loginInteractive(account); }
       console.log(await accountStatus(account));
+      if (provider === "codex" && phiSettings(s).guard) console.log("Codex accounts sit idle while the PHI/PII guard is on: Codex cannot refuse a command before it runs and has no BAA.");
       return;
     }
     case "accounts list": {
       if (!s.accounts.length) { console.log("No accounts. Add one with: consort-cli accounts add --provider claude --name work"); return; }
-      for (const acc of s.accounts) console.log(`${acc.id}  ${acc.provider.padEnd(6)}  ${acc.name.padEnd(20)}  ${await accountStatus(acc)}${acc.blockedUntil && acc.blockedUntil > Date.now() ? `  · blocked until ${new Date(acc.blockedUntil).toLocaleTimeString()}` : ""}`);
+      for (const acc of s.accounts) console.log(`${acc.id}  ${acc.provider.padEnd(6)}  ${acc.name.padEnd(20)}  ${await accountStatus(acc)}${acc.provider === "codex" && phiSettings(s).guard ? "  · idle while the PHI/PII guard is on" : ""}${acc.blockedUntil && acc.blockedUntil > Date.now() ? `  · blocked until ${new Date(acc.blockedUntil).toLocaleTimeString()}` : ""}`);
       return;
     }
     case "accounts login": {
@@ -153,7 +170,7 @@ async function main(argv: string[]) {
       const out = resolve(str(a, "out") ?? `consort-cli-${host()}-${new Date().toISOString().slice(0, 10)}.json`);
       writeFileSync(out, JSON.stringify(b, null, 2), { mode: 0o600 });
       const noCred = b.accounts.filter((x) => x.auth === "login" && !x.credentials).map((x) => x.name);
-      console.log(`Wrote ${out} (mode 600): ${b.scanners.length} scanner(s), ${b.accounts.length} account(s), ClickUp ${b.clickupKey ? "token" : "none"}, Slack ${b.slack ? "set" : "none"}.`);
+      console.log(`Wrote ${out} (mode 600): ${b.scanners.length} scanner(s), ${b.resources?.length ?? 0} resource(s), ${b.accounts.length} account(s), ClickUp ${b.clickupKey ? "token" : "none"}, Slack ${b.slack ? "set" : "none"}.`);
       console.log(`On the other machine: consort-cli import ${basename(out)}`);
       if (noCred.length) console.log(`${noCred.join(", ")}: login kept in this machine's keychain, so sign in there with: consort-cli accounts login <id>`);
       console.log("It holds secrets; move it over a private channel and delete it afterwards.");
@@ -168,6 +185,7 @@ async function main(argv: string[]) {
       console.log(`Added: ${r.added.join(", ") || "nothing"}`);
       if (r.kept.length) console.log(`Already here, kept: ${r.kept.join(", ")}${a.replace ? "" : " (--replace overrides settings)"}`);
       if (r.needLogin.length) console.log(`Sign in: ${r.needLogin.map((id) => `consort-cli accounts login ${id}`).join("; ")}`);
+      for (const note of r.notes) console.log(note);
       console.log("Ready. Start it: consort-cli run");
       return;
     }
@@ -262,6 +280,90 @@ async function main(argv: string[]) {
         job.effortPolicy = { ...job.effortPolicy, [role]: raw };
       }
       saveState(s); console.log(`Updated scanner ${job.name}.`); return;
+    }
+    case "resources add": {
+      const name = need(a, "name");
+      const path = resolve(str(a, "markdown") ?? fail("--markdown <path of a notes checkout> is required"));
+      const problem = resourceProblem(path, s.jobs.map((j) => j.repo), existsSync);
+      if (problem) fail(problem);
+      if ((s.resources ?? []).some((r) => r.name === name)) fail(`a resource named ${name} already exists`);
+      const resource = { id: newId("res"), name, kind: "markdown" as const, path };
+      (s.resources ??= []).push(resource); saveState(s);
+      console.log(`Added resource ${name} (${resource.id}): markdown notes at ${path}. Grilling reads it from the next task on.`);
+      return;
+    }
+    case "resources list": {
+      for (const r of s.resources ?? []) console.log(`${r.id}  ${r.name.padEnd(20)}  ${r.kind}  ${r.path}${existsSync(join(r.path, ".git")) ? "" : "  (not a git checkout here: skipped)"}`);
+      if (!s.resources?.length) console.log("No project info resources."); return;
+    }
+    case "resources remove": {
+      const which = rest[0] ?? fail("resource id or name required");
+      const before = s.resources?.length ?? 0;
+      s.resources = (s.resources ?? []).filter((r) => r.id !== which && r.name !== which);
+      if (s.resources.length === before) fail(`no resource ${which}`);
+      saveState(s); console.log("Removed."); return;
+    }
+    case "phi status": { for (const line of await phiStatusLines(s)) console.log(line); return; }
+    case "phi guard": {
+      const on = rest[0] === "on" ? true : rest[0] === "off" ? false : fail("phi guard on|off");
+      s.phi = { ...s.phi, guard: on }; saveState(s);
+      const key = await checkCoveredKey(s.covered);
+      console.log(on ? ok(`PHI/PII guard on: every turn gets the member-data rules and the guard's hooks, Codex sits out, what leaves for Slack, tickets and GitHub is gated, and member-data questions go to the covered analyst${key.ok ? "" : ` (unavailable until the key is set: ${key.reason})`}. Restart the daemon to apply it to running workers.`) : bad("PHI/PII guard off: agents run without the member-data rules or the guard's hooks, nothing outbound is gated, and Codex accounts take turns."));
+      return;
+    }
+    case "phi key": {
+      const action = rest[0] ?? fail("phi key ref|store|clear");
+      if (action === "clear") { const was = describeKeyRef(s.covered); delete s.covered; saveState(s); console.log(`Forgot ${was}; the key itself is where it was.`); return; }
+      const flags = { keychain: (a.keychain as string | true | undefined), account: str(a, "account"), file: str(a, "file") };
+      if (action === "store") {
+        if (process.platform !== "darwin") fail("phi key store uses the macOS Keychain; elsewhere, write the key to a file only you can read (chmod 600) and run phi key ref --file <path>");
+        const service = typeof flags.keychain === "string" ? flags.keychain : DEFAULT_COVERED_SERVICE;
+        console.log(`security asks for the key now; Consort never sees it. Paste it at the prompt, then again to confirm.`);
+        if (!(await storeKeychainKey(service, "consort-cli"))) fail("security did not store the key");
+        s.covered = { kind: "keychain", service, account: "consort-cli" }; saveState(s);
+        console.log(ok(`stored in the Keychain item ${service}; the covered analyst fetches it from there`));
+        return;
+      }
+      if (action !== "ref") fail("phi key ref|store|clear");
+      const ref = keyRefFrom(flags, DEFAULT_COVERED_SERVICE) ?? fail("phi key ref --keychain [service] [--account a] | --file <path>");
+      if (ref!.kind === "file") ref!.path = resolve(ref!.path);
+      const key = await checkCoveredKey(ref);
+      s.covered = ref; saveState(s);
+      console.log(key.ok ? ok(`covered key: ${describeKeyRef(ref)} (found; its value is never read here)`) : bad(`covered key: ${describeKeyRef(ref)} saved, but ${key.reason}`));
+      return;
+    }
+    case "phi configure": {
+      const lists = { grant: "coveredGrant", "warehouse-commands": "warehouseCommands", domains: "internalEmailDomains", "identifier-columns": "identifierColumns", "person-tables": "personTables" } as const;
+      const phi = { ...s.phi };
+      for (const [flag, field] of Object.entries(lists)) { const v = list(a, flag); if (v.length) phi[field] = v; }
+      if (str(a, "contact")) phi.complianceContact = str(a, "contact");
+      if (str(a, "model")) phi.coveredModel = str(a, "model");
+      for (const [flag, field] of [["min-cell", "minCell"], ["max-active", "coveredMaxActive"], ["max-turns", "coveredMaxTurns"]] as const) {
+        const raw = str(a, flag); if (raw === undefined) continue;
+        const value = Number(raw); if (!Number.isInteger(value) || value < 1) fail(`--${flag} must be a positive integer`);
+        phi[field] = value;
+      }
+      s.phi = phi; saveState(s); console.log("Updated the PHI/PII guard settings."); return;
+    }
+    case "phi incidents": {
+      const raw = str(a, "last") ?? "20";
+      const last = Number(raw); if (!Number.isInteger(last) || last < 1) fail("--last must be a positive integer");
+      const incidents = readIncidents(last);
+      if (!incidents.length) { console.log("No incidents: the PII gate has caught nothing in an uncovered context."); return; }
+      for (const i of incidents) console.log(`${i.ts}  ${i.op}${i.ticket ? `  ticket ${i.ticket}` : ""}  ${i.categories}${i.shapes ? `  ${dim(i.shapes)}` : ""}`);
+      return;
+    }
+    case "phi smoke": {
+      if (a.uncovered) {
+        const r = await phiSmokeUncovered(s, need(a, "command"));
+        for (const line of r.lines) console.log(line);
+        if (!r.ok) process.exit(3);
+        return;
+      }
+      const r = await phiSmoke(s, { model: str(a, "model"), echoShape: !!a["echo-shape"] });
+      console.log(r.ok ? ok(r.line) : bad(r.line));
+      if (!r.ok) process.exit(3);
+      return;
     }
     case "accounts configure": {
       const account = s.accounts.find(account => account.id === rest[0]) ?? fail("no such account");
@@ -502,7 +604,7 @@ async function daemon() {
       statusEvent("info", `${job.name}: checking ${job.source} for eligible tickets to start`);
       try {
         if (job.source === "sentry") {
-          const result = await scanSentry(job, s.clickupKey, { workers: loadState().tasks, onProgress: progress => {
+          const result = await scanSentry(job, s.clickupKey, { workers: loadState().tasks, mask: (text) => inbound(text, phiSettings(loadState())).text, onProgress: progress => {
             const fresh = loadState(); const current = fresh.jobs.find(j => j.id === job.id);
             if (current) { current.scanProgress = progress; saveState(fresh); }
           } });

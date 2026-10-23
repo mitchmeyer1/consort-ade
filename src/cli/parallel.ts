@@ -4,6 +4,9 @@ import { mkdir, readFile, writeFile, rm, copyFile, readdir, cp, rename, lstat, r
 import { basename, dirname, join, resolve, relative } from "node:path";
 import { promisify } from "node:util";
 import { stageSafely } from "./checkpoint.ts";
+import type { PushGuard } from "./phiGate";
+import { redactPii } from "../shared/redact.ts";
+import { isNoResource, RESOURCE_HEADING, resourceReaderPrompt, type Resource } from "../shared/resources.ts";
 
 const exec = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) => (await exec("git", args, { cwd, maxBuffer: 16 << 20 })).stdout;
@@ -14,8 +17,9 @@ const safe = (p: string) => p && !p.startsWith("/") && !p.split(/[\\/]/).include
 const within = (file: string, scope: string) => file === scope || file.startsWith(scope.replace(/\/$/, "") + "/");
 const scopesOverlap = (a: string[], b: string[]) => a.some((x) => b.some((y) => within(x, y) || within(y, x)));
 export type ParallelTask = { id: string; files: string[]; prompt: string; blockedBy?: string[] };
-export type ParallelRun = (job: { id: string; cwd: string; prompt: string; kind: "research" | "implementation" }) => Promise<{ text: string; error?: string; limit?: unknown }>;
-export type ParallelOptions = { cwd: string; directory: string; tasks: ParallelTask[]; run: ParallelRun; concurrency?: number };
+export type ParallelRun = (job: { id: string; cwd: string; prompt: string; kind: "research" | "implementation" | "resource" }) => Promise<{ text: string; error?: string; limit?: unknown }>;
+/** `pushGuard`: the PHI/PII guard's check on a child's saved work before it goes to GitHub, given the commit the child started from */
+export type ParallelOptions = { cwd: string; directory: string; tasks: ParallelTask[]; run: ParallelRun; concurrency?: number; pushGuard?: (base: string) => PushGuard | undefined };
 
 async function bounded<T, R>(items: T[], count: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);
@@ -53,13 +57,67 @@ async function revision(cwd: string, tasks: ParallelTask[]): Promise<string> {
   }
   return hash.digest("hex");
 }
+export type ResourceSection = { name: string; text: string; head: string; reused: boolean; empty: boolean };
+/** `summary` is the planner's prompt section, empty when no resource bore on the ticket; a resource that could not be read is in `failed` and the rest still count */
+export type ResourceResearch = { summary: string; sections: ResourceSection[]; failed: { name: string; error: string }[] };
+export type ResourceOptions = { resources: Resource[]; directory: string; ticketBody: string; run: ParallelRun; concurrency?: number };
+
+/**
+ * Project info resources are read in place: one read-only reader per resource with its working
+ * directory in the checkout, no worktree, nothing written there. A report is reused while the
+ * checkout's commit, its uncommitted edits and the reader's prompt (which carries the ticket) are
+ * unchanged, and RESOURCES.md beside the task research keeps the latest reports.
+ */
+export async function runResourceResearch(o: ResourceOptions): Promise<ResourceResearch> {
+  const outcomes = await bounded(o.resources, cap(o.concurrency ?? 3), (resource) => readResource(o, resource).then((section) => ({ section }), (e: Error) => ({ failed: { name: resource.name, error: e.message.split("\n")[0] } })));
+  const sections = outcomes.flatMap((x) => ("section" in x ? [x.section] : []));
+  const failed = outcomes.flatMap((x) => ("failed" in x ? [x.failed] : []));
+  const found = sections.filter((s) => !s.empty);
+  if (sections.length) {
+    await mkdir(o.directory, { recursive: true });
+    await writeFile(join(o.directory, "RESOURCES.md"), `# Project info resources\n\n${sections.map((s) => `## ${s.name}\n\nCheckout commit: ${s.head}\n\n${s.empty ? "Nothing here bears on the ticket." : s.text}`).join("\n\n")}\n`);
+  }
+  return { summary: found.length ? `${RESOURCE_HEADING}\n${found.map((s) => `### ${s.name}\n${s.text}`).join("\n\n")}\n` : "", sections, failed };
+}
+
+async function readResource(o: ResourceOptions, resource: Resource): Promise<ResourceSection> {
+  if (!resource.path.startsWith("/")) throw new Error(`Resource ${resource.name}: ${resource.path} is not an absolute path`);
+  await lstat(join(resource.path, ".git")).catch(() => { throw new Error(`Resource ${resource.name}: ${resource.path} is not a git checkout`); });
+  const prompt = resourceReaderPrompt(resource.name, o.ticketBody);
+  const key = await resourceRevision(resource.path, prompt);
+  const head = (await git(resource.path, "rev-parse", "HEAD")).trim();
+  const cache = join(o.directory, `resource-${resource.id}-${key}.json`);
+  const cached = await readFile(cache, "utf8").then((s) => JSON.parse(s)).catch(() => undefined);
+  if (cached?.key === key && typeof cached.text === "string") return { name: resource.name, text: cached.text, head, reused: true, empty: !cached.text };
+  const result = await o.run({ id: resource.name, cwd: resource.path, prompt, kind: "resource" });
+  if (result.error || result.limit) throw new Error(`Resource ${resource.name}: ${result.error ?? "account limit"}`);
+  // the notes should hold no personal data; masking what slips through costs nothing
+  const text = isNoResource(result.text) ? "" : redactPii(result.text.trim());
+  // a checkout that moved while it was read (another worker pulled) gives this report no cache entry
+  if (await resourceRevision(resource.path, prompt) === key) {
+    await mkdir(o.directory, { recursive: true });
+    await writeFile(cache, JSON.stringify({ key, text }));
+  }
+  return { name: resource.name, text, head, reused: false, empty: !text };
+}
+
+async function resourceRevision(cwd: string, prompt: string): Promise<string> {
+  const hash = createHash("sha256").update(prompt).update("\0");
+  hash.update(await git(cwd, "rev-parse", "HEAD")).update("\0");
+  // --no-optional-locks: reading status must not rewrite the notes repo's index
+  const status = await git(cwd, "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all");
+  hash.update(status);
+  if (status) hash.update(await git(cwd, "diff", "HEAD", "--binary"));
+  return hash.digest("hex");
+}
 /**
  * A child ticket's work is never thrown away. While it runs, the worker commits it every few
  * minutes; when the worker stops, or the child fails, or a stopped wave is cleaned up, what it has
  * is committed and kept under refs/consort/wip/<ticket> and pushed to GitHub as
  * consort-wip/<branch>/<ticket>. The next run of that ticket starts from it.
  */
-type Child = { main: string; ticket: string; base: string; finished?: boolean };
+// `guard` is never written to the marker: a recovered child gets it again from its caller
+type Child = { main: string; ticket: string; base: string; finished?: boolean; guard?: PushGuard };
 const live = new Map<string, Child>();
 export const WIP_SAVE_MS = 5 * 60_000;
 const wipRef = (ticket: string) => `refs/consort/wip/${ticket}`;
@@ -75,7 +133,9 @@ export async function saveChild(cwd: string, push = true): Promise<boolean> {
   const head = (await git(cwd, "rev-parse", "HEAD")).trim();
   if (head === c.base) return false;
   await git(cwd, "update-ref", wipRef(c.ticket), head);
-  if (push) await git(cwd, "push", "--no-verify", "-f", "origin", `${head}:refs/heads/${await wipBranch(c.main, c.ticket)}`).catch(() => undefined);
+  // work the PHI/PII guard withholds stays in the local ref; the coordinator's checkpoint gates its own push
+  const withheld = push ? await c.guard?.((args, dir) => git(dir, ...args), cwd).catch(() => "unchecked") : undefined;
+  if (push && !withheld) await git(cwd, "push", "--no-verify", "-f", "origin", `${head}:refs/heads/${await wipBranch(c.main, c.ticket)}`).catch(() => undefined);
   return true;
 }
 /** every running child ticket, saved at once: the worker calls this before it exits on a stop */
@@ -107,7 +167,7 @@ async function isolated<T>(o: ParallelOptions, task: ParallelTask, fn: (cwd: str
   await git(o.cwd, "worktree", "add", "--detach", cwd, "HEAD");
   if (ticket) {
     const child: Child = { main: o.cwd, ticket: task.id, base: (await git(cwd, "rev-parse", "HEAD")).trim() };
-    live.set(cwd, child);
+    live.set(cwd, { ...child, guard: o.pushGuard?.(child.base) });
     await writeFile(markerOf(cwd), JSON.stringify(child));
   }
   try {
@@ -194,14 +254,14 @@ async function currentStatus(cwd: string, id: string): Promise<string | undefine
   return text?.match(/(?:^|\n)\s*(?:\*\*)?Status:(?:\*\*)?\s*([^\n]+)/i)?.[1]?.replace(/[*`]/g, "").trim().toLowerCase();
 }
 /** Recover a crash between cherry-pick and checkpoint, without replaying completed work. */
-export async function recoverImplementation(cwd: string, directory: string): Promise<string[]> {
+export async function recoverImplementation(cwd: string, directory: string, pushGuard?: ParallelOptions["pushGuard"]): Promise<string[]> {
   // child worktrees left by a worker that was stopped mid-wave: no child runs while the coordinator recovers
   const children = join(dirname(resolve(cwd)), `.parallel-${basename(resolve(cwd))}`);
   for (const dir of (await readdir(children).catch(() => [] as string[])).filter((d) => !d.endsWith(".json"))) {
     const path = join(children, dir);
     // a ticket's leftover work is committed and kept (refs/consort/wip, and GitHub) before its folder goes
     const child = await readFile(markerOf(path), "utf8").then((t) => JSON.parse(t) as Child).catch(() => undefined);
-    if (child) { live.set(path, child); await saveChild(path).catch(() => false); live.delete(path); }
+    if (child) { live.set(path, { ...child, guard: pushGuard?.(child.base) }); await saveChild(path).catch(() => false); live.delete(path); }
     await git(cwd, "worktree", "remove", "--force", path).catch(() => rm(path, { recursive: true, force: true }));
     await rm(markerOf(path), { force: true });
   }

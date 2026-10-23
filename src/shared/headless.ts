@@ -1,6 +1,7 @@
 import { MODELS, type Provider } from "./types.ts";
 import { byCapability, rankModel } from "./modelTiers.ts";
 import { cliModelsByCapability } from "./cliModels.ts";
+import { RESOURCE_HEADING } from "./resources.ts";
 
 /**
  * Rules for running /ship with nobody at the keyboard (consort-cli). The agent decides the
@@ -34,7 +35,7 @@ Consort is running this feature unattended on a server. There is no user in the 
 
 ${AI_COST_POLICY}
 
-- No personal data in anything you write for Slack, ticket comments or questions: never repeat a person's name, email, phone number, street address, date of birth, record number or any patient detail from the ticket, the code or the data. Say "the patient", "the member" or "a user" instead. GitHub logins and Slack handles are fine.
+- No personal data in anything you write for Slack, ticket comments, questions, PR titles and bodies, review comments, commit messages, code, fixtures or evidence: never repeat a person's name, email, phone number, street address, date of birth, record number or any patient detail from the ticket, the code or the data. Say "the patient", "the member" or "a user" instead. GitHub logins and Slack handles are fine.
 - Decide anything straightforward yourself: naming, file placement, which existing pattern to follow, test shape, obvious defaults. Record each such decision as one line under "Assumptions" in ${"`"}.consort/ship/GRILLING.md${"`"} and in the spec, so a reader can overturn it later.
 - If the business purpose, acceptance criteria, or design is materially unclear, ask the owner before building or changing behavior.
 - Ask only when the answer changes scope, cost outside the pre-authorized AI allowance, data, security, or user-facing behaviour in a way the ticket does not settle and the code does not imply. Put each such question on its own line as ${"`"}[ask-user: <the question, with your recommended answer>]${"`"}, then end your turn. Consort relays them over Slack and sends the answers back as the next message. Never block on anything you did not mark this way.
@@ -61,6 +62,13 @@ Map the idea as a design tree and walk it. Decide every branch yourself where th
 ${BREAK_CHECK} Put the break question on its own ${"`"}[ask-user: …]${"`"} line like any other.
 
 When no open question remains and the impact check is recorded, write ${"`"}.consort/ship/SPEC.md${"`"} in this same turn, sections in this order: Problem, Solution, User stories (a long numbered list, "As a <actor>, I want <feature>, so that <benefit>"), Implementation decisions, Testing decisions, Out of scope, Open questions (only real ones), Impact check (copied from GRILLING.md), Assumptions (copied from GRILLING.md). Then emit ${"`"}[ship-spec: .consort/ship/SPEC.md]${"`"}, ${"`"}[ship-stage: Spec'd | Spec written headless in <n> round(s).]${"`"} and ${"`"}[ship-next: /ship]${"`"}.`;
+
+/** added to headless Grilling when project info resource reports are appended to the prompt (cli/pipeline.ts) */
+export const RESOURCE_GRILLING_RULES = `### Prior decisions (project info resources)
+This prompt ends with a "${RESOURCE_HEADING}" section: read-only readers' reports on the team's notes, each fact with its note path and date. You cannot open the resources; rely on the reports.
+- Do not ask the owner what a report already answers. Decide it and record it under "## Assumptions" in GRILLING.md as "<decision> (<resource>: <path>, <date>)".
+- Where the ticket asks for something a dated decision settled otherwise, do not recommend reversing the decision. Ask one question that names both, in this shape: ${"`"}[ask-user: The ticket says <X>; the <date> decision in <resource>: <path> says <Y>. Follow the decision? — recommended: yes]${"`"}.
+- A note's claim about the code is a lead, not a fact: check it in the code before relying on it, and say in Assumptions where the code disagrees.`;
 
 /** what the PR-monitor turn does when humans have commented */
 export const RESPOND_TO_REVIEW = (unresolved: { threadId?: string; author: string; path?: string; line?: number; body: string; url: string }[]) => `## This turn: answer the humans on the PR
@@ -374,7 +382,7 @@ export const slackLines = {
   answered: (n: number, open: number) => `✅ Answered ${n} review comment${n === 1 ? "" : "s"}${open ? `; ${open} still open` : ""}`,
   reviewerPick: (logins: string[]) => `✅ Reviewers from the changed files' contributors: ${logins.map((l) => `@${l}`).join(", ")}`,
   prClosed: (state: string) => `✅ PR ${state}. Done`,
-  rebooted: (stage: string) => `✅ Rebooted by you at *${stage}*. Checking where the last run got to, then continuing`,
+  rebooted: (stage: string) => `✅ Rebooted by you at *${stage}*. ${stage === "Grilling" ? "Grilling again with fresh research" : "Checking where the last run got to, then continuing"}`,
   working: (line: string) => `✅ Working: ${brief(line, 200)}`,
   conflicts: (base: string, attempt: number) => `✅ Merge conflicts with \`${base}\`${attempt > 1 ? ` (try ${attempt})` : ""}. Resolving them and pushing; not ready to merge until GitHub says clean`,
 };
@@ -763,7 +771,7 @@ export function evidenceProblems(m: EvidenceManifest | undefined): string[] {
   return issues;
 }
 
-export const EVIDENCE_PROMPT = (i: { helper: string; ticketUrl: string; prUrl: string; worktree: string; repoRoot?: string }) => `## This turn: evidence the feature works, for the people who will merge it
+export const EVIDENCE_PROMPT = (i: { helper: string; ticketUrl: string; prUrl: string; worktree: string; repoRoot?: string; /** the PHI/PII guard is on: rows come from the task's own seeded database only */ phi?: boolean }) => `## This turn: evidence the feature works, for the people who will merge it
 
 The PR has been through Consort's review rounds. Before it goes to human reviewers, produce proof a reviewer can look at without running anything, and write it to ${EVIDENCE_DIR}/ in this worktree with a manifest at ${EVIDENCE_MANIFEST}.
 
@@ -775,7 +783,7 @@ An existing required key covered by the sub-dollar allowance can be used without
 
 Decide from SPEC.md and the diff whether a frontend is involved.
 - **Frontend involved:** seed a local database with data that exercises the feature (use the repo's own seed or fixture scripts, migrations and docker-compose if it has them; invent plausible data where it has none), start the app locally, and take screenshots of the feature in use: the before state where it helps, each step, the result. Take them with the helper: \`node ${i.helper} <url> [width height]\` captures a page to a PNG and prints its path; move or copy each PNG into ${EVIDENCE_DIR}/ with a descriptive file name. Stop the app and any containers when done.
-- **No frontend:** run the feature end to end and capture what proves it: the commands and their output, database queries and their rows, API calls and responses, test runs. Save each as text in the manifest, and also as a picture: pipe the text to \`node ${i.helper} --text "<title>" > ${EVIDENCE_DIR}/<name>.png\`, which renders it as a terminal image.
+- **No frontend:** run the feature end to end and capture what proves it: the commands and their output, database queries and their rows${i.phi ? " (from this task's seeded local database only, never a warehouse or real member rows)" : ""}, API calls and responses, test runs. Save each as text in the manifest, and also as a picture: pipe the text to \`node ${i.helper} --text "<title>" > ${EVIDENCE_DIR}/<name>.png\`, which renders it as a terminal image.
 - Both when both apply.
 
 Manifest schema (JSON):

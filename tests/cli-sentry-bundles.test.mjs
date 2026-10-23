@@ -5,13 +5,14 @@ import ts from 'typescript';
 import * as headless from '../src/shared/headless.ts';
 import * as grouping from '../src/shared/sentryScanner.ts';
 import {modelTiers} from '../src/shared/modelTiers.ts';
+import * as phi from '../src/shared/phi.ts';
 const code=ts.transpileModule(readFileSync(new URL('../src/cli/sentryBundles.ts',import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
 function harness(blocked=false, results=[], timers={}){
   const events=[];
   const calls=[];
   const state={accounts:[{id:'saved-codex',provider:'codex',configDir:'/existing/login',...(blocked?{blockedUntil:Date.now()+60000}:{})}],slack:{botToken:'do-not-send'}};
   const groups=[{key:'one',title:'One',issues:[{id:'1',title:'error',project:{slug:'node'}}]},{key:'two',title:'Two',issues:[{id:'2',title:'different error',project:{slug:'web'}}]}];
-  const mocks={'./statusLog':{statusEvent:(tone,text)=>events.push({tone,text})},'./state.ts':{loadState:()=>state},'./agent':{runTurn:async o=>{calls.push(o);if(results.length) { const next=results.shift(); return typeof next === "function" ? next(o) : next; }return {text:JSON.stringify({bundles:[{groupKeys:['one','two'],title:'One bug',reason:'Shared failing endpoint'}]})};}},'../shared/headless.ts':headless,'../shared/modelTiers.ts':{modelTiers},'../shared/sentryScanner.ts':grouping};
+  const mocks={'../shared/phi.ts':phi,'./statusLog':{statusEvent:(tone,text)=>events.push({tone,text})},'./state.ts':{loadState:()=>state},'./agent':{runTurn:async o=>{calls.push(o);if(results.length) { const next=results.shift(); return typeof next === "function" ? next(o) : next; }return {text:JSON.stringify({bundles:[{groupKeys:['one','two'],title:'One bug',reason:'Shared failing endpoint'}]})};}},'../shared/headless.ts':headless,'../shared/modelTiers.ts':{modelTiers},'../shared/sentryScanner.ts':grouping};
   const mod={exports:{}};new Function('require','module','exports','setTimeout','clearTimeout','setInterval','clearInterval',code)(n=>mocks[n],mod,mod.exports,timers.setTimeout??setTimeout,timers.clearTimeout??clearTimeout,timers.setInterval??setInterval,timers.clearInterval??clearInterval);
   return {calls,events,run:()=>mod.exports.planSentryBundles({repo:'/existing/repo'},groups)};
 }
