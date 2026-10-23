@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { createPrompter as prompter, type Ask } from "./prompter";
 import { promisify } from "node:util";
 import { cliStatus } from "../main/cliRuntime";
@@ -20,6 +20,7 @@ import { DEFAULT_STATUSES, loadState, LOGINS_DIR, newId, saveState, STATE_FILE, 
  */
 
 import { bad, banner, dim, head, mint, ok } from "./theme";
+import { resourceProblem } from "../shared/resources.ts";
 import { findBrowser } from "./evidence";
 
 const run = promisify(execFile);
@@ -268,6 +269,34 @@ export async function runScannerWizard(kind?: string): Promise<void> {
   } finally { close(); }
 }
 
+/** notes checkouts every Grilling reads; each must be a git checkout that is not one of the scanners' own repositories */
+async function resourceSteps(ask: Ask): Promise<void> {
+  why("Project info resources", {
+    for: "Grilling sends one read-only reader into each, so the planner asks you less and never recommends undoing a decision your notes already record.",
+    where: "a local git clone of markdown notes on your systems' decisions, processes and gotchas (a team second brain or vault); pulled at the start of every task.",
+    needs: ["only notes whose contents may be quoted in PRs, Slack and ticket comments: no patient or personal data, no secrets.", "Consort cannot check that; keeping the notes clean is yours."],
+    can: "be read, offline, by one reader per resource during Grilling.",
+    not: "be written to, or be seen by the agents that plan or build; they get the reader's report.",
+  });
+  let s = loadState();
+  for (const r of [...(s.resources ?? [])]) {
+    if (!(await keep(ask, `resource "${r.name}"`, `${r.kind} notes at ${r.path}`))) { s = loadState(); s.resources = (s.resources ?? []).filter((x) => x.id !== r.id); saveState(s); console.log(`resource "${r.name}" removed`); }
+  }
+  for (;;) {
+    const answer = await ask("Path of a markdown notes checkout to add (empty to finish)");
+    if (!answer) return;
+    const path = resolve(answer);
+    s = loadState();
+    const problem = resourceProblem(path, s.jobs.map((j) => j.repo), existsSync);
+    if (problem) { console.log(bad(problem)); continue; }
+    const name = await ask("A name for it, shown in reports", { default: basename(path) });
+    if ((s.resources ?? []).some((r) => r.name === name)) { console.log(bad(`a resource named ${name} already exists`)); continue; }
+    const commit = await run("git", ["-C", path, "rev-parse", "--short", "HEAD"], { timeout: 15_000 }).then((x) => x.stdout.trim(), () => "");
+    (s.resources ??= []).push({ id: newId("res"), name, kind: "markdown", path }); saveState(s);
+    console.log(ok(`resource "${name}": markdown notes at ${path}${commit ? ` (${commit})` : ""}`));
+  }
+}
+
 export async function runSetup(): Promise<void> {
   const { ask, close } = prompter();
   try {
@@ -294,8 +323,12 @@ export async function runSetup(): Promise<void> {
       s.branchPrefix = prefix.replace(/^\/+|\/+$/g, ""); saveState(s);
     }
 
+    // ── project info resources ─────────────────────────────────────────────────────────
+    console.log(head("3. Project info resources (optional)"));
+    await resourceSteps(ask);
+
     // ── accounts ───────────────────────────────────────────────────────────────────────────
-    console.log(head("3. AI accounts"));
+    console.log(head("4. AI accounts"));
     why("AI accounts", {
       for: "running the agents that build, test and review. A pool: when one account hits its usage limit the work moves to the next.",
       where: "a Claude or ChatGPT subscription login (runs the provider's login here, into ~/.consort-cli/logins/<account>, separate from Consort desktop and from your own `claude` or `codex`), or an API key from console.anthropic.com or platform.openai.com.",
@@ -331,7 +364,7 @@ export async function runSetup(): Promise<void> {
     }
 
     // ── slack ──────────────────────────────────────────────────────────────────────────────
-    console.log(head("4. Slack, where it asks you things"));
+    console.log(head("5. Slack, where it asks you things"));
     why("Slack bot token", {
       for: "the only way consort-cli talks to you: one DM thread per ticket with progress, the few questions it cannot decide, and the ready-to-merge ping. You answer in the thread.",
       where: "a Slack app with a bot user, yours or an existing one: api.slack.com/apps → your app → OAuth & Permissions → Bot User OAuth Token (starts xoxb-). A user token (xoxp-) or a webhook URL will not do.",
@@ -384,7 +417,7 @@ export async function runSetup(): Promise<void> {
     }
 
     // ── permissions on the box ──────────────────────────────────────────────────────────────
-    console.log(head("5. Permissions"));
+    console.log(head("6. Permissions"));
     s = loadState();
     for (const job of s.jobs) {
       const probe = join(WORK_DIR, `.probe-${process.pid}`);
@@ -409,7 +442,7 @@ export async function runSetup(): Promise<void> {
 
     s = loadState(); s.setupCompletedAt = Date.now(); saveState(s);
     console.log(head("Done"));
-    console.log(`${s.accounts.length} account(s), ${s.jobs.length} scanner(s), Slack ${s.slack ? "on" : "off"}.\nStart it:   consort-cli run\nWatch it:   consort-cli view\nDry run:    consort-cli scanners scan <scanner id>`);
+    console.log(`${s.accounts.length} account(s), ${s.jobs.length} scanner(s), ${s.resources?.length ?? 0} project info resource(s), Slack ${s.slack ? "on" : "off"}.\nStart it:   consort-cli run\nWatch it:   consort-cli view\nDry run:    consort-cli scanners scan <scanner id>`);
   } catch (e) {
     // ctrl-d or a closed pipe: what was saved stays saved; the flag is not set
     if (/readline was closed|closed/i.test(String((e as Error).message))) { console.log("\nSetup stopped before finishing; what you entered is saved. Run `consort-cli setup` again to continue."); return; }

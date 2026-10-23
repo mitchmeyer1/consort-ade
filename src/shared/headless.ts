@@ -1,6 +1,7 @@
 import { MODELS, type Provider } from "./types.ts";
 import { byCapability, rankModel } from "./modelTiers.ts";
 import { cliModelsByCapability } from "./cliModels.ts";
+import { RESOURCE_HEADING } from "./resources.ts";
 
 /**
  * Rules for running /ship with nobody at the keyboard (consort-cli). The agent decides the
@@ -61,6 +62,13 @@ Map the idea as a design tree and walk it. Decide every branch yourself where th
 ${BREAK_CHECK} Put the break question on its own ${"`"}[ask-user: …]${"`"} line like any other.
 
 When no open question remains and the impact check is recorded, write ${"`"}.consort/ship/SPEC.md${"`"} in this same turn, sections in this order: Problem, Solution, User stories (a long numbered list, "As a <actor>, I want <feature>, so that <benefit>"), Implementation decisions, Testing decisions, Out of scope, Open questions (only real ones), Impact check (copied from GRILLING.md), Assumptions (copied from GRILLING.md). Then emit ${"`"}[ship-spec: .consort/ship/SPEC.md]${"`"}, ${"`"}[ship-stage: Spec'd | Spec written headless in <n> round(s).]${"`"} and ${"`"}[ship-next: /ship]${"`"}.`;
+
+/** added to headless Grilling when project info resource reports are appended to the prompt (cli/pipeline.ts) */
+export const RESOURCE_GRILLING_RULES = `### Prior decisions (project info resources)
+This prompt ends with a "${RESOURCE_HEADING}" section: read-only readers' reports on the team's notes, each fact with its note path and date. You cannot open the resources; rely on the reports.
+- Do not ask the owner what a report already answers. Decide it and record it under "## Assumptions" in GRILLING.md as "<decision> (<resource>: <path>, <date>)".
+- Where the ticket asks for something a dated decision settled otherwise, do not recommend reversing the decision. Ask one question that names both, in this shape: ${"`"}[ask-user: The ticket says <X>; the <date> decision in <resource>: <path> says <Y>. Follow the decision? — recommended: yes]${"`"}.
+- A note's claim about the code is a lead, not a fact: check it in the code before relying on it, and say in Assumptions where the code disagrees.`;
 
 /** what the PR-monitor turn does when humans have commented */
 export const RESPOND_TO_REVIEW = (unresolved: { threadId?: string; author: string; path?: string; line?: number; body: string; url: string }[]) => `## This turn: answer the humans on the PR

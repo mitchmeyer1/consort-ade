@@ -26,6 +26,7 @@ import { sourceFor } from "./sources";
 import { renderView, viewLoop } from "./view";
 import { readAllUsage } from "./usage";
 import { createAccount, runScannerWizard, runSetup, scannerName, setupDone } from "./setup";
+import { resourceProblem } from "../shared/resources.ts";
 import { applyBundle, buildBundle } from "./transfer";
 import { cleanupEnvironment } from "./environment";
 import { alive, DAEMON_LOG, daemonPid, recordDaemon, startDetached, stopDaemon } from "./daemonctl";
@@ -89,6 +90,8 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   scanners list | scanners remove <id> | scanners enable|disable <id> | scanners scan <id>   (scan: dry run)
                                                                           a scanner watches one place for tickets and hands each match to a worker agent
   scanners configure <id> [--max-parallel N] [--max-open-tasks N] [--max-environments N] [--planning-model provider:model] [--implementation-model provider:model] [--coordination-model provider:model] [--reader-model provider:model] [--frontier-model provider:model] [--<role>-effort low|medium|high|xhigh|max] [--parallel-research N] [--parallel-implementation N] [--max-model-attempts N]
+  resources add --name <n> --markdown <path>                              a project info resource: a git checkout of notes Grilling reads
+  resources list | resources remove <id or name>                          (no patient or personal data in it: agents may quote it)
   capacity configure [--max-active-turns N] [--max-open-tasks N] [--max-environments N]
   accounts configure <id> --max-active-turns N
   run [-d]                                                                the daemon: scan, claim, dispatch, watch; -d runs it in the background
@@ -109,8 +112,8 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   accounts unblock <id>                                                   clear a usage block early
   cli status | cli update                                                 the Claude Code and Codex binaries
   status
-  export [--out <file>] [--scanner <id or name>]                          one file with the tokens, accounts and scanners this box runs
-  import <file> [--repo-dir <dir>] [--replace]                            set up this box from that file; clones repos it lacks
+  export [--out <file>] [--scanner <id or name>]                          one file with the tokens, accounts, scanners and resources this box runs
+  import <file> [--repo-dir <dir>] [--replace]                            set up this box from that file; clones repos and resources it lacks
   accounts login <id>                                                     sign an account in again (after an import without credentials)`;
 
 async function main(argv: string[]) {
@@ -153,7 +156,7 @@ async function main(argv: string[]) {
       const out = resolve(str(a, "out") ?? `consort-cli-${host()}-${new Date().toISOString().slice(0, 10)}.json`);
       writeFileSync(out, JSON.stringify(b, null, 2), { mode: 0o600 });
       const noCred = b.accounts.filter((x) => x.auth === "login" && !x.credentials).map((x) => x.name);
-      console.log(`Wrote ${out} (mode 600): ${b.scanners.length} scanner(s), ${b.accounts.length} account(s), ClickUp ${b.clickupKey ? "token" : "none"}, Slack ${b.slack ? "set" : "none"}.`);
+      console.log(`Wrote ${out} (mode 600): ${b.scanners.length} scanner(s), ${b.resources?.length ?? 0} resource(s), ${b.accounts.length} account(s), ClickUp ${b.clickupKey ? "token" : "none"}, Slack ${b.slack ? "set" : "none"}.`);
       console.log(`On the other machine: consort-cli import ${basename(out)}`);
       if (noCred.length) console.log(`${noCred.join(", ")}: login kept in this machine's keychain, so sign in there with: consort-cli accounts login <id>`);
       console.log("It holds secrets; move it over a private channel and delete it afterwards.");
@@ -168,6 +171,7 @@ async function main(argv: string[]) {
       console.log(`Added: ${r.added.join(", ") || "nothing"}`);
       if (r.kept.length) console.log(`Already here, kept: ${r.kept.join(", ")}${a.replace ? "" : " (--replace overrides settings)"}`);
       if (r.needLogin.length) console.log(`Sign in: ${r.needLogin.map((id) => `consort-cli accounts login ${id}`).join("; ")}`);
+      for (const note of r.notes) console.log(note);
       console.log("Ready. Start it: consort-cli run");
       return;
     }
@@ -262,6 +266,28 @@ async function main(argv: string[]) {
         job.effortPolicy = { ...job.effortPolicy, [role]: raw };
       }
       saveState(s); console.log(`Updated scanner ${job.name}.`); return;
+    }
+    case "resources add": {
+      const name = need(a, "name");
+      const path = resolve(str(a, "markdown") ?? fail("--markdown <path of a notes checkout> is required"));
+      const problem = resourceProblem(path, s.jobs.map((j) => j.repo), existsSync);
+      if (problem) fail(problem);
+      if ((s.resources ?? []).some((r) => r.name === name)) fail(`a resource named ${name} already exists`);
+      const resource = { id: newId("res"), name, kind: "markdown" as const, path };
+      (s.resources ??= []).push(resource); saveState(s);
+      console.log(`Added resource ${name} (${resource.id}): markdown notes at ${path}. Grilling reads it from the next task on.`);
+      return;
+    }
+    case "resources list": {
+      for (const r of s.resources ?? []) console.log(`${r.id}  ${r.name.padEnd(20)}  ${r.kind}  ${r.path}${existsSync(join(r.path, ".git")) ? "" : "  (not a git checkout here: skipped)"}`);
+      if (!s.resources?.length) console.log("No project info resources."); return;
+    }
+    case "resources remove": {
+      const which = rest[0] ?? fail("resource id or name required");
+      const before = s.resources?.length ?? 0;
+      s.resources = (s.resources ?? []).filter((r) => r.id !== which && r.name !== which);
+      if (s.resources.length === before) fail(`no resource ${which}`);
+      saveState(s); console.log("Removed."); return;
     }
     case "accounts configure": {
       const account = s.accounts.find(account => account.id === rest[0]) ?? fail("no such account");

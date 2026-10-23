@@ -10,7 +10,7 @@ import { hostname } from "node:os";
 import { isCodexLimitText, isUsageLimitText, limitFromRateEvent, type LimitHit } from "../shared/seatPool.ts";
 import type { TurnUsage } from "../shared/headless.ts";
 import { codexEffort, type EffortLevel } from "../shared/cliTurnPolicy.ts";
-import type { HookCallback } from "@anthropic-ai/claude-agent-sdk";
+import type { HookCallback, SettingSource } from "@anthropic-ai/claude-agent-sdk";
 
 /**
  * One agent turn, headless: Claude Code through the agent SDK, Codex through its SDK, each on the
@@ -40,7 +40,7 @@ export const binaryFor = (provider: Provider): string => {
   return bin;
 };
 
-export type TurnOptions = { /** labels for the telemetry log; without it the turn is not recorded */ trace?: TurnTrace; cwd: string; prompt: string; model: string; account: Account; resume?: string; maxTurns?: number; onText?: (t: string) => void; signal?: AbortSignal; readOnly?: boolean; effort?: EffortLevel; delegateModel?: string; maxDelegates?: number; /** the task's own ports and Docker names, on top of the process env */ env?: Record<string, string> };
+export type TurnOptions = { /** labels for the telemetry log; without it the turn is not recorded */ trace?: TurnTrace; cwd: string; prompt: string; model: string; account: Account; resume?: string; maxTurns?: number; onText?: (t: string) => void; signal?: AbortSignal; readOnly?: boolean; /** no web search or fetch, so what the turn read never leaves this machine except in its reply */ offline?: boolean; /** where Claude Code loads settings, CLAUDE.md and MCP servers from; a project info resource reader skips the notes repo's own */ settingSources?: SettingSource[]; effort?: EffortLevel; delegateModel?: string; maxDelegates?: number; /** the task's own ports and Docker names, on top of the process env */ env?: Record<string, string> };
 export type Turn = { text: string; sessionId?: string; error?: string; limit?: LimitHit; /** what the turn spent, per model (Claude Code prices its own; Codex gives tokens only) */ usage?: TurnUsage[] };
 
 export const envFor = (account: Account, extra: Record<string, string> = {}): Record<string, string | undefined> => {
@@ -111,9 +111,10 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
     options: {
       cwd: o.cwd, model: o.model, resume: o.resume, pathToClaudeCodeExecutable: binaryFor("claude"), abortController: ac,
       stderr: (d: string) => { stderr = (stderr + d).slice(-4000); },
-      env: envFor(o.account, { ...o.env, ...(o.delegateModel ? { CLAUDE_CODE_SUBAGENT_MODEL: o.delegateModel } : {}) }), settingSources: ["user", "project", "local"],
+      env: envFor(o.account, { ...o.env, ...(o.delegateModel ? { CLAUDE_CODE_SUBAGENT_MODEL: o.delegateModel } : {}) }), settingSources: o.settingSources ?? ["user", "project", "local"],
       permissionMode: o.readOnly ? "plan" : "bypassPermissions", allowDangerouslySkipPermissions: !o.readOnly,
-      ...((o.maxDelegates ?? 0) > 0 ? { hooks: delegateBudget(1) } : { disallowedTools: ["Agent", "Task"] }),
+      ...((o.maxDelegates ?? 0) > 0 ? { hooks: delegateBudget(1) } : {}),
+      disallowedTools: [...((o.maxDelegates ?? 0) > 0 ? [] : ["Agent", "Task"]), ...(o.offline ? ["WebSearch", "WebFetch"] : [])],
       ...(o.effort ? { effort: o.effort } : {}),
       ...(o.maxTurns ? { maxTurns: o.maxTurns } : {}),
     },
@@ -151,7 +152,7 @@ async function runCodex(o: TurnOptions): Promise<Turn> {
   const { Codex } = await import("@openai/codex-sdk");
   const codex = new Codex({ ...(o.account.auth === "key" && o.account.apiKey ? { apiKey: o.account.apiKey } : {}), codexPathOverride: binaryFor("codex"), env: envFor(o.account, o.env) as Record<string, string>, config: { agents: { enabled: (o.maxDelegates ?? 0) > 0, max_concurrent_threads_per_session: 1, ...(o.delegateModel ? { default_subagent_model: o.delegateModel, default_subagent_reasoning_effort: "low" } : {}) } } });
   // unattended: no approvals, full access on this box, and the web for research
-  const opts = { model: o.model, workingDirectory: o.cwd, skipGitRepoCheck: true, sandboxMode: o.readOnly ? "read-only" as const : "danger-full-access" as const, networkAccessEnabled: true, approvalPolicy: "never" as const, webSearchEnabled: true, webSearchMode: "live" as const, ...(o.effort ? { modelReasoningEffort: codexEffort(o.effort) } : {}) };
+  const opts = { model: o.model, workingDirectory: o.cwd, skipGitRepoCheck: true, sandboxMode: o.readOnly ? "read-only" as const : "danger-full-access" as const, networkAccessEnabled: !o.offline, approvalPolicy: "never" as const, webSearchEnabled: !o.offline, ...(o.offline ? {} : { webSearchMode: "live" as const }), ...(o.effort ? { modelReasoningEffort: codexEffort(o.effort) } : {}) };
   const thread = o.resume ? codex.resumeThread(o.resume, opts) : codex.startThread(opts);
   const texts: string[] = [];
   let sessionId = o.resume;

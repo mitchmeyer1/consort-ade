@@ -1,6 +1,6 @@
 import { SHIP_DIR, SHIP_REVIEW_ROUNDS, SHIP_STAGES, TICKET_FILE, shipFooter, shipStep, stageIndex, ticketRef, type ShipFeature, type ShipForm } from "./ship.ts";
 import type { ReviewSummary } from "./review.ts";
-import { BREAK_CHECK, GRILLING_HEADLESS, HEADLESS_RULES } from "./headless.ts";
+import { BREAK_CHECK, GRILLING_HEADLESS, HEADLESS_RULES, RESOURCE_GRILLING_RULES } from "./headless.ts";
 
 /**
  * The prompt for one /ship turn: the rules every stage shares, the feature's state, and the
@@ -27,6 +27,8 @@ export type ShipPromptInput = {
   headless?: boolean;
   /** CLI runtime schedules isolated research/writer waves between coordinator turns. */
   runtimeParallel?: boolean;
+  /** consort-cli: project info resource reports are appended to this turn, so headless Grilling gets the rules for using them */
+  resources?: boolean;
 };
 
 const REVIEW_FILE = (f: ShipFeature) => `.consort/pr-review/pr-${f.review?.pr ?? "<n>"}.review.json`;
@@ -253,7 +255,7 @@ export function shipPrompt(i: ShipPromptInput): string {
   const body =
     handler === "pause" ? PAUSE(i)
     : handler === "closed" ? CLOSED()
-    : handler === "grilling" ? (i.headless ? GRILLING_HEADLESS : GRILLING(i))
+    : handler === "grilling" ? (i.headless ? (i.resources ? `${GRILLING_HEADLESS}\n\n${RESOURCE_GRILLING_RULES}` : GRILLING_HEADLESS) : GRILLING(i))
     : handler === "implementing" ? IMPLEMENTING(i)
     : handler === "test" ? TEST_SESSION(i)
     : handler === "approve" ? APPROVE(i)

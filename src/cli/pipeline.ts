@@ -10,7 +10,8 @@ import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review
 import { selectCliModel, type CliModelRole } from "../shared/cliModels.ts";
 import { MODEL_ROLE_RULES, BUILD_EFFORT_RULE, parseBuildEffort, parseModelEscalation, roleEffort, stageModelRole } from "../shared/cliTurnPolicy.ts";
 import { AccountUnavailableError, withAgentTurn, withEnvironmentSlot } from "./capacity";
-import { prepareResearchTasks, readImplementationTasks, recoverImplementation, runImplementation, runResearch, type ParallelRun } from "./parallel";
+import { prepareResearchTasks, readImplementationTasks, recoverImplementation, runImplementation, runResearch, runResourceResearch, type ParallelRun } from "./parallel";
+import type { Resource } from "../shared/resources.ts";
 import { excludeConsortDir, fetchTicket, writeTicketFile } from "../main/ship";
 import { addWorktree } from "../main/git";
 import type { Provider } from "../shared/types";
@@ -102,6 +103,14 @@ export async function workTask(taskId: string): Promise<void> {
     await addWorktree(job.repo, shipFolder(shipSlug(task.ticket.title), task.ticket.id), task.branch, `origin/${job.base}`, WORK_DIR);
   }
   await excludeConsortDir(task.worktree).catch(() => {});
+  // project info resources are read in place by Grilling's readers; pulled on every start, since a stale copy would replay decisions the team has since changed
+  const resources: Resource[] = [];
+  for (const resource of state.resources ?? []) {
+    if (!existsSync(join(resource.path, ".git"))) { log(task, `resource ${resource.name}: ${resource.path} is not a git checkout here; Grilling runs without it`); continue; }
+    await run("git", ["-C", resource.path, "pull", "--ff-only", "--quiet"], { timeout: 60_000 }).then(() => log(task!, `resource ${resource.name} pulled`), (e: Error) => log(task!, `resource ${resource.name} not pulled (${String(e.message).split("\n")[0]}); reading it as it is`));
+    resources.push(resource);
+  }
+  const resourcePaths = new Set(resources.map((r) => r.path));
   const fetched = await fetchTicket(task.ticket, { repoPath: job.repo, clickupKey: state.clickupKey });
   let ticketBody = writeTicketFile(task.worktree, task.ticket, fetched);
   // the ClickUp subtasks, so the build tickets can name them and the worker can move them (cli/subtasks.ts)
@@ -190,6 +199,9 @@ export async function workTask(taskId: string): Promise<void> {
     let model = fixedModel ?? modelFor(provider, role);
     const readOnly = role === "reader";
     const managesSession = cwd === task.worktree && !fixedModel && !readOnly;
+    // a resource is read in place, so nothing but a read-only, offline reader may run there
+    const resourceTurn = resourcePaths.has(cwd);
+    if (resourceTurn && !readOnly) throw new Error(`only a read-only reader may run in a project info resource (${cwd})`);
     let roleFailures = 0;
     let escalationReason: string | undefined;
     const ordinaryRole = role;
@@ -292,7 +304,7 @@ export async function workTask(taskId: string): Promise<void> {
         quietSince = Date.now();
         usageTimer = setInterval(checkUsage, 60_000);
         deadline = timeoutMs ? setTimeout(() => { timedOut = true; trace.reason = "timeout"; abort.abort(); }, timeoutMs) : undefined;
-        return runTurn({ trace, cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}${feature.stage === "Grilling" ? `\n${BUILD_EFFORT_RULE}` : ""}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}\n\n${ENVIRONMENT_RULES(turnEnv)}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: turnEnv, signal: abort.signal, readOnly, effort, delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { quietSince = Date.now(); const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
+        return runTurn({ trace, cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}${feature.stage === "Grilling" && !resourceTurn ? `\n${BUILD_EFFORT_RULE}` : ""}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}${resourceTurn ? "" : `\n\n${ENVIRONMENT_RULES(turnEnv)}`}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: turnEnv, signal: abort.signal, readOnly, ...(resourceTurn ? { offline: true, settingSources: ["user" as const] } : {}), effort, delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { quietSince = Date.now(); const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
       }, reviewUnits); }
       catch (e) { if (e instanceof AccountUnavailableError) { continue; } throw e; }
       finally { active = false; mine.set(who.id, (mine.get(who.id) ?? 1) - 1); if (usageTimer) clearInterval(usageTimer); if (deadline) clearTimeout(deadline); }
@@ -523,28 +535,40 @@ export async function workTask(taskId: string): Promise<void> {
 
   const parallelDirectory = join(task.worktree, ".consort", "ship", "parallel");
   const parallelRun: ParallelRun = async child => {
-    // a parallel ticket gets 90 minutes (saved every 5, so a timeout resumes); research stays short
-    childSteps.set(child.cwd, `parallel ${child.kind === "research" ? "research" : "ticket"} ${child.id}`);
-    const execute = async (childEnv: TaskEnv) => ({ text: await turn(child.prompt, builderProvider, child.kind === "research" ? "reader" : "implementation", false, child.kind === "research" ? 15 * 60_000 : 90 * 60_000, child.cwd, undefined, childEnv) });
-    return child.kind === "implementation" ? withChildEnvironment(taskId, child.id, execute) : execute(env);
+    // a parallel ticket gets 90 minutes (saved every 5, so a timeout resumes); research and resource readers stay short, and only tickets write
+    const writes = child.kind === "implementation";
+    childSteps.set(child.cwd, `parallel ${writes ? "ticket" : child.kind} ${child.id}`);
+    const execute = async (childEnv: TaskEnv) => ({ text: await turn(child.prompt, builderProvider, writes ? "implementation" : "reader", false, writes ? 90 * 60_000 : 15 * 60_000, child.cwd, undefined, childEnv) });
+    return writes ? withChildEnvironment(taskId, child.id, execute) : execute(env);
   };
   let sharedResearch = "";
+  // the readers' reports on the project info resources, kept apart so a failed repo research never drops them
+  let resourceReport = "";
   let parallelGuidance = "";
 
   // ── the stages, Grilling through In Review ──────────────────────────────────────────────
   for (let n = 0; feature.stage !== "In Review" && feature.stage !== "Merged" && feature.stage !== "Closed"; n++) {
     if (await applyOwnerUpdates()) continue;
     if (feature.stage === "Grilling") {
-      activity("researching business flows, tests and integrations");
-      try {
-        const research = await runResearch({ cwd: task.worktree, directory: parallelDirectory, tasks: await prepareResearchTasks(task.worktree, ticketBody ?? task.ticket.title), concurrency: job.parallelResearch ?? 3, run: parallelRun });
-        sharedResearch = research.summary;
-        log(task, research.reused ? "reusing unchanged task research" : "parallel research complete");
-      } catch (e) {
+      activity(resources.length ? "researching business flows, tests, integrations and project info resources" : "researching business flows, tests and integrations");
+      const [research, notes] = await Promise.allSettled([
+        (async () => runResearch({ cwd: task.worktree, directory: parallelDirectory, tasks: await prepareResearchTasks(task.worktree, ticketBody ?? task.ticket.title), concurrency: job.parallelResearch ?? 3, run: parallelRun }))(),
+        resources.length ? runResourceResearch({ resources, directory: parallelDirectory, ticketBody: ticketBody ?? task.ticket.title, run: parallelRun, concurrency: job.parallelResearch ?? 3 }) : Promise.resolve(undefined),
+      ]);
+      if (research.status === "fulfilled") {
+        sharedResearch = research.value.summary;
+        log(task, research.value.reused ? "reusing unchanged task research" : "parallel research complete");
+      } else {
         // The coordinator can still do serial research, retaining any real owner questions.
-        parallelGuidance = `Research collection needs follow-up: ${(e as Error).message}. Complete the missing research before the spec, and relay any owner decision with [ask-user: ...].`;
+        parallelGuidance = `Research collection needs follow-up: ${(research.reason as Error).message}. Complete the missing research before the spec, and relay any owner decision with [ask-user: ...].`;
         log(task, parallelGuidance);
       }
+      // the planner cannot open a resource, so a failed reader just leaves its section out
+      if (notes.status === "fulfilled" && notes.value) {
+        resourceReport = notes.value.summary;
+        for (const s of notes.value.sections) log(task, `resource ${s.name}: ${s.empty ? "nothing bears on the ticket" : s.reused ? "reusing unchanged report" : "report complete"}`);
+        for (const f of notes.value.failed) log(task, `resource ${f.name} not read: ${f.error}`);
+      } else if (notes.status === "rejected") log(task, `project info resources not read: ${(notes.reason as Error).message}`);
     }
     if (["Spec'd", "Implementing"].includes(feature.stage) && !feature.built) {
       // the dependency graph, in code: post the waves when the ticket set changes; a graph that is mostly a chain gets one re-split
@@ -597,8 +621,8 @@ export async function workTask(taskId: string): Promise<void> {
       }
     }
     const form = feature.stage === "Ready to Test" ? "approve" as const : "resume" as const;
-    const stagePrompt = pendingUser ?? shipPrompt({ feature, form: { form }, worktree: task.worktree, branch: task.branch, base: `origin/${job.base}`, ticketBody, headless: true, runtimeParallel: true });
-    const prompt = `${stagePrompt}\n\n${sharedResearch ? `## Shared research (verify changed code before relying on it)\n${sharedResearch}\n` : ""}${parallelGuidance}`;
+    const stagePrompt = pendingUser ?? shipPrompt({ feature, form: { form }, worktree: task.worktree, branch: task.branch, base: `origin/${job.base}`, ticketBody, headless: true, runtimeParallel: true, resources: !!resourceReport });
+    const prompt = `${stagePrompt}\n\n${sharedResearch ? `## Shared research (verify changed code before relying on it)\n${sharedResearch}\n` : ""}${resourceReport ? `${resourceReport}\n` : ""}${parallelGuidance}`;
     pendingUser = undefined;
     parallelGuidance = "";
     // writing the build plan (no tickets yet) is the turn that decides how parallel the build can be: Fable or Astra

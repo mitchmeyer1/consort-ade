@@ -140,3 +140,16 @@ test('a max effort turn asks Codex for xhigh, its top level', async () => {
   await agent.runTurn({ ...opts, effort: 'max' });
   assert.equal(options.modelReasoningEffort, 'xhigh');
 });
+
+test('an offline turn gets no network and no web search on Codex; an ordinary turn keeps both', async () => {
+  let options;
+  const agent = load(async () => ({ events: (async function* () { yield { type: 'turn.completed', usage: {} }; })() }), o => { options = o; });
+  await agent.runTurn({ ...opts, readOnly: true, offline: true });
+  assert.equal(options.networkAccessEnabled, false);
+  assert.equal(options.webSearchEnabled, false);
+  assert.equal('webSearchMode' in options, false);
+  await agent.runTurn(opts);
+  assert.equal(options.networkAccessEnabled, true);
+  assert.equal(options.webSearchEnabled, true);
+  assert.equal(options.webSearchMode, 'live');
+});

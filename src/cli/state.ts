@@ -159,6 +159,8 @@ export type Task = {
   cost?: TaskCost;
 };
 export type CliState = { capacity?: { maxActiveTurns?: number; maxOpenTasks?: number; maxEnvironments?: number }; version: 1; accounts: Account[]; slack?: SlackConfig; clickupKey?: string; branchPrefix?: string; jobs: Job[]; tasks: Task[];
+  /** notes checkouts every Grilling reads before asking the owner (shared/resources.ts); set by setup or `resources add` */
+  resources?: import("../shared/resources.ts").Resource[];
   /** set by `consort-cli setup` at the end of the walk-through; every other command checks it */
   setupCompletedAt?: number;
   /** this install's claim name: hostname plus a random suffix, minted on first use */

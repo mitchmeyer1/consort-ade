@@ -4,6 +4,8 @@ import { mkdir, readFile, writeFile, rm, copyFile, readdir, cp, rename, lstat, r
 import { basename, dirname, join, resolve, relative } from "node:path";
 import { promisify } from "node:util";
 import { stageSafely } from "./checkpoint.ts";
+import { redactPii } from "../shared/redact.ts";
+import { isNoResource, RESOURCE_HEADING, resourceReaderPrompt, type Resource } from "../shared/resources.ts";
 
 const exec = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) => (await exec("git", args, { cwd, maxBuffer: 16 << 20 })).stdout;
@@ -14,7 +16,7 @@ const safe = (p: string) => p && !p.startsWith("/") && !p.split(/[\\/]/).include
 const within = (file: string, scope: string) => file === scope || file.startsWith(scope.replace(/\/$/, "") + "/");
 const scopesOverlap = (a: string[], b: string[]) => a.some((x) => b.some((y) => within(x, y) || within(y, x)));
 export type ParallelTask = { id: string; files: string[]; prompt: string; blockedBy?: string[] };
-export type ParallelRun = (job: { id: string; cwd: string; prompt: string; kind: "research" | "implementation" }) => Promise<{ text: string; error?: string; limit?: unknown }>;
+export type ParallelRun = (job: { id: string; cwd: string; prompt: string; kind: "research" | "implementation" | "resource" }) => Promise<{ text: string; error?: string; limit?: unknown }>;
 export type ParallelOptions = { cwd: string; directory: string; tasks: ParallelTask[]; run: ParallelRun; concurrency?: number };
 
 async function bounded<T, R>(items: T[], count: number, fn: (item: T) => Promise<R>): Promise<R[]> {
@@ -51,6 +53,59 @@ async function revision(cwd: string, tasks: ParallelTask[]): Promise<string> {
     hash.update(file).update("\0");
     hash.update(await readFile(join(cwd, file)).catch(() => Buffer.from("<deleted>")));
   }
+  return hash.digest("hex");
+}
+export type ResourceSection = { name: string; text: string; head: string; reused: boolean; empty: boolean };
+/** `summary` is the planner's prompt section, empty when no resource bore on the ticket; a resource that could not be read is in `failed` and the rest still count */
+export type ResourceResearch = { summary: string; sections: ResourceSection[]; failed: { name: string; error: string }[] };
+export type ResourceOptions = { resources: Resource[]; directory: string; ticketBody: string; run: ParallelRun; concurrency?: number };
+
+/**
+ * Project info resources are read in place: one read-only reader per resource with its working
+ * directory in the checkout, no worktree, nothing written there. A report is reused while the
+ * checkout's commit, its uncommitted edits and the reader's prompt (which carries the ticket) are
+ * unchanged, and RESOURCES.md beside the task research keeps the latest reports.
+ */
+export async function runResourceResearch(o: ResourceOptions): Promise<ResourceResearch> {
+  const outcomes = await bounded(o.resources, cap(o.concurrency ?? 3), (resource) => readResource(o, resource).then((section) => ({ section }), (e: Error) => ({ failed: { name: resource.name, error: e.message.split("\n")[0] } })));
+  const sections = outcomes.flatMap((x) => ("section" in x ? [x.section] : []));
+  const failed = outcomes.flatMap((x) => ("failed" in x ? [x.failed] : []));
+  const found = sections.filter((s) => !s.empty);
+  if (sections.length) {
+    await mkdir(o.directory, { recursive: true });
+    await writeFile(join(o.directory, "RESOURCES.md"), `# Project info resources\n\n${sections.map((s) => `## ${s.name}\n\nCheckout commit: ${s.head}\n\n${s.empty ? "Nothing here bears on the ticket." : s.text}`).join("\n\n")}\n`);
+  }
+  return { summary: found.length ? `${RESOURCE_HEADING}\n${found.map((s) => `### ${s.name}\n${s.text}`).join("\n\n")}\n` : "", sections, failed };
+}
+
+async function readResource(o: ResourceOptions, resource: Resource): Promise<ResourceSection> {
+  if (!resource.path.startsWith("/")) throw new Error(`Resource ${resource.name}: ${resource.path} is not an absolute path`);
+  await lstat(join(resource.path, ".git")).catch(() => { throw new Error(`Resource ${resource.name}: ${resource.path} is not a git checkout`); });
+  const prompt = resourceReaderPrompt(resource.name, o.ticketBody);
+  const key = await resourceRevision(resource.path, prompt);
+  const head = (await git(resource.path, "rev-parse", "HEAD")).trim();
+  const cache = join(o.directory, `resource-${resource.id}-${key}.json`);
+  const cached = await readFile(cache, "utf8").then((s) => JSON.parse(s)).catch(() => undefined);
+  if (cached?.key === key && typeof cached.text === "string") return { name: resource.name, text: cached.text, head, reused: true, empty: !cached.text };
+  const result = await o.run({ id: resource.name, cwd: resource.path, prompt, kind: "resource" });
+  if (result.error || result.limit) throw new Error(`Resource ${resource.name}: ${result.error ?? "account limit"}`);
+  // the notes should hold no personal data; masking what slips through costs nothing
+  const text = isNoResource(result.text) ? "" : redactPii(result.text.trim());
+  // a checkout that moved while it was read (another worker pulled) gives this report no cache entry
+  if (await resourceRevision(resource.path, prompt) === key) {
+    await mkdir(o.directory, { recursive: true });
+    await writeFile(cache, JSON.stringify({ key, text }));
+  }
+  return { name: resource.name, text, head, reused: false, empty: !text };
+}
+
+async function resourceRevision(cwd: string, prompt: string): Promise<string> {
+  const hash = createHash("sha256").update(prompt).update("\0");
+  hash.update(await git(cwd, "rev-parse", "HEAD")).update("\0");
+  // --no-optional-locks: reading status must not rewrite the notes repo's index
+  const status = await git(cwd, "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all");
+  hash.update(status);
+  if (status) hash.update(await git(cwd, "diff", "HEAD", "--binary"));
   return hash.digest("hex");
 }
 /**

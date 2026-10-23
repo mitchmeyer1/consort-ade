@@ -12,6 +12,7 @@ import * as cliTurnPolicy from '../src/shared/cliTurnPolicy.ts';
 import { usageBlock } from '../src/shared/usage.ts';
 import * as usageMod from '../src/shared/usage.ts';
 import * as ownerUpdates from '../src/cli/ownerUpdates.ts';
+import { RESOURCE_HEADING } from '../src/shared/resources.ts';
 
 const require = createRequire(import.meta.url);
 const compile = file => ts.transpileModule(readFileSync(new URL(`../src/cli/${file}.ts`, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -21,7 +22,7 @@ function harness(opts = {}) {
   const events = [], messages = [];
   const task = { id: 't', jobId: 'j', ticket: { id: 'T1', title: 'Example', url: 'https://ticket/1' }, worktree: '/virtual', branch: 'feature', accountIds: {}, sessions: {}, reviewsDone: 0, threadsSeen: [], envReadyAt: 1, evidenceValidatedAt: 1, feature: { stage: 'In Review', prs: ['https://github.com/a/b/pull/1'], evidenceAt: 1 }, ...opts.task };
   const accounts = opts.accounts ?? [{ id: 'c', provider: 'claude', name: 'Claude' }, { id: 'x', provider: 'codex', name: 'Codex' }];
-  const state = { tasks: [task], jobs: [{ id: 'j', repo: '/virtual', base: 'main', ...opts.job }], accounts, slack: { userId: 'owner' } };
+  const state = { tasks: [task], jobs: [{ id: 'j', repo: '/virtual', base: 'main', ...opts.job }], accounts, slack: { userId: 'owner' }, resources: opts.resources };
   let interval, deadline;
   let clock = Date.now();
   class Clock extends Date { static now() { return clock; } }
@@ -29,12 +30,12 @@ function harness(opts = {}) {
   let reads = 0;
   const mocks = {
     'node:fs': { existsSync: () => true, readFileSync: f => opts.readFile?.(f) ?? '', mkdirSync() {}, writeFileSync() {}, rmSync() {} },
-    'node:util': { promisify: () => async (cmd, args) => { events.push(args.join(' ')); return { stdout: '' }; } },
+    'node:util': { promisify: () => async (cmd, args) => { events.push(args.join(' ')); return opts.exec ? opts.exec(cmd, args) : { stdout: '' }; } },
     './evidenceRetry': evidenceRetry,
     '../shared/headless.ts': headless, '../shared/seatPool.ts': seatPool, '../shared/ship.ts': ship,
     '../shared/cliModels.ts': cliModels, '../shared/cliTurnPolicy.ts': cliTurnPolicy,
       './capacity': { AccountUnavailableError: class extends Error {}, withAgentTurn: async (_, __, fn) => fn(), withEnvironmentSlot: async (_, fn) => fn() },
-      './parallel': { prepareResearchTasks: async () => [], recoverImplementation: async () => [], readImplementationTasks: async () => [], runImplementation: async o => opts.runImplementation?.(o) ?? ({ completed: [], commits: [], failed: [] }), runResearch: async o => opts.runResearch?.(o) ?? ({ summary: 'No conflicting flows found', results: [], reused: false }) }, '../shared/usage.ts': usageMod,
+      './parallel': { runResourceResearch: async o => opts.runResourceResearch ? opts.runResourceResearch(o) : ({ summary: '', sections: [], failed: [] }), prepareResearchTasks: async () => [], recoverImplementation: async () => [], readImplementationTasks: async () => [], runImplementation: async o => opts.runImplementation?.(o) ?? ({ completed: [], commits: [], failed: [] }), runResearch: async o => opts.runResearch?.(o) ?? ({ summary: 'No conflicting flows found', results: [], reused: false }) }, '../shared/usage.ts': usageMod,
     '../shared/shipPrompt.ts': { shipPrompt: o => opts.shipPrompt?.(o) ?? 'fix findings' },
     '../shared/review.ts': { parseReview: () => ({}), reviewSummary: () => opts.missingReport ? undefined : opts.summary ?? { total: 0 } },
     '../main/ship': { excludeConsortDir: async () => {}, fetchTicket: async () => ({}), writeTicketFile: () => '' },
@@ -955,4 +956,63 @@ test('restart recovers the legacy publication network question without an owner 
   assert.ok(!h.events.includes('owner reply'));
   assert.ok(h.events.includes('publish evidence'));
   assert.ok(h.task.evidenceValidatedAt);
+});
+
+const vault = { id: 'res_1', name: 'team-notes', kind: 'markdown', path: '/vault' };
+const grilling = { feature: { stage: 'Grilling', prs: [], history: [] }, accountIds: { claude: 'c' }, sessions: { claude: 'parent-session' } };
+const resourceReport = async o => {
+  const report = await o.run({ id: 'team-notes', cwd: o.resources[0].path, prompt: 'Read the notes', kind: 'resource' });
+  return { summary: `${RESOURCE_HEADING}\n### team-notes\n${report.text}\n`, sections: [{ name: 'team-notes', text: report.text, head: 'abc', reused: false, empty: false }], failed: [] };
+};
+
+test('project info resources are pulled at start, read by an offline read-only reader in the checkout, and reported to the planner without the path', async () => {
+  const seen = [], forms = [];
+  const h = harness({ resources: [vault], task: grilling,
+    runResearch: async () => ({ summary: 'Flow export preserves archived records', reused: false, results: [] }),
+    runResourceResearch: resourceReport,
+    shipPrompt: o => { forms.push(o); return 'coordinate stage'; },
+    turn: o => {
+      seen.push(o);
+      if (o.cwd === '/vault') return { text: 'Support tickets are opened by the messaging platform (decisions/2026-07-24-ticketing.md, 2026-07-24)' };
+      throw halt;
+    },
+  });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.ok(h.events.includes('-C /vault pull --ff-only --quiet'));
+  const reader = seen.find(o => o.cwd === '/vault');
+  assert.ok(reader.readOnly && reader.model === 'claude-haiku-4-5-20251001' && reader.effort === 'low' && !reader.resume);
+  assert.equal(reader.offline, true);
+  assert.deepEqual(reader.settingSources, ['user']);
+  assert.doesNotMatch(reader.prompt, /Your environment on this machine/);
+  assert.doesNotMatch(reader.prompt, /build-effort/);
+  const planner = seen.find(o => o.cwd === '/virtual');
+  assert.ok(planner.prompt.includes(RESOURCE_HEADING));
+  assert.match(planner.prompt, /Support tickets are opened by the messaging platform/);
+  assert.match(planner.prompt, /Flow export preserves archived records/);
+  assert.ok(!planner.prompt.includes('/vault'), 'the planner never gets the path');
+  assert.equal(planner.offline, undefined);
+  assert.equal(forms[0].resources, true);
+  assert.equal(h.task.sessions.claude, 'parent-session');
+});
+
+test('a resource that fails to pull is still read; one that fails to read leaves no section; without resources nothing is pulled or read', async () => {
+  const run = async (extra) => {
+    const seen = [], forms = [], asked = [];
+    const h = harness({ task: grilling, runResearch: async () => ({ summary: 'Flow export preserves archived records', reused: false, results: [] }),
+      shipPrompt: o => { forms.push(o); return 'coordinate stage'; },
+      turn: o => { seen.push(o); if (o.cwd === '/vault') return { text: 'A dated decision' }; throw halt; },
+      ...extra, runResourceResearch: extra.runResourceResearch && (async o => { asked.push(o); return extra.runResourceResearch(o); }) });
+    await assert.rejects(h.work(), e => e === halt);
+    return { h, planner: seen.find(o => o.cwd === '/virtual'), forms, asked };
+  };
+  const pullFails = await run({ resources: [vault], runResourceResearch: resourceReport, exec: (cmd, args) => { if (args.includes('pull')) throw new Error('not possible to fast-forward\nhint'); return { stdout: '' }; } });
+  assert.match(pullFails.planner.prompt, /A dated decision/, 'read as it is');
+  const readFails = await run({ resources: [vault], runResourceResearch: async () => { throw new Error('every account is busy'); } });
+  assert.ok(!readFails.planner.prompt.includes(RESOURCE_HEADING));
+  assert.match(readFails.planner.prompt, /Flow export preserves archived records/, 'the repo research still arrives');
+  assert.equal(readFails.forms[0].resources, false);
+  const none = await run({ runResourceResearch: resourceReport });
+  assert.equal(none.asked.length, 0);
+  assert.ok(!none.h.events.some(e => e.includes('pull')));
+  assert.equal(none.forms[0].resources, false);
 });

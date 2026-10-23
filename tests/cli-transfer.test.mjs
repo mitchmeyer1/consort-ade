@@ -79,3 +79,44 @@ test('model roles and capacity settings survive export and import', async () => 
   assert.equal(fresh.jobs[0].parallelImplementation, 2);
   assert.equal(fresh.jobs[0].maxOpenTasks, 5);
 });
+
+const createAccountStub = (st, provider, name, apiKey) => { const acc = { id: `${provider}_${st.accounts.length + 1}`, name, provider, auth: apiKey ? 'key' : 'login', createdAt: 1, ...(apiKey ? { apiKey } : { configDir: `/b/logins/${provider}_${st.accounts.length + 1}` }) }; st.accounts.push(acc); return acc; };
+
+test('project info resources travel with their remotes; import reuses a checkout that is here, clones one that is not, and leaves out one it cannot get', async () => {
+  const s = state();
+  s.resources = [
+    { id: 'res_1', name: 'team-notes', kind: 'markdown', path: '/home/a/notes' },
+    { id: 'res_2', name: 'local-only', kind: 'markdown', path: '/home/a/scratch-notes' },
+    { id: 'res_3', name: 'shared', kind: 'markdown', path: '/srv/shared-notes' },
+  ];
+  const remotes = { '/home/a/roster': 'git@github.com:you/roster.git', '/home/a/notes': 'git@github.com:you/team-notes.git', '/srv/shared-notes': 'git@github.com:you/shared-notes.git' };
+  const b = await buildBundle(s, { readFile: () => undefined, remoteOf: async (p) => remotes[p] });
+  assert.deepEqual(b.resources, [
+    { name: 'team-notes', kind: 'markdown', path: '/home/a/notes', remote: 'git@github.com:you/team-notes.git' },
+    { name: 'local-only', kind: 'markdown', path: '/home/a/scratch-notes', remote: undefined },
+    { name: 'shared', kind: 'markdown', path: '/srv/shared-notes', remote: 'git@github.com:you/shared-notes.git' },
+  ]);
+  const fresh = { version: 1, accounts: [], jobs: [], tasks: [] };
+  const cloned = [];
+  const r = await applyBundle(fresh, b, { repoDir: '/home/b/repos', exists: (p) => p === '/srv/shared-notes/.git', clone: async (remote, into) => { cloned.push([remote, into]); }, writeCred() {}, create: createAccountStub });
+  assert.deepEqual(cloned, [['git@github.com:you/roster.git', '/home/b/repos/roster'], ['git@github.com:you/team-notes.git', '/home/b/repos/team-notes']]);
+  assert.deepEqual(fresh.resources.map((x) => [x.name, x.kind, x.path]), [['team-notes', 'markdown', '/home/b/repos/team-notes'], ['shared', 'markdown', '/srv/shared-notes']]);
+  assert.ok(fresh.resources.every((x) => x.id && !['res_1', 'res_3'].includes(x.id)), 'fresh ids on this box');
+  assert.equal(r.notes.length, 1);
+  assert.match(r.notes[0], /^resource local-only: \/home\/a\/scratch-notes is not here and could not be cloned; imported without it/);
+  assert.ok(r.added.includes('resource team-notes') && r.added.includes('resource shared'));
+});
+
+test('a resource whose clone fails is left out with a note, one already here by name is kept, and an export without resources has none', async () => {
+  const s = state();
+  s.resources = [{ id: 'res_1', name: 'team-notes', kind: 'markdown', path: '/home/a/notes' }, { id: 'res_2', name: 'wiki', kind: 'markdown', path: '/home/a/wiki' }];
+  const b = await buildBundle(s, { readFile: () => undefined, remoteOf: async (p) => (p === '/home/a/roster' ? 'git@github.com:you/roster.git' : `git@github.com:you/${p.split('/').pop()}.git`) });
+  const box = { version: 1, accounts: [], jobs: [], tasks: [], resources: [{ id: 'res_9', name: 'wiki', kind: 'markdown', path: '/srv/wiki' }] };
+  const r = await applyBundle(box, b, { repoDir: '/home/b/repos', exists: () => false, clone: async (remote) => { if (remote.endsWith('notes.git')) throw new Error('auth failed'); }, writeCred() {}, create: createAccountStub });
+  assert.deepEqual(box.resources.map((x) => x.name), ['wiki'], 'the clone failure is left out, the local wiki is kept');
+  assert.equal(box.resources[0].path, '/srv/wiki');
+  assert.ok(r.kept.includes('resource wiki'));
+  assert.match(r.notes.join('\n'), /resource team-notes: .* imported without it/);
+  const plain = await buildBundle(state(), { readFile: () => undefined, remoteOf: async () => 'git@github.com:you/roster.git' });
+  assert.equal('resources' in plain, false);
+});
