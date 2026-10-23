@@ -498,13 +498,20 @@ async function daemon() {
       if (!due) continue;
       const starting = loadState();
       const startingJob = starting.jobs.find((j) => j.id === job.id);
-      if (startingJob) { startingJob.scanStartedAt = Date.now(); saveState(starting); }
+      if (startingJob) { startingJob.scanStartedAt = Date.now(); if (startingJob.source === "sentry") startingJob.scanProgress = { step: 1, action: "Starting Sentry scan", at: Date.now() }; saveState(starting); }
       statusEvent("info", `${job.name}: checking ${job.source} for eligible tickets to start`);
       try {
         if (job.source === "sentry") {
-          const result = await scanSentry(job, s.clickupKey, { workers: loadState().tasks });
+          const result = await scanSentry(job, s.clickupKey, { workers: loadState().tasks, onProgress: progress => {
+            const fresh = loadState(); const current = fresh.jobs.find(j => j.id === job.id);
+            if (current) { current.scanProgress = progress; saveState(fresh); }
+          } });
           statusEvent(result.reserved || result.atCapacity ? "warn" : "success", result.atCapacity ? `${job.name}: ${result.activeTickets}/${result.ticketLimit} Sentry ticket slots occupied; no Sentry scan or new workers until a slot frees` : `${job.name}: ${result.issues} Sentry issues → ${result.groups} planned bug bundles; ${result.created} ClickUp tickets created; ${result.existing} existing; ${result.reserved} reserved elsewhere or awaiting reconciliation; ${result.deferred} deferred by the Sentry ticket limit`);
-          const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); j.scanStartedAt = undefined; saveState(after); }
+          const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) {
+            j.lastScanAt = Date.now(); j.scanStartedAt = undefined;
+            j.scanProgress = { step: 3, at: Date.now(), action: result.atCapacity ? `${result.activeTickets}/${result.ticketLimit} Sentry ticket slots occupied` : `${result.issues} issues, ${result.groups} bundles, ${result.created} tickets created, ${result.existing} existing, ${result.reserved} reserved elsewhere, ${result.deferred} deferred` };
+            saveState(after);
+          }
           continue;
         }
         if (job.source === "review") {
@@ -559,7 +566,7 @@ async function daemon() {
         }
         statusEvent(claimed ? "success" : candidates ? "warn" : "info", `${job.name}: ${tickets.length} tasks checked; ${candidates ? `${candidates} new matching tasks; ${claimed} claimed${availableSlots === 0 ? "; waiting for a free worker slot" : claimed < candidates ? "; remaining tasks deferred" : ""}` : "no new eligible tickets; existing workers continue separately"}`);
         const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); j.scanStartedAt = undefined; saveState(after); }
-      } catch (e) { statusEvent("error", `${job.name}: ${job.source} scan failed; see daemon log`); console.error(`${new Date().toISOString()} scanner ${job.name} failed: ${(e as Error).message}`); const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); j.scanStartedAt = undefined; saveState(after); } }
+      } catch (e) { statusEvent("error", `${job.name}: ${job.source} scan failed; see daemon log`); console.error(`${new Date().toISOString()} scanner ${job.name} failed: ${(e as Error).message}`); const after = loadState(); const j = after.jobs.find((x) => x.id === job.id); if (j) { j.lastScanAt = Date.now(); j.scanStartedAt = undefined; if (j.source === "sentry") j.scanProgress = { step: j.scanProgress?.step ?? 1, action: "Retrying on the next scheduled scan", at: Date.now(), error: (e as Error).message.slice(0, 300) }; saveState(after); } }
     }
     await new Promise((r) => setTimeout(r, 15_000));
   }

@@ -1,3 +1,4 @@
+import { sentryAnalysisRow } from "../shared/sentryProgress.ts";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -61,8 +62,9 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   const accountName = (id?: string) => s.accounts.find((a) => a.id === id)?.name ?? "";
   const activityW = Math.max(20, width - 6);
   const lines: string[] = [];
-  const active = tasks.filter((t) => !FINISHED.includes(t.status)).length;
   const pid = daemonPid();
+  const preparing = s.jobs.filter(j => !tasks.some(t => t.jobId === `${j.id}-worker` && !FINISHED.includes(t.status))).flatMap(j => { const row = sentryAnalysisRow(j, now, !!pid); return row ? [row] : []; });
+  const active = tasks.filter((t) => !FINISHED.includes(t.status)).length + preparing.filter(r => r.running).length;
   lines.push(banner("view", [
     pid ? green(`daemon running (pid ${pid})`) : red("daemon not running: consort-cli run -d"),
     `${mint(`${active} active`)} ${dim(`· ${new Date(now).toLocaleTimeString()} · q to quit`)}`,
@@ -75,7 +77,18 @@ export function renderView(now = Date.now(), width = process.stdout.columns || 1
   // one aligned row per ticket, coloured like the accounts list; what it is doing, dim, under it; then a blank line
   const cols = { ticket: 12, title: 28, step: 5, stage: 12, next: 14, status: 9, account: 16, turn: 20, cost: 13, ports: 11, age: 12, log: 5 };
   lines.push(dim(`  ${[pad("TICKET", cols.ticket), pad("TITLE", cols.title), pad("STEP", cols.step), pad("STAGE", cols.stage), pad("NEXT", cols.next), pad("STATUS", cols.status), pad("ACCOUNT", cols.account), pad("TURN", cols.turn), pad("COST", cols.cost), pad("PORTS", cols.ports), pad("AGE", cols.age), pad("LOG", cols.log), "DIFF"].join("  ")}`));
-  if (!working.length) lines.push(dim("  nothing in flight; the daemon claims tickets as scanners come due"), "");
+  for (const row of preparing) {
+    const color = row.status === "RUNNING" ? green : row.status === "STOPPED" ? red : amber;
+    lines.push(`  ${[
+      mint(pad(row.id, cols.ticket)), cream(bold(pad(row.title, cols.title))),
+      mint(pad(`${row.step}/3`, cols.step)), bold(pad(row.stage, cols.stage)), dim(pad("ClickUp ticket", cols.next)),
+      color(pad(row.status, cols.status)), dim(pad(accountName(row.accountId), cols.account)),
+      dim(pad(row.model ?? "", cols.turn)), dim(pad("", cols.cost)), dim(pad("", cols.ports)),
+      dim(pad(row.ageMs === undefined ? "" : ago(row.ageMs), cols.age)),
+    ].join("  ").trimEnd()}`);
+    lines.push(`    ${color(row.action)}`, "");
+  }
+  if (!working.length && !preparing.length) lines.push(dim("  nothing in flight; the daemon claims tickets as scanners come due"), "");
   for (const t of working) {
     const acct = accountName(t.activeProvider ? t.accountIds[t.activeProvider] : t.accountIds.claude ?? t.accountIds.codex);
     const log = logOf(t, now);

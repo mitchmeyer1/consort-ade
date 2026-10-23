@@ -287,3 +287,20 @@ test('legacy queued Sentry tickets are adopted by the bounded linked worker',asy
   assert.match(w.tasks[0].markdown_description,/consort-sentry-scanner:j/);
   assert.ok(!w.calls.some(c=>c.u.hostname==='sentry.io'));
 });
+
+test('Sentry scan reports collection, grouping, and ticket preparation in order', async () => {
+  const w = world();
+  const progress = [];
+  await w.run({ onProgress: p => progress.push(p) });
+  assert.deepEqual([...new Set(progress.map(p => p.step))], [1, 2, 3]);
+  assert.match(progress[0].action, /ClickUp destination/);
+  assert.ok(progress.some(p => p.step === 2 && /Sentry issues/.test(p.action)));
+  assert.ok(progress.some(p => p.step === 3 && /Preparing ClickUp ticket/.test(p.action)));
+});
+
+test('escaped Markdown group marker matches an existing ticket without issue URLs', async () => {
+  const { matchingSentryTask, sentryScannerIdOf } = await import('../src/shared/sentryScanner.ts');
+  const task = { markdown_description: String.raw`\[consort-sentry-scanner:job-sentry\] \[consort-sentry-group:stable-key\]` };
+  assert.equal(sentryScannerIdOf(task), 'job-sentry');
+  assert.equal(matchingSentryTask(task, { key: 'stable-key', issues: [] }), true);
+});

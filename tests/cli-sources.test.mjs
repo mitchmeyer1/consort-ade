@@ -138,3 +138,16 @@ test('Slack: posts and card edits leave with names, emails, phones and addresses
   assert.match(sent[0].body.text, /^✅ Patient \*\*\*\* \(\*\*\*\*, \*\*\*\*\) at \*\*\*\* asked <@U1>/);
   assert.equal(sent[1].body.text, 'card for ****');
 });
+
+test('ClickUp escaped Markdown markers still route Sentry tickets to the linked worker', async t => {
+  const { canClaimSentryTicket } = await import('../src/cli/sentryCapacity.ts');
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ last_page: true, tasks: [{
+    id: '17thtp0pk6t', name: 'Sentry bug', status: { status: 'to do' }, tags: [{ name: 'sentry' }],
+    markdown_description: String.raw`\[consort-sentry-scanner:job-sentry\]`,
+    description: '[consort-sentry-scanner:job-sentry]',
+  }] })));
+  const tickets = await clickupSource('test-key', job).scan();
+  assert.equal(tickets[0].sentryScannerId, 'job-sentry');
+  assert.equal(canClaimSentryTicket({ sentryProducerId: 'job-sentry' }, tickets[0]), true);
+  assert.equal(canClaimSentryTicket({}, tickets[0]), false);
+});

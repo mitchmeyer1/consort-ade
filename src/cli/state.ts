@@ -74,6 +74,7 @@ export type Job = {
   enabled: boolean;
   lastScanAt?: number;
   scanStartedAt?: number;
+  scanProgress?: import("../shared/sentryProgress.ts").SentryScanProgress;
   createdAt: number;
 };
 export type TaskStatus = "working" | "waiting" | "monitoring" | "ready" | "done" | "failed" | "released";

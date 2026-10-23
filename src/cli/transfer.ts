@@ -14,7 +14,7 @@ const run = promisify(execFile);
  * flight are not moved: their worktrees live on the box that started them.
  */
 export type BundleAccount = { name: string; provider: Account["provider"]; auth: Account["auth"]; apiKey?: string; maxActiveTurns?: number; credentials?: { file: string; content: string } };
-export type BundleScanner = Omit<Job, "id" | "lastScanAt" | "scanStartedAt" | "repo"> & { repoPath: string; repoRemote?: string };
+export type BundleScanner = Omit<Job, "id" | "lastScanAt" | "scanStartedAt" | "scanProgress" | "repo"> & { repoPath: string; repoRemote?: string };
 export type Bundle = { kind: "consort-cli-bundle"; version: 1; exportedAt: number; host: string; capacity?: CliState["capacity"]; clickupKey?: string; slack?: CliState["slack"]; branchPrefix?: string; accounts: BundleAccount[]; scanners: BundleScanner[] };
 
 /** the credential file a login keeps in its own directory (Claude Code on macOS keeps it in the Keychain instead, so there may be none) */
@@ -29,7 +29,7 @@ export async function buildBundle(s: CliState, opts: { only?: string[]; readFile
   });
   const scanners: BundleScanner[] = [];
   for (const j of s.jobs.filter((j) => !opts.only?.length || opts.only.includes(j.id) || opts.only.includes(j.name))) {
-    const { id: _id, lastScanAt: _l, scanStartedAt: _scan, repo, ...rest } = j;
+    const { id: _id, lastScanAt: _l, scanStartedAt: _scan, scanProgress: _progress, repo, ...rest } = j;
     scanners.push({ ...rest, repoPath: repo, repoRemote: await remoteOf(repo) });
   }
   return { kind: "consort-cli-bundle", version: 1, exportedAt: Date.now(), host: s.hostId ?? host(), capacity: s.capacity, clickupKey: s.clickupKey, slack: s.slack, branchPrefix: s.branchPrefix, accounts, scanners };

@@ -35,3 +35,8 @@ test('only the linked bounded worker can claim a Sentry bundle',()=>{
   assert.equal(canClaimSentryTicket({sentryProducerId:'sentry'},{}),false);
   assert.equal(canClaimSentryTicket({},{}),true);
 });
+
+test('Markdown-only escaped markers still consume the one-ticket limit', () => {
+  const tickets = [{ id: '1', markdown_description: String.raw`\[consort-sentry-scanner:sentry\] \[consort-sentry-group:abc\]`, status: { type: 'open' } }];
+  assert.equal(sentryOpenTickets(producer, tickets), 1);
+});

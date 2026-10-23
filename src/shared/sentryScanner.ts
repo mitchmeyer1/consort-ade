@@ -46,8 +46,15 @@ export function applySentryBundlePlan(groups: SentryGroup[], text: string): Sent
 export const sentryIssueReservationKey = (workspace: string, config: Pick<SentryScannerConfig, "host" | "org">, id: string) => hash(JSON.stringify([workspace, config.host.replace(/\/$/, ""), config.org, id]));
 export const sentryGroupMarker = (key: string) => `[consort-sentry-group:${key}]`;
 export const sentryReservationKey = (workspaceId: string, group: SentryGroup) => hash(`${workspaceId}:${group.key}`);
+/** ClickUp returns escaped brackets in Markdown, including our machine-readable markers. */
+export function sentryTaskText(task: { name?: string; description?: string; markdown_description?: string }): string {
+  return `${task.name ?? ""}\n${task.description ?? ""}\n${task.markdown_description ?? ""}`.replace(/\\([\[\]])/g, "$1");
+}
+export function sentryScannerIdOf(task: { description?: string; markdown_description?: string }): string | undefined {
+  return /\[consort-sentry-scanner:([A-Za-z0-9_-]+)\]/.exec(sentryTaskText(task))?.[1];
+}
 export function matchingSentryTask(task: { name?: string; description?: string; markdown_description?: string }, group: SentryGroup): boolean {
-  const text = `${task.name ?? ""}\n${task.description ?? ""}\n${task.markdown_description ?? ""}`;
+  const text = sentryTaskText(task);
   if (text.includes(sentryGroupMarker(group.key))) return true;
   return group.issues.some((i) => text.includes(i.permalink) || new RegExp(`/issues/${i.id}(?:[/#?\\s)]|$)`).test(text) || (i.shortId && new RegExp(`\\b${i.shortId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(text)));
 }

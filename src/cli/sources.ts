@@ -1,3 +1,4 @@
+import { sentryScannerIdOf } from "../shared/sentryScanner.ts";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { claimComment, type ClickupScope, type ScannedTicket } from "../shared/headless.ts";
@@ -114,7 +115,7 @@ export function clickupSource(key: string, job: Job): Source {
           if (seen.has(String(t.id))) continue; // a task shown in several lists counts once
           seen.add(String(t.id));
           out.push({
-            ...( /\[consort-sentry-scanner:([^\]]+)\]/.exec(`${t.markdown_description ?? ""}\n${t.description ?? ""}`)?.[1] ? { sentryScannerId: /\[consort-sentry-scanner:([^\]]+)\]/.exec(`${t.markdown_description ?? ""}\n${t.description ?? ""}`)![1] } : {}),
+            ...(sentryScannerIdOf(t) ? { sentryScannerId: sentryScannerIdOf(t) } : {}),
             id: String(t.id), title: String(t.name ?? t.id), status: t.status?.status, url: t.url ?? `https://app.clickup.com/t/${t.id}`,
             tags: ((t.tags ?? []) as any[]).map((x) => String(x.name)), assignees: ((t.assignees ?? []) as any[]).flatMap((a) => [a.username, a.email].filter(Boolean).map(String)),
             updatedAt: Number(t.date_updated) || undefined,

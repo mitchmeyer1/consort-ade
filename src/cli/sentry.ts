@@ -1,8 +1,9 @@
 /** Sentry is a ticket producer: it never claims work or starts a worker agent. */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { groupSentryIssues, matchingSentryTask, sentryReservationKey, sentryIssueReservationKey, sentryTicketDescription, type SentryGroup, type SentryIssue, type SentryScannerConfig } from "../shared/sentryScanner.ts";
+import { groupSentryIssues, matchingSentryTask, sentryTaskText, sentryReservationKey, sentryIssueReservationKey, sentryTicketDescription, type SentryGroup, type SentryIssue, type SentryScannerConfig } from "../shared/sentryScanner.ts";
 import { sentryOpenTickets, sentryTicketLimit } from "./sentryCapacity.ts";
+import type { SentryScanProgress } from "../shared/sentryProgress.ts";
 import type { Task, Job } from "./state";
 const run = promisify(execFile);
 const CLICKUP = "https://api.clickup.com/api/v2";
@@ -60,11 +61,12 @@ export async function readSentryIssues(config: SentryScannerConfig, fetcher: typ
   }
 }
 
-export async function scanSentry(job: Job, clickupKey: string | undefined, opts: { dryRun?: boolean; deps?: Partial<Deps>; workers?: Pick<Task, "ticket" | "status">[] } = {}): Promise<SentryScanResult> {
+export async function scanSentry(job: Job, clickupKey: string | undefined, opts: { dryRun?: boolean; deps?: Partial<Deps>; workers?: Pick<Task, "ticket" | "status">[]; onProgress?: (progress: SentryScanProgress) => void } = {}): Promise<SentryScanResult> {
   const config = job.sentry;
+  opts.onProgress?.({ step: 1, action: "Checking ClickUp destination and existing tickets", at: Date.now() });
   validateSentryConfig(config);
   if (!clickupKey) throw new Error("Sentry ticket creation needs a ClickUp API key.");
-  const deps: Deps = { fetch: (...args) => fetch(...args), reserve: reserveSentryGroup, plan: async (j, g) => (await import("./sentryBundles.ts")).planSentryBundles(j, g), ...opts.deps };
+  const deps: Deps = { fetch: (...args) => fetch(...args), reserve: reserveSentryGroup, plan: async (j, g) => (await import("./sentryBundles.ts")).planSentryBundles(j, g, opts.onProgress), ...opts.deps };
   const request = async (path: string, init?: RequestInit) => (await jsonRequest(deps.fetch, `${CLICKUP}${path}`, clickupKey, init)).data;
   // Validate routing before reading/claiming issues. A folder is a selector; tasks are always created in its chosen list.
   const destination = await request(`/list/${encodeURIComponent(config.listId)}`);
@@ -95,7 +97,7 @@ export async function scanSentry(job: Job, clickupKey: string | undefined, opts:
   let tasks = await readTasks();
   // Adopt queued tickets from producer-only versions before handing the list to a linked worker.
   if (!opts.dryRun) for (const task of tasks) {
-    const text = task.markdown_description ?? task.description ?? "";
+    const text = sentryTaskText(task);
     if (String(task.list?.id) === config.listId && text.includes("[consort-sentry-group:") && !text.includes("[consort-sentry-scanner:") && !["closed", "done"].includes(task.status?.type)) {
       const markdown = `${text}\n[consort-sentry-scanner:${job.id}]`;
       await request(`/task/${encodeURIComponent(task.id)}`, { method: "PUT", body: JSON.stringify({ markdown_content: markdown }) });
@@ -104,7 +106,9 @@ export async function scanSentry(job: Job, clickupKey: string | undefined, opts:
   }
   const limit = sentryTicketLimit(job);
   if (!opts.dryRun && sentryOpenTickets(job, tasks, opts.workers) >= limit) return { issues: 0, groups: 0, created: 0, existing: 0, reserved: 0, preview: 0, deferred: 1, tickets: [], atCapacity: true, activeTickets: sentryOpenTickets(job, tasks, opts.workers), ticketLimit: limit };
+  opts.onProgress?.({ step: 1, action: "Reading all matching Sentry issues", at: Date.now() });
   const issues = await readSentryIssues(config, deps.fetch);
+  opts.onProgress?.({ step: 2, action: `Grouping ${issues.length} Sentry issues into bug bundles`, at: Date.now() });
   const groups = await deps.plan(job, groupSentryIssues(issues, config));
   const result: SentryScanResult = { issues: issues.length, groups: groups.length, created: 0, existing: 0, reserved: 0, preview: 0, deferred: 0, tickets: [] };
   if (!groups.length) return result;
@@ -122,6 +126,7 @@ export async function scanSentry(job: Job, clickupKey: string | undefined, opts:
     return true;
   };
   for (const group of groups) {
+    opts.onProgress?.({ step: 3, action: `Preparing ClickUp ticket from ${groups.length} planned bundles; ${result.created} created`, at: Date.now() });
     if (await attachToExisting(group)) { result.existing++; continue; }
     if (opts.dryRun) { result.preview++; continue; }
     if (sentryOpenTickets(job, tasks, opts.workers) >= limit) { result.deferred++; continue; }
