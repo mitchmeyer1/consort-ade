@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { codexEffort, isEffortLevel, parseBuildEffort, roleEffort } from '../src/shared/cliTurnPolicy.ts';
+import { codexEffort, isEffortLevel, parseBuildEffort, roleEffort, turnMoved } from '../src/shared/cliTurnPolicy.ts';
 
 test('effort follows the role unless the scanner sets it', () => {
   assert.equal(roleEffort('reader'), 'low');
@@ -33,4 +33,14 @@ test('parseBuildEffort reads the marker with or without a reason and ignores unk
   assert.deepEqual(parseBuildEffort('[build-effort: medium - routine CRUD]'), { level: 'medium', reason: 'routine CRUD' });
   assert.equal(parseBuildEffort('[build-effort: extreme — no]'), undefined);
   assert.equal(parseBuildEffort('no marker here'), undefined);
+});
+
+test('a turn that only repeats its markers is not progress, so the stuck guard can fire', () => {
+  const built = { stage: "Spec'd", prs: ['https://github.com/a/b/pull/1'], built: true, spec: '.consort/spec.md' };
+  assert.equal(turnMoved(built, { ...built, prs: [...built.prs] }, false), false);
+  assert.equal(turnMoved(built, { ...built }, true), true);
+  assert.equal(turnMoved(built, { ...built, stage: 'Ready to Test' }, false), true);
+  assert.equal(turnMoved({ ...built, built: false }, built, false), true);
+  assert.equal(turnMoved(built, { ...built, prs: [...built.prs, 'https://github.com/a/b/pull/2'] }, false), true);
+  assert.equal(turnMoved(built, { ...built, report: '.consort/report.md', tests: { pass: 3, total: 3 } }, false), true);
 });

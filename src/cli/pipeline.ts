@@ -8,7 +8,7 @@ import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUs
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { selectCliModel, type CliModelRole } from "../shared/cliModels.ts";
-import { MODEL_ROLE_RULES, BUILD_EFFORT_RULE, parseBuildEffort, parseModelEscalation, roleEffort, stageModelRole } from "../shared/cliTurnPolicy.ts";
+import { MAX_STAGE_TURNS, turnMoved, MODEL_ROLE_RULES, BUILD_EFFORT_RULE, parseBuildEffort, parseModelEscalation, roleEffort, stageModelRole } from "../shared/cliTurnPolicy.ts";
 import { AccountUnavailableError, COVERED_ACCOUNT, withAgentTurn, withEnvironmentSlot } from "./capacity";
 import { prepareResearchTasks, readImplementationTasks, recoverImplementation, runImplementation, runResearch, runResourceResearch, type ParallelRun } from "./parallel";
 import type { Resource } from "../shared/resources.ts";
@@ -199,6 +199,9 @@ export async function workTask(taskId: string): Promise<void> {
   // a push the PHI/PII guard withheld at the last checkpoint: the next stage turn is told what to rewrite
   let guardGuidance = "";
   let idle = 0;
+  let stageTurns = 0;
+  const headOf = () => run("git", ["rev-parse", "HEAD"], { cwd: task.worktree }).then((r) => r.stdout.trim(), () => undefined);
+  let head = await headOf(); // new commits since the last reply count as progress for the stuck guard
   const turn = async (prompt: string | ((provider: Provider) => string), provider: Provider = builderProvider, role: CliModelRole = "planning", resume = true, timeoutMs?: number, cwd = task.worktree, fixedModel?: string, turnEnv: TaskEnv = env): Promise<string> => {
     const crashes = new Map<string, number>(); // failures in unrelated parallel jobs never combine
     // accounts that errored on this turn: the next attempt goes to a different account, on either provider
@@ -427,12 +430,15 @@ export async function workTask(taskId: string): Promise<void> {
       if (feature.stage === "In Review") await source.setStatus(task.ticket.id, "review").catch((e) => log(task, `status failed: ${e.message}`));
     }
     for (const pr of feature.prs) if (!before.prs.includes(pr)) await say(slackLines.pr(pr));
+    const now = await headOf();
+    const headMoved = Boolean(head && now && now !== head);
+    head = now ?? head;
     const covered = parseCoveredAnalyst(text);
     const coveredBlock = covered ? await askCovered(covered) : "";
     const questions = parseAskUser(text);
     if (questions.length) { const answer = await ask(questions); pendingUser = `${coveredBlock ? `${coveredBlock}\n\n` : ""}The owner answered on Slack:\n\n${answer}\n\nContinue from where you stopped; apply the answers and do not ask these again.`; idle = 0; return true; }
     if (coveredBlock) { pendingUser = `${coveredBlock}\n\nContinue from where you stopped.`; idle = 0; return true; }
-    idle = feature.stage === before.stage && !change ? idle + 1 : 0;
+    idle = turnMoved(before, feature, headMoved) ? 0 : idle + 1;
     return false;
   };
 
@@ -669,12 +675,16 @@ export async function workTask(taskId: string): Promise<void> {
     turnTag = `t${n + 1} · `; activity(`${turnTag}starting`);
     const text = await turn(prompt, builderProvider, role);
     log(task, `turn ${n + 1} at ${feature.stage}: ${stripAskUser(stripShipMarkers(text)).slice(0, 300).replace(/\n/g, " ")}`);
+    const stageBefore = feature.stage;
     await applyReply(text);
     await saveProgress();
-    if (idle >= STUCK_AFTER) {
-      const answer = await ask([slackLines.problem({ where: feature.stage, what: `${idle} turns in a row did not move the stage`, why: [`Last reply: ${brief(stripAskUser(stripShipMarkers(text)), 300)}`], recent: [...recent], ask: "Reply with what to do next." }, task.ticket.url)], true);
+    stageTurns = feature.stage === stageBefore ? stageTurns + 1 : 0;
+    if (idle >= STUCK_AFTER || stageTurns >= MAX_STAGE_TURNS) {
+      const what = idle >= STUCK_AFTER ? `${idle} turns in a row did not move the stage` : `${stageTurns} turns at ${feature.stage} without reaching the next stage`;
+      const answer = await ask([slackLines.problem({ where: feature.stage, what, why: [`Last reply: ${brief(stripAskUser(stripShipMarkers(text)), 300)}`], recent: [...recent], ask: "Reply with what to do next." }, task.ticket.url)], true);
       pendingUser = `The owner says: ${answer}`;
       idle = 0;
+      stageTurns = 0;
     }
   }
   if (feature.stage !== "In Review") { await finish("done", `PR was ${feature.stage.toLowerCase()} outside Consort`); return; }

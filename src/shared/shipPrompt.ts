@@ -240,8 +240,9 @@ export function shipHandler(f: ShipFeature, form: ShipForm): string {
   if (f.stage === "Closed") return "closed";
   if (form.form === "feedback") return "revising";
   if (f.stage === "Grilling") return "grilling";
-  if (f.stage === "Spec'd" || (f.stage === "Implementing" && !f.built)) return "implementing";
-  if (f.stage === "Implementing" && f.built && !f.report) return "test";
+  if ((f.stage === "Spec'd" || f.stage === "Implementing") && !f.built) return "implementing";
+  // an agent can build straight from the spec without moving to Implementing; built is built, so test it rather than ask for the build again
+  if ((f.stage === "Spec'd" || f.stage === "Implementing") && f.built && !f.report) return "test";
   if (f.stage === "Implementing") return "reentry";
   if (f.stage === "Ready to Test") return form.form === "approve" ? "approve" : "reentry";
   if (f.stage === "Revising") return "revising";
