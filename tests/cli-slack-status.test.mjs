@@ -121,3 +121,15 @@ test('status replies call automatic PR monitoring RUNNING',async()=>{
   h.messages([{ts:'2',user:'owner',text:'status'}]);await h.run();
   assert.match(h.replies[0].text,/CI running[\s\S]*STATUS: RUNNING$/);
 });
+
+test('a quiet live worker stays RUNNING and explains that no owner action is needed', async () => {
+  const h = harness(down);
+  h.task.updatedAt = Date.now() - 18 * 60_000;
+  h.messages([{ ts: '2', user: 'owner', text: 'Hows this going' }]);
+  await h.run();
+  assert.equal(h.replies.length, 1);
+  assert.match(h.replies[0].text, /No progress message for 18 min; worker is alive/);
+  assert.match(h.replies[0].text, /No action needed from you/);
+  assert.match(h.replies[0].text, /STATUS: RUNNING$/);
+  assert.doesNotMatch(h.replies[0].text, /STALLED|STATUS: WAITING/);
+});

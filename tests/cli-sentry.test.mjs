@@ -192,7 +192,7 @@ test('setup explicitly chooses a child list, tag and initial status without crea
   const { configureSentryScanner } = await import('../src/cli/sentrySetup.ts');
   const answers = new Map([
     ['Name this Sentry scanner', 'Sentry intake'], ['Sentry HTTPS host', 'https://sentry.io'], ['Sentry organization slug', 'aligned'],
-    ['Sentry project slugs (comma-separated)', 'node,web'], ['Environments (comma-separated; empty for all)', 'production'], ['Sentry issue query', 'is:unresolved'],
+    ['Sentry project names from the URL (for example: node; separate multiple names with commas)', 'node,web'], ['Environments (comma-separated; empty for all)', 'production'], ['Sentry issue query', 'is:unresolved'],
     ['Sentry auth token (event:read for organization issue access; never a DSN)', 'secret'], ['ClickUp workspace ID (deduplication searches this entire workspace)', 'w'],
     ['Destination ClickUp list or folder URL/id (use folder:<id> for a bare folder ID)', 'folder:1234567'], ['Which list inside that folder receives the Sentry tickets?', '20'],
     ['Tag to put on each created ticket (align with a ClickUp worker scanner)', 'ai-handle'], ['Initial ClickUp task status', 'ready'], ['Scan Sentry every N minutes', '15'], ['How many Sentry tickets may be worked on at once?', '1'],
@@ -204,6 +204,14 @@ test('setup explicitly chooses a child list, tag and initial status without crea
     return new Response(JSON.stringify(data));
   };
   const result = await configureSentryScanner(async (q, opts) => { assert.ok(answers.has(q), q); if (q.includes('auth token')) assert.equal(opts.secret, true); return answers.get(q); }, 'clickup-key', { repo: '/repo', base: 'main' }, fetcher);
+  const invalidProjects = ['', '4511116960006144', 'node,web'];
+  let projectAnswers = 0;
+  const corrected = await configureSentryScanner(async q => {
+    if (q.startsWith('Sentry project names')) { projectAnswers++; return invalidProjects.shift(); }
+    if (q.startsWith('Environments')) assert.equal(projectAnswers, 3, 'setup must not advance past an empty or numeric project');
+    return answers.get(q);
+  }, 'clickup-key', { repo: '/repo', base: 'main' }, fetcher);
+  assert.deepEqual(corrected.job.sentry.projects, ['node', 'web']);
   assert.equal(result.job.source, 'sentry');
   assert.equal(result.job.sentry.listId, '20');
   assert.equal(result.job.sentry.folderId, '1234567');

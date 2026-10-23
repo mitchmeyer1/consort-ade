@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { createInterface } from "node:readline/promises";
+import { createPrompter as prompter, type Ask } from "./prompter";
 import { promisify } from "node:util";
 import { cliStatus } from "../main/cliRuntime";
 import { accountStatus, loginInteractive, runtimeDeps } from "./agent";
@@ -29,32 +29,6 @@ export { chooseFrom, clickupListIdFrom, slackUserIdFrom };
 /** the default name for a new scanner: Consort Watcher, numbered once there is more than one */
 export const scannerName = (s: Pick<CliState, "jobs">) => (s.jobs.length ? `Consort Watcher ${s.jobs.length + 1}` : "Consort Watcher");
 export const setupDone = (s: Pick<CliState, "setupCompletedAt">) => !!s.setupCompletedAt;
-
-type Ask = (q: string, opts?: { secret?: boolean; default?: string }) => Promise<string>;
-
-function prompter(): { ask: Ask; close: () => void } {
-  // lines are queued as they arrive, so a piped or pasted answer is never lost between questions
-  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: !!process.stdin.isTTY });
-  const queue: string[] = [];
-  const waiters: ((s: string) => void)[] = [];
-  let closed = false;
-  rl.on("line", (l) => { const w = waiters.shift(); if (w) w(l); else queue.push(l); });
-  rl.on("close", () => { closed = true; for (const w of waiters.splice(0)) w("\u0004"); });
-  const next = () => (queue.length ? Promise.resolve(queue.shift()!) : closed ? Promise.resolve("\u0004") : new Promise<string>((r) => waiters.push(r)));
-  const ask: Ask = async (q, opts = {}) => {
-    const label = `${mint("›")} ${q}${opts.default ? dim(` [${opts.default}]`) : ""}${mint(":")} `;
-    process.stdout.write(label);
-    const out = process.stdout as any;
-    const orig = out.write.bind(out);
-    if (opts.secret && process.stdin.isTTY) out.write = () => true; // keystrokes are not echoed
-    try {
-      const v = await next();
-      if (v === "\u0004") throw new Error("readline was closed");
-      return v.trim() || (opts.default ?? "");
-    } finally { out.write = orig; if (opts.secret && process.stdin.isTTY) orig("\n"); }
-  };
-  return { ask, close: () => rl.close() };
-}
 
 const yes = async (ask: Ask, q: string, dflt = true) => /^y/i.test(await ask(`${q} (${dflt ? "Y/n" : "y/N"})`, { default: dflt ? "y" : "n" }));
 /** a step that already has a value: show it, and "y" (or Enter) keeps it; "n" asks again */

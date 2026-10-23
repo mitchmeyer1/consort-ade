@@ -529,11 +529,10 @@ export function slackProgress(t: Parameters<typeof taskStep>[0], build?: { done:
 }
 
 /**
- * The STATUS cell: is the agent moving? RUNNING when the worker is alive and the log is fresh;
- * WAITING on a Slack answer; LIMIT when every account it can use is blocked; STALLED when it should
- * be running but has said nothing for a while; STOPPED when it failed or its worker is gone.
+ * The STATUS cell describes who acts next. A quiet live worker stays RUNNING with a warning;
+ * silence alone does not establish a stall. WAITING needs a Slack answer; STOPPED has no worker.
  */
-export type TaskHealth = { label: "RUNNING" | "WAITING" | "LIMIT" | "STALLED" | "STOPPED" | "COMPLETED" | "DONE" | "RELEASED"; tone: "ok" | "warn" | "bad" | "off" | "complete"; note?: string };
+export type TaskHealth = { label: "RUNNING" | "WAITING" | "LIMIT" | "STOPPED" | "COMPLETED" | "DONE" | "RELEASED"; tone: "ok" | "warn" | "bad" | "off" | "complete"; note?: string };
 export function taskHealth(
   t: { status: string; accountIds: Partial<Record<string, string>>; activeProvider?: Provider; activity?: string; note?: string; pauseReason?: string },
   accounts: { id: string; provider: string; blockedUntil?: number }[],
@@ -550,7 +549,7 @@ export function taskHealth(
   const limited = accounts.length > 0 && accounts.every((a) => a.blockedUntil && a.blockedUntil > now);
   if (limited || /accounts? at (its|their) limit/i.test(t.activity ?? "")) return { label: "LIMIT", tone: "warn", note: "every account at its usage limit" };
   if (t.status === "waiting") return { label: "WAITING", tone: "warn", note: t.pauseReason ?? t.note ?? "needs your Slack reply to continue" };
-  if (live.logAgeMs !== undefined && live.logAgeMs > stalledAfterMs) return { label: "STALLED", tone: "warn", note: `quiet for ${Math.round(live.logAgeMs / 60_000)} min` };
+  if (live.logAgeMs !== undefined && live.logAgeMs > stalledAfterMs) return { label: "RUNNING", tone: "warn", note: `No progress message for ${Math.round(live.logAgeMs / 60_000)} min; worker is alive. No action needed from you; Consort handles recovery` };
   return { label: "RUNNING", tone: "ok" };
 }
 

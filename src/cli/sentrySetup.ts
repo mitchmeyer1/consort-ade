@@ -19,7 +19,15 @@ export async function configureSentryScanner(ask: Ask, existingKey: string | und
   const name = await ask("Name this Sentry scanner", { default: "Sentry → ClickUp" });
   const host = await ask("Sentry HTTPS host", { default: previous?.host ?? "https://sentry.io" });
   const org = await ask("Sentry organization slug", { default: previous?.org });
-  const projects = (await ask("Sentry project slugs (comma-separated)", { default: previous?.projects.join(",") })).split(",").map((p) => p.trim()).filter(Boolean);
+  let projects: string[] = [];
+  while (!projects.length) {
+    projects = (await ask("Sentry project names from the URL (for example: node; separate multiple names with commas)", { default: previous?.projects.join(",") })).split(",").map(p => p.trim()).filter(Boolean);
+    if (!projects.length) console.log("Enter at least one Sentry project name before continuing.");
+    else if (projects.some(p => /^\d+$/.test(p))) {
+      console.log("Use the project name from its Sentry URL (for example: node), not its numeric ID.");
+      projects = [];
+    }
+  }
   const environments = (await ask("Environments (comma-separated; empty for all)", { default: previous?.environments.join(",") ?? "production" })).split(",").map((s) => s.trim()).filter(Boolean);
   const query = await ask("Sentry issue query", { default: previous?.query ?? "is:unresolved" });
   const token = previous?.token ?? await ask("Sentry auth token (event:read for organization issue access; never a DSN)", { secret: true });

@@ -261,6 +261,8 @@ STATUS shows green `RUNNING` while the worker is active, yellow `WAITING` for a 
 - A ticket released with `tasks release` keeps its claim comment on the tracker; delete it there if another box should take it.
 
 
+A live worker with no recent progress message remains RUNNING in the terminal and Slack. After ten minutes, the terminal warns that no progress message has arrived and explicitly says no owner action is needed. Silence alone does not prove a stall; the worker handles its timeout and recovery. WAITING means a question needs your reply.
+
 ### Evidence must pass before human review
 
 The CLI keeps the PR in draft through local self-review rounds and evidence gathering. Only after verified evidence is published to both the PR and ticket does the CLI mark the PR ready and request external reviewers. Draft PRs remain visible, so unsolicited comments can still arrive before this handoff.

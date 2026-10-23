@@ -96,7 +96,7 @@ function statusOf(state: CliState, taskId: string, alive: (pid: number) => boole
   const current = state.tasks.find(t => t.id === taskId);
   if (!current) return undefined;
   const health = taskHealth(current, state.accounts, { workerAlive: !!current.pid && alive(current.pid), logAgeMs: Date.now() - current.updatedAt }, Date.now());
-  const status: SlackTaskStatus = health.label === "COMPLETED" ? "COMPLETED" : health.label === "WAITING" ? "WAITING" : ["RUNNING", "STALLED", "LIMIT"].includes(health.label) ? "RUNNING" : "STOPPED";
+  const status: SlackTaskStatus = health.label === "COMPLETED" ? "COMPLETED" : health.label === "WAITING" ? "WAITING" : ["RUNNING", "LIMIT"].includes(health.label) ? "RUNNING" : "STOPPED";
   const step = taskStep(current);
   const action = status === "COMPLETED" ? "Ready for you to merge; Consort will not merge." : (current.status === "monitoring" ? current.activity ?? health.note : health.note ?? current.activity) ?? current.note ?? "Preparing the task.";
   return { status, kind: status === "COMPLETED" ? "completed" : status === "RUNNING" ? "update" : status === "WAITING" ? "waiting" : "stopped", line: `Step ${step.n}/${step.total} (${stepLabel(step.name, current.worktree)}): ${brief(action, 650).replace(/[.!?]+$/, "")}.` };

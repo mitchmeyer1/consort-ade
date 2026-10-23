@@ -300,14 +300,18 @@ test('turns use Codex when Claude is blocked, with sticky accounts per provider 
   assert.equal(pickTurnAccount([{ id: 'c', provider: 'claude' }], 'codex', now, {}).id, 'c');
 });
 
-test('STATUS says whether the agent is moving: running, waiting on Slack, at a limit, stalled, or stopped', async () => {
+test('STATUS says whether the agent is moving: running (including quiet workers), waiting on Slack, at a limit, or stopped', async () => {
   const { taskHealth } = await import('../src/shared/headless.ts');
   const now = Date.UTC(2026, 9, 20, 21);
   const accounts = [{ id: 'c1', provider: 'claude' }, { id: 'c2', provider: 'claude', blockedUntil: now + 3_600_000 }];
   const t = (o) => ({ status: 'working', accountIds: { claude: 'c1' }, ...o });
   assert.equal(taskHealth(t({}), accounts, { workerAlive: true, logAgeMs: 30_000 }, now).label, 'RUNNING');
   assert.equal(taskHealth(t({ status: 'waiting' }), accounts, { workerAlive: true, logAgeMs: 0 }, now).label, 'WAITING');
-  assert.equal(taskHealth(t({}), accounts, { workerAlive: true, logAgeMs: 11 * 60_000 }, now).label, 'STALLED');
+  const quiet = taskHealth(t({}), accounts, { workerAlive: true, logAgeMs: 11 * 60_000 }, now);
+  assert.equal(quiet.label, 'RUNNING');
+  assert.equal(quiet.tone, 'warn');
+  assert.match(quiet.note, /No progress message for 11 min; worker is alive.*No action needed/);
+  assert.equal(taskHealth(t({ status: 'waiting', note: 'Which environment?' }), accounts, { workerAlive: true, logAgeMs: 30 * 60_000 }, now).label, 'WAITING');
   assert.equal(taskHealth(t({}), accounts, { workerAlive: false, logAgeMs: 0 }, now).label, 'STOPPED', 'a live status with no worker process is stopped');
   assert.deepEqual(taskHealth(t({ status: 'failed', note: 'worker exited 1' }), accounts, { workerAlive: false, logAgeMs: 0 }, now), { label: 'STOPPED', tone: 'bad', note: 'worker exited 1' });
   const allBlocked = accounts.map((a) => ({ ...a, blockedUntil: now + 1 }));
