@@ -1,3 +1,4 @@
+import { smallReview } from "./reviewProgress";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
@@ -202,7 +203,7 @@ export async function workTask(taskId: string): Promise<void> {
   let stageTurns = 0;
   const headOf = () => run("git", ["rev-parse", "HEAD"], { cwd: task.worktree }).then((r) => r.stdout.trim(), () => undefined);
   let head = await headOf(); // new commits since the last reply count as progress for the stuck guard
-  const turn = async (prompt: string | ((provider: Provider) => string), provider: Provider = builderProvider, role: CliModelRole = "planning", resume = true, timeoutMs?: number, cwd = task.worktree, fixedModel?: string, turnEnv: TaskEnv = env): Promise<string> => {
+  const turn = async (prompt: string | ((provider: Provider) => string), provider: Provider = builderProvider, role: CliModelRole = "planning", resume = true, timeoutMs?: number, cwd = task.worktree, fixedModel?: string, turnEnv: TaskEnv = env, smallChange = false): Promise<string> => {
     const crashes = new Map<string, number>(); // failures in unrelated parallel jobs never combine
     // accounts that errored on this turn: the next attempt goes to a different account, on either provider
     const tried = new Set<string>();
@@ -282,7 +283,7 @@ export async function workTask(taskId: string): Promise<void> {
         ...(managesSession ? { accountIds: { ...t.accountIds, [provider]: who.id }, sessions: { ...t.sessions, [provider]: t.accountIds[provider] === who.id ? t.sessions[provider] : undefined } } : {}),
         activity: `${turnTag}running ${provider} ${model} on ${who.name}`, turn: { role, provider, model, effort, startedAt: Date.now() } }));
       touchAccount(who.id);
-      const reviewUnits = fixedModel ? Math.min(2, job.maxParallel ?? 2, who.maxActiveTurns ?? 2, live.capacity?.maxActiveTurns ?? 4) : 1;
+      const reviewUnits = fixedModel && !smallChange ? Math.min(2, job.maxParallel ?? 2, who.maxActiveTurns ?? 2, live.capacity?.maxActiveTurns ?? 4) : 1;
       const delegation = reviewUnits > 1 ? "You may run ONE foreground review reader at a time, on the supplied reader model. Never spawn nested agents or background agents. This overrides any larger wave in the skill." : "Do not dispatch agents. Consort has reserved only your turn; inspect the review evidence yourself. This overrides the skill's delegation instructions.";
       const session = resume && managesSession && cur.accountIds[provider] === who.id ? cur.sessions[provider] : undefined;
       const step = named ?? (fixedModel ? `self-review on ${model}` : `${feature.stage}${turnTag ? ` ${turnTag.replace(/ · $/, "")}` : ""}`);
@@ -314,6 +315,7 @@ export async function workTask(taskId: string): Promise<void> {
       let usageTimer: ReturnType<typeof setInterval> | undefined;
       let res;
       recent.length = 0;
+      const queuedAt=Date.now();
       let startedAt = Date.now();
       try { res = await withAgentTurn(taskId, who.id, () => {
         startedAt = Date.now();
@@ -327,7 +329,7 @@ export async function workTask(taskId: string): Promise<void> {
       if (usageLimit) res.limit = { text: usageLimit.reason, resetsAt: usageLimit.until };
       updateTask(taskId, t => ({
         ...(res.usage?.length ? { cost: addTurnCost(t.cost, res.usage) } : {}),
-        turnHistory: [...(t.turnHistory ?? []), { at: startedAt, stage: feature.stage, role, provider, model, effort, durationMs: Date.now() - startedAt, usage: res.usage, error: timedOut ? `Timed out after ${timeoutMs}ms` : res.error ?? res.limit?.text, escalated: !!escalationReason, escalationReason }],
+        turnHistory: [...(t.turnHistory ?? []), { at: startedAt, stage: feature.stage, role, provider, model, effort, durationMs: Date.now() - startedAt, queueMs: startedAt-queuedAt, executionMs: Date.now()-startedAt, usage: res.usage, error: timedOut ? `Timed out after ${timeoutMs}ms` : res.error ?? res.limit?.text, escalated: !!escalationReason, escalationReason }],
       }));
       if (silenced) {
         silences++;
@@ -520,8 +522,10 @@ export async function workTask(taskId: string): Promise<void> {
   };
   // waits between PR checks end early when the owner posts an update
   const nap = (ms: number) => new Promise<void>((resolve) => {
+    const started=Date.now();
+    let finished=false;
     const check = setInterval(() => { if (loadState().tasks.find((t) => t.id === taskId)?.ownerUpdates?.length) done(); }, 15_000);
-    const done = () => { clearInterval(check); resolve(); };
+    const done = () => { if(finished)return; finished=true; clearInterval(check); updateTask(taskId,t=>({externalWaitMs:(t.externalWaitMs??0)+Date.now()-started})); resolve(); };
     setTimeout(done, ms);
   });
 
@@ -707,7 +711,10 @@ export async function workTask(taskId: string): Promise<void> {
     log(task, `review round ${round} on ${provider}:${model}`);
     activity(`review round ${round} on ${model}`);
     rmSync(join(task.worktree, ".consort", "pr-review", `pr-${pr}.review.json`), { force: true });
-    const reviewText = await turn((active) => reviewSkillPrompt(task.worktree, pr, modelFor(active, "reader")), provider, "frontier", false, undefined, task.worktree, model);
+    const stat=await run("git",["diff","--numstat",`origin/${job.base}...HEAD`],{cwd:task.worktree,timeout:30000});
+    const rows=stat.stdout.trim().split("\n").filter(Boolean).map(line=>line.split("\t"));
+    const small=smallReview(rows.map(r=>r.slice(2).join("\t")),rows.reduce((n,r)=>n+(/^\d+$/.test(r[0])&&/^\d+$/.test(r[1])?Number(r[0])+Number(r[1]):100000),0));
+    const reviewText = await turn((active) => reviewSkillPrompt(task.worktree, pr, small ? undefined : modelFor(active, "reader"), small), provider, "frontier", false, undefined, task.worktree, model, env, small);
     await completeReply(reviewText, undefined, "frontier", provider, model);
     const summary = reviewSummaryOf(pr);
     if (!summary) throw new Error(`Review round ${round} did not write a valid review report`);
@@ -910,7 +917,7 @@ export async function workTask(taskId: string): Promise<void> {
 }
 
 /** the pr-writeup skill as the app sends it, assembled from the package's skills folder */
-export function reviewSkillPrompt(worktree: string, pr: number, delegateModel?: string): string {
+export function reviewSkillPrompt(worktree: string, pr: number, delegateModel?: string, smallChange = false): string {
   const dir = join(packageRoot(), "skills", "pr-writeup");
   const skill = readFileSync(join(dir, "SKILL.md"), "utf8").replace(/^---[\s\S]*?---\n/, "");
   const categories = readFileSync(join(dir, "categories.md"), "utf8");
@@ -927,7 +934,9 @@ ${skill}
 
 ## Review rubric you apply in verification
 
-${categories}`;
+${categories}
+
+${smallChange ? '## Small change override\nInspect this bounded change yourself in one pass. Do not dispatch readers or write a multi-area plan. Check affected callers and required tests; keep the same findings schema and safety rules.' : ''}`;
 }
 
 /** what the daemon records when it claims a ticket; the worker does the rest */

@@ -9,11 +9,12 @@ import * as usage from '../src/shared/usage.ts';
 import * as review from '../src/shared/review.ts';
 import * as ship from '../src/shared/ship.ts';
 import * as phi from '../src/shared/phi.ts';
+import * as progress from '../src/cli/reviewProgress.ts';
 
 const require = createRequire(import.meta.url);
 const compile = name => ts.transpileModule(readFileSync(new URL(`../src/cli/${name}.ts`, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 function load(name, extra = {}) {
-  const mocks = { '../shared/phi.ts': phi, '../shared/headless.ts': headless, '../shared/cliModels.ts': cliModels, '../shared/usage.ts': usage, '../shared/review.ts': review, '../shared/ship.ts': ship,
+  const mocks = { './reviewProgress': progress, '../shared/phi.ts': phi, '../shared/headless.ts': headless, '../shared/cliModels.ts': cliModels, '../shared/usage.ts': usage, '../shared/review.ts': review, '../shared/ship.ts': ship,
     './state': { WORK_DIR: '/wt', HOME: '/home', newId: p => `${p}-1`, loadState: () => ({ tasks: extra.tasks ?? [], accounts: [], jobs: [] }) }, ...extra.mocks };
   const mod = { exports: {} };
   new Function('require', 'module', 'exports', compile(name))(n => mocks[n] ?? (n.startsWith('.') ? {} : require(n)), mod, mod.exports);
@@ -129,15 +130,18 @@ async function flow(t, findings, extraJobs = [], resume, opts = {}) {
   const task = { id: 't', jobId: 'j', kind: 'review', worktree: wt, status: 'working', envReadyAt: 1, review: { repo: 'acme/mono', pr: 9, url: 'https://github.com/acme/mono/pull/9', title: 'Add CSV export', author: 'dev', head: 'h', base: 'development' } };
   const state = { tasks: [task], jobs: [{ id: 'j', repo, name: 'reviews', reviewer: 'mitch', source: 'review' }, ...extraJobs.map(j => ({ ...j, repo }))], accounts: [{ id: 'c', provider: 'claude', name: 'C' }, { id: 'x', provider: 'codex', name: 'X' }], slack: { userId: 'u' } };
   const turns = [], posts = [], slackPosts = [];
+  let reservations=0,finalCrashed=false;
   const runTurn = async o => {
     turns.push({ model: o.model, readOnly: o.readOnly, prompt: o.prompt });
     if (o.prompt.includes('step 1 of 3')) { await writeFile(join(wt, '.consort', 'review', 'plan.json'), JSON.stringify({ tldr: 'Adds a CSV export.', emoji: '📤', title: 'CSV report export', slices: [{ id: 's1', title: 'API', files: ['src/a.ts'] }, { id: 's2', title: 'UI', files: ['src/b.tsx'] }] })); return { text: 'written' }; }
+    if (o.prompt.includes('Review one area') && opts.invalidArea) return {text:'No structured result'};
+    if (o.prompt.includes('step 3 of 3') && opts.finalCrashOnce && !finalCrashed) { finalCrashed=true; throw Error('simulated worker interruption'); }
     if (o.prompt.includes('Review one area')) return { text: `[review-findings]\n\`\`\`json\n${JSON.stringify(typeof findings === 'function' ? findings() : findings)}\n\`\`\`` };
     if (o.prompt.includes('step 3 of 3')) return { text: `[review-final]\n\`\`\`json\n${JSON.stringify({ summary: 'Adds a CSV export.', flows: ['Exporting a report now downloads a CSV.'], headline: 'ok', findings: typeof findings === 'function' ? findings() : findings })}\n\`\`\`` };
     return { text: 'done' };
   };
   const mocks = {
-    './agent': { runTurn }, './capacity': { withAgentTurn: async (_, __, fn) => fn() },
+    './agent': { runTurn }, './capacity': { tryAcquireAnyAgentTurn:(_,ids)=>{reservations++;return opts.queueOnce&&reservations===1?undefined:{accountId:ids[0],lease:'test'};},releaseAgentTurn(){} },
     './environment': { allocateEnvironment: async () => headless.taskEnv('consort-t', 20000), cleanupEnvironment: async () => ({}) },
     './oversight': { oversightModel: p => (p === 'claude' ? 'claude-opus-5' : 'gpt-5.6-sol') },
     './reviewPost': { postReview: async (r, f, event, body) => { posts.push({ event, n: f.length, body }); return { url: 'https://github.com/acme/mono/pull/9#review', event, inline: f.length, general: 0 }; } },
@@ -155,7 +159,9 @@ async function flow(t, findings, extraJobs = [], resume, opts = {}) {
   }
   const watches = [...(opts.watches ?? [{ state: 'MERGED' }])];
   const sleeps = [];
-  await reviewTask('t', async () => (await opts.onWatch?.(wt), watches.length > 1 ? watches.shift() : watches[0]), async ms => { sleeps.push(ms); });
+  const runReview=()=>reviewTask('t', async () => (await opts.onWatch?.(wt), watches.length > 1 ? watches.shift() : watches[0]), async ms => { sleeps.push(ms); });
+  if(opts.finalCrashOnce) await assert.rejects(runReview(),/simulated worker interruption/);
+  await runReview();
   return { task, turns, posts, slackPosts, wt, root, sleeps };
 }
 
@@ -235,4 +241,20 @@ test('restarted while waiting for approval: waits for the answer again, never re
   assert.equal(f.turns.length, 0, 'no agent turns');
   assert.deepEqual(f.posts.map(p => p.event), ['APPROVE']);
   assert.equal(f.task.status, 'done'); assert.equal(f.task.note, 'approved');
+});
+
+test('review queue wait is measured separately and ends before execution starts',async t=>{
+  const f=await flow(t,[],[],undefined,{queueOnce:true});
+  assert.ok(f.task.turnHistory.some(h=>h.queueMs>=200));
+  for(const h of f.task.turnHistory){assert.ok(h.executionMs>=0);assert.ok(h.durationMs===h.executionMs);}
+});
+
+test('restart after final verification interruption reuses completed review areas',async t=>{
+ const f=await flow(t,[{severity:'medium',title:'Example',file:'src/a.ts',line:1,comment:'Fix this'}],[],undefined,{finalCrashOnce:true});
+ assert.equal(f.turns.filter(x=>x.prompt.includes('Review one area')).length,2);
+ assert.equal(f.turns.filter(x=>x.prompt.includes('step 1 of 3')).length,1);
+ assert.equal(f.turns.filter(x=>x.prompt.includes('step 3 of 3')).length,2);
+});
+test('malformed area results cannot become an empty approving review',async t=>{
+ await assert.rejects(flow(t,[],[],undefined,{invalidArea:true}),/review areas failed/);
 });

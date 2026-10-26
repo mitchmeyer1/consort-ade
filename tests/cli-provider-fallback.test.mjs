@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import ts from 'typescript';
 import * as headless from '../src/shared/headless.ts';
+import * as reviewProgress from '../src/cli/reviewProgress.ts';
 import * as evidenceRetry from '../src/cli/evidenceRetry.ts';
 import * as seatPool from '../src/shared/seatPool.ts';
 import * as cliModels from '../src/shared/cliModels.ts';
@@ -25,7 +26,7 @@ for (const blockedAtStart of [true, false]) {
     ] };
     const calls = [];
     const reachedCodex = new Error('Codex turn reached');
-    const mocks = {
+    const mocks = { './reviewProgress': reviewProgress,
       'node:fs': { existsSync: () => true },
       './evidenceRetry': evidenceRetry,
     '../shared/headless.ts': headless,

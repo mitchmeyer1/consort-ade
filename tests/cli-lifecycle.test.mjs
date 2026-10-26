@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import ts from 'typescript';
 import * as headless from '../src/shared/headless.ts';
+import * as reviewProgress from '../src/cli/reviewProgress.ts';
 import * as evidenceRetry from '../src/cli/evidenceRetry.ts';
 import * as seatPool from '../src/shared/seatPool.ts';
 import * as ship from '../src/shared/ship.ts';
@@ -31,7 +32,7 @@ function harness(opts = {}) {
   class Clock extends Date { static now() { return clock; } }
   const basePr = { state: 'OPEN', isDraft: false, reviewDecision: '', approvals: [], unresolved: [], requestedReviewers: [], ci: 'pass', url: 'https://github.com/a/b/pull/1' };
   let reads = 0;
-  const mocks = {
+  const mocks = { './reviewProgress': reviewProgress,
     'node:fs': { existsSync: () => true, readFileSync: f => opts.readFile?.(f) ?? '', mkdirSync() {}, writeFileSync() {}, rmSync() {} },
     'node:util': { promisify: () => async (cmd, args) => { events.push(args.join(' ')); return opts.exec ? opts.exec(cmd, args) : { stdout: '' }; } },
     './evidenceRetry': evidenceRetry,
@@ -1098,4 +1099,19 @@ test('under the PHI/PII guard the ticket reaches the agent masked, every turn ca
   assert.equal(typeof guarded, 'function');
   assert.ok(!turns[0].prompt.includes(withheld));
   assert.ok(turns[1].prompt.includes(withheld));
+});
+
+test('a small self-review reserves one turn and inspects directly without a delegated reader',async()=>{
+  let checked=0;
+  const h=harness({
+    job:{maxParallel:4},
+    exec:async(_cmd,args)=>({stdout:args.includes('--numstat')?'92\t61\ttests/navbar.test.ts\n':''}),
+    turn:o=>{
+      if(o.prompt.includes('Small change override')){
+        checked++;assert.equal(o.maxDelegates,0);assert.match(o.prompt,/Do not dispatch readers/);
+      }
+      return {text:''};
+    },
+  });
+  await h.work();assert.equal(checked,2);
 });

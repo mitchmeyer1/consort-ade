@@ -115,7 +115,9 @@ export type Task = {
   sessions: Partial<Record<Provider, string>>;
   accountIds: Partial<Record<Provider, string>>;
   /** provider executing the current turn, including a fallback from the builder's provider */
-  turnHistory?: { at: number; stage: string; role: string; provider: Provider; model: string; effort?: import("../shared/cliTurnPolicy.ts").EffortLevel; durationMs: number; usage?: import("../shared/headless.ts").TurnUsage[]; error?: string; escalated?: boolean; escalationReason?: string }[];
+  turnHistory?: { at: number; stage: string; role: string; provider: Provider; model: string; effort?: import("../shared/cliTurnPolicy.ts").EffortLevel; durationMs: number; queueMs?: number; executionMs?: number; usage?: import("../shared/headless.ts").TurnUsage[]; error?: string; escalated?: boolean; escalationReason?: string }[];
+  /** Time spent sleeping between external PR/author checks, separate from AI execution. */
+  externalWaitMs?: number;
   riskReason?: string;
   /** the turn in flight, or the last one: the view shows its model and effort beside the account */
   turn?: { role: string; provider: Provider; model: string; effort: import("../shared/cliTurnPolicy.ts").EffortLevel; startedAt: number };

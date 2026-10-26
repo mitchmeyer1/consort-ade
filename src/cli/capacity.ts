@@ -49,6 +49,16 @@ export function tryAcquireAgentTurn(taskId: string, accountId: string, units = 1
     return id;
   });
 }
+/** Try all eligible accounts before queueing behind any one account. Each reservation is locked. */
+export function tryAcquireAnyAgentTurn(taskId: string, accountIds: string[]): { accountId: string; lease: string } | undefined {
+  for (const accountId of accountIds) {
+    try {
+      const lease = tryAcquireAgentTurn(taskId, accountId);
+      if (lease) return { accountId, lease };
+    } catch (error) { if (!(error instanceof AccountUnavailableError)) throw error; }
+  }
+  return undefined;
+}
 export function releaseAgentTurn(taskId: string, lease: string) {
   mutateState(state => { const t = state.tasks.find(t => t.id === taskId); if (t) t.activeTurns = t.activeTurns?.filter(turn => turn.id !== lease); });
 }

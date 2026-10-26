@@ -385,3 +385,11 @@ Consort never re-requests review from anyone who previously approved that PR, in
 The daemon maintains one master monitor post in the configured Slack channel or DM, in addition to each ticket thread. It edits that root post in place and never posts replies beneath it. Working, the six most recent completed tasks, and cached account usage mirror the terminal overview. Each ticket title opens its own Slack conversation; ticket and GitHub links remain separate. Sentry preparation appears before its ClickUp ticket exists. The monitor refreshes from saved state every 15 seconds, edits only when its contents change, and saves its post identity across restarts. If the local identity is missing it finds the existing bot monitor in channel history before creating one. Monitor discovery needs the same conversation-history scope used by ticket replies.
 
 Run `consort-cli slack monitor` to create or refresh the master post immediately without restarting ticket workers.
+
+### Review speed and recovery
+
+Review workers reserve an available eligible account before starting their execution timeout. The global, scanner and per-account limits still apply. Task turn history records `queueMs` separately from `executionMs`; `externalWaitMs` counts sleeps between PR/author checks.
+
+Each successful review area is saved under the task worktree's `.consort/review/areas/` immediately. A restart reuses that area only when its PR head, base context, policy, scope and prompt match. Failed or malformed areas prevent approval and do not discard successful areas.
+
+Repeat reviews compare against the last reviewed head and recheck previous findings, expanding to affected callers. A changed merge base, rebase, model/guard policy, or dependency/configuration file triggers a full pass. Changes of at most two files and 200 added/deleted lines use one reviewer when they do not touch configuration, authentication, migrations, schemas, payments or security. Small self-reviews inspect directly without a delegated reader. Required tests, findings verification and owner approval stay in place.

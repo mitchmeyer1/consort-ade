@@ -127,3 +127,12 @@ test('review reservations count coordinator and delegate units against every tur
   state.mutateState(s=>{s.accounts[0].maxActiveTurns=1;});assert.equal(capacity.maxAgentTurnUnits('t','a'),1);
   assert.throws(()=>capacity.tryAcquireAgentTurn('t','a',2),/exceeds/);
 });
+
+test('account reservation skips full and blocked accounts without exceeding limits',()=>{
+  seed();state.mutateState(s=>{s.accounts=[{id:'a',maxActiveTurns:1},{id:'b',maxActiveTurns:1},{id:'blocked',blockedUntil:Date.now()+60000}];});
+  const first=capacity.tryAcquireAnyAgentTurn('t',['a','b']);assert.equal(first.accountId,'a');
+  const next=capacity.tryAcquireAnyAgentTurn('u',['blocked','a','b']);assert.equal(next.accountId,'b');
+  assert.equal(capacity.tryAcquireAnyAgentTurn('u',['a','b']),undefined);
+  capacity.releaseAgentTurn('t',first.lease);capacity.releaseAgentTurn('u',next.lease);
+  assert.equal(state.loadState().tasks.flatMap(t=>t.activeTurns??[]).length,0);
+});

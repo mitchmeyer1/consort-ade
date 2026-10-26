@@ -29,7 +29,7 @@ import { parseReview, serializeReview, type Finding, type Review, type ReviewEve
 import { newShipFeature } from "../shared/ship.ts";
 import type { Provider } from "../shared/types.ts";
 import { runTurn } from "./agent";
-import { withAgentTurn } from "./capacity";
+import { tryAcquireAnyAgentTurn, releaseAgentTurn } from "./capacity";
 import { allocateEnvironment, cleanupEnvironment } from "./environment";
 import { oversightModel } from "./oversight";
 import { postReview } from "./reviewPost";
@@ -39,6 +39,7 @@ import { environmentPrompt, saveRepoEnv } from "./repoEnv";
 import { Slack } from "./slack";
 import { blockAccount, HOME, loadState, newId, touchAccount, updateTask, WORK_DIR, type Account, type Job, type Task } from "./state";
 import { usageFor } from "./usage";
+import { reviewScope, scopeGuidance, ReviewCheckpoints, readReviewJson, saveReviewJson, type ReviewScope } from "./reviewProgress";
 
 const run = promisify(execFile);
 const sh = async (cmd: string, args: string[], cwd: string) => (await run(cmd, args, { cwd, timeout: 300_000, maxBuffer: 64 << 20 })).stdout;
@@ -149,7 +150,7 @@ ${RULES_NOTE(wt)}
 1. Learn how this repository is built: its layout and layering, where each kind of code lives, naming, data access, error handling, config and secrets, background jobs, tests, and how existing features are organised so they scale. Read the docs and the existing modules closest to what the PR touches.
 2. Read the change: \`git diff origin/${t.base}...HEAD --stat\`, then the diff itself.
 3. Write .consort/review/OVERVIEW.md: a 2-3 sentence TL;DR of what the PR does; the conventions and rules that apply to it; where it could break at scale; the risky areas.
-4. Write .consort/review/plan.json: {"tldr": "<2-3 sentences>", "emoji": "<one emoji that pictures what this PR changes, e.g. 🚀 for a deploy fix, 🧭 for navigation; never 🔎>", "title": "<2-5 plain words naming the change>", "slices": [{"id": "s1", "title": "<area>", "files": ["<changed files in this area>"], "related": ["<callers, similar existing modules, schemas to compare against>"], "focus": "<what to check here>"}]}. 3 to 10 slices, together covering every changed file, each small enough for one reviewer to crawl thoroughly. Group by area of the code, not by commit.
+4. Write .consort/review/plan.json: {"tldr": "<2-3 sentences>", "emoji": "<one emoji that pictures what this PR changes, e.g. 🚀 for a deploy fix, 🧭 for navigation; never 🔎>", "title": "<2-5 plain words naming the change>", "slices": [{"id": "s1", "title": "<area>", "files": ["<changed files in this area>"], "related": ["<callers, similar existing modules, schemas to compare against>"], "focus": "<what to check here>"}]}. 1 to 10 slices proportional to scope (one for a small change), together covering every changed file, each small enough for one reviewer to crawl thoroughly. Group by area of the code, not by commit.
 Reply with one line when both files are written.`;
 
 export const SLICE_PROMPT = (t: ReviewTarget, wt: string, slice: { id: string; title: string; files: string[]; related?: string[]; focus?: string }) => `## Review one area of PR #${t.pr} "${t.title}"
@@ -266,6 +267,8 @@ async function reviewRound(taskId: string, watch: (t: ReviewTarget, repo: string
             if (existsSync(copy)) copyFileSync(copy, saved);
           }
           if (existsSync(saved)) writeFileSync(join(dir, "previous.json"), JSON.stringify(parseReview(readFileSync(saved, "utf8")).findings, null, 2));
+          const completedScope=readReviewJson<ReviewScope>(join(dir,"scope.json"));
+          if(completedScope) saveReviewJson(join(dir,"previous-scope.json"),completedScope);
           mkdirSync(join(dir, `round-${round - 1}`), { recursive: true });
           for (const f of ["OVERVIEW.md", "plan.json", "swarm.json", `pr-${t.pr}.review.json`]) if (existsSync(join(dir, f))) renameSync(join(dir, f), join(dir, `round-${round - 1}`, f));
           updateTask(taskId, (x) => ({ status: "working", note: undefined, reviewStep: 1, activity: `round ${round}: @${t.author} asked again`, review: { ...x.review!, head: pr.headRefOid, round } }));
@@ -273,7 +276,9 @@ async function reviewRound(taskId: string, watch: (t: ReviewTarget, repo: string
           return "again";
         }
       }
+      const waitingSince=Date.now();
       await sleep(WATCH_MS);
+      updateTask(taskId,x=>({externalWaitMs:(x.externalWaitMs??0)+Date.now()-waitingSince}));
     }
   };
   if (task.status === "monitoring") return waitForAuthor(task.note ?? "changes requested");
@@ -312,6 +317,7 @@ async function reviewRound(taskId: string, watch: (t: ReviewTarget, repo: string
   const policy = job.modelPolicy ?? state.jobs.find((j) => j.repo === job.repo && j.source !== "review" && j.modelPolicy)?.modelPolicy;
   const turn = async (role: "frontier" | "swarm" | "setup", prompt: string, readOnly: boolean, timeoutMs: number, step: string): Promise<string> => {
     const tried = new Set<string>();
+    let queuedAt = Date.now();
     for (let attempt = 0; attempt < 8; attempt++) {
       const now = Date.now();
       const live = loadState();
@@ -319,23 +325,28 @@ async function reviewRound(taskId: string, watch: (t: ReviewTarget, repo: string
       if (!open.length) { tried.clear(); await new Promise((r) => setTimeout(r, 60_000)); continue; }
       const modelOn = (a: Account) => role === "frontier" ? selectCliModel(a.provider, models[a.provider], "frontier", policy) : role === "swarm" ? oversightModel(a.provider, policy) : selectCliModel(a.provider, models[a.provider], "implementation", policy);
       const usage = await usageFor(open);
-      const who = open.filter((a) => !modelBlock(usage.get(a.id), modelOn(a)) && !usageBlock(usage.get(a.id) ?? { keyId: a.id, at: 0, windows: [] }, now))
-        .sort((x, y) => (modelLoad(usage.get(x.id), modelOn(x)) ?? 1_000) - (modelLoad(usage.get(y.id), modelOn(y)) ?? 1_000) || (x.lastUsedAt ?? 0) - (y.lastUsedAt ?? 0))[0];
-      if (!who) { open.forEach((a) => tried.add(a.id)); continue; }
+      const eligible = open.filter((a) => !modelBlock(usage.get(a.id), modelOn(a)) && !usageBlock(usage.get(a.id) ?? { keyId: a.id, at: 0, windows: [] }, now))
+        .sort((x, y) => (modelLoad(usage.get(x.id), modelOn(x)) ?? 1_000) - (modelLoad(usage.get(y.id), modelOn(y)) ?? 1_000) || (x.lastUsedAt ?? 0) - (y.lastUsedAt ?? 0));
+      if (!eligible.length) { open.forEach((a) => tried.add(a.id)); continue; }
+      const reserved = tryAcquireAnyAgentTurn(taskId, eligible.map(a=>a.id));
+      if (!reserved) { attempt--; await new Promise(r=>setTimeout(r,250)); continue; }
+      const who = eligible.find(a=>a.id===reserved.accountId)!;
       const model = modelOn(who);
-      touchAccount(who.id);
+
       const abort = new AbortController();
       const trace: TurnTrace = { taskId, ticket: task.ticket?.id ?? `pr-${t.pr}`, title: t.title, scanner: job.name, kind: "review", stage: role, step, role };
       const timer = setTimeout(() => { trace.reason = "timeout"; abort.abort(); }, timeoutMs);
       const started = Date.now();
       try {
-        const res = await withAgentTurn(taskId, who.id, () => runTurn({ trace, phi: { ...turnPhi(live), task: taskId, alert: (line: string) => say(line) }, cwd: wt, model, account: who, readOnly, signal: abort.signal, maxDelegates: 0, effort: role === "frontier" ? "high" : "medium", env: env as unknown as Record<string, string>,
-          prompt: `${HEADLESS_RULES}\n\n${prompt}\n\n${ENVIRONMENT_RULES(env)}` }));
-        updateTask(taskId, (x) => ({ ...(res.usage?.length ? { cost: addTurnCost(x.cost, res.usage) } : {}), turnHistory: [...(x.turnHistory ?? []), { at: started, stage: `review ${role}`, role, provider: who.provider as Provider, model, durationMs: Date.now() - started, usage: res.usage, error: res.error ?? res.limit?.text }] }));
+        touchAccount(who.id);
+        const res = await runTurn({ trace, phi: { ...turnPhi(live), task: taskId, alert: (line: string) => say(line) }, cwd: wt, model, account: who, readOnly, signal: abort.signal, maxDelegates: 0, effort: role === "frontier" ? "high" : "medium", env: env as unknown as Record<string, string>,
+          prompt: `${HEADLESS_RULES}\n\n${prompt}\n\n${ENVIRONMENT_RULES(env)}` });
+        const executionMs=Date.now()-started;
+        updateTask(taskId, (x) => ({ ...(res.usage?.length ? { cost: addTurnCost(x.cost, res.usage) } : {}), turnHistory: [...(x.turnHistory ?? []), { at: started, stage: `review ${role}`, role, provider: who.provider as Provider, model, durationMs: executionMs, queueMs: started - queuedAt, executionMs, usage: res.usage, error: res.error ?? res.limit?.text }] }));
         if (res.limit) { blockAccount(who.id, res.limit.resetsAt, res.limit.text); tried.add(who.id); continue; }
         if (res.error || !res.text.trim()) { log(`${role} turn failed on ${who.name}: ${res.error ?? "empty reply"}`); tried.add(who.id); continue; }
         return res.text;
-      } finally { clearTimeout(timer); }
+      } finally { clearTimeout(timer); releaseAgentTurn(taskId,reserved.lease); queuedAt=Date.now(); }
     }
     throw new Error(`The ${role} review step failed on every account`);
   };
@@ -353,34 +364,55 @@ async function reviewRound(taskId: string, watch: (t: ReviewTarget, repo: string
     }
 
     // 2. the frontier overview and plan
-    const planFile = join(wt, ".consort", "review", "plan.json");
+    const reviewDir=join(wt,".consort","review");
+    const scope=await reviewScope(t.head,t.base,reviewDir,args=>sh("git",args,wt),JSON.stringify({policy,guard:phiSettings(loadState())}));
+    const priorScope=readReviewJson<ReviewScope>(join(reviewDir,"scope.json"));
+    const planFile = join(reviewDir, "plan.json");
+    if(priorScope && JSON.stringify(priorScope)!==JSON.stringify(scope) && existsSync(planFile)) renameSync(planFile,planFile+".stale");
+    saveReviewJson(join(reviewDir,"scope.json"),scope);
+    const checkpoints=new ReviewCheckpoints(reviewDir,scope);
+    const guidance=scopeGuidance(scope);
+    if(!existsSync(planFile) && scope.from && scope.files.length===0) {
+      saveReviewJson(planFile,{tldr:t.title,slices:[]});
+    }
     if (!existsSync(planFile)) {
       activity("frontier model: reading the repository and planning the review", 2);
-      await turn("frontier", OVERVIEW_PROMPT(t, wt), false, 45 * 60_000, "overview and plan");
+      await turn("frontier", OVERVIEW_PROMPT(t, wt)+"\n\n"+guidance, false, 45 * 60_000, "overview and plan");
     }
     const plan = JSON.parse(readFileSync(planFile, "utf8")) as { tldr?: string; emoji?: string; title?: string; slices?: { id: string; title: string; files: string[]; related?: string[]; focus?: string }[] };
     const picked = parseSlackIdentity(JSON.stringify({ emoji: plan.emoji ?? "", title: plan.title ?? "" }));
     if (picked && picked.emoji !== "🔎" && (picked.emoji !== identity.emoji || picked.title !== identity.title)) await setIdentity(picked);
-    const slices = (plan.slices ?? []).filter((s) => s && Array.isArray(s.files) && s.files.length);
-    if (!slices.length) throw new Error("The overview wrote no review slices");
+    let slices = (plan.slices ?? []).filter((s) => s && Array.isArray(s.files) && s.files.length);
+    if(scope.small && slices.length>1) slices=[{id:"small",title:"Changed code and affected callers",files:[...new Set(slices.flatMap(s=>s.files))],related:[...new Set(slices.flatMap(s=>s.related??[]))]}];
+    if (!slices.length && !(scope.from && scope.files.length===0)) throw new Error("The overview wrote no review slices");
     await say(`Plan: ${slices.length} areas, reviewed in parallel on Opus/Sol: ${slices.map((s) => s.title).join("; ")}`);
 
     // 3. the swarm, one read-only reviewer per area, as many at once as capacity allows
     activity(`reviewer swarm: ${slices.length} areas in parallel`, 3);
     const raw: RawFinding[] = [];
     const results = await Promise.allSettled(slices.map(async (slice) => {
-      const text = await turn("swarm", SLICE_PROMPT(t, wt, slice), true, 45 * 60_000, `review area ${slice.id} ${slice.title}`.slice(0, 80));
-      const found = cleanFindings(jsonAfter(text, "[review-findings]"));
+      const key=SLICE_PROMPT(t,wt,slice)+"\n\n"+guidance;
+      let found=checkpoints.read<RawFinding[]>(key);
+      if(!found) {
+        const text = await turn("swarm", SLICE_PROMPT(t, wt, slice)+"\n\n"+guidance, true, 45 * 60_000, `review area ${slice.id} ${slice.title}`.slice(0, 80));
+        const parsed=jsonAfter(text,"[review-findings]");
+        if(!Array.isArray(parsed)) throw new Error(`Review area ${slice.id} returned no findings array`);
+        found=cleanFindings(parsed);
+        checkpoints.save(key,found);
+      } else log(`area ${slice.id}: restored saved results`);
       raw.push(...found);
       log(`area ${slice.id} (${slice.title}): ${found.length} findings`);
     }));
     const failedAreas = results.filter((r) => r.status === "rejected").length;
     writeFileSync(join(wt, ".consort", "review", "swarm.json"), JSON.stringify(raw, null, 2));
 
+    if(failedAreas) throw new Error(`${failedAreas} review areas failed; completed areas are saved for retry. No partial review will be approved.`);
+
     // 4. the frontier verification
     activity(`frontier model: verifying ${raw.length} findings`, 4);
-    const finalText = raw.length ? await turn("frontier", FINAL_PROMPT(t, wt, slices.length - failedAreas), true, 45 * 60_000, "verify findings") : "[review-final] {\"findings\": []}";
+    const finalText = raw.length || existsSync(join(reviewDir,"previous.json")) ? await turn("frontier", FINAL_PROMPT(t, wt, slices.length - failedAreas)+"\n\n"+guidance, true, 45 * 60_000, "verify findings") : "[review-final] {\"findings\": []}";
     const final = jsonAfter(finalText, "[review-final]") as { summary?: string; tldr?: string; headline?: string; flows?: unknown } | undefined;
+    if(!final || !Array.isArray((final as {findings?:unknown}).findings)) throw new Error("Final verification returned no findings array; retry with saved area results");
     const flows = Array.isArray(final?.flows) ? final!.flows.filter((f): f is string => typeof f === "string" && !!f.trim()).slice(0, 4) : [];
     const review = buildReview(t, cleanFindings(final), { tldr: final?.summary ?? final?.tldr ?? plan.tldr, headline: final?.headline, at: new Date().toISOString() });
     const reviewPath = join(wt, ".consort", "review", `pr-${t.pr}.review.json`);
