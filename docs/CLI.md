@@ -379,3 +379,9 @@ Reviewer suggestions rank Git blame owners of changed lines and their surroundin
 RUNNING means Consort owns the next action, including review polling, comment batching, merge-conflict follow-up, and CI checks. WAITING means Consort needs the owner’s Slack answer before continuing. Automatic credit-reset waits show LIMIT on the dashboard and RUNNING with the reset explanation in Slack. These automatic states no longer announce “Paused.”
 
 Consort never re-requests review from anyone who previously approved that PR, including after fixes, merge-conflict resolution, new commits, or dismissed approvals. The GitHub request function checks review history immediately before every request and excludes approved and dismissed reviewers. Slack messages list only requests actually made. GitHub approval and CI completion requirements remain enforced.
+
+### Slack master monitor
+
+The daemon maintains one master monitor post in the configured Slack channel or DM, in addition to each ticket thread. It edits that root post in place and never posts replies beneath it. Working, the six most recent completed tasks, and cached account usage mirror the terminal overview. Each ticket title opens its own Slack conversation; ticket and GitHub links remain separate. Sentry preparation appears before its ClickUp ticket exists. The monitor refreshes from saved state every 15 seconds, edits only when its contents change, and saves its post identity across restarts. If the local identity is missing it finds the existing bot monitor in channel history before creating one. Monitor discovery needs the same conversation-history scope used by ticket replies.
+
+Run `consort-cli slack monitor` to create or refresh the master post immediately without restarting ticket workers.

@@ -74,6 +74,8 @@ const CACHE = () => join(HOME, "usage-cache.json");
 function loadCache(): Record<string, ConnectorUsage> {
   try { return JSON.parse(readFileSync(CACHE(), "utf8")); } catch { return {}; }
 }
+/** Read saved meters without probing accounts or consuming AI turns. */
+export const cachedUsage = () => new Map(Object.entries(loadCache()));
 export function saveUsage(fresh: Map<string, ConnectorUsage>): void {
   try {
     const all = { ...loadCache(), ...Object.fromEntries(fresh) };

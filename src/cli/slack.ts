@@ -60,6 +60,34 @@ export class Slack {
     return j.ts as string;
   }
 
+  /** A single monitor root, with no automatic per-ticket STATUS footer or thread reply. */
+  async postMonitor(text: string): Promise<string> {
+    return (await this.api("chat.postMessage", { channel: await this.channel(), text, unfurl_links: false, unfurl_media: false })).ts;
+  }
+
+  async permalink(ts: string): Promise<string> {
+    const result = await this.api("chat.getPermalink", { channel: await this.channel(), message_ts: ts });
+    if (typeof result.permalink !== "string" || !/^https:\/\//.test(result.permalink)) throw new Error("Slack returned no thread permalink");
+    return result.permalink;
+  }
+
+  /** Recover a prior monitor after a restart or lost local timestamp; never adopt a human post. */
+  async findMonitor(heading: string): Promise<string | undefined> {
+    const me = await this.api("auth.test", {});
+    let cursor: string | undefined;
+    const seen = new Set<string>();
+    do {
+      const page = await this.api("conversations.history", { channel: await this.channel(), limit: 100, ...(cursor ? { cursor } : {}) });
+      const found = page.messages?.find((m: any) => m.user === me.user_id && m.text?.startsWith(heading) && (!m.thread_ts || m.thread_ts === m.ts));
+      if (found) return found.ts;
+      if (!page.has_more) return undefined;
+      const next = page.response_metadata?.next_cursor;
+      if (!next || seen.has(next)) throw new Error("Slack monitor history pagination did not advance");
+      seen.add(next); cursor = next;
+    } while (cursor);
+    return undefined;
+  }
+
   /** replace a posted message's text, e.g. the thread's first post (cli/slackCard.ts) */
   async update(ts: string, text: string): Promise<void> {
     await this.api("chat.update", { channel: await this.channel(), ts, text, unfurl_links: false });

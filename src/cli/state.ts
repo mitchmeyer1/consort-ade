@@ -161,7 +161,10 @@ export type Task = {
   /** tokens and estimated dollars over every agent turn so far (shared/headless.ts addTurnCost) */
   cost?: TaskCost;
 };
-export type CliState = { capacity?: { maxActiveTurns?: number; maxOpenTasks?: number; maxEnvironments?: number }; version: 1; accounts: Account[]; slack?: SlackConfig; clickupKey?: string; branchPrefix?: string; jobs: Job[]; tasks: Task[];
+export type CliState = {
+  /** Local-only identity of the one Slack monitor post; never a ticket thread. */
+  slackMonitor?: { channel: string; ts?: string; key?: string; creating?: boolean; lease?: { id: string; until: number } };
+ capacity?: { maxActiveTurns?: number; maxOpenTasks?: number; maxEnvironments?: number }; version: 1; accounts: Account[]; slack?: SlackConfig; clickupKey?: string; branchPrefix?: string; jobs: Job[]; tasks: Task[];
   /** where the covered (BAA) Anthropic key lives; Consort never stores the key itself (shared/phi.ts) */
   covered?: import("../shared/phi.ts").CoveredKeyRef;
   /** the PHI/PII guard's settings; absent means off */

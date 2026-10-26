@@ -17,6 +17,7 @@ import { Slack } from "./slack";
 import { canStartWorker, handleWorkerExit, requestWorkerStop, workerStopMessage } from "./workerControl";
 import { answerTaskStatusQuestions } from "./slackStatus";
 import { refreshSlackCards } from "./slackCard";
+import { refreshSlackMonitor } from "./slackMonitor";
 import { saveLiveChildren } from "./parallel";
 import { refresh } from "./refresh";
 import { historyTurns, readTurns, renderReport, sinceMs } from "./telemetry";
@@ -78,6 +79,7 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   accounts list | accounts remove <id>
   slack set --bot-token xoxb-… --user <U…> [--channel <C…>]            where questions and progress go (DM by default)
   slack test
+  slack monitor                                                         create or refresh the single master monitor post
   clickup set-key <key>
   prefix set <branch-prefix>                                             e.g. "bot" → bot/<slug>-<id>
   scanners add --name <n> --source clickup --list|--folder|--space <id> --repo <path> --base main [--tag ai-handle] [--status "to do"]
@@ -192,6 +194,12 @@ async function main(argv: string[]) {
     case "accounts remove": { const id = rest[0] ?? fail("account id required"); s.accounts = s.accounts.filter((x) => x.id !== id); saveState(s); console.log("Removed."); return; }
 
     case "slack set": { s.slack = { botToken: need(a, "bot-token"), userId: need(a, "user"), channel: str(a, "channel") }; saveState(s); console.log("Slack saved. Test it with: consort-cli slack test"); return; }
+    case "slack monitor": {
+      if (!s.slack) fail("Slack is not configured. Run consort-cli setup first.");
+      await refreshSlackMonitor();
+      console.log("Slack master monitor refresh checked.");
+      return;
+    }
     case "slack test": {
       if (!s.slack) fail("no Slack configured");
       const slack = new Slack(s.slack!);
@@ -566,6 +574,7 @@ async function daemon() {
     if (!statusCheck) statusCheck = Promise.all([
       answerTaskStatusQuestions(alive).catch(e => console.error(`Slack status responder: ${e.message}`)),
       refreshSlackCards().catch(e => console.error(`Slack status cards: ${e.message}`)),
+      refreshSlackMonitor().catch(e => console.error(`Slack master monitor: ${e.message}`)),
     ]).then(() => {}).finally(() => { statusCheck = undefined; });
   };
   checkStatusQuestions();
