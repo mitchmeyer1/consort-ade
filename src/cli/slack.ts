@@ -62,7 +62,28 @@ export class Slack {
 
   /** A single monitor root, with no automatic per-ticket STATUS footer or thread reply. */
   async postMonitor(text: string): Promise<string> {
-    return (await this.api("chat.postMessage", { channel: await this.channel(), text, unfurl_links: false, unfurl_media: false })).ts;
+    return (await this.api("chat.postMessage", { channel: await this.channel(), text: text.split("\n")[0], parse: "none", unfurl_links: false, unfurl_media: false, blocks: this.monitorBlocks(text) })).ts;
+  }
+
+  /** Block sections keep Slack from splitting a long monitor into multiple root messages. */
+  private monitorBlocks(text: string): unknown[] {
+    const safe = this.gate ? this.gate(text) : redactPii(text);
+    const chunks: string[] = [];
+    let chunk = "";
+    for (const line of safe.split("\n")) {
+      if (chunk.length + line.length + 1 > 2900 && chunk) { chunks.push(chunk); chunk = ""; }
+      for (let offset = 0; offset < line.length; offset += 2900) {
+        const part = line.slice(offset, offset + 2900);
+        if (chunk.length + part.length + 1 > 2900 && chunk) { chunks.push(chunk); chunk = ""; }
+        chunk += (chunk ? "\n" : "") + part;
+      }
+    }
+    if (chunk) chunks.push(chunk);
+    return chunks.map(text => ({ type: "section", text: { type: "mrkdwn", text } }));
+  }
+
+  async updateMonitor(ts: string, text: string): Promise<void> {
+    await this.api("chat.update", { channel: await this.channel(), ts, text: text.split("\n")[0], blocks: this.monitorBlocks(text), unfurl_links: false });
   }
 
   async permalink(ts: string): Promise<string> {
@@ -71,21 +92,37 @@ export class Slack {
     return result.permalink;
   }
 
-  /** Recover a prior monitor after a restart or lost local timestamp; never adopt a human post. */
-  async findMonitor(heading: string): Promise<string | undefined> {
+  /** Discover only this bot's monitor roots, including legacy split posts. */
+  async monitorPosts(heading: string): Promise<{ ts: string; replies: number }[]> {
     const me = await this.api("auth.test", {});
+    const found: { ts: string; replies: number }[] = [];
     let cursor: string | undefined;
     const seen = new Set<string>();
     do {
       const page = await this.api("conversations.history", { channel: await this.channel(), limit: 100, ...(cursor ? { cursor } : {}) });
-      const found = page.messages?.find((m: any) => m.user === me.user_id && m.text?.startsWith(heading) && (!m.thread_ts || m.thread_ts === m.ts));
-      if (found) return found.ts;
-      if (!page.has_more) return undefined;
+      for (const m of page.messages ?? []) {
+        if (m.user === me.user_id && (typeof m.text === "string" && m.text.split("\n")[0].replaceAll(":bar_chart:", "📊") === heading.replaceAll(":bar_chart:", "📊")) && (!m.thread_ts || m.thread_ts === m.ts)) found.push({ ts: m.ts, replies: m.reply_count ?? 0 });
+      }
+      if (!page.has_more) return found;
       const next = page.response_metadata?.next_cursor;
       if (!next || seen.has(next)) throw new Error("Slack monitor history pagination did not advance");
       seen.add(next); cursor = next;
     } while (cursor);
-    return undefined;
+    return found;
+  }
+
+  async findMonitor(heading: string): Promise<string | undefined> {
+    return (await this.monitorPosts(heading))[0]?.ts;
+  }
+
+  /** Remove obsolete bot monitor roots only; preserve ticket threads and any replies. */
+  async removeDuplicateMonitors(keep: string, heading: string): Promise<void> {
+    const posts = await this.monitorPosts(heading);
+    if (!posts.some(p => p.ts === keep)) throw new Error("Cannot clean monitors before confirming the current master post");
+    for (const post of posts) if (post.ts !== keep && post.replies === 0) {
+      try { await this.api("chat.delete", { channel: await this.channel(), ts: post.ts }); }
+      catch (error) { if (!/message_not_found/.test(String(error))) throw error; }
+    }
   }
 
   /** replace a posted message's text, e.g. the thread's first post (cli/slackCard.ts) */

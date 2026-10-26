@@ -13,7 +13,7 @@ const task=(over={})=>({id:'t',jobId:'j',ticket:{id:'ticket-1',title:'Export loc
 function fixture(over={}) {
   const state={accounts:[],jobs:[],tasks:[task()],slack:{botToken:'secret',userId:'owner',channel:'C123'},...over};
   const calls=[];let existing,failPost,failUpdate,failLink;
-  const slack={channel:async()=>state.slack.channel,findMonitor:async()=>{calls.push(['find']);return existing;},permalink:async ts=>{calls.push(['link',ts]);if(failLink)throw failLink;return `https://example.slack.com/archives/C123/p${ts.replace('.','')}`;},postMonitor:async text=>{calls.push(['post',text]);if(failPost)throw failPost;return 'monitor-ts';},update:async(ts,text)=>{calls.push(['update',ts,text]);if(failUpdate){const err=failUpdate;failUpdate=undefined;throw err;}}};
+  const slack={removeDuplicateMonitors:async keep=>{calls.push(['cleanup',keep]);},channel:async()=>state.slack.channel,findMonitor:async()=>{calls.push(['find']);return existing;},permalink:async ts=>{calls.push(['link',ts]);if(failLink)throw failLink;return `https://example.slack.com/archives/C123/p${ts.replace('.','')}`;},postMonitor:async text=>{calls.push(['post',text]);if(failPost)throw failPost;return 'monitor-ts';},updateMonitor:async(ts,text)=>{calls.push(['update',ts,text]);if(failUpdate){const err=failUpdate;failUpdate=undefined;throw err;}}};
   const mocks={'../shared/slackMonitor.ts':monitor,'../shared/headless.ts':headless,'./state':{loadState:()=>state,mutateState:fn=>fn(state)},'./slack':{Slack:class{}},'./daemonctl':{alive:()=>true},'./usage':{cachedUsage:()=>new Map()}};
   const mod={exports:{}};new Function('require','module','exports',compiled)(n=>mocks[n]??require(n),mod,mod.exports);
   return {state,calls,run:(at=now)=>mod.exports.refreshSlackMonitor(at,()=>slack),existing:ts=>{existing=ts;},failLink:err=>{failLink=err;},failPost:err=>{failPost=err;},failUpdate:err=>{failUpdate=err;}};
@@ -24,6 +24,8 @@ test('master monitor has three sections, linked ticket titles, costs and safe ac
   for(const section of ['*Working*','*Completed · most recent 6*','*Accounts*'])assert.ok(text.includes(section));
   assert.match(text,/<https:\/\/example.slack.com\/thread\/1\|Export locations>/);
   assert.match(text,/<https:\/\/example.slack.com\/thread\/2\|Fix map tiles>/);
+  assert.match(text,/^🔄 .*Export locations.*RUNNING/m);
+  assert.match(text,/^🎉🍭🎊 .*Fix map tiles/m);
   assert.match(text,/Claude 1.*5-hour 25%/);
   assert.doesNotMatch(text,/private@example.com|SECRET/);
   if(process.env.CONSORT_SCREENSHOT_FIXTURE){const html=text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/&lt;(https:\/\/[^|]+)\|([^&]+)&gt;/g,'<a href="$1">$2</a>').replace(/\*([^*]+)\*/g,'<strong>$1</strong>');writeFileSync('.consort/slack-master-preview.html',`<!doctype html><meta charset="utf-8"><title>Slack master monitor preview</title><style>body{background:#1a1d21;color:#ddd;font:16px/1.8 system-ui;padding:32px;max-width:1000px}a{color:#5bbbea}pre{font:inherit;white-space:pre-wrap}strong{color:white}</style><p>Monitor preview — test data</p><pre>${html}</pre>`);}
@@ -71,7 +73,7 @@ test('Slack monitor API posts a root without a thread or broadcast and resolves 
     const response=method==='chat.getPermalink'?{ok:true,permalink:'https://example.slack.com/archives/C1/p123456'}:{ok:true,ts:'master-ts'};
     return new Response(JSON.stringify(response));
   },text=>text);
-  await slack.postMonitor(MASTER_MONITOR_HEADING);await slack.update('master-ts','Updated monitor');
+  await slack.postMonitor(MASTER_MONITOR_HEADING);await slack.updateMonitor('master-ts','Updated monitor');
   assert.equal(await slack.permalink('123.456'),'https://example.slack.com/archives/C1/p123456');
   for(const c of calls.filter(c=>['chat.postMessage','chat.update'].includes(c.method))){assert.equal(c.body.thread_ts,undefined);assert.equal(c.body.reply_broadcast,undefined);}
   assert.equal(calls[0].body.text,MASTER_MONITOR_HEADING);
@@ -83,7 +85,7 @@ test('monitor discovery pages history and accepts only this bot’s root',async(
   const { Slack }=await import('../src/cli/slack.ts');let pages=0;
   const slack=new Slack({botToken:'test',userId:'owner',channel:'C1'},async(url)=>{
     if(String(url).endsWith('auth.test'))return new Response(JSON.stringify({ok:true,user_id:'BOT'}));
-    const messages=++pages===1?[{ts:'human',user:'owner',text:MASTER_MONITOR_HEADING},{ts:'reply',user:'BOT',text:MASTER_MONITOR_HEADING,thread_ts:'parent'}]:[{ts:'original',user:'BOT',text:MASTER_MONITOR_HEADING}];
+    const messages=++pages===1?[{ts:'human',user:'owner',text:MASTER_MONITOR_HEADING},{ts:'reply',user:'BOT',text:MASTER_MONITOR_HEADING,thread_ts:'parent'}]:[{ts:'original',user:'BOT',text:MASTER_MONITOR_HEADING.replace('📊',':bar_chart:')}];
     return new Response(JSON.stringify({ok:true,messages,has_more:pages===1,response_metadata:{next_cursor:pages===1?'next':''}}));
   },text=>text);
   assert.equal(await slack.findMonitor(MASTER_MONITOR_HEADING),'original');assert.equal(pages,2);
@@ -100,4 +102,42 @@ test('failed ticket permalink still creates the monitor and retries the link nex
   assert.match(f.calls.find(c=>c[0]==='post')[1],/Slack thread pending/);
   f.failLink(undefined);await f.run(now+60000);
   assert.match(f.calls.find(c=>c[0]==='update')[2],/<https:\/\/example.slack.com\/archives/);
+});
+
+test('long monitors use bounded Slack blocks for both creation and edits',async()=>{
+  const {Slack}=await import('../src/cli/slack.ts');const calls=[];
+  const slack=new Slack({botToken:'test',userId:'owner',channel:'C1'},async(url,init)=>{
+    calls.push(Object.fromEntries(new URLSearchParams(init.body)));
+    return new Response(JSON.stringify({ok:true,ts:'monitor'}));
+  },text=>text.replaceAll('SECRET','MASKED'));
+  const text=MASTER_MONITOR_HEADING+'\n'+Array(40).fill('Ticket SECRET '+'x'.repeat(150)).join('\n');
+  await slack.postMonitor(text);await slack.updateMonitor('monitor',text);
+  for(const body of calls){
+    const blocks=JSON.parse(body.blocks);assert.ok(blocks.length>1);
+    assert.ok(blocks.every(b=>b.text.text.length<=3000));
+    assert.ok(blocks[0].text.text.startsWith(MASTER_MONITOR_HEADING));
+    assert.doesNotMatch(JSON.stringify(blocks),/SECRET/);
+    assert.match(blocks.map(b=>b.text.text).join('\n'),/MASKED/);
+    assert.equal(body.thread_ts,undefined);
+  }
+});
+
+test('duplicate cleanup deletes only obsolete own monitor roots without replies',async()=>{
+  const {Slack}=await import('../src/cli/slack.ts');const removed=[];
+  const slack=new Slack({botToken:'test',userId:'owner',channel:'C1'},async(url,init)=>{
+    const method=String(url).split('/').at(-1),body=Object.fromEntries(new URLSearchParams(init.body));
+    if(method==='auth.test')return Response.json({ok:true,user_id:'BOT'});
+    if(method==='chat.delete'){removed.push(body.ts);return Response.json({ok:true});}
+    return Response.json({ok:true,messages:[
+      {ts:'keep',user:'BOT',text:MASTER_MONITOR_HEADING},
+      {ts:'old',user:'BOT',text:MASTER_MONITOR_HEADING.replace('📊',':bar_chart:')+'\nUpdated earlier'},
+      {ts:'discussion',user:'BOT',text:MASTER_MONITOR_HEADING,reply_count:1},
+      {ts:'human',user:'owner',text:MASTER_MONITOR_HEADING},
+      {ts:'ticket',user:'BOT',text:'Ticket status'},
+      {ts:'reply',user:'BOT',text:MASTER_MONITOR_HEADING,thread_ts:'ticket'},
+    ]});
+  },text=>text);
+  await slack.removeDuplicateMonitors('keep',MASTER_MONITOR_HEADING);assert.deepEqual(removed,['old']);
+  await assert.rejects(slack.removeDuplicateMonitors('missing',MASTER_MONITOR_HEADING),/confirming/);
+  assert.deepEqual(removed,['old']);
 });

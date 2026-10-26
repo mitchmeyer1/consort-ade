@@ -7,6 +7,7 @@ import { Slack } from './slack';
 import { alive } from './daemonctl';
 import { cachedUsage } from './usage';
 const links = new Map<string,string>();
+const reconciled = new Set<string>();
 let active: Promise<void> | undefined;
 export function refreshSlackMonitor(now=Date.now(), slackFor=(cfg:SlackConfig)=>new Slack(cfg)): Promise<void> {
   if(active) return active;
@@ -47,10 +48,14 @@ async function refresh(now:number, slackFor:(cfg:SlackConfig)=>Slack):Promise<vo
     if(text.length>35000) throw new Error('Slack master monitor exceeds the single-post text limit.');
     const key=createHash('sha256').update(text).digest('hex');
     monitor=loadState().slackMonitor!;
-    if(monitor.key===key) return;
+    if(monitor.key===key && monitor.ts) {
+      const identity=`${channel}:${monitor.ts}`;
+      if(!reconciled.has(identity)) { await slack.removeDuplicateMonitors(monitor.ts,MASTER_MONITOR_HEADING); reconciled.add(identity); }
+      return;
+    }
     let ts=monitor.ts;
     if(ts) {
-      try { await slack.update(ts,text); }
+      try { await slack.updateMonitor(ts,text); }
       catch(error) {
         if(/message_not_found/.test(String(error))) mutateState(s=>{if(s.slackMonitor?.lease?.id===lease) Object.assign(s.slackMonitor,{ts:undefined,key:undefined,creating:undefined});});
         throw error;
@@ -65,6 +70,8 @@ async function refresh(now:number, slackFor:(cfg:SlackConfig)=>Slack):Promise<vo
       }
     }
     mutateState(s=>{if(s.slackMonitor?.lease?.id===lease) Object.assign(s.slackMonitor,{ts,key,creating:undefined});});
+    const identity=`${channel}:${ts}`;
+    if(!reconciled.has(identity)) { await slack.removeDuplicateMonitors(ts!,MASTER_MONITOR_HEADING); reconciled.add(identity); }
   } finally {
     mutateState(s=>{if(s.slackMonitor?.lease?.id===lease) s.slackMonitor.lease=undefined;});
   }

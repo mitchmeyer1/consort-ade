@@ -15,7 +15,7 @@ export function slackMasterMonitor(state: CliState, threads: Map<string, string>
     const health = taskHealth(t, state.accounts, { workerAlive: !!t.pid && alive(t.pid), logAgeMs: now - t.updatedAt }, now);
     const step = taskStep(t);
     const status = health.label;
-    const icon = status === 'WAITING' || status === 'STOPPED' ? '❌' : FINISHED.includes(t.status) ? '🎉🍭🎊' : '✅';
+    const icon = status === 'WAITING' || status === 'STOPPED' ? '❌' : FINISHED.includes(t.status) ? '🎉🍭🎊' : '🔄';
     const age = t.finishedAt ? `finished ${ago(now-t.finishedAt)} ago` : ago(now-t.startedAt);
     const title = `${t.slackIdentity?.emoji ?? ''} ${t.slackIdentity?.title ?? t.ticket.title}`.trim();
     const destinations = [t.ticket.url ? linked('ticket',t.ticket.url) : '', t.review?.url ?? t.feature?.prs?.at(-1) ? linked('github', t.review?.url ?? t.feature.prs.at(-1)) : ''].filter(Boolean);
@@ -24,7 +24,7 @@ export function slackMasterMonitor(state: CliState, threads: Map<string, string>
     if (destinations.length) lines.push(`   ${destinations.join(' · ')}`);
   };
   const preparation = state.jobs.filter(j => !working.some(t=>t.jobId===`${j.id}-worker` && !FINISHED.includes(t.status))).flatMap(j=>{const row=sentryAnalysisRow(j,now,true);return row?[row]:[];});
-  for (const row of preparation) lines.push(`✅ ${clean(row.title,65)} · ${row.status} · ${row.stage} ${row.step}/3`, `   ${clean(row.action,200)}`);
+  for (const row of preparation) lines.push(`🔄 ${clean(row.title,65)} · ${row.status} · ${row.stage} ${row.step}/3`, `   ${clean(row.action,200)}`);
   // Keep one post within Slack's text budget; links remain outside code blocks and clickable.
   for (const t of working.slice(0,16)) taskRow(t,true);
   if (working.length>16) lines.push(`… ${working.length-16} more tasks in the CLI`);
