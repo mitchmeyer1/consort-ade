@@ -1,7 +1,7 @@
 import type { Provider } from "./types.ts";
 
 /** CLI roles stay stable when an account or provider changes. Desktop tiers are separate. */
-export type CliModelRole = "planning" | "implementation" | "coordination" | "reader" | "frontier";
+export type CliModelRole = "planning" | "implementation" | "coordination" | "reader" | "frontier" | "evidence";
 export type CliModelPolicy = Partial<Record<CliModelRole, Partial<Record<Provider, string>>>>;
 
 /** Family outranks release number: Astra 6 remains above Sol 6.1. */
@@ -20,9 +20,18 @@ export function selectCliModel(provider: Provider, available: string[], role: Cl
   const belongs = (id: string) => provider === "claude" ? /^claude-/.test(id) : /^gpt-/.test(id);
   const configured = policy[role]?.[provider];
   if (configured && !belongs(configured)) throw new Error(`Model ${configured} does not belong to ${provider}`);
-  if (configured) return configured;
+  const evidenceFamily = (id: string) => provider === "claude" ? /(?:^|-)opus(?:-|$)/.test(id) : /(?:^|-)sol(?:-|$)/.test(id);
+  if (configured) {
+    if (role === "evidence" && !evidenceFamily(configured)) throw new Error("Evidence requires an Opus model on Claude or a Sol model on Codex");
+    return configured;
+  }
   const ranked = cliModelsByCapability(available.filter(belongs));
   const top = ranked[0] ?? "";
+  if (role === "evidence") {
+    const model = ranked.find(evidenceFamily);
+    if (!model) throw new Error(`No ${provider === "claude" ? "Opus" : "Sol"} model available for evidence`);
+    return model;
+  }
   // Judgement runs on the strongest model: planning decides what gets built, frontier reviews it.
   if (role === "frontier" || role === "planning") return top;
   const extraction = (id: string) => /haiku|luna|mini|nano/.test(id);

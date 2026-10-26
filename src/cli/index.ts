@@ -95,7 +95,7 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
            reads SENTRY_AUTH_TOKEN from the environment; creates bundles for a linked worker; default one open Sentry ticket
   scanners list | scanners remove <id> | scanners enable|disable <id> | scanners scan <id>   (scan: dry run)
                                                                           a scanner watches one place for tickets and hands each match to a worker agent
-  scanners configure <id> [--max-parallel N] [--max-open-tasks N] [--max-environments N] [--planning-model provider:model] [--implementation-model provider:model] [--coordination-model provider:model] [--reader-model provider:model] [--frontier-model provider:model] [--<role>-effort low|medium|high|xhigh|max] [--parallel-research N] [--parallel-implementation N] [--max-model-attempts N]
+  scanners configure <id> [--max-parallel N] [--max-open-tasks N] [--max-environments N] [--planning-model provider:model] [--implementation-model provider:model] [--coordination-model provider:model] [--evidence-model provider:model] [--reader-model provider:model] [--frontier-model provider:model] [--<role>-effort low|medium|high|xhigh|max] [--parallel-research N] [--parallel-implementation N] [--max-model-attempts N]
   resources add --name <n> --markdown <path>                              a project info resource: a git checkout of notes Grilling reads
   resources list | resources remove <id or name>                          (no patient or personal data in it: agents may quote it)
   phi status                                                              the PHI/PII guard: on or off, where the covered key is, what an agent shell sees
@@ -274,7 +274,7 @@ async function main(argv: string[]) {
         const value = Number(raw); if (!Number.isInteger(value) || value < 1) fail(`--${flag} must be a positive integer`);
         job[field] = value;
       }
-      for (const role of ["planning", "implementation", "coordination", "reader", "frontier"] as const) {
+      for (const role of ["planning", "implementation", "coordination", "reader", "frontier", "evidence"] as const) {
         for (const raw of list(a, `${role}-model`)) {
           const colon = raw.indexOf(":"); const provider = raw.slice(0, colon); const model = raw.slice(colon + 1);
           if (colon < 1 || !model || (provider !== "claude" && provider !== "codex")) fail(`--${role}-model must be claude:model or codex:model`);
@@ -282,7 +282,7 @@ async function main(argv: string[]) {
           job.modelPolicy = { ...job.modelPolicy, [role]: { ...job.modelPolicy?.[role], [provider]: model } };
         }
       }
-      for (const role of ["planning", "implementation", "coordination", "reader", "frontier"] as const) {
+      for (const role of ["planning", "implementation", "coordination", "reader", "frontier", "evidence"] as const) {
         const raw = str(a, `${role}-effort`); if (raw === undefined) continue;
         if (!isEffortLevel(raw)) fail(`--${role}-effort must be one of ${EFFORT_LEVELS.join(", ")}`);
         job.effortPolicy = { ...job.effortPolicy, [role]: raw };

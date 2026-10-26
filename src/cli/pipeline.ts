@@ -744,13 +744,13 @@ export async function workTask(taskId: string): Promise<void> {
         const helper = browser ? writeScreenshotHelper(task.worktree, browser) : undefined;
         const prompt = EVIDENCE_PROMPT({ phi: phiSettings(loadState()).guard, helper: helper ?? "(no browser installed: backend output may be text; frontend screenshots require a browser)", ticketUrl: task.ticket.url, prUrl: prUrl!, worktree: task.worktree, repoRoot: job.repo });
         await resumeEvidenceTurn("Gathering evidence", async (continuation) => {
-          const text = await turn(`${prompt}\n\n${guidance}\n\n${continuation}`, builderProvider, "implementation", true, EVIDENCE_TURN_MS);
-          await completeReply(text, EVIDENCE_TURN_MS, "implementation");
+          const text = await turn(`${prompt}\n\n${guidance}\n\n${continuation}`, builderProvider, "evidence", true, EVIDENCE_TURN_MS);
+          await completeReply(text, EVIDENCE_TURN_MS, "evidence");
           return text;
         }, say);
         validateEvidence(task.worktree);
         activity("checking evidence against acceptance criteria");
-        const verification = await resumeEvidenceTurn("Checking evidence", (continuation) => turn(`${VERIFY_EVIDENCE_PROMPT}\n\n${continuation}`, builderProvider, "coordination", false, EVIDENCE_CHECK_MS), say);
+        const verification = await resumeEvidenceTurn("Checking evidence", (continuation) => turn(`${VERIFY_EVIDENCE_PROMPT}\n\n${continuation}`, builderProvider, "evidence", false, EVIDENCE_CHECK_MS), say);
         if (!evidenceApproved(verification)) throw new ProblemError({ where: "evidence", what: "The evidence check did not pass", why: blockerBullets(stripAskUser(verification) || parseAskUser(verification).join(" ") || "No approval was returned.") });
         const cost = loadState().tasks.find((t) => t.id === taskId)?.cost;
         const evidenceTiming = { startedAt: task.startedAt, endedAt: Date.now() };

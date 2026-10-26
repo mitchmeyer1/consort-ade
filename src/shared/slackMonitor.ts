@@ -6,24 +6,30 @@ import type { ConnectorUsage } from './usage.ts';
 export const MASTER_MONITOR_HEADING = '*📊 Consort master monitor*';
 const clean = (s: string, length = 160) => s.replace(/[\r\n\t]+/g, ' ').replace(/[*_`~]/g, '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').slice(0, length);
 const linked = (label: string, url?: string) => url && /^https:\/\/[^\s<>|]+$/.test(url) ? `<${url}|${clean(label, 65)}>` : clean(label, 65);
+/** Ready work stays visible even when it is older than the six recent completions. */
+export function slackMonitorGroups(state: Pick<CliState,'tasks'>, now: number) {
+  const tasks=visibleTasks(state.tasks,now).sort((a,b)=>b.updatedAt-a.updatedAt);
+  const ready=state.tasks.filter(t=>t.status==='ready').sort((a,b)=>b.updatedAt-a.updatedAt);
+  const completed=recentCompleted(state.tasks.filter(t=>t.status!=='ready'));
+  const working=tasks.filter(t=>!FINISHED.includes(t.status)||t.status==='failed');
+  return {working,ready,completed};
+}
 export function slackMasterMonitor(state: CliState, threads: Map<string, string>, now: number, alive: (pid: number) => boolean, usage = new Map<string, ConnectorUsage>(), authors = new Map<string,string>()): string {
-  const tasks = visibleTasks(state.tasks, now).sort((a,b) => b.updatedAt - a.updatedAt);
-  const completed = recentCompleted(tasks);
-  const working = tasks.filter(t => !completed.includes(t));
+  const {working,ready,completed}=slackMonitorGroups(state,now);
   const lines = [MASTER_MONITOR_HEADING, `Updated ${new Date(Math.floor(now / 60_000) * 60_000).toISOString().replace('T', ' ').slice(0,16)} UTC`, '', '*Working*'];
-  const taskRow = (t: typeof tasks[number], detail: boolean) => {
+  const taskRow = (t: CliState['tasks'][number], detail: boolean) => {
     const health = taskHealth(t, state.accounts, { workerAlive: !!t.pid && alive(t.pid), logAgeMs: now - t.updatedAt }, now);
     const step = taskStep(t);
-    const status = health.label;
-    const icon = status === 'WAITING' || status === 'STOPPED' ? '❌' : FINISHED.includes(t.status) ? '🎉🍭🎊' : '🔄';
-    const age = t.finishedAt ? `finished ${ago(now-t.finishedAt)} ago` : ago(now-t.startedAt);
+    const status = t.status==='ready' ? 'READY TO MERGE' : health.label;
+    const icon = t.status==='ready' ? '📦' : status === 'WAITING' || status === 'STOPPED' ? '❌' : FINISHED.includes(t.status) ? '🎉🍭🎊' : '🔄';
+    const age = t.status==='ready' ? `ready ${ago(now-(t.finishedAt??t.updatedAt))} ago` : t.finishedAt ? `finished ${ago(now-t.finishedAt)} ago` : ago(now-t.startedAt);
     const job = state.jobs.find(j=>j.id===t.jobId);
     const kind = t.kind==='review' ? 'Review' : job?.sentryProducerId || job?.source==='sentry' ? 'Sentry' : 'Feature';
     const author = authors.get(t.id) ?? t.review?.author;
     const pr = t.review?.url ?? t.feature?.prs?.at(-1);
     const byline = author ? `author: ${linked('@'+author, 'https://github.com/'+author)}` : pr ? 'author unavailable' : 'PR not created';
     const title = `${t.slackIdentity?.emoji ?? ''} ${t.slackIdentity?.title ?? t.ticket.title}`.trim();
-    const destinations = [t.ticket.url ? linked('ticket',t.ticket.url) : '', t.review?.url ?? t.feature?.prs?.at(-1) ? linked('github', t.review?.url ?? t.feature.prs.at(-1)) : ''].filter(Boolean);
+    const destinations = [t.ticket.url ? linked('ticket',t.ticket.url) : '', t.review?.url ?? t.feature?.prs?.at(-1) ? linked(t.status==='ready'?'merge PR':'github', t.review?.url ?? t.feature.prs.at(-1)) : ''].filter(Boolean);
     lines.push(`${icon} ${kind} · ${linked(title,threads.get(t.id))}${threads.has(t.id)?'':' (Slack thread pending)'} · ${byline} · ${clean(status)} · ${clean(step.name)} ${step.n}/${step.total} · ${costCell(t.cost) || 'cost pending'} · ${age}`);
     if (detail) lines.push(`   ${clean(t.status === 'waiting' ? t.pauseReason ?? t.note ?? t.activity ?? health.note ?? 'Needs your Slack reply' : health.note ?? t.activity ?? t.note ?? 'Preparing the task', 200)}`);
     if (destinations.length) lines.push(`   ${destinations.join(' · ')}`);
@@ -34,6 +40,10 @@ export function slackMasterMonitor(state: CliState, threads: Map<string, string>
   for (const t of working.slice(0,16)) taskRow(t,true);
   if (working.length>16) lines.push(`… ${working.length-16} more tasks in the CLI`);
   if (!working.length && !preparation.length) lines.push('No tasks in progress.');
+  lines.push('', '*Ready to merge · your action*');
+  for(const t of ready.slice(0,16)) taskRow(t,false);
+  if(ready.length>16) lines.push(`… ${ready.length-16} more ready-to-merge tickets in the CLI`);
+  if(!ready.length) lines.push('No tickets waiting to be merged.');
   lines.push('', '*Completed · most recent 6*');
   for(const t of completed) taskRow(t,false);
   if(!completed.length) lines.push('No completed tasks yet.');

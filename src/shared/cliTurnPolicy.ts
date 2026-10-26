@@ -50,7 +50,7 @@ export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 export type CliEffortPolicy = Partial<Record<CliModelRole, EffortLevel>>;
 export const isEffortLevel = (value: string): value is EffortLevel => (EFFORT_LEVELS as readonly string[]).includes(value);
 /** The build roles follow the planner's [build-effort]; readers and frontier turns are bounded jobs with their own levels. */
-const PLANNED_ROLES: readonly CliModelRole[] = ["implementation", "coordination"];
+const PLANNED_ROLES: readonly CliModelRole[] = ["implementation", "coordination", "evidence"];
 /** Precedence: what the scanner pins, then what the planner decided for this task, then the role's default. */
 export function roleEffort(role: CliModelRole, policy: CliEffortPolicy = {}, planned?: EffortLevel): EffortLevel {
   return policy[role] ?? (PLANNED_ROLES.includes(role) ? planned : undefined) ?? (role === "reader" ? "low" : role === "frontier" ? "high" : "medium");

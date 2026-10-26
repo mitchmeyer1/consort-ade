@@ -1115,3 +1115,18 @@ test('a small self-review reserves one turn and inspects directly without a dele
   });
   await h.work();assert.equal(checked,2);
 });
+
+test('evidence capture and acceptance checks use Opus despite Sonnet routine settings',async()=>{
+ const evidence=[];
+ const h=harness({task:{reviewsDone:3,evidenceValidatedAt:undefined},job:{modelPolicy:{implementation:{claude:'claude-sonnet-5'},coordination:{claude:'claude-sonnet-5'}}},accounts:[{id:'c',provider:'claude',name:'Claude'}],turn:o=>{
+   evidence.push(o.model);return {text:o.prompt.includes(headless.VERIFY_EVIDENCE_PROMPT)?'[evidence-approved]':''};
+ }});
+ await h.work();assert.ok(evidence.length>=2);assert.ok(evidence.every(m=>/opus/.test(m)),evidence.join(','));
+});
+test('evidence capture and acceptance checks use Sol on Codex-only installs',async()=>{
+ const evidence=[];
+ const h=harness({task:{reviewsDone:3,evidenceValidatedAt:undefined},accounts:[{id:'x',provider:'codex',name:'Codex'}],turn:o=>{
+   evidence.push(o.model);return {text:o.prompt.includes(headless.VERIFY_EVIDENCE_PROMPT)?'[evidence-approved]':''};
+ }});
+ await h.work();assert.ok(evidence.length>=2);assert.ok(evidence.every(m=>/sol/.test(m)),evidence.join(','));
+});

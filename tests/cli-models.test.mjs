@@ -55,3 +55,12 @@ test('OpenAI standard short-context estimates price current families without gen
   assert.equal(priceFor('gpt-9-astra'), undefined);
   assert.equal(usdFor('gpt-6.1-sol', { input: 1e6, output: 1e6, cacheRead: 1e6, cacheWrite: 1e6 }), 14.6);
 });
+
+test('evidence always uses Opus or Sol across provider switches and ignores routine role settings',()=>{
+ const policy={implementation:{claude:'claude-sonnet-5'},coordination:{claude:'claude-sonnet-5'}};
+ assert.equal(selectCliModel('claude',models.claude,'evidence',policy),'claude-opus-5');
+ assert.equal(selectCliModel('codex',models.codex,'evidence',policy),'gpt-6.1-sol');
+ assert.equal(selectCliModel('claude',models.claude,'evidence',{evidence:{claude:'claude-opus-6'}}),'claude-opus-6');
+ assert.throws(()=>selectCliModel('claude',models.claude,'evidence',{evidence:{claude:'claude-sonnet-5'}}),/requires an Opus/);
+ assert.throws(()=>selectCliModel('claude',['claude-sonnet-5'],'evidence'),/No Opus/);
+});

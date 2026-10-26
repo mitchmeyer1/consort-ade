@@ -1,7 +1,6 @@
 /** Update one shared monitor root. Per-ticket listeners never use this timestamp. */
 import { createHash, randomUUID } from 'node:crypto';
-import { MASTER_MONITOR_HEADING, slackMasterMonitor } from '../shared/slackMonitor.ts';
-import { FINISHED, recentCompleted, visibleTasks } from '../shared/headless.ts';
+import { MASTER_MONITOR_HEADING, slackMasterMonitor, slackMonitorGroups } from '../shared/slackMonitor.ts';
 import { loadState, mutateState, type SlackConfig } from './state';
 import { Slack } from './slack';
 import { alive } from './daemonctl';
@@ -32,8 +31,8 @@ async function refresh(now:number, slackFor:(cfg:SlackConfig)=>Slack):Promise<vo
       if(existing) mutateState(s=>{if(s.slackMonitor?.lease?.id===lease) Object.assign(s.slackMonitor,{ts:existing,creating:undefined});});
       else if(monitor.creating) throw new Error('Slack monitor creation was interrupted; waiting to find the original post before creating another.');
     }
-    const state=loadState(), tasks=visibleTasks(state.tasks,now).sort((a,b)=>b.updatedAt-a.updatedAt);
-    const shown=[...tasks.filter(t=>!FINISHED.includes(t.status)||t.status==='failed').slice(0,16),...recentCompleted(tasks)];
+    const state=loadState(), {working,ready,completed}=slackMonitorGroups(state,now);
+    const shown=[...working.slice(0,16),...ready.slice(0,16),...completed];
     const threads=new Map<string,string>();
     for(const task of shown) if(task.slackThread) {
       const key=`${channel}:${task.slackThread}`;

@@ -18,10 +18,10 @@ function fixture(over={}) {
   const mod={exports:{}};new Function('require','module','exports',compiled)(n=>mocks[n]??require(n),mod,mod.exports);
   return {state,calls,run:(at=now)=>mod.exports.refreshSlackMonitor(at,()=>slack),existing:ts=>{existing=ts;},failLink:err=>{failLink=err;},failPost:err=>{failPost=err;},failUpdate:err=>{failUpdate=err;}};
 }
-test('master monitor has three sections, linked ticket titles, costs and safe account meters',()=>{
-  const text=slackMasterMonitor({tasks:[task(),task({id:'done',status:'done',finishedAt:now-60000,slackThread:'789.1',ticket:{id:'done',title:'Fix map tiles',url:'https://ticket/2'}})],jobs:[],accounts:[{id:'c',provider:'claude',name:'private@example.com',apiKey:'SECRET'},{id:'blocked',provider:'claude',blockedUntil:now+3600000,blockedWhy:'5-hour limit reached'},{id:'codex',provider:'codex'}]},new Map([['t','https://example.slack.com/thread/1'],['done','https://example.slack.com/thread/2']]),now,()=>true,new Map([['c',{at:now,windows:[{label:'5-hour',percent:25}]}],['blocked',{at:now,windows:[{label:'5-hour',percent:100,resetsAt:now+3600000}]}],['codex',{at:now,windows:[{label:'5-hour',percent:100}]}]]),new Map([['t','mitchmeyer1'],['done','pmonco']]));
+test('master monitor has four sections, linked ticket titles, costs and safe account meters',()=>{
+  const text=slackMasterMonitor({tasks:[task(),task({id:'ready',status:'ready',finishedAt:now-120000,slackThread:'456.1',ticket:{id:'ready',title:'Fix Sentry batching',url:'https://ticket/ready'}}),task({id:'done',status:'done',finishedAt:now-60000,slackThread:'789.1',ticket:{id:'done',title:'Fix map tiles',url:'https://ticket/2'}})],jobs:[],accounts:[{id:'c',provider:'claude',name:'private@example.com',apiKey:'SECRET'},{id:'blocked',provider:'claude',blockedUntil:now+3600000,blockedWhy:'5-hour limit reached'},{id:'codex',provider:'codex'}]},new Map([['t','https://example.slack.com/thread/1'],['done','https://example.slack.com/thread/2'],['ready','https://example.slack.com/thread/ready']]),now,()=>true,new Map([['c',{at:now,windows:[{label:'5-hour',percent:25}]}],['blocked',{at:now,windows:[{label:'5-hour',percent:100,resetsAt:now+3600000}]}],['codex',{at:now,windows:[{label:'5-hour',percent:100}]}]]),new Map([['t','mitchmeyer1'],['done','pmonco'],['ready','mitchmeyer1']]));
   assert.ok(text.startsWith(MASTER_MONITOR_HEADING));
-  for(const section of ['*Working*','*Completed · most recent 6*','*Accounts*'])assert.ok(text.includes(section));
+  for(const section of ['*Working*','*Ready to merge · your action*','*Completed · most recent 6*','*Accounts*'])assert.ok(text.includes(section));
   assert.match(text,/<https:\/\/example.slack.com\/thread\/1\|Export locations>/);
   assert.match(text,/<https:\/\/example.slack.com\/thread\/2\|Fix map tiles>/);
   assert.match(text,/^🔄 .*Export locations.*RUNNING/m);
@@ -185,4 +185,19 @@ test('blocked accounts show only the reason and latest applicable Eastern resume
   assert.match(render(winter,{},[{label:'Weekly',percent:100,resetsAt:winter+3600000}]),/Dec 1, 10:00 AM EST/);
   assert.match(render(now,{},[{label:'Weekly',percent:100}]),/resume time unavailable/);
   assert.match(render(now,{blockedUntil:now+3600000},[{label:'Weekly',percent:100,resetsAt:now+7200000}]),/12:00 PM EDT/);
+});
+
+test('ready-to-merge tasks stay separate and visible beyond recent completed retention',async()=>{
+ const ready=task({id:'old-ready',status:'ready',updatedAt:now-30*86400000,finishedAt:now-30*86400000,slackThread:'old.1',ticket:{id:'ready',title:'Old ready ticket',url:'https://ticket/ready'}});
+ const done=Array.from({length:8},(_,i)=>task({id:'done-'+i,status:'done',updatedAt:now-i*1000,finishedAt:now-i*1000,ticket:{id:'d'+i,title:'Done '+i}}));
+ const f=fixture({tasks:[task(),ready,...done]});await f.run();
+ const text=f.calls.find(c=>c[0]==='post')[1];
+ const [working,rest]=text.split('*Ready to merge · your action*');const [pending,completed]=rest.split('*Completed · most recent 6*');
+ assert.doesNotMatch(working,/Old ready ticket/);assert.doesNotMatch(completed,/Old ready ticket/);
+ assert.match(pending,/READY TO MERGE/);assert.match(pending,/<https:\/\/example.slack.com\/archives\/C123\/pold1\|Old ready ticket>/);
+ assert.match(pending,/merge PR>/);assert.equal((completed.match(/^🎉🍭🎊 /gm)||[]).length,6);
+ f.state.tasks.find(t=>t.id==='old-ready').status='done';f.state.tasks.find(t=>t.id==='old-ready').finishedAt=now;
+ await f.run(now+60000);const updated=f.calls.find(c=>c[0]==='update')[2];
+ assert.match(updated.split('*Ready to merge · your action*')[1].split('*Completed')[0],/No tickets waiting/);
+ assert.match(updated.split('*Completed · most recent 6*')[1],/Old ready ticket/);
 });
