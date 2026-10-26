@@ -43,9 +43,13 @@ export function slackMasterMonitor(state: CliState, threads: Map<string, string>
     const number=(providerCounts.get(a.provider)??0)+1;providerCounts.set(a.provider,number);
     const cached=usage.get(a.id);
     const windows=cached?.windows.slice(0,4).map(w=>`${clean(w.label,20)} ${Math.round(w.percent)}%`).join(' · ');
-    const blocked=a.blockedUntil && a.blockedUntil>now;
-    const label=blocked ? `limited until ${new Date(a.blockedUntil!).toISOString().slice(11,16)} UTC` : 'available';
-    lines.push(`${blocked?'❌':'✅'} ${a.provider==='claude'?'Claude':'Codex'} ${number} · ${label}${windows?` · ${windows}`:''}${cached?` · usage ${ago(now-cached.at)} ago`:''}`);
+    const percentages=cached?.windows.map(w=>w.percent).filter(Number.isFinite) ?? [];
+    const peak=percentages.length ? Math.max(...percentages) : undefined;
+    const limited=!!a.blockedUntil && a.blockedUntil>now;
+    const blocked=limited || !!cached?.blocked || !!cached?.windows.some(w=>w.locked) || (peak!==undefined && peak>=100);
+    const icon=blocked ? '🔴' : peak===undefined ? '⚪' : peak<=50 ? '🟢' : peak<90 ? '🟡' : '🟠';
+    const label=limited ? `limited until ${new Date(a.blockedUntil!).toISOString().slice(11,16)} UTC` : blocked ? 'blocked' : peak===undefined ? 'usage unavailable' : 'available';
+    lines.push(`${icon} ${a.provider==='claude'?'Claude':'Codex'} ${number} · ${label}${windows?` · ${windows}`:''}${cached?` · usage ${ago(now-cached.at)} ago`:''}`);
   }
   if(!state.accounts.length) lines.push('No accounts configured.');
   lines.push('', 'Open a ticket title to reply in its Slack thread. This monitor updates in place; ticket discussions stay in their own threads.', '', 'STATUS: MONITORING');

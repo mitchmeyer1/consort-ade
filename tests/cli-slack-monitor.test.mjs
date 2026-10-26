@@ -160,3 +160,18 @@ test('author lookup uses the PR author, caches successes and retries failures',a
   const second=await mod.exports.monitorAuthors(tasks,lookup);assert.equal(second.get('t'),'actual-pr-author');
   await mod.exports.monitorAuthors(tasks,lookup);assert.equal(calls,2);
 });
+
+test('account colors use the highest window with exact usage boundaries and blocked overrides',()=>{
+  for(const [percent,icon] of [[0,'🟢'],[50,'🟢'],[51,'🟡'],[89,'🟡'],[90,'🟠'],[99,'🟠'],[100,'🔴'],[105,'🔴']]){
+    const text=slackMasterMonitor({tasks:[],jobs:[],accounts:[{id:'a',provider:'claude'}]},new Map(),now,()=>true,new Map([['a',{at:now,windows:[{label:'5-hour',percent:0},{label:'Weekly',percent}]}]]));
+    assert.ok(text.includes(icon+' Claude 1'),`${percent}% should show ${icon}`);
+    if(percent>=100)assert.match(text,/Claude 1 · blocked/);
+  }
+  for(const over of [{blockedUntil:now+60000},{}]){
+    const usage={at:now,windows:[{label:'5-hour',percent:10}],...(over.blockedUntil?{}:{blocked:'credits exhausted'})};
+    const text=slackMasterMonitor({tasks:[],jobs:[],accounts:[{id:'a',provider:'codex',...over}]},new Map(),now,()=>true,new Map([['a',usage]]));
+    assert.match(text,/🔴 Codex 1/);
+  }
+  const missing=slackMasterMonitor({tasks:[],jobs:[],accounts:[{id:'a',provider:'claude'}]},new Map(),now,()=>true);
+  assert.match(missing,/⚪ Claude 1 · usage unavailable/);
+});
