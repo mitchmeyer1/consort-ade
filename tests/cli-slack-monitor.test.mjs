@@ -14,12 +14,12 @@ function fixture(over={}) {
   const state={accounts:[],jobs:[],tasks:[task()],slack:{botToken:'secret',userId:'owner',channel:'C123'},...over};
   const calls=[];let existing,failPost,failUpdate,failLink;
   const slack={removeDuplicateMonitors:async keep=>{calls.push(['cleanup',keep]);},channel:async()=>state.slack.channel,findMonitor:async()=>{calls.push(['find']);return existing;},permalink:async ts=>{calls.push(['link',ts]);if(failLink)throw failLink;return `https://example.slack.com/archives/C123/p${ts.replace('.','')}`;},postMonitor:async text=>{calls.push(['post',text]);if(failPost)throw failPost;return 'monitor-ts';},updateMonitor:async(ts,text)=>{calls.push(['update',ts,text]);if(failUpdate){const err=failUpdate;failUpdate=undefined;throw err;}}};
-  const mocks={'../shared/slackMonitor.ts':monitor,'../shared/headless.ts':headless,'./state':{loadState:()=>state,mutateState:fn=>fn(state)},'./slack':{Slack:class{}},'./daemonctl':{alive:()=>true},'./usage':{cachedUsage:()=>new Map()}};
+  const mocks={'./slackMonitorAuthors':{monitorAuthors:async()=>new Map()},'../shared/slackMonitor.ts':monitor,'../shared/headless.ts':headless,'./state':{loadState:()=>state,mutateState:fn=>fn(state)},'./slack':{Slack:class{}},'./daemonctl':{alive:()=>true},'./usage':{cachedUsage:()=>new Map()}};
   const mod={exports:{}};new Function('require','module','exports',compiled)(n=>mocks[n]??require(n),mod,mod.exports);
   return {state,calls,run:(at=now)=>mod.exports.refreshSlackMonitor(at,()=>slack),existing:ts=>{existing=ts;},failLink:err=>{failLink=err;},failPost:err=>{failPost=err;},failUpdate:err=>{failUpdate=err;}};
 }
 test('master monitor has three sections, linked ticket titles, costs and safe account meters',()=>{
-  const text=slackMasterMonitor({tasks:[task(),task({id:'done',status:'done',finishedAt:now-60000,slackThread:'789.1',ticket:{id:'done',title:'Fix map tiles',url:'https://ticket/2'}})],jobs:[],accounts:[{id:'c',provider:'claude',name:'private@example.com',apiKey:'SECRET'}]},new Map([['t','https://example.slack.com/thread/1'],['done','https://example.slack.com/thread/2']]),now,()=>true,new Map([['c',{at:now,windows:[{label:'5-hour',percent:25}]}]]));
+  const text=slackMasterMonitor({tasks:[task(),task({id:'done',status:'done',finishedAt:now-60000,slackThread:'789.1',ticket:{id:'done',title:'Fix map tiles',url:'https://ticket/2'}})],jobs:[],accounts:[{id:'c',provider:'claude',name:'private@example.com',apiKey:'SECRET'}]},new Map([['t','https://example.slack.com/thread/1'],['done','https://example.slack.com/thread/2']]),now,()=>true,new Map([['c',{at:now,windows:[{label:'5-hour',percent:25}]}]]),new Map([['t','mitchmeyer1'],['done','pmonco']]));
   assert.ok(text.startsWith(MASTER_MONITOR_HEADING));
   for(const section of ['*Working*','*Completed · most recent 6*','*Accounts*'])assert.ok(text.includes(section));
   assert.match(text,/<https:\/\/example.slack.com\/thread\/1\|Export locations>/);
@@ -140,4 +140,23 @@ test('duplicate cleanup deletes only obsolete own monitor roots without replies'
   await slack.removeDuplicateMonitors('keep',MASTER_MONITOR_HEADING);assert.deepEqual(removed,['old']);
   await assert.rejects(slack.removeDuplicateMonitors('missing',MASTER_MONITOR_HEADING),/confirming/);
   assert.deepEqual(removed,['old']);
+});
+
+test('monitor labels review, feature and Sentry rows with actual GitHub authors',()=>{
+  const tasks=[task({id:'review',kind:'review',review:{author:'pmonco',url:'https://github.com/acme/repo/pull/2'}}),task({id:'feature'}),task({id:'sentry',jobId:'sentry-worker'}),task({id:'new',feature:{stage:'Implementing',prs:[]}})];
+  const text=slackMasterMonitor({tasks,jobs:[{id:'sentry-worker',sentryProducerId:'producer'}],accounts:[]},new Map(),now,()=>true,new Map(),new Map([['feature','mitchmeyer1'],['sentry','sentry-builder']]));
+  assert.match(text,/🔄 Review .*author: <https:\/\/github.com\/pmonco\|@pmonco>/);
+  assert.match(text,/🔄 Feature .*author: <https:\/\/github.com\/mitchmeyer1\|@mitchmeyer1>/);
+  assert.match(text,/🔄 Sentry .*author: <https:\/\/github.com\/sentry-builder\|@sentry-builder>/);
+  assert.match(text,/🔄 Feature .*PR not created/);
+});
+
+test('author lookup uses the PR author, caches successes and retries failures',async()=>{
+  const source=ts.transpileModule(readFileSync(new URL('../src/cli/slackMonitorAuthors.ts',import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
+  const mod={exports:{}};new Function('require','module','exports',source)(require,mod,mod.exports);
+  const tasks=[task(),task({id:'review',kind:'review',review:{author:'pmonco'}}),task({id:'no-pr',feature:{prs:[]}})];
+  let calls=0;const lookup=async()=>{calls++;if(calls===1)throw Error('offline');return 'actual-pr-author';};
+  const first=await mod.exports.monitorAuthors(tasks,lookup);assert.equal(first.get('t'),undefined);assert.equal(first.get('review'),'pmonco');
+  const second=await mod.exports.monitorAuthors(tasks,lookup);assert.equal(second.get('t'),'actual-pr-author');
+  await mod.exports.monitorAuthors(tasks,lookup);assert.equal(calls,2);
 });
