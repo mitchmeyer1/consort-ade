@@ -48,8 +48,17 @@ export function slackMasterMonitor(state: CliState, threads: Map<string, string>
     const limited=!!a.blockedUntil && a.blockedUntil>now;
     const blocked=limited || !!cached?.blocked || !!cached?.windows.some(w=>w.locked) || (peak!==undefined && peak>=100);
     const icon=blocked ? '🔴' : peak===undefined ? '⚪' : peak<=50 ? '🟢' : peak<90 ? '🟡' : '🟠';
-    const label=limited ? `limited until ${new Date(a.blockedUntil!).toISOString().slice(11,16)} UTC` : blocked ? 'blocked' : peak===undefined ? 'usage unavailable' : 'available';
-    lines.push(`${icon} ${a.provider==='claude'?'Claude':'Codex'} ${number} · ${label}${windows?` · ${windows}`:''}${cached?` · usage ${ago(now-cached.at)} ago`:''}`);
+    if(blocked) {
+      const exhausted=cached?.windows.filter(w=>w.locked || w.percent>=100) ?? [];
+      const reason=clean((limited ? a.blockedWhy : undefined) || cached?.blocked || exhausted.map(w=>`${w.label} limit reached`).join(', ') || 'Usage limit reached',160);
+      const resets=[...(limited?[a.blockedUntil!]:[]),...exhausted.flatMap(w=>w.resetsAt && w.resetsAt>now ? [w.resetsAt] : [])];
+      const unknownReset=exhausted.some(w=>!w.resetsAt || w.resetsAt<=now);
+      const resume=resets.length && !unknownReset ? `resume after ${new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',timeZoneName:'short'}).format(Math.max(...resets))}` : 'resume time unavailable';
+      lines.push(`${icon} ${a.provider==='claude'?'Claude':'Codex'} ${number} · blocked: ${reason} · ${resume}`);
+    } else {
+      const label=peak===undefined ? 'usage unavailable' : 'available';
+      lines.push(`${icon} ${a.provider==='claude'?'Claude':'Codex'} ${number} · ${label}${windows?` · ${windows}`:''}${cached?` · usage ${ago(now-cached.at)} ago`:''}`);
+    }
   }
   if(!state.accounts.length) lines.push('No accounts configured.');
   lines.push('', 'Open a ticket title to reply in its Slack thread. This monitor updates in place; ticket discussions stay in their own threads.', '', 'STATUS: MONITORING');

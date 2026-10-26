@@ -19,7 +19,7 @@ function fixture(over={}) {
   return {state,calls,run:(at=now)=>mod.exports.refreshSlackMonitor(at,()=>slack),existing:ts=>{existing=ts;},failLink:err=>{failLink=err;},failPost:err=>{failPost=err;},failUpdate:err=>{failUpdate=err;}};
 }
 test('master monitor has three sections, linked ticket titles, costs and safe account meters',()=>{
-  const text=slackMasterMonitor({tasks:[task(),task({id:'done',status:'done',finishedAt:now-60000,slackThread:'789.1',ticket:{id:'done',title:'Fix map tiles',url:'https://ticket/2'}})],jobs:[],accounts:[{id:'c',provider:'claude',name:'private@example.com',apiKey:'SECRET'}]},new Map([['t','https://example.slack.com/thread/1'],['done','https://example.slack.com/thread/2']]),now,()=>true,new Map([['c',{at:now,windows:[{label:'5-hour',percent:25}]}]]),new Map([['t','mitchmeyer1'],['done','pmonco']]));
+  const text=slackMasterMonitor({tasks:[task(),task({id:'done',status:'done',finishedAt:now-60000,slackThread:'789.1',ticket:{id:'done',title:'Fix map tiles',url:'https://ticket/2'}})],jobs:[],accounts:[{id:'c',provider:'claude',name:'private@example.com',apiKey:'SECRET'},{id:'blocked',provider:'claude',blockedUntil:now+3600000,blockedWhy:'5-hour limit reached'},{id:'codex',provider:'codex'}]},new Map([['t','https://example.slack.com/thread/1'],['done','https://example.slack.com/thread/2']]),now,()=>true,new Map([['c',{at:now,windows:[{label:'5-hour',percent:25}]}],['blocked',{at:now,windows:[{label:'5-hour',percent:100,resetsAt:now+3600000}]}],['codex',{at:now,windows:[{label:'5-hour',percent:100}]}]]),new Map([['t','mitchmeyer1'],['done','pmonco']]));
   assert.ok(text.startsWith(MASTER_MONITOR_HEADING));
   for(const section of ['*Working*','*Completed · most recent 6*','*Accounts*'])assert.ok(text.includes(section));
   assert.match(text,/<https:\/\/example.slack.com\/thread\/1\|Export locations>/);
@@ -174,4 +174,15 @@ test('account colors use the highest window with exact usage boundaries and bloc
   }
   const missing=slackMasterMonitor({tasks:[],jobs:[],accounts:[{id:'a',provider:'claude'}]},new Map(),now,()=>true);
   assert.match(missing,/⚪ Claude 1 · usage unavailable/);
+});
+
+test('blocked accounts show only the reason and latest applicable Eastern resume time',()=>{
+  const render=(at,account,windows)=>slackMasterMonitor({tasks:[],jobs:[],accounts:[{id:'a',provider:'claude',...account}]},new Map(),at,()=>true,new Map([['a',{at,windows}]]));
+  const text=render(now,{blockedUntil:now+3600000,blockedWhy:'5-hour limit reached'},[{label:'5-hour',percent:100,resetsAt:now+3600000},{label:'Weekly',percent:10}]);
+  assert.match(text,/🔴 Claude 1 · blocked: 5-hour limit reached · resume after Oct 26, 11:00 AM EDT/);
+  assert.doesNotMatch(text,/100%|Weekly|usage 0m/);
+  const winter=Date.UTC(2026,11,1,14);
+  assert.match(render(winter,{},[{label:'Weekly',percent:100,resetsAt:winter+3600000}]),/Dec 1, 10:00 AM EST/);
+  assert.match(render(now,{},[{label:'Weekly',percent:100}]),/resume time unavailable/);
+  assert.match(render(now,{blockedUntil:now+3600000},[{label:'Weekly',percent:100,resetsAt:now+7200000}]),/12:00 PM EDT/);
 });
