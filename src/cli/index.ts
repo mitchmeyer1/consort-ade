@@ -33,7 +33,7 @@ import { checkCoveredKey } from "./covered";
 import { keyRefFrom, phiSmoke, phiSmokeUncovered, phiStatusLines, storeKeychainKey } from "./phiCommands";
 import { inbound, readIncidents } from "./phiGate";
 import { applyBundle, buildBundle } from "./transfer";
-import { reapIdleEnvironments, releaseEnvironment } from "./environment";
+import { reapIdleEnvironments, releaseEnvironment, sweepLeftovers, SWEEP_EVERY_MS } from "./environment";
 import { alive, DAEMON_LOG, daemonPid, recordDaemon, startDetached, stopDaemon } from "./daemonctl";
 import { banner, cream, dim, mint, ok, bad } from "./theme";
 import { FINISHED, retainedTasks } from "../shared/headless.ts";
@@ -129,7 +129,8 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   status
   export [--out <file>] [--scanner <id or name>]                          one file with the tokens, accounts, scanners and resources this box runs
   import <file> [--repo-dir <dir>] [--replace]                            set up this box from that file; clones repos and resources it lacks
-  accounts login <id>                                                     sign an account in again (after an import without credentials)`;
+  accounts login <id>                                                     sign an account in again (after an import without credentials)
+  cleanup [--dry-run]                                                     remove leftover Docker environments and unused volumes now (the daemon does it hourly)`;
 
 async function main(argv: string[]) {
   const a = parseArgs(argv);
@@ -451,6 +452,12 @@ async function main(argv: string[]) {
       return;
     }
 
+    case "cleanup": {
+      const dry = !!(a as Record<string, unknown>)["dry-run"];
+      const r = await sweepLeftovers({ dryRun: dry });
+      console.log(`${dry ? "Would remove" : "Removed"} ${r.environments.length} leftover environment(s)${r.environments.length ? `: ${r.environments.join(", ")}` : ""}, and ${r.volumes} unused volume(s).`);
+      return;
+    }
     case "tasks list": { for (const t of s.tasks) console.log(`${t.id}  ${t.status.padEnd(10)}  ${t.ticket.id.padEnd(12)}  ${t.feature.stage.padEnd(14)}  ${t.branch}  ${t.note ?? ""}`); if (!s.tasks.length) console.log("No tasks."); return; }
     case "tasks release": {
       const t = s.tasks.find((x) => x.id === rest[0] || x.ticket.id === rest[0]) ?? fail("no such task; use the task id or the ticket id from consort-cli view");
@@ -585,6 +592,11 @@ async function daemon() {
   const reap = () => { if (reaping) return; reaping = true; reapIdleEnvironments().then(codes => { if (codes.length) console.log(`${new Date().toISOString()} removed unused environment(s): ${codes.join(", ")}`); }, e => console.error(`Environment sweep: ${e.message}`)).finally(() => { reaping = false; }); };
   reap();
   setInterval(reap, 60_000);
+  // the backstop: at start and every hour, leftovers that slipped past the normal cleanup (cli/environment.ts sweepLeftovers)
+  let sweeping = false;
+  const sweep = () => { if (sweeping) return; sweeping = true; sweepLeftovers().then(r => { if (r.environments.length || r.volumes) console.log(`${new Date().toISOString()} cleanup: removed ${r.environments.length} leftover environment(s)${r.environments.length ? ` (${r.environments.join(", ")})` : ""} and ${r.volumes} unused volume(s)`); }, e => console.error(`Cleanup sweep: ${e.message}`)).finally(() => { sweeping = false; }); };
+  sweep();
+  setInterval(sweep, SWEEP_EVERY_MS);
   for (;;) {
     const s = loadState();
     // completed tasks beyond the newest six fall out of the state file (ready-to-merge ones stay); failed ones after a week

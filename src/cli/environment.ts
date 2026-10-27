@@ -258,3 +258,46 @@ export async function withChildEnvironment<T>(taskId: string, childId: string, a
   try { return await action(env); }
   finally { await releaseEnvironment(holderId); }
 }
+
+/** run codes this tool makes: pool sets, and per-task codes from before the pool */
+export const CLI_CODE = /^consort-(?:env-[0-9a-f]{8}|[a-z0-9]{10,16})$/;
+/** run codes the Consort desktop app gives each chat turn */
+export const APP_CODE = /^consort-[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** an unused volume younger than this is left alone: a container may be about to take it */
+export const VOLUME_GRACE_MS = 60 * 60_000;
+export const SWEEP_EVERY_MS = 60 * 60_000;
+
+export type SweepResult = { environments: string[]; volumes: number };
+
+/**
+ * The backstop the daemon runs at start and every hour, and `consort-cli cleanup` runs on demand:
+ * containers, networks and volumes of this tool's run codes that no set in the pool or open task
+ * owns; then unused volumes over an hour old that are anonymous (a removed container's data) or
+ * belong to a run code of this tool or of a finished desktop chat turn. Named volumes of other
+ * projects, and anything a container still uses, are never touched.
+ */
+export async function sweepLeftovers(o: { dryRun?: boolean; now?: number } = {}): Promise<SweepResult> {
+  const now = o.now ?? Date.now();
+  const state = loadState();
+  const owned = new Set([...(state.envPool ?? []).map((x) => x.runCode), ...state.tasks.filter((t) => OPEN.includes(t.status)).flatMap((t) => [t.runCode, runCodeFor(t)].filter((c): c is string => !!c))]);
+  // 1. leftover environments: anything Docker holds under a code of ours that nothing owns
+  const codes = new Set<string>();
+  for (const line of (await docker(["ps", "-a", "--format", '{{.Label "io.consort.run"}}\t{{.Label "com.docker.compose.project"}}'])).split("\n")) for (const c of line.split("\t")) if (CLI_CODE.test(c)) codes.add(c);
+  for (const line of (await docker(["volume", "ls", "--format", '{{.Label "io.consort.run"}}\t{{.Label "com.docker.compose.project"}}'])).split("\n")) for (const c of line.split("\t")) if (CLI_CODE.test(c)) codes.add(c);
+  const environments = [...codes].filter((c) => !owned.has(c)).sort();
+  if (!o.dryRun) for (const code of environments) await cleanupEnvironment(code);
+  // 2. unused volumes: anonymous ones, or ones labelled with a code of ours or of a desktop chat turn
+  const dangling = (await docker(["volume", "ls", "-q", "--filter", "dangling=true"])).split("\n").filter(Boolean);
+  const doomed: string[] = [];
+  for (let i = 0; i < dangling.length; i += 200) {
+    const out = await docker(["volume", "inspect", "--format", '{{.Name}}\t{{.CreatedAt}}\t{{range $k, $v := .Labels}}{{if eq $k "com.docker.volume.anonymous"}}anon{{end}}{{end}}\t{{index .Labels "io.consort.run"}}\t{{index .Labels "com.docker.compose.project"}}', ...dangling.slice(i, i + 200)]);
+    for (const line of out.split("\n").filter(Boolean)) {
+      const [name, created, anon, run, project] = line.split("\t");
+      if (!name || now - Date.parse(created) < VOLUME_GRACE_MS) continue;
+      const code = [run, project].find((c) => c && c !== "<no value>");
+      if (code ? (CLI_CODE.test(code) && !owned.has(code)) || APP_CODE.test(code) : anon === "anon") doomed.push(name);
+    }
+  }
+  if (!o.dryRun) for (let i = 0; i < doomed.length; i += 100) await docker(["volume", "rm", ...doomed.slice(i, i + 100)]);
+  return { environments, volumes: doomed.length };
+}
