@@ -95,9 +95,9 @@ export async function workTask(taskId: string): Promise<void> {
   let lastWorkingAt = 0;
   const working = async (line: string) => {
     const clean = stripAskUser(stripShipMarkers(line)).replace(/\[evidence-approved\]/g, "").trim();
-    if (!clean || !slack || !thread || Date.now() - lastWorkingAt < WORKING_NOTE_MS) return;
+    if (!clean || Date.now() - lastWorkingAt < WORKING_NOTE_MS) return;
     lastWorkingAt = Date.now();
-    await say(slackLines.working(clean));
+    await note(slackLines.working(clean));
   };
   // the task's own ports and Docker names, on every turn from here on
   // a set of local services from the machine's pool (cli/environment.ts): claimed before each agent turn, handed back while the task waits
@@ -160,7 +160,10 @@ export async function workTask(taskId: string): Promise<void> {
     // the services stay up for the next task on this repo; the daemon tears down sets left unused (cli/environment.ts)
     await releaseEnvironment(taskId);
   };
-  const tell = async (text: string) => { await say(text); await source.comment(task.ticket.id, text.replace(/<([^|>]+)\|([^>]+)>/g, "$2 ($1)")).catch((e) => log(task, `ticket comment failed: ${e.message}`)); };
+  const comment = (text: string) => source.comment(task.ticket.id, text.replace(/<([^|>]+)\|([^>]+)>/g, "$2 ($1)")).catch((e) => log(task, `ticket comment failed: ${e.message}`));
+  const tell = async (text: string) => { await say(text); await comment(text); };
+  // progress that needs nothing from the owner goes on the ticket only; the Slack thread keeps steps, questions, replies and the end
+  const note = async (text: string) => { log(task, text.replace(/\n/g, " ⏎ ")); await comment(text); };
 
   /** ask the owner on Slack and wait; without Slack the question is logged and the run stops */
   const ask = async (questions: string[], preformatted = false): Promise<string> => {
@@ -433,7 +436,7 @@ export async function workTask(taskId: string): Promise<void> {
     const change = parseShipMarkers(text);
     // the spec's turns set the build effort; a review or an escalated build turn never resets it
     const planned = feature.stage === "Grilling" ? parseBuildEffort(text) : undefined;
-    if (planned) { updateTask(task.id, { plannedEffort: { ...planned, at: Date.now() } }); await say(slackLines.buildEffort(planned.level, planned.reason)); }
+    if (planned) { updateTask(task.id, { plannedEffort: { ...planned, at: Date.now() } }); await note(slackLines.buildEffort(planned.level, planned.reason)); }
     const before = feature;
     if (change) feature = applyShipChange(feature, change, Date.now());
     updateTask(task.id, { feature });
@@ -543,7 +546,7 @@ export async function workTask(taskId: string): Promise<void> {
   if (task.rebootedAt) {
     // `consort-cli reboot`: the owner stopped the last worker; open by working out where it got to
     log(task, "rebooted by the owner; picking up after the last run");
-    await say(slackLines.rebooted(feature.stage));
+    await note(slackLines.rebooted(feature.stage));
     // at Grilling nothing is half-built: grill again with fresh research and resource reports, rather than let one recovery turn write the spec without them and settle the dropped questions itself
     if (feature.stage !== "Grilling") {
       activity("rebooted: checking where the last run got to");
@@ -585,7 +588,7 @@ export async function workTask(taskId: string): Promise<void> {
     await completeReply(text, undefined, "implementation");
     if (saveRepoEnv(job.repo, task.worktree)) log(task, "saved this repo's environment setup for the next task");
     updateTask(task.id, { envReadyAt: Date.now(), envFilesBase: Number(env.CONSORT_PORT_BASE), envFilesCode: env.CONSORT_RUN });
-    await say(slackLines.env(env.CONSORT_PORT_RANGE));
+    await note(slackLines.env(env.CONSORT_PORT_RANGE));
   }
   await applyOwnerUpdates();
   await openDraft();
@@ -729,7 +732,7 @@ export async function workTask(taskId: string): Promise<void> {
     await completeReply(reviewText, undefined, "frontier", provider, model);
     const summary = reviewSummaryOf(pr);
     if (!summary) throw new Error(`Review round ${round} did not write a valid review report`);
-    await say(slackLines.review(round, model, summary.total));
+    await note(slackLines.review(round, model, summary.total));
     feature = { ...feature, review: { chatId: `cli-${round}`, pr, round, startedAt: Date.now(), doneAt: Date.now() }, reviewRound: round };
     updateTask(task.id, { feature });
     if (summary.total === 0) { updateTask(task.id, { reviewsDone: round }); continue; }
@@ -771,7 +774,7 @@ export async function workTask(taskId: string): Promise<void> {
         const at = Date.now();
         feature = { ...feature, evidenceAt: at };
         updateTask(taskId, { feature, evidenceValidatedAt: at });
-        await say(slackLines.evidence(published.items, published.images, cost ? shortUsd(cost) : undefined));
+        await note(slackLines.evidence(published.items, published.images, cost ? shortUsd(cost) : undefined));
         break;
       } catch (e) {
         if (e instanceof PiiWithheldError && withheldRetries++ < 2) {
@@ -815,13 +818,13 @@ export async function workTask(taskId: string): Promise<void> {
     if (unique.length !== 2) { requestError = "I need exactly two distinct GitHub logins, excluding the PR author."; continue; }
     const verified = await validateReviewers(job.repo, unique);
     if (verified.length !== 2) { requestError = "Those logins do not identify two people with repository access. Use two @GitHub logins."; continue; }
-    if (candidates.length === 2 && !requestError) await say(slackLines.reviewerPick(candidates));
+    if (candidates.length === 2 && !requestError) await note(slackLines.reviewerPick(candidates));
     let sent: string[];
     try { sent = await requestReviewers(job.repo, pr, unique); }
     catch (e) { requestError = `GitHub rejected the review request: ${(e as Error).message}`; continue; }
     requested = verified;
     updateTask(taskId, { reviewersRequested: requested });
-    if (sent.length) await say(slackLines.reviewers(sent));
+    if (sent.length) await note(slackLines.reviewers(sent));
   }
   updateTask(task.id, { status: "monitoring", activity: "watching the PR" });
   // Read GitHub first so the pause explains the real blockers.
@@ -850,12 +853,12 @@ export async function workTask(taskId: string): Promise<void> {
       updateTask(taskId, { reviewBatch: observed.batch });
       if (fresh.length && !observed.ready) {
         // this is work in progress, not a pause: the agent is letting the reviewer finish, then fixes everything at once
-        const note = `collecting ${fresh.length} review comments; fixing them together after 3 quiet minutes`;
-        updateTask(taskId, { status: "monitoring", activity: note });
+        const collecting = `collecting ${fresh.length} review comments; fixing them together after 3 quiet minutes`;
+        updateTask(taskId, { status: "monitoring", activity: collecting });
         await notifyTask(taskId, "running", `Review comments arrived; collecting them.`);
         if (previousBatch !== observed.batch?.fingerprint) {
-          statusEvent("info", `Ticket ${task.ticket.id}: ${note}`);
-          await say(slackLines.working(`Collecting ${fresh.length} review comment${fresh.length === 1 ? "" : "s"} from ${[...new Set(fresh.map(t => "@" + t.author))].join(", ")}; fixing them together once they stop for 3 minutes. Nothing needed from you`));
+          statusEvent("info", `Ticket ${task.ticket.id}: ${collecting}`);
+          await note(slackLines.working(`Collecting ${fresh.length} review comment${fresh.length === 1 ? "" : "s"} from ${[...new Set(fresh.map(t => "@" + t.author))].join(", ")}; fixing them together once they stop for 3 minutes. Nothing needed from you`));
         }
         // poll faster while collecting, so the fix starts soon after the quiet period ends rather than up to a poll later
         const remaining = REVIEW_QUIET_MS - (Date.now() - (observed.batch?.stableSince ?? Date.now()));
@@ -875,14 +878,14 @@ export async function workTask(taskId: string): Promise<void> {
         updateTask(taskId, { reviewRequestedHead: afterFix.headSha, reviewRequestedAt: Date.now(), reviewWaitSince: Date.now() });
         if (sent.length) await say(`✅ Re-requested review from ${sent.map(n => "@" + n).join(", ")} after addressing feedback. Your action: none now.`);
         statusEvent("success", `Ticket ${task.ticket.id}: handled a batch of ${fresh.length} review comments`);
-        await say(slackLines.answered(fresh.length, fresh.length - addressed.length));
+        await note(slackLines.answered(fresh.length, fresh.length - addressed.length));
         continue; // re-read straight away
       }
       if (state.mergeable === "CONFLICTING") {
         // a PR that does not merge cleanly is never handed off: bring the base in, resolve, push, and let CI and GitHub re-check
         conflictFixes++;
         if (conflictFixes > 3) throw new ProblemError({ where: "PR watch", what: `Still conflicting with ${job.base} after ${conflictFixes - 1} merge attempts`, why: ["Each attempt merged the base, resolved, and pushed; GitHub still reports conflicts"], ask: "Resolve by hand, or reply with how to resolve the conflicting files." });
-        await say(slackLines.conflicts(job.base, conflictFixes));
+        await note(slackLines.conflicts(job.base, conflictFixes));
         activity(`resolving merge conflicts with ${job.base}`);
         const answer = await turn(`PR ${prUrl} has merge conflicts with origin/${job.base}, so it cannot be merged. In this worktree: git fetch origin ${job.base}, then git merge origin/${job.base} into the branch. Resolve every conflict keeping both the branch's intent and the base's changes; never drop either side blindly. For generated files, regenerate rather than hand-edit. Run the relevant checks, commit the merge, and push. If a conflict needs a business or design decision, ask the owner. Never merge the PR itself.`, builderProvider, "implementation");
         await completeReply(answer, undefined, "implementation");

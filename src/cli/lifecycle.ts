@@ -37,10 +37,12 @@ export async function notifyTask(taskId: string, activity: NonNullable<Task["lif
   const task = state.tasks.find((t) => t.id === taskId);
   if (!task) return;
   if (task.lifecycle !== activity || (["paused", "monitoring"].includes(activity) && task.pauseReason !== reason)) {
+    // the thread hears about steps that need the owner or end the task; restarts, resumes and routine waits stay in the log
+    const quiet = activity === "running" ? !/^Answer received/.test(reason) : activity === "monitoring" ? !/Your action: (?!none)/i.test(reason) : activity === "stopped" && /Progress saved|restarting/i.test(reason);
     const verb = activity === "monitoring" ? "Running" : activity === "running" ? (task.lifecycle ? "Resumed" : "Started") : activity === "paused" ? "Paused" : activity === "completed" ? "Completed — ready for you to merge" : "Stopped";
     const notification = { id: randomUUID(), text: slackStatus(slackMessage(activity === "completed" ? "completed" : ["running", "monitoring"].includes(activity) ? "update" : activity === "paused" ? "waiting" : "stopped",`${verb}: ${task.ticket.title}\n${reason}`), activity === "paused" ? "WAITING" : ["running", "monitoring"].includes(activity) ? "RUNNING" : activity === "completed" ? "COMPLETED" : "STOPPED") };
     updateTask(taskId, (t) => ({ lifecycle: activity, pauseReason: ["paused", "monitoring"].includes(activity) ? reason : undefined,
-      ...(state.slack ? { notificationQueue: [...(t.notificationQueue ?? []), notification] } : {}) }));
+      ...(state.slack && !quiet ? { notificationQueue: [...(t.notificationQueue ?? []), notification] } : {}) }));
   }
   await flushTaskNotifications(taskId);
 }

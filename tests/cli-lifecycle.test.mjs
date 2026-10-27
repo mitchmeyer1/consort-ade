@@ -91,8 +91,9 @@ test('all providers exhausted: one pause, then a separate resume after reset', a
     turn: () => { throw halt; },
   });
   await assert.rejects(h.work(), e => e === halt);
-  assert.equal(h.messages.filter(m => /Running:/.test(m.text) && /usage limit/.test(m.text)).length, 1);
-  assert.equal(h.messages.filter(m => /Resumed:/.test(m.text)).length, 1);
+  // a usage wait and its resume are routine: the tile shows them, the thread stays quiet
+  assert.equal(h.messages.filter(m => /Running:/.test(m.text) && /usage limit/.test(m.text)).length, 0);
+  assert.equal(h.messages.filter(m => /Resumed:/.test(m.text)).length, 0);
   assert.equal(h.task.status, 'working');
   assert.ok(h.messages.filter(m => /\*(Paused|Resumed):/.test(m.text)).every(m => m.thread && !m.broadcast));
 });
@@ -111,7 +112,8 @@ test('usage probe prevents starting an exhausted Codex account even without a tu
   await assert.rejects(h.work(), e => e === halt);
   assert.equal(h.task.status, 'waiting');
   assert.equal(h.events.filter(e => e.startsWith('turn:')).length, 0);
-  assert.equal(h.messages.filter(m => /Running:/.test(m.text) && /usage limit/.test(m.text)).length, 1);
+  assert.match(h.task.pauseReason, /usage limit/);
+  assert.equal(h.messages.filter(m => /Running:/.test(m.text) && /usage limit/.test(m.text)).length, 0);
 });
 
 test('usage exhaustion during a turn aborts the stalled agent and pauses', async () => {
@@ -153,9 +155,8 @@ test('two internal rounds precede two reviewer requests; human feedback resumes 
   assert.equal(h.task.reviewsDone, 2);
   assert.equal(h.task.status, 'ready');
   assert.equal(h.task.lifecycle, 'completed');
-  assert.ok(h.messages.some(m => /Running:/.test(m.text) && /STATUS: RUNNING$/.test(m.text)));
   assert.ok(!h.messages.some(m => /Paused:/.test(m.text)));
-  assert.ok(h.messages.some(m => /Resumed:/.test(m.text)));
+  assert.ok(!h.messages.some(m => /(Running|Resumed):/.test(m.text)), 'routine watch and resume notices stay out of the thread');
   assert.ok(!h.events.some(e => /pr merge/.test(e)));
 });
 
@@ -175,14 +176,15 @@ test('missing internal report cannot finish a review round', async () => {
   assert.equal(failed.task.reviewsDone, 0);
 });
 
-test('worker stops and restarts announce separate transitions; repeated stop is deduplicated', async () => {
+test('a worker stop is announced once; the restart that follows stays out of the thread', async () => {
   const h = harness();
   await h.notify('t', 'running', 'started');
   await h.notify('t', 'stopped', 'process exited');
   await h.notify('t', 'stopped', 'process exited');
   await h.notify('t', 'running', 'restarted');
   assert.equal(h.messages.filter(m => /Stopped:/.test(m.text)).length, 1);
-  assert.equal(h.messages.filter(m => /Resumed:/.test(m.text)).length, 1);
+  assert.equal(h.messages.filter(m => /Resumed:/.test(m.text)).length, 0);
+  assert.equal(h.task.lifecycle, 'running');
 });
 
 test('usage blocks respect all exhausted windows, reset times, staleness and model scope', () => {
@@ -411,16 +413,16 @@ test('lifecycle marks pauses as waiting and stops as stopped, and reserves celeb
   const h = harness();
   await h.notify('t', 'running', 'Starting');
   await h.notify('t', 'paused', 'Credits exhausted');
-  await h.notify('t', 'running', 'Credits restored');
+  await h.notify('t', 'running', 'Answer received: go ahead');
   await h.notify('t', 'stopped', 'Worker stopped');
   await h.notify('t', 'completed', 'Both reviewers and CI approved; merge is yours');
   const notifications = h.messages.filter(m => m.thread);
-  assert.deepEqual(notifications.map(m => m.text.match(/STATUS: (\w+)$/)?.[1]), ["RUNNING", "WAITING", "RUNNING", "STOPPED", "COMPLETED"]);
-  assert.ok(notifications[0].text.startsWith('✅ '));
-  assert.ok(notifications[1].text.startsWith('⏳ '), 'a pause is waiting, not a failure');
-  assert.ok(notifications[2].text.startsWith('✅ '));
-  assert.ok(notifications[3].text.startsWith('⏹️ '), 'a stop on purpose is not a failure');
-  assert.ok(notifications[4].text.startsWith('🎉🍭🎊 '));
+  // the start is routine and stays quiet; the resume after an answer is a reply to the owner
+  assert.deepEqual(notifications.map(m => m.text.match(/STATUS: (\w+)$/)?.[1]), ["WAITING", "RUNNING", "STOPPED", "COMPLETED"]);
+  assert.ok(notifications[0].text.startsWith('⏳ '), 'a pause is waiting, not a failure');
+  assert.ok(notifications[1].text.startsWith('✅ '));
+  assert.ok(notifications[2].text.startsWith('⏹️ '), 'a stop on purpose is not a failure');
+  assert.ok(notifications[3].text.startsWith('🎉🍭🎊 '));
   assert.ok(notifications.every(m => m.thread === h.task.slackThread && !m.broadcast));
   assert.ok(notifications.every(m => /<https:\/\/ticket\/1\|ticket> · <https:\/\/github.com\/a\/b\/pull\/1\|github>\n\nSTATUS: \w+$/.test(m.text)));
 });
@@ -432,7 +434,8 @@ test('a rebooted task opens with a pickup turn that works out where the last run
   assert.ok(prompts[0].includes(headless.REBOOT_PROMPT), 'the first turn is the pickup');
   assert.ok(!prompts[1].includes(headless.REBOOT_PROMPT), 'then the stage resumes');
   assert.equal(h.task.rebootedAt, undefined);
-  assert.ok(h.messages.some(m => /Rebooted by you at \*Implementing\*/.test(m.text)));
+  assert.ok(h.events.some(e => /^ticket comment:[\s\S]*Rebooted by you at \*Implementing\*/.test(e)));
+  assert.ok(!h.messages.some(m => /Rebooted by you/.test(m.text)), 'the reboot note goes on the ticket, not the thread');
   assert.ok(!h.events.includes('owner reply'));
 });
 
@@ -447,8 +450,8 @@ test('while a turn runs the thread gets a short Working note: the first agent li
     throw halt;
   }, onReply: () => {} });
   await assert.rejects(h.work(), e => e === halt);
-  const notes = h.messages.filter(m => /Working:/.test(m.text)).map(m => m.text);
-  assert.ok(notes.every(text => /STATUS: RUNNING$/.test(text)));
+  assert.ok(!h.messages.some(m => /Working:/.test(m.text)), 'working notes go on the ticket, not the thread');
+  const notes = h.events.filter(e => /^ticket comment:[\s\S]*Working:/.test(e)).map(e => e.slice('ticket comment:'.length));
   assert.deepEqual(notes.map(text => text.split('\n')[0]), ['✅ Working: Reading the spec and the ticket', '✅ Working: Reading the spec and the ticket'], 'one note per turn start; the second line is inside the five-minute window; markers never leak');
   assert.ok(notes.every(n => !/ask-user/.test(n)));
 });
@@ -471,7 +474,8 @@ test('watch names a blocking reviewer and green CI, re-requests once and does no
   const h=harness({task:{reviewsDone:3,reviewersRequested:['ada','bob']},readPr:(n,pr)=>({...pr,headSha:'sha1',reviewDecision:'CHANGES_REQUESTED',changesRequestedBy:['ada']}),sleep(){if(++polls===3)throw halt;}});
   await assert.rejects(h.work(),e=>e===halt);
   assert.equal(h.events.filter(e=>e==='reviewers:ada,bob').length,1);
-  assert.ok(h.messages.some(m=>/ada must review again/.test(m.text)&&/CI is green/.test(m.text)&&/Your action: none now/.test(m.text)));
+  assert.ok(/ada must review again/.test(h.task.pauseReason)&&/CI is green/.test(h.task.pauseReason)&&/Your action: none now/.test(h.task.pauseReason));
+  assert.ok(!h.messages.some(m=>/ada must review again/.test(m.text)),'a wait that needs nothing from the owner stays out of the thread');
   assert.ok(!h.messages.some(m=>/Waiting on reviews and CI\./.test(m.text)));
 });
 
@@ -498,16 +502,17 @@ test('a PR with merge conflicts is never handed off: the base is merged in and p
   await h.work();
   assert.equal(h.task.status, 'ready');
   assert.ok(prompts.some(p => /merge conflicts with origin\/main/.test(p) && /git merge origin\/main/.test(p) && /Never merge the PR itself/.test(p)), 'a conflict-fix turn ran');
-  assert.ok(h.messages.some(m => /Merge conflicts with `main`/.test(m.text)));
-  const readyAt = h.messages.findIndex(m => /Ready to merge/.test(m.text));
-  const conflictAt = h.messages.findIndex(m => /Merge conflicts with/.test(m.text));
-  assert.ok(conflictAt >= 0 && readyAt > conflictAt, 'ready only after the conflict was handled');
+  assert.ok(h.events.some(e => /^ticket comment:[\s\S]*Merge conflicts with `main`/.test(e)));
+  const turnAt = h.events.indexOf('turn:claude');
+  const lastConflictRead = h.events.lastIndexOf('read PR');
+  assert.ok(turnAt >= 0 && lastConflictRead > turnAt, 'ready only after the conflict was handled');
+  assert.ok(h.messages.some(m => /Ready to merge/.test(m.text)));
 });
 
 test('still conflicting after three merge attempts asks the owner instead of looping', async () => {
   const h = harness({ task: { reviewsDone: 3, reviewersRequested: ['ada', 'bob'] }, readPr: (n, pr) => ({ ...pr, approvals: ['ada'], reviewDecision: 'APPROVED', mergeable: 'CONFLICTING' }), turn: () => ({ text: '' }), sleep() {}, onReply: () => { throw halt; } });
   await assert.rejects(h.work(), e => e === halt);
-  assert.equal(h.messages.filter(m => /Merge conflicts with `main`/.test(m.text)).length, 3);
+  assert.equal(h.events.filter(e => /^ticket comment:[\s\S]*Merge conflicts with `main`/.test(e)).length, 3);
   assert.ok(h.messages.some(m => /Stuck at PR watch/.test(m.text) && /Still conflicting with main after 3 merge attempts/.test(m.text)));
   assert.ok(!h.messages.some(m => /Ready to merge/.test(m.text)));
 });
@@ -518,15 +523,17 @@ test('collecting review comments reads as working, not paused: one Working note 
     readPr: (n, pr) => n < 4 ? { ...pr, unresolved: [comment] } : { ...pr, approvals: ['ada'], reviewDecision: 'APPROVED' },
     sleep() {}, turn: () => ({ text: '' }) });
   await h.work();
-  assert.equal(h.messages.filter(m => /Working: Collecting 1 review comment from @ada/.test(m.text)).length, 1, 'said once per batch, not on every poll');
+  assert.equal(h.events.filter(e => /^ticket comment:[\s\S]*Working: Collecting 1 review comment from @ada/.test(e)).length, 1, 'said once per batch, not on every poll');
   assert.ok(!h.messages.some(m => /Paused:/.test(m.text) && /Collecting/.test(m.text)), 'collecting is not a pause');
-  assert.ok(h.messages.every(m => !/Collecting/.test(m.text) || /STATUS: RUNNING$/.test(m.text)), 'the status footer says running');
+  assert.ok(!h.messages.some(m => /Collecting/.test(m.text)), 'collecting goes on the ticket, not the thread');
   assert.equal(h.task.status, 'ready');
 });
 
 test('automatic monitoring is RUNNING while a required owner answer is WAITING', async () => {
   const h=harness();
   await h.notify('t','monitoring','CI is running; next check in 3m. Your action: none.');
+  assert.equal(h.messages.filter(m=>m.thread).length,0,'a wait that needs nothing from the owner stays out of the thread');
+  await h.notify('t','monitoring','CI is green. Your action: nudge @ada to review.');
   await h.notify('t','paused','Choose the design; reply here.');
   const replies=h.messages.filter(m=>m.thread);
   assert.match(replies[0].text,/Running:[\s\S]*STATUS: RUNNING$/);
@@ -888,7 +895,7 @@ test('the planner sets the build effort for the writers, and a scanner-level eff
     assert.ok(!writers.some(o => o.prompt.includes('[build-effort:')), 'build turns are not asked');
     assert.equal(h.task.plannedEffort.level, 'xhigh');
     assert.equal(h.task.plannedEffort.reason, 'crosses billing and the warehouse sync');
-    assert.ok(h.messages.some(m => /Build effort: xhigh/.test(m.text)), 'the thread names the planner\'s choice');
+    assert.ok(h.events.some(e => /^ticket comment:[\s\S]*Build effort: xhigh/.test(e)), 'the ticket names the planner\'s choice');
   }
 });
 
@@ -1046,7 +1053,7 @@ test('a task rebooted at Grilling grills again with fresh research and resource 
   assert.ok(planner.prompt.includes(RESOURCE_HEADING), 'the first planner turn has the resource report');
   assert.equal(forms[0].resources, true);
   assert.equal(h.task.rebootedAt, undefined);
-  assert.ok(h.messages.some(m => /Rebooted by you at \*Grilling\*\. Grilling again with fresh research/.test(m.text)));
+  assert.ok(h.events.some(e => /^ticket comment:[\s\S]*Rebooted by you at \*Grilling\*\. Grilling again with fresh research/.test(e)));
 });
 
 const marker = '[covered-analyst: How many members replied uncertain?; tables: analytics.consent.appended_phone; shape: a count and a share]';
