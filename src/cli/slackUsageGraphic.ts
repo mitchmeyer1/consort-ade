@@ -6,9 +6,9 @@
  */
 import { monitorAccounts, monitorSystem, type AccountUsage } from './slackMonitorBlocks.ts';
 
-// Slack scales an image block down to fit its message, so a 1360px drawing showed its type at a third of the size,
-// and a 640px one showed narrow with room to its right. 960px at the same height fills more of that room.
-const W = 960, PAD = 24, NAME_W = 150, ROW_H = 56, HEAD_H = 30, GROUP_GAP = 22, RESUME_W = 110;
+// Slack shows every image block at the same width (about 480px) however wide it is drawn: a 1360px drawing showed
+// its type at a third of the size. So the panel is drawn narrow, 640px, and its type shows 25% larger than at 800px.
+const W = 640, PAD = 24, NAME_W = 150, ROW_H = 56, HEAD_H = 30, GROUP_GAP = 22, RESUME_W = 110;
 const FONT = `Menlo, 'SF Mono', Consolas, 'DejaVu Sans Mono', monospace`;
 const INK = '#ece6d8', MUTED = '#9a9c9e', TRACK = '#33363b';
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -101,7 +101,7 @@ function bar(x: number, y: number, width: number, label: string, value: string, 
 }
 
 // The usage rows end at SPLIT; the System box fills the rest, after a gap holding a thin rule.
-const SPLIT = 560, SYS_GAP = 24, SYS_ALONE_W = 320, COUNT_H = 38, BAR_H = 48, LINE_H = 19;
+const SPLIT = 372, SYS_GAP = 24, SYS_ALONE_W = 320, COUNT_H = 38, BAR_H = 48, LINE_H = 19;
 const CHART_H = 84, CHART_BARS_H = 36;
 /** `10 15 - 20` from the monitor text as numbers, `-` as no reading; undefined without a series. */
 const series = (s: string | undefined) => (s ? s.split(' ').map((v) => (v === '-' ? null : Number(v))) : undefined);
