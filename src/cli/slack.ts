@@ -1,10 +1,9 @@
-import { setTimeout as delay } from 'node:timers/promises';
-import { createHash } from 'node:crypto';
 import { replyAfter, slackMessage, slackStatus, STATUS_TAIL } from "../shared/headless.ts";
 import type { SlackConfig } from "./state";
 import { redactPii } from "../shared/redact.ts";
 import type { SlackFile } from "./ownerUpdates";
 import { slackGate } from "./phiGate.ts";
+import { monitorBlockKit } from "./slackMonitorBlocks.ts";
 
 export type SlackThreadMessage = { ts: string; user?: string; text?: string; bot_id?: string; files?: SlackFile[] };
 
@@ -16,18 +15,15 @@ export type SlackThreadMessage = { ts: string; user?: string; text?: string; bot
  *
  * Scopes the bot token needs: chat:write (post), im:write (open the DM), im:history (read replies in
  * the DM; channels:history or groups:history instead when pointed at a channel), files:read (download
- * documents the owner attaches to an update), files:write (private dashboard images). No users:read or
+ * documents the owner attaches to an update). Nothing else: no users:read, files:write or
  * incoming-webhook. The list the setup wizard shows is SLACK_SCOPES in setup.ts.
  */
-const dashboardFiles = new Map<string, {id:string; key:string}[]>();
-const dashboardDisabled = new Set<string>();
 export class Slack {
   private cfg: SlackConfig;
   private fetchImpl: typeof fetch;
   private gate?: (text: string) => string;
-  private retryDelay: (ms:number)=>Promise<unknown>;
   /** `gate` turns a message into what may be posted; by default the PHI/PII guard's, read from state (cli/phiGate.ts slackGate) */
-  constructor(cfg: SlackConfig, fetchImpl: typeof fetch = (...a) => fetch(...a), gate: ((text: string) => string) | undefined = slackGate, retryDelay: (ms:number)=>Promise<unknown> = delay) { this.cfg = cfg; this.fetchImpl = fetchImpl; this.gate = gate; this.retryDelay=retryDelay; }
+  constructor(cfg: SlackConfig, fetchImpl: typeof fetch = (...a) => fetch(...a), gate: ((text: string) => string) | undefined = slackGate) { this.cfg = cfg; this.fetchImpl = fetchImpl; this.gate = gate; }
 
   private async api(method: string, body: Record<string, unknown>): Promise<any> {
     // form fields, not JSON: Slack's read methods (conversations.replies, conversations.history…) answer
@@ -42,7 +38,7 @@ export class Slack {
       ...(form.size ? { body: form.toString() } : {}), signal: AbortSignal.timeout(20_000),
     });
     const j = await res.json();
-    if (!j.ok) throw Object.assign(new Error(`Slack ${method}: ${j.error ?? res.status}`), { slackMessages: j.response_metadata?.messages ?? j.errors ?? [] });
+    if (!j.ok) throw Object.assign(new Error(`Slack ${method}: ${j.error ?? res.status}`), { slackMessages: j.response_metadata?.messages ?? [] });
     return j;
   }
 
@@ -67,19 +63,19 @@ export class Slack {
 
   /** A single monitor root, with no automatic per-ticket STATUS footer or thread reply. */
   async postMonitor(text: string): Promise<string> {
-    const result=await this.sendMonitor("chat.postMessage", { channel: await this.channel(), text: text.split("\n")[0], parse: "none", unfurl_links: false, unfurl_media: false, blocks: await this.dashboardBlocks(text) }, text);
-    await this.retireDashboardFiles();return result.ts;
+    return (await this.sendMonitor("chat.postMessage", { channel: await this.channel(), text: text.split("\n")[0], parse: "none", unfurl_links: false, unfurl_media: false }, text)).ts;
   }
 
-  /** Pin the existing root; a pin provides a shortcut without reposting the dashboard. */
+  /** Pin the existing root; a pin provides a shortcut without reposting the monitor. */
   async pinMonitor(ts: string): Promise<void> {
     try { await this.api("pins.add", { channel: await this.channel(), timestamp: ts }); }
     catch (error) { if (!/already_pinned/.test(String(error))) throw error; }
   }
 
-  /** Block sections keep Slack from splitting a long monitor into multiple root messages. */
-  private monitorBlocks(text: string): unknown[] {
+  /** The monitor as Block Kit (cli/slackMonitorBlocks.ts); any other text as plain sections, which keep Slack from splitting a long post. */
+  private monitorBlocks(text: string, plain = false): unknown[] {
     const safe = this.gate ? this.gate(text) : redactPii(text);
+    if (!plain) { const blocks = monitorBlockKit(safe); if (blocks) return blocks; }
     const chunks: string[] = [];
     let chunk = "";
     for (const line of safe.split("\n")) {
@@ -95,83 +91,16 @@ export class Slack {
   }
 
   async updateMonitor(ts: string, text: string): Promise<void> {
-    await this.sendMonitor("chat.update", { channel: await this.channel(), ts, text: text.split("\n")[0], blocks: await this.dashboardBlocks(text), unfurl_links: false }, text);
-    await this.retireDashboardFiles();
+    await this.sendMonitor("chat.update", { channel: await this.channel(), ts, text: text.split("\n")[0], unfurl_links: false }, text);
   }
 
-  private async sendMonitor(method:string,body:Record<string,unknown>,text:string):Promise<any>{
-    for(let attempt=0;;attempt++){
-      try{return await this.api(method,body);}
-      catch(error){
-        const messages=(error as Error & {slackMessages?:string[]}).slackMessages??[];
-        // A rejected block created no message. Slack can acknowledge an upload before its image is ready.
-        if(messages.some(m=>m.includes('invalid slack file')) && attempt<4){
-          await this.retryDelay([250,750,1500,3000][attempt]);continue;
-        }
-        // Never retry an ambiguous network failure: the original root may already exist.
-        if(!/Slack chat\.(?:postMessage|update): (?:invalid_blocks|invalid_arguments|file_not_found)/.test(String(error)))throw error;
-        console.error(`Slack dashboard blocks rejected: ${String(error)}; using text monitor.`);
-        this.dashboardCurrent=undefined;
-        return this.api(method,{...body,blocks:this.monitorBlocks(text)});
-      }
-    }
-  }
-
-  setDashboardFiles(files:{id:string;key:string}[]):void{this.savedDashboardFiles=files;}
-  getDashboardFiles():{id:string;key:string}[]{return this.dashboardCurrent ? dashboardFiles.get(this.dashboardCurrent.identity)??[] : this.savedDashboardFiles;}
-  private savedDashboardFiles:{id:string;key:string}[]=[];
-  /** Upload privately, then reference the image in the existing root; no file-share posts. */
-  private async dashboardBlocks(text: string): Promise<unknown[]> {
-    const identity=createHash('sha256').update(this.cfg.botToken+':'+await this.channel()).digest('hex');
-    if(dashboardDisabled.has(identity)) return this.monitorBlocks(text);
-    const safe=this.gate ? this.gate(text) : redactPii(text);
-    // Ordinary guard notices and legacy/test messages keep their native text representation.
-    if(!safe.startsWith('*📊 Consort master monitor*') || !safe.includes('*Working*')) return this.monitorBlocks(safe);
-    try {
-      const {dashboardPanels,dashboardGraphic,dashboardPng}=await import('./slackDashboard.ts');
-      const panels=dashboardPanels(safe), previous=dashboardFiles.get(identity)??this.savedDashboardFiles, used:{id:string;key:string}[]=[], blocks:unknown[]=[];
-      // One image precedes at most 38 native task-link rows and the update timestamp.
-      const visible=[dashboardGraphic(panels)];
-      for(const panel of visible){
-        const key=createHash('sha256').update(panel.svg).digest('hex');
-        let file=previous.find(f=>f.key===key);
-        if(!file){
-          const png=dashboardPng(panel.svg);
-          const upload=await this.api('files.getUploadURLExternal',{filename:'consort-dashboard.png',length:png.length});
-          if(!upload.file_id || !upload.upload_url) throw new Error('Slack image upload URL unavailable');
-          const response=await this.fetchImpl(upload.upload_url,{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:new Uint8Array(png),signal:AbortSignal.timeout(20_000)});
-          if(!response.ok) throw new Error(`Slack image transfer: HTTP ${response.status}`);
-          await this.api('files.completeUploadExternal',{files:[{id:upload.file_id,title:'Consort dashboard'}]});
-          file={id:upload.file_id,key};
-          dashboardFiles.set(identity,[...(dashboardFiles.get(identity)??previous),file]);
-        }
-        used.push(file);
-        blocks.push({type:'image',slack_file:{id:file.id},alt_text:panel.alt});
-      }
-      // The image contains every task; native rows beneath it preserve independent destinations.
-      for(const panel of panels)if(panel.links){
-        const title=(panel.title??'Task').replace(/[*_`~]/g,'');
-        blocks.push({type:'section',text:{type:'mrkdwn',text:[`*${title}*`,panel.metadata,[panel.age,panel.cost].filter(Boolean).join(' · '),panel.action,panel.links].filter(Boolean).join('\n').slice(0,2900)}});
-      }
-      for(const account of panels.flatMap(p=>p.accounts??[]))if(account.blocked)blocks.push({type:'section',text:{type:'mrkdwn',text:`*${account.name} · blocked*\n${account.detail}`.slice(0,2900)}});
-      blocks.push({type:'context',elements:[{type:'plain_text',text:safe.split('\n')[1]??'Consort monitor'}]});
-      // Keep uploaded IDs until chat.update succeeds; abandoned files can be reused on retry.
-      dashboardFiles.set(identity,[...used,...(dashboardFiles.get(identity)??previous).filter(f=>!used.some(u=>u.id===f.id))]);
-      this.dashboardCurrent={identity,used};
-      return blocks;
-    } catch(error){
-      if(/missing_scope/.test(String(error))) dashboardDisabled.add(identity);
-      console.error(`Slack dashboard images: ${String(error)}; using text monitor.`);
-      this.dashboardCurrent=undefined;
-      return this.monitorBlocks(safe);
-    }
-  }
-  private dashboardCurrent?: {identity:string;used:{id:string;key:string}[]};
-  private async retireDashboardFiles():Promise<void>{
-    const current=this.dashboardCurrent;if(!current)return;
-    for(const file of dashboardFiles.get(current.identity)??[])if(!current.used.some(f=>f.id===file.id)){
-      try{await this.api('files.delete',{file:file.id});}catch{/* Retry retirement on the next successful update. */continue;}
-      dashboardFiles.set(current.identity,(dashboardFiles.get(current.identity)??[]).filter(f=>f.id!==file.id));
+  /** Should Slack reject the Block Kit layout, the same root gets the plain-section monitor; nothing else is retried, as a timed-out post may already exist. */
+  private async sendMonitor(method: string, body: Record<string, unknown>, text: string): Promise<any> {
+    try { return await this.api(method, { ...body, blocks: this.monitorBlocks(text) }); }
+    catch (error) {
+      if (!/^Error: Slack chat\.(?:postMessage|update): invalid_blocks/.test(String(error))) throw error;
+      console.error(`Slack monitor blocks rejected: ${String(error)} ${JSON.stringify((error as { slackMessages?: unknown }).slackMessages ?? [])}; using the text monitor.`);
+      return this.api(method, { ...body, blocks: this.monitorBlocks(text, true) });
     }
   }
 

@@ -50,7 +50,6 @@ const why = (title: string, lines: { for: string; where: string; needs?: string[
 
 /** the Slack bot token scopes consort-cli calls, one line each: what the scope is for, so a missing one is obvious */
 const SLACK_SCOPES: readonly [scope: string, reason: string][] = [
-  ["files:write", "upload the branded monitor dashboard"],
   ["chat:write", "post progress and questions as the bot"],
   ["im:write", "open the DM with you"],
   ["im:history", "read your replies in the DM thread; without it the bot can post but never hear you"],

@@ -402,19 +402,13 @@ Evidence capture, capture continuations and acceptance checks use a dedicated `e
 
 The master monitor uses 🟠 for tasks needing a human reply. It attempts to pin its root once per daemon session; automatic pinning needs Slack's `pins:write` bot scope. Missing permission leaves monitor updates working and logs a manual-pin instruction. Slack pins are available through the conversation's Pins tab; they do not stick a message to the bottom of the conversation.
 
-### Branded Slack monitor
+### Slack monitor layout
 
-The master monitor renders Consort's cream muses artwork, black panels, task workflow stages,
-costs, GitHub authors, and AI capacity as private PNG images. Existing monitor timestamps and
-per-ticket threads are reused after reboot. Slack requires `files:write` for image uploads;
-without it the bot retains the full text monitor and logs the missing scope.
-
-One SVG dashboard, rasterized to one PNG for Slack, contains every task and its action.
-Task titles and Slack / GitHub / ClickUp links appear as native text below the complete graphic. Slack cannot make destinations embedded in a PNG clickable, and
-native Slack spacing will differ from the HTML design preview. Blocked AI accounts show their
-reason and Eastern resume time instead of usage bars. Uploaded images are reused when unchanged;
-replaced images are retired only after the monitor edit succeeds.
-
-The Slack image overview stays short: up to four active tasks, a completed count, and AI capacity.
-Every task retains its full author, workflow, cost, age, description and links in native text below
-the graphic. This prevents Slack from shrinking a tall task history into an unreadable thumbnail.
+The master monitor is native Slack Block Kit, not an image: a Consort header, one line with the
+update time (shown in the reader's time zone) and the counts, then four lists in the order you act
+on them: needs your reply, ready to merge, working, completed. Each task shows its title linked to
+its Slack thread, the workflow stage as a `▰▰▱▱` bar, the author, cost and age, the current action
+as a quote, and Thread / GitHub (or Merge PR) / ClickUp links. AI capacity closes the post with one
+meter per account; a blocked account shows its reason and Eastern resume time instead. Task rows are
+packed into as few sections as fit, so forty tasks stay inside Slack's fifty-block limit. Should Slack
+reject the layout, the same root gets the plain text monitor. No `files:write` scope is needed.
