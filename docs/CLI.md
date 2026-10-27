@@ -140,7 +140,7 @@ Slack headings use a local formatter, so naming a task consumes no model call. E
 
 ## Slack app
 
-One Consort app serves the whole team. Create it once: [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From a manifest** → pick the workspace → paste [slack-app-manifest.json](slack-app-manifest.json) → **Create** → **Install to Workspace**. Under **Basic Information → Display Information** upload `build/icon_1024.png` as the app icon. The **Bot User OAuth Token** (starts `xoxb-`) on **OAuth & Permissions** is the token everyone uses.
+One Consort app serves the whole team. Create it once: [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From a manifest** → pick the workspace → paste [slack-app-manifest.json](slack-app-manifest.json) → **Create** → **Install to Workspace**. Under **Basic Information → Display Information** upload `build/consort-slack-icon.png` as the app icon (the muses on one flat colour, so Slack's rounded corners stay clean). The **Bot User OAuth Token** (starts `xoxb-`) on **OAuth & Permissions** is the token everyone uses.
 
 Each person then runs `consort-cli slack set --bot-token xoxb-… --user <their member id>` (the member id is in Slack under Profile → ⋯ → Copy member ID). Every consort-cli posts into its own owner's DM with the bot and publishes that owner's Home tab, so people share the bot but see only their own tasks. Anyone holding the token can post as the bot, so share it like a password.
 
