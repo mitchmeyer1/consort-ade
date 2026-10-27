@@ -199,7 +199,7 @@ export function monitorCounts(safe: string): Record<Group['key'], number> | unde
   return { reply: reply.rows.length, nudge: nudge.rows.length, ready: ready.rows.length + more(ready), working: working.rows.length + more(working) };
 }
 /** Blocks for a master monitor text; undefined for anything else (guard notices, legacy posts, tests). The head is the uploaded header picture when there is one, else the banner. */
-export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageImage, head?: UsageImage, system?: UsageImage, linked?: { wide: { url: string; alt: string } }): Block[] | undefined {
+export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageImage, head?: UsageImage, system?: UsageImage, linked?: { usage: { url: string; alt: string }; system: { url: string; alt: string } }): Block[] | undefined {
   const monitor = parseMonitor(safe);
   if (!monitor) return undefined;
   const { lines, groups, completed, completedNotes, accounts } = monitor;
@@ -227,9 +227,9 @@ export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageIma
   const parsed = accounts.map(parseAccount);
   // The rendered panel says everything the chart and notes would; without one, Slack's own chart stands in.
   const chart = usage || linked ? undefined : usageChart(parsed, now);
-  // Usage and System side by side in one linked picture (cli/imageTunnel.ts), inside a full-width container so it spans the
-  // message; an uploaded file never renders in a container, so without a link they are uploaded and stacked at top level.
-  if (linked) blocks.push(container(`panels-${now}`, ' ', undefined, [{ type: 'image', image_url: linked.wide.url, alt_text: linked.wide.alt.slice(0, 2000) }], { divider: false }));
+  // Usage and System are two pictures: side by side as carousel cards when they have public addresses (cli/imageTunnel.ts),
+  // else uploaded and one under the other, as an uploaded file in a card shows blank in Slack.
+  if (linked) blocks.push({ type: 'carousel', block_id: `panels-${now}`, elements: (['usage', 'system'] as const).map(k => ({ type: 'card', block_id: `${k}-${now}`, hero_image: { type: 'image', image_url: linked[k].url, alt_text: linked[k].alt.slice(0, 2000) } })) });
   const picture = (key: string, img: UsageImage) => ({ type: 'image', block_id: `${key}-${now}`, slack_file: { id: img.fileId }, alt_text: img.alt.slice(0, 2000) });
   if (usage) blocks.push(picture('usage', usage));
   else if (chart) blocks.push(chart);

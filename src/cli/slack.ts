@@ -8,14 +8,15 @@ import { slackGate } from "./phiGate.ts";
 import { monitorBlockKit, type UsageImage } from "./slackMonitorBlocks.ts";
 import { publish, tunnelUp } from "./imageTunnel.ts";
 
-/** Usage and System as one wide picture at the daemon's public picture address, or undefined without the tunnel. */
-async function linkedPictures(safe: string): Promise<{ wide: { url: string; alt: string } } | undefined> {
+/** Usage and System at the daemon's public picture address, or undefined without the tunnel or either picture. */
+async function linkedPictures(safe: string): Promise<{ usage: { url: string; alt: string }; system: { url: string; alt: string } } | undefined> {
   if (!tunnelUp()) return undefined;
   try {
     const { usageGraphic, usagePng } = await import("./slackUsageGraphic.ts");
-    const g = usageGraphic(safe, "wide");
-    const url = g && publish(await usagePng(g.svg));
-    return g && url ? { wide: { url, alt: g.alt } } : undefined;
+    const u = usageGraphic(safe, "usage"), s = usageGraphic(safe, "system");
+    if (!u || !s) return undefined;
+    const uUrl = publish(await usagePng(u.svg)), sUrl = publish(await usagePng(s.svg));
+    return uUrl && sUrl ? { usage: { url: uUrl, alt: u.alt }, system: { url: sUrl, alt: s.alt } } : undefined;
   } catch (error) { console.error(`Slack linked pictures: ${String(error)}`); return undefined; }
 }
 /** a rendered picture's file ids and picture hash, as state saves them */
@@ -177,7 +178,7 @@ export class Slack {
   private async sendMonitor(method: string, body: Record<string, unknown>, text: string): Promise<any> {
     const safe = this.gate ? this.gate(text) : redactPii(text);
     const kit = monitorBlockKit(safe);
-    // Usage and System as one wide linked picture from the daemon's ngrok address; uploads only if Slack refuses that.
+    // Usage and System side by side as carousel cards, from the daemon's ngrok address; uploads only if Slack refuses that.
     const linked = kit ? await linkedPictures(safe) : undefined;
     let usage: ShownImage | undefined, system: ShownImage | undefined, head: ShownImage | undefined;
     const layouts: (() => Promise<{ blocks: unknown[]; withImage: boolean } | undefined>)[] = [

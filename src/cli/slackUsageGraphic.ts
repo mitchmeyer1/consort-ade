@@ -164,26 +164,10 @@ export function usageAlt(accounts: AccountUsage[], system: Record<string, string
  * The panel for a master monitor text, or undefined when it lists no accounts and no System section. `part` draws
  * the usage rows or the System box alone, each its own picture for the two cards of a Slack carousel.
  */
-export function usageGraphic(safe: string, part?: 'usage' | 'system' | 'wide'): { svg: string; alt: string } | undefined {
+export function usageGraphic(safe: string, part?: 'usage' | 'system'): { svg: string; alt: string } | undefined {
   const accounts = part === 'system' ? [] : monitorAccounts(safe), system = part === 'usage' ? {} : monitorSystem(safe);
   if (!accounts.length && !Object.keys(system).length) return undefined;
-  const svg = part === 'wide' ? wideSvg(accounts, system) : part ? cardSvg(part, accounts, system) : usageSvg(accounts, system);
-  return { svg, alt: usageAlt(accounts, system) };
-}
-
-// Inside a full-width Slack container a linked picture spans the whole message, so this one is drawn wide:
-// the usage rows on the left, then the System box as two columns.
-const WIDE_SPLIT = 584, WIDE_W = 1004;
-/** Usage left of a thin rule, System right of it: counts, disk and machine, then the CPU and memory charts. */
-export function wideSvg(accounts: AccountUsage[], system: Record<string, string>): string {
-  const hasUsage = accounts.length > 0, hasSystem = Object.keys(system).length > 0;
-  const usage = hasUsage ? usageBody(accounts, hasSystem ? WIDE_SPLIT : WIDE_W, false, { nameW: 130, resumeW: 100, gap: 18 }) : { body: '', height: 0 };
-  const x = hasUsage ? WIDE_SPLIT : 0, pick = (charts: boolean) => Object.fromEntries(Object.entries(system).filter(([k]) => CHARTS.has(k) === charts));
-  const left = hasSystem ? systemBody(pick(false), x + PAD, x + PAD + 200) : { body: '', height: 0 };
-  const right = hasSystem ? systemBody(pick(true), x + PAD + 220, WIDE_W - PAD, '') : { body: '', height: 0 };
-  const height = Math.max(usage.height, left.height, right.height);
-  const rule = hasUsage && hasSystem ? `<line x1="${WIDE_SPLIT}" y1="${PAD}" x2="${WIDE_SPLIT}" y2="${height - PAD}" stroke="${TRACK}" stroke-width="2"/>` : '';
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDE_W}" height="${height}" viewBox="0 0 ${WIDE_W} ${height}" font-family="${FONT}">${usage.body}${rule}${left.body}${right.body}</svg>`;
+  return { svg: part ? cardSvg(part, accounts, system) : usageSvg(accounts, system), alt: usageAlt(accounts, system) };
 }
 
 // A Slack card is a fixed width and crops its picture to 4:3. Each card picture is drawn as narrow as its content
