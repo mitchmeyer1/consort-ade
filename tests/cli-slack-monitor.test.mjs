@@ -113,7 +113,7 @@ test('long monitors use bounded Slack blocks for both creation and edits',async(
   const text=MASTER_MONITOR_HEADING+'\n'+Array(40).fill('Ticket SECRET '+'x'.repeat(150)).join('\n');
   await slack.postMonitor(text);await slack.updateMonitor('monitor',text);
   for(const body of calls){
-    const blocks=JSON.parse(body.blocks);assert.ok(blocks.length>1);
+    const blocks=body.blocks?JSON.parse(body.blocks):JSON.parse(body.view).blocks;assert.ok(blocks.length>1);
     assert.ok(blocks.every(b=>b.text.text.length<=3000));
     assert.ok(blocks[0].text.text.startsWith(MASTER_MONITOR_HEADING));
     assert.doesNotMatch(JSON.stringify(blocks),/SECRET/);

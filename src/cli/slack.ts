@@ -25,6 +25,8 @@ export type SlackThreadMessage = { ts: string; user?: string; text?: string; bot
  * documents the owner attaches to an update), files:write (the PR article in a review thread). No users:read or
  * incoming-webhook. The list the setup wizard shows is SLACK_SCOPES in setup.ts.
  */
+/** Home tab errors already logged, so a recurring one is reported once per process. */
+const homeErrors = new Set<string>();
 /** Bots whose token lacks files:write: picture uploads are not tried again this process. */
 const usageUploadsDisabled = new Set<string>();
 export class Slack {
@@ -175,6 +177,7 @@ export class Slack {
           const result = await this.api(method, { ...body, blocks: layout.blocks });
           await this.settleFile("usage", layout.withImage ? usage : undefined, usage);
           await this.settleFile("head", layout.withImage ? head : undefined, head);
+          await this.publishHome(layouts.slice(i).map((l) => l.blocks));
           return result;
         } catch (error) {
           const messages = (error as Error & { slackMessages?: string[] }).slackMessages ?? [];
@@ -183,6 +186,23 @@ export class Slack {
           console.error(`Slack monitor blocks rejected: ${String(error)} ${JSON.stringify(messages)}; trying the next layout.`);
           break;
         }
+      }
+    }
+  }
+
+  /**
+   * The same dashboard on the owner's Home tab of this app, one click from Slack's sidebar: the layout the post
+   * took, else the next one Slack accepts. The Home tab is extra; its failure never fails the post, and each
+   * distinct error is logged once per process.
+   */
+  private async publishHome(layouts: unknown[][]): Promise<void> {
+    if (!this.cfg.userId) return;
+    for (const blocks of layouts) {
+      try { await this.api("views.publish", { user_id: this.cfg.userId, view: { type: "home", blocks: blocks.slice(0, 100) } }); return; }
+      catch (error) {
+        const message = `${String(error)} ${JSON.stringify((error as Error & { slackMessages?: string[] }).slackMessages ?? [])}`;
+        if (!homeErrors.has(message)) { homeErrors.add(message); console.error(`Slack Home tab: ${message}`); }
+        if (!/invalid_blocks/.test(String(error))) return;
       }
     }
   }

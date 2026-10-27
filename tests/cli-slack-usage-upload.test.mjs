@@ -26,7 +26,10 @@ function fake(opts = {}) {
   const calls = []; let n = 0;
   const slack = new Slack({ botToken: `tok-${Math.random()}`, channel: 'C1', userId: 'owner' }, async (url, init) => {
     if (String(url).startsWith('https://upload.example/')) { calls.push({ method: 'transfer', bytes: init.body.length }); return new Response('ok'); }
-    const method = String(url).split('/').at(-1), body = Object.fromEntries(new URLSearchParams(init.body)); calls.push({ method, body });
+    const method = String(url).split('/').at(-1), body = Object.fromEntries(new URLSearchParams(init.body));
+    // The Home tab copy is checked on its own; the upload tests count only the post's calls.
+    if (method === 'views.publish') { const view = JSON.parse(body.view); (opts.home ??= []).push(view); const no = opts.homeError?.(view); return Response.json(no ? { ok: false, error: no } : { ok: true }); }
+    calls.push({ method, body });
     if (method === 'files.getUploadURLExternal') return opts.noScope ? Response.json({ ok: false, error: 'missing_scope' }) : Response.json({ ok: true, file_id: `F${++n}`, upload_url: `https://upload.example/${n}` });
     if (method === 'chat.update' || method === 'chat.postMessage') {
       const blocks = JSON.parse(body.blocks), withImage = JSON.stringify(blocks).includes('slack_file');
@@ -110,4 +113,20 @@ test('the header shows a count for every open group, zeros included, and uploads
   const svg = headSvg({ reply: 0, nudge: 2, ready: 0, working: 1 });
   for (const label of ['REPLY', 'NUDGE', 'READY', 'WORKING']) assert.ok(svg.includes(`>${label}<`), label);
   assert.equal((svg.match(/>0</g) ?? []).length, 2, 'zeros are drawn'); assert.match(svg, /<image [^>]*href="data:image\/png;base64,/);
+});
+
+test('every accepted post is copied to the owner Home tab with the same blocks', async () => {
+  const { slack, calls, opts } = fake();
+  await slack.updateMonitor('same', text);
+  assert.equal(opts.home.length, 1); assert.equal(opts.home[0].type, 'home');
+  assert.deepEqual(opts.home[0].blocks, sent(calls)[0]);
+});
+
+test('a Home tab failure never fails the post; rejected blocks fall back to the next layout', async () => {
+  const rejectCards = fake({ homeError: v => JSON.stringify(v.blocks).includes('slack_file') ? 'invalid_blocks' : undefined });
+  await rejectCards.slack.updateMonitor('same', text);
+  assert.equal(rejectCards.opts.home.length, 2); assert.ok(!JSON.stringify(rejectCards.opts.home[1].blocks).includes('slack_file'));
+  const disabled = fake({ homeError: () => 'not_enabled' });
+  await disabled.slack.updateMonitor('same', text);
+  assert.equal(disabled.opts.home.length, 1, 'a non-block error is not retried'); assert.equal(sent(disabled.calls).length, 1);
 });
