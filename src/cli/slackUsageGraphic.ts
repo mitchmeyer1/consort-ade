@@ -172,26 +172,25 @@ export function usageGraphic(safe: string, part?: 'usage' | 'system'): { svg: st
 
 // A Slack card is a fixed width and crops its picture to 4:3. Each card picture is drawn as narrow as its content
 // allows, at 4:3 with no spare margin, so Slack scales its type up as far as it can.
-const CARD_MIN_W = 384, CARD_M = 8, CARD_ROW = 48, CHARTS = new Set(['CPU', 'CPU30', 'Memory', 'Memory30']);
+const CARD_MIN_W = 384, CARD_M = 8, CARD_ROW = 56, CHARTS = new Set(['CPU', 'CPU30', 'Memory', 'Memory30']);
 const card = (body: string, x: number, y: number, contentH: number) => {
   const width = Math.max(CARD_MIN_W, Math.ceil((contentH * 4) / 3)), height = Math.round((width * 3) / 4);
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="${x} ${y} ${width} ${height}" font-family="${FONT}">${body}</svg>`;
 };
-/** One account per row: its name over its reset or resume time, then its bars. */
+/** One account per row: its name with its reset or resume time on the right, then its bars across the whole width. */
 function cardUsage(accounts: AccountUsage[]): string {
   const columns = Math.min(4, Math.max(1, ...accounts.map((a) => a.windows.length)));
-  const height = CARD_M + 24 + accounts.length * CARD_ROW + CARD_M, width = Math.max(CARD_MIN_W, Math.ceil((height * 4) / 3));
-  const nameW = 114, gap = 10, barsX = CARD_M + nameW, groupW = (width - CARD_M - barsX - (columns - 1) * gap) / columns;
+  const height = CARD_M + 22 + accounts.length * CARD_ROW + CARD_M, width = Math.max(CARD_MIN_W, Math.ceil((height * 4) / 3));
+  const gap = 12, right = width - CARD_M, groupW = (right - CARD_M - (columns - 1) * gap) / columns, words = Math.floor((right - CARD_M) / 8.4);
   let y = CARD_M, body = text('USAGE', CARD_M, y + 14, 15, MUTED, ' letter-spacing="4"');
-  y += 24;
+  y += 22;
   for (const a of accounts) {
-    body += text(clip(a.name, 10), CARD_M, y + 20, 19, INK, ' font-weight="600"');
+    body += text(clip(a.name, 12), CARD_M, y + 15, 17, INK, ' font-weight="600"');
     const at = a.blocked ? resumeAt(a.detail) : a.resets ? resumeAt(a.resets) : undefined, tone = a.blocked ? usageColor(100) : MUTED;
-    if (at || a.blocked) body += text(at ? `${at.day} ${at.time}` : 'resume unknown', CARD_M, y + 38, 11, tone);
-    const words = Math.floor((width - CARD_M - barsX) / 8.4);
-    if (a.blocked && !a.windows.length) body += text(clip(`blocked · ${a.detail.replace(/ · resume.*$/, '')}`, words), barsX, y + 26, 14, usageColor(100));
-    else if (!a.windows.length) body += text(clip(a.detail === 'no reading yet' ? 'no reading yet' : `no reading · ${a.detail}`, words), barsX, y + 26, 14, MUTED);
-    else a.windows.slice(0, columns).forEach((w, i) => { body += bar(barsX + i * (groupW + gap), y - 8, groupW, short(w.label), String(w.percent), w.percent); });
+    if (at || a.blocked) body += text(at ? `${at.day} ${at.time}` : 'resume unknown', right, y + 15, 12, tone, ' text-anchor="end"');
+    if (a.blocked && !a.windows.length) body += text(clip(`blocked · ${a.detail.replace(/ · resume.*$/, '')}`, words), CARD_M, y + 40, 14, usageColor(100));
+    else if (!a.windows.length) body += text(clip(a.detail === 'no reading yet' ? 'no reading yet' : `no reading · ${a.detail}`, words), CARD_M, y + 40, 14, MUTED);
+    else a.windows.slice(0, columns).forEach((w, i) => { body += bar(CARD_M + i * (groupW + gap), y + 9, groupW, short(w.label), String(w.percent), w.percent); });
     y += CARD_ROW;
   }
   return card(body, 0, 0, height);
