@@ -21,12 +21,11 @@ export function usageSvg(accounts: AccountUsage[]): string {
   const groups = new Map<string, AccountUsage[]>();
   for (const a of accounts) { const key = a.name.split(' ')[0] ?? a.name; groups.set(key, [...(groups.get(key) ?? []), a]); }
   const columns = Math.min(4, Math.max(1, ...accounts.map((a) => a.windows.length)));
-  const updated = accounts.map((a) => a.detail.match(/usage (.+? ago)/)?.[1]).find(Boolean);
   const height = PAD + HEAD_H + [...groups.values()].reduce((h, rows) => h + 44 + rows.length * ROW_H, 0) + 16;
   const barsX = PAD + NAME_W, barsW = W - PAD - barsX, groupW = (barsW - (columns - 1) * GROUP_GAP) / columns;
   let y = PAD;
+  // No clock in the picture: the footer line carries the update time, and a picture that only changes with the numbers is uploaded far less often.
   let body = text('USAGE', PAD, y + 28, 26, MUTED, ' letter-spacing="6"');
-  if (updated) body += text(`updated ${updated}`, W - PAD, y + 28, 24, MUTED, ' text-anchor="end"');
   y += HEAD_H;
   for (const [provider, rows] of groups) {
     body += text(provider.toUpperCase(), PAD, y + 30, 22, MUTED, ' letter-spacing="5"');

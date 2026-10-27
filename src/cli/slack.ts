@@ -6,6 +6,8 @@ import { redactPii } from "../shared/redact.ts";
 import type { SlackFile } from "./ownerUpdates";
 import { slackGate } from "./phiGate.ts";
 import { monitorBlockKit, type UsageImage } from "./slackMonitorBlocks.ts";
+/** the usage panel's file ids and picture hash, as state saves them */
+export type UsageFiles = { file?: string; key?: string; stale?: string };
 
 export type SlackThreadMessage = { ts: string; user?: string; text?: string; bot_id?: string; files?: SlackFile[] };
 
@@ -97,13 +99,14 @@ export class Slack {
     await this.sendMonitor("chat.update", { channel: await this.channel(), ts, text: text.split("\n")[0], unfurl_links: false }, text);
   }
 
-  // the usage panel's file: the one shown now, the one the previous process showed (to retire), and the one just uploaded
-  private usageFile?: string;
-  private previousUsageFile?: string;
-  /** the file id state saved for the panel shown before this process started */
-  setUsageFile(id: string | undefined): void { this.previousUsageFile = id; }
-  /** the file id the monitor shows now, for state */
-  getUsageFile(): string | undefined { return this.usageFile ?? this.previousUsageFile; }
+  /**
+   * The usage panel's files: `file` is shown now and `key` hashes its picture, so an unchanged panel is not uploaded
+   * again; `stale` was shown before and is deleted on the next change, one generation late, so a client still
+   * showing the older message never loses its image. State keeps the triple across restarts (cli/slackMonitor.ts).
+   */
+  private usage: UsageFiles = {};
+  setUsageFile(saved: UsageFiles | undefined): void { this.usage = { ...(saved ?? {}) }; }
+  getUsageFile(): UsageFiles { return { ...this.usage }; }
 
   /** Upload privately (files:write); the id goes into an image block as slack_file. */
   private async uploadImage(png: Buffer, filename: string, title: string): Promise<string> {
@@ -115,18 +118,25 @@ export class Slack {
     return upload.file_id as string;
   }
 
-  /** The usage panel rendered and uploaded (cli/slackUsageGraphic.ts), or undefined when there is none or it cannot be uploaded. */
-  private async usageImage(safe: string): Promise<UsageImage | undefined> {
-    const key = createHash("sha256").update(this.cfg.botToken).digest("hex");
-    if (usageUploadsDisabled.has(key)) return undefined;
+  /**
+   * The usage panel (cli/slackUsageGraphic.ts): the file already shown when the picture is unchanged, else rendered,
+   * uploaded and given a moment to settle, as Slack rejects an edit that shows a file it is still processing.
+   * Undefined when there is no panel or it cannot be uploaded.
+   */
+  private async usageImage(safe: string): Promise<(UsageImage & { key: string; reused: boolean }) | undefined> {
+    const token = createHash("sha256").update(this.cfg.botToken).digest("hex");
+    if (usageUploadsDisabled.has(token)) return undefined;
     try {
       const { usageGraphic, usagePng } = await import("./slackUsageGraphic.ts");
       const graphic = usageGraphic(safe);
       if (!graphic) return undefined;
+      const key = createHash("sha256").update(graphic.svg).digest("hex");
+      if (this.usage.file && this.usage.key === key) return { fileId: this.usage.file, alt: graphic.alt, key, reused: true };
       const fileId = await this.uploadImage(await usagePng(graphic.svg), "consort-usage.png", "AI usage");
-      return { fileId, alt: graphic.alt };
+      await this.retryDelay(1500);
+      return { fileId, alt: graphic.alt, key, reused: false };
     } catch (error) {
-      if (/missing_scope/.test(String(error))) usageUploadsDisabled.add(key);
+      if (/missing_scope/.test(String(error))) usageUploadsDisabled.add(token);
       console.error(`Slack usage panel: ${String(error)}; showing the chart instead.`);
       return undefined;
     }
@@ -151,7 +161,7 @@ export class Slack {
       for (let attempt = 0; ; attempt++) {
         try {
           const result = await this.api(method, { ...body, blocks: layout.blocks });
-          await this.settleUsageFile(layout.withImage ? usage?.fileId : undefined, usage?.fileId);
+          await this.settleUsageFile(layout.withImage ? usage : undefined, usage);
           return result;
         } catch (error) {
           const messages = (error as Error & { slackMessages?: string[] }).slackMessages ?? [];
@@ -164,11 +174,14 @@ export class Slack {
     }
   }
 
-  /** After a successful send: remember the shown file, delete the one it replaced and any upload that went unshown. */
-  private async settleUsageFile(shown: string | undefined, uploaded: string | undefined): Promise<void> {
+  /** After a successful send: a newly shown file becomes current, the one it replaced waits a generation, the one before that is deleted; an upload that went unshown is deleted at once. */
+  private async settleUsageFile(shown: (UsageImage & { key: string; reused: boolean }) | undefined, uploaded: (UsageImage & { reused: boolean }) | undefined): Promise<void> {
     const retire = new Set<string>();
-    if (uploaded && uploaded !== shown) retire.add(uploaded);
-    if (shown) { for (const old of [this.previousUsageFile, this.usageFile]) if (old && old !== shown) retire.add(old); this.usageFile = shown; this.previousUsageFile = undefined; }
+    if (uploaded && !uploaded.reused && uploaded.fileId !== shown?.fileId) retire.add(uploaded.fileId);
+    if (shown && !shown.reused) {
+      if (this.usage.stale && this.usage.stale !== shown.fileId && this.usage.stale !== this.usage.file) retire.add(this.usage.stale);
+      this.usage = { file: shown.fileId, key: shown.key, stale: this.usage.file && this.usage.file !== shown.fileId ? this.usage.file : undefined };
+    }
     for (const id of retire) await this.api("files.delete", { file: id }).catch(() => undefined);
   }
 

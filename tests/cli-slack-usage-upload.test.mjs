@@ -37,28 +37,33 @@ function fake(opts = {}) {
 }
 const sent = calls => calls.filter(c => c.method === 'chat.update').map(c => JSON.parse(c.body.blocks));
 
-test('the panel is rendered, uploaded privately, shown as slack_file full width, and the previous file retired', async () => {
-  const { slack, calls } = fake();
-  slack.setUsageFile('OLD');
+test('the panel is uploaded once per picture, shown as slack_file full width, reused while unchanged, and old files retire a generation late', async () => {
+  const { slack, calls, opts } = fake();
+  slack.setUsageFile({ file: 'OLD', key: 'old-key', stale: 'OLDER' });
   await slack.updateMonitor('same', text);
   assert.deepEqual(calls.map(c => c.method), ['files.getUploadURLExternal', 'transfer', 'files.completeUploadExternal', 'chat.update', 'files.delete']);
+  assert.deepEqual(opts.delays, [1500], 'the upload settles before the edit');
   assert.equal(calls[0].body.filename, 'consort-usage.png'); assert.ok(calls[1].bytes > 1000);
   assert.deepEqual(JSON.parse(calls[2].body.files), [{ id: 'F1', title: 'AI usage' }]); assert.equal(calls[2].body.channel_id, undefined);
   const blocks = sent(calls)[0];
   const panel = blocks.find(b => b.type === 'container' && b.child_blocks?.[0]?.slack_file);
   assert.deepEqual(panel.child_blocks[0], { type: 'image', slack_file: { id: 'F1' }, alt_text: 'AI usage: Claude 1 5h 42%, wk 20%' });
   assert.ok(!blocks.some(b => b.type === 'data_visualization'));
-  assert.equal(calls[4].body.file, 'OLD'); assert.equal(slack.getUsageFile(), 'F1');
+  assert.equal(calls[4].body.file, 'OLDER', 'the file two generations back is deleted; the one just replaced waits');
+  const saved = slack.getUsageFile(); assert.equal(saved.file, 'F1'); assert.equal(saved.stale, 'OLD'); assert.equal(typeof saved.key, 'string');
+  await slack.updateMonitor('same', text.replace('Updated 2026-10-27 16:45', 'Updated 2026-10-27 16:46'));
+  assert.deepEqual(calls.slice(5).map(c => c.method), ['chat.update'], 'same numbers a minute later: no upload, no delete');
+  assert.ok(JSON.stringify(sent(calls)[1]).includes('"id":"F1"')); assert.deepEqual(slack.getUsageFile(), saved);
   await slack.updateMonitor('same', text.replace('42%', '43%'));
-  assert.deepEqual(calls.slice(5).map(c => c.method), ['files.getUploadURLExternal', 'transfer', 'files.completeUploadExternal', 'chat.update', 'files.delete']);
-  assert.equal(calls.at(-1).body.file, 'F1', 'the file just replaced is deleted'); assert.equal(slack.getUsageFile(), 'F2');
+  assert.deepEqual(calls.slice(6).map(c => c.method), ['files.getUploadURLExternal', 'transfer', 'files.completeUploadExternal', 'chat.update', 'files.delete']);
+  assert.equal(calls.at(-1).body.file, 'OLD'); assert.deepEqual([slack.getUsageFile().file, slack.getUsageFile().stale], ['F2', 'F1']);
 });
 
 test('an image Slack has not finished processing is retried on the same layout with growing waits', async () => {
   const { slack, calls, opts } = fake({ processing: 2 });
   await slack.updateMonitor('same', text);
   const edits = calls.filter(c => c.method === 'chat.update');
-  assert.equal(edits.length, 3); assert.deepEqual(opts.delays, [250, 750]);
+  assert.equal(edits.length, 3); assert.deepEqual(opts.delays, [1500, 250, 750]);
   assert.equal(edits[0].body.blocks, edits[2].body.blocks); assert.equal(calls.filter(c => c.method === 'files.getUploadURLExternal').length, 1, 'one upload');
 });
 
@@ -67,7 +72,7 @@ test('when Slack rejects the image layout the chart layout goes out and the unsh
   await slack.updateMonitor('same', text);
   const layouts = sent(calls);
   assert.equal(layouts.length, 2); assert.ok(JSON.stringify(layouts[0]).includes('slack_file')); assert.ok(layouts[1].some(b => b.type === 'data_visualization'));
-  assert.deepEqual(calls.filter(c => c.method === 'files.delete').map(c => c.body.file), ['F1']); assert.equal(slack.getUsageFile(), undefined);
+  assert.deepEqual(calls.filter(c => c.method === 'files.delete').map(c => c.body.file), ['F1']); assert.deepEqual(slack.getUsageFile(), {});
 });
 
 test('without files:write the chart layout is used and the upload is not tried again', async () => {

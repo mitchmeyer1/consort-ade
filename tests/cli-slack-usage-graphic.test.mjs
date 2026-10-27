@@ -37,7 +37,8 @@ test('accounts parse out of the monitor text with every window', () => {
 test('the panel draws provider groups, a row per account, a coloured bar per window, and blocked or unread rows as words', () => {
   const svg = usageSvg(monitorAccounts(text));
   assert.match(svg, /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="1600" height="\d+"/);
-  for (const s of ['>USAGE<', '>CLAUDE<', '>CODEX<', '>Claude 1<', '>Codex 2<', '>5h<', '>wk<', '>fable<', '>updated 1m ago<']) assert.ok(svg.includes(s), s);
+  for (const s of ['>USAGE<', '>CLAUDE<', '>CODEX<', '>Claude 1<', '>Codex 2<', '>5h<', '>wk<', '>fable<']) assert.ok(svg.includes(s), s);
+  assert.doesNotMatch(svg, /ago/, 'no clock in the picture, so it only changes with the numbers');
   assert.match(svg, /fill="#e9c46a"[^>]*>77</); assert.match(svg, /fill="#f3ead6"[^>]*>49</); assert.match(svg, /fill="#f08a66"[^>]*>91</);
   assert.equal(usageColor(50), '#f3ead6'); assert.equal(usageColor(51), '#e9c46a'); assert.equal(usageColor(90), '#e9c46a'); assert.equal(usageColor(91), '#f08a66');
   assert.match(svg, />blocked · weekly limit reached · resume after Oct 28, 2:30 PM EDT</); assert.match(svg, />no reading yet</);

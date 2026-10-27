@@ -418,8 +418,10 @@ main one green. Completed work is a table (task, author, cost, finished, links) 
 container. AI usage is a picture in the style of `consort-cli view`: a row per account, a thin bar
 per limit window (5h, wk, a model's weekly) in white to 50%, yellow to 90%, orange above, blocked
 accounts in words; the daemon renders it (`src/cli/slackUsageGraphic.ts`, rasterized by resvg),
-uploads it privately (`files:write`) and shows it full width, deleting the previous one after the
-edit succeeds. Without the scope, or when the upload fails, Slack's own bar chart stands in with a
+uploads it privately (`files:write`) and shows it full width. The picture carries no clock, so a
+new file goes up only when the numbers change; the edit waits a moment for Slack to process the
+upload, and the file shown two changes ago is deleted, one generation late, so a client still on
+the older message keeps its image. Without the scope, or when the upload fails, Slack's own bar chart stands in with a
 line per blocked account. Table block
 ids carry the refresh time, as Slack asks for a new id on every update. Should the message exceed
 Slack's fifty-block limit, the later groups fall back to packed text rows; should Slack reject the
