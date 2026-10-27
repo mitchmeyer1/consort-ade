@@ -158,8 +158,13 @@ export type Task = {
   activity?: string;
   /** the agent's last few progress lines from its current turn, for the stop report on Slack */
   recent?: string[];
-  /** the task's own environment: Docker run code and the first port of its block (see cli/environment.ts) */
+  /**
+   * The environment the task's worktree files point at: Docker run code and first port of the block
+   * (cli/environment.ts). portBase is set only while the task holds a set from the pool.
+   */
   runCode?: string; portBase?: number; envReadyAt?: number;
+  /** the set the worktree's .consort/env files were written for; claiming another set rewrites them */
+  envFilesBase?: number; envFilesCode?: string;
   /** tokens and estimated dollars over every agent turn so far (shared/headless.ts addTurnCost) */
   cost?: TaskCost;
 };
@@ -177,6 +182,16 @@ export type CliState = {
   setupCompletedAt?: number;
   /** this install's claim name: hostname plus a random suffix, minted on first use */
   hostId?: string;
+  /** the shared sets of local services (databases…) tasks claim and hand back (cli/environment.ts) */
+  envPool?: EnvSlot[];
+};
+
+/** one set of local services for a repository: free when nothing holds it */
+export type EnvSlot = {
+  id: string; repo: string; runCode: string; portBase: number; createdAt: number;
+  /** who holds it now: a task id, or task id/child id for a parallel writer */
+  holder?: { id: string; taskId: string; pid: number; at: number };
+  lastUsedAt: number; lastHolder?: string;
 };
 
 const empty = (): CliState => ({ version: 1, accounts: [], jobs: [], tasks: [] });

@@ -30,7 +30,7 @@ import { newShipFeature } from "../shared/ship.ts";
 import type { Provider } from "../shared/types.ts";
 import { runTurn } from "./agent";
 import { tryAcquireAnyAgentTurn, releaseAgentTurn } from "./capacity";
-import { allocateEnvironment, cleanupEnvironment } from "./environment";
+import { claimForTask, releaseEnvironment } from "./environment";
 import { oversightModel } from "./oversight";
 import { postReview } from "./reviewPost";
 import { slackIdentityFor, takenEmojis } from "./slackIdentity";
@@ -310,7 +310,8 @@ async function reviewRound(taskId: string, watch: (t: ReviewTarget, repo: string
     if (!existsSync(join(wt, f))) copyFileSync(join(job.repo, f), join(wt, f));
   }
   mkdirSync(join(wt, ".consort", "review"), { recursive: true });
-  const env = await allocateEnvironment(loadState().tasks.find((x) => x.id === taskId)!);
+  // a set of local services from the machine's pool (cli/environment.ts), handed back before the approval wait
+  const env = await claimForTask(loadState().tasks.find((x) => x.id === taskId)!, { log, onWait: () => activity("every environment for this repo is in use; waiting for one", 1) });
 
   const models = seedModels();
   // model settings: the review scanner's own, else those of a build scanner on the same repository
@@ -360,7 +361,7 @@ async function reviewRound(taskId: string, watch: (t: ReviewTarget, repo: string
       await turn("setup", environmentPrompt(job.repo, wt, env), false, 30 * 60_000, "environment setup")
         .then(() => { if (saveRepoEnv(job.repo, wt)) log("saved this repo's environment setup"); })
         .catch((e) => log(`environment setup incomplete: ${(e as Error).message}`));
-      updateTask(taskId, { envReadyAt: Date.now() });
+      updateTask(taskId, { envReadyAt: Date.now(), envFilesBase: Number(env.CONSORT_PORT_BASE), envFilesCode: env.CONSORT_RUN });
     }
 
     // 2. the frontier overview and plan
@@ -445,19 +446,20 @@ async function reviewRound(taskId: string, watch: (t: ReviewTarget, repo: string
         activity("waiting for the owner's word to approve", 5);
         const ts = await say(slackAsk(approvalQuestion(t, review, posted?.url, flows)), "WAITING", true);
         updateTask(taskId, { status: "waiting", pendingQuestion: { questions: [`Approve PR #${t.pr}?`], afterTs: ts ?? String(Date.now() / 1000) } });
+        await releaseEnvironment(taskId);
         outcome = await awaitApproval(review, ts);
         requested = "not approved yet";
       }
     }
   } finally {
-    await cleanupEnvironment(env.CONSORT_RUN).catch(() => undefined);
+    await releaseEnvironment(taskId).catch(() => undefined);
     const after = loadState().tasks.find((x) => x.id === taskId);
     if (after?.status === "done") {
       await sh("git", ["worktree", "remove", "--force", wt], job.repo).catch(() => undefined);
-      updateTask(taskId, { portBase: undefined, envReadyAt: undefined });
+      updateTask(taskId, { envReadyAt: undefined });
     }
   }
-  // the services are down again; the watch only polls GitHub
+  // the services are handed back; the watch only polls GitHub
   if (outcome === "watch") return waitForAuthor(requested);
   return outcome;
 }

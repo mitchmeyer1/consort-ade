@@ -32,7 +32,7 @@ for (const blockedAtStart of [true, false]) {
     '../shared/headless.ts': headless,
       '../shared/seatPool.ts': seatPool,
       '../shared/cliModels.ts': cliModels, '../shared/cliTurnPolicy.ts': cliTurnPolicy, '../shared/phi.ts': phi, './phiGate': phiGate, './covered': { runCoveredTurn: async () => ({ status: 'unavailable', reason: 'no covered key in tests' }) },
-      './capacity': { AccountUnavailableError: class extends Error {}, withAgentTurn: async (_, __, fn) => fn(), withEnvironmentSlot: async (_, fn) => fn() },
+      './capacity': { AccountUnavailableError: class extends Error {}, withAgentTurn: async (_, __, fn) => fn() },
       './parallel': { prepareResearchTasks: async () => [], recoverImplementation: async () => [], readImplementationTasks: async () => [], runImplementation: async () => ({ completed: [], commits: [] }), runResearch: async () => ({ summary: 'No conflicting flows found', results: [], reused: false }) },
       '../main/ship': { excludeConsortDir: async () => {}, fetchTicket: async () => ({}), writeTicketFile: () => '' },
       './slackIdentity': { ensureSlackIdentity: async () => {} },
@@ -46,7 +46,7 @@ for (const blockedAtStart of [true, false]) {
       '../shared/usage.ts': { usageBlock: () => undefined },
       './sources': { sourceFor: () => ({ subtasks: async () => [] }) },
       './subtasks': { writeSubtaskFile() {}, needsLinks: () => false, syncSubtaskProgress: async o => ({ states: o.saved, noted: [] }), LINK_PROMPT: '' },
-      './environment': { allocateEnvironment: async () => ({}) },
+      './environment': { claimForTask: async () => ({}), releaseEnvironment: async () => {} },
       './slackIdentity': { ensureSlackIdentity: async () => {} },
       './state': {
         loadState: () => state,

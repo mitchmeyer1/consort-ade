@@ -76,43 +76,121 @@ test('withAgentTurn releases after errors and rejects a blocked account', async 
   assert.equal(state.loadState().tasks[0].activeTurns.length,0);
   state.blockAccount('a',Date.now()+10000,'limit');assert.throws(()=>capacity.tryAcquireAgentTurn('t','a'),capacity.AccountUnavailableError);
 });
-test('environment cap counts persistent allocations separately and releases failed reservations', async () => {
-  seed();state.mutateState(s=>{s.jobs[0].maxEnvironments=1;s.tasks[1].portBase=4000;});
-  assert.equal(capacity.tryAcquireEnvironment('t'),false);
-  state.updateTask('u',{status:'done',portBase:undefined});
-  await assert.rejects(capacity.withEnvironmentSlot('t',async()=>{throw Error('allocation failed');}),/allocation failed/);
-  assert.equal(state.loadState().tasks[0].environmentReservation,undefined);
-  assert.ok(capacity.tryAcquireEnvironment('t'));
+const pool = () => state.loadState().envPool ?? [];
+const claim = (id, o = {}) => environment.claimEnvironment(id, { pollMs: 10, ...o });
+
+test('tasks share sets of services: a free set is reused, a new one starts only when every set is held', async () => {
+  seed();state.mutateState(s=>{s.jobs[0].repo='/repo';s.jobs[0].maxEnvironments=4;});
+  const first=await claim('t');
+  assert.equal(pool().length,1);assert.equal(state.loadState().tasks[0].portBase,first.slot.portBase,'the holder shows its ports');
+  const second=await claim('u');
+  assert.notEqual(second.env.CONSORT_RUN,first.env.CONSORT_RUN,'a held set is never shared');assert.equal(pool().length,2);
+  await environment.releaseEnvironment('t');
+  assert.equal(state.loadState().tasks[0].portBase,undefined,'handed back');
+  await environment.releaseEnvironment('u');
+  state.mutateState(s=>{s.tasks.push({id:'v',jobId:'j',status:'working',feature:{stage:'Implementing'},updatedAt:1});});
+  const third=await claim('v');
+  assert.ok([first.env.CONSORT_RUN,second.env.CONSORT_RUN].includes(third.env.CONSORT_RUN),'a free set is reused, no new one');
+  assert.equal(pool().length,2);
+  const again=await claim('t');
+  assert.equal(again.env.CONSORT_RUN,[first,second].map(x=>x.env.CONSORT_RUN).find(c=>c!==third.env.CONSORT_RUN),'the remaining free set');
 });
 
-test('machine turn, task and environment limits apply across scanners', () => {
+test('a task gets its own last set back when it is free', async () => {
+  seed();state.mutateState(s=>{s.jobs[0].maxEnvironments=4;});
+  const a=await claim('t');const b=await claim('u');
+  await environment.releaseEnvironment('u');await environment.releaseEnvironment('t');
+  assert.equal((await claim('t')).env.CONSORT_RUN,a.env.CONSORT_RUN);
+  assert.equal((await claim('u')).env.CONSORT_RUN,b.env.CONSORT_RUN);
+});
+
+test('at the scanner limit a task waits for a set to be handed back', async () => {
+  seed();state.mutateState(s=>{s.jobs[0].maxEnvironments=1;});
+  await claim('t');
+  let waited=false;
+  const pending=claim('u',{onWait:()=>{waited=true;}});
+  await new Promise(r=>setTimeout(r,40));
+  assert.ok(waited);
+  await environment.releaseEnvironment('t');
+  const got=await pending;
+  assert.equal(pool().length,1);assert.equal(got.slot.holder.id,'u');
+});
+
+test('a set held by a worker that died goes back to the pool', async () => {
+  seed();state.mutateState(s=>{s.jobs[0].maxEnvironments=1;});
+  await claim('t',{pid:999999});
+  const got=await claim('u');
+  assert.equal(got.slot.holder.id,'u');assert.equal(got.slot.lastHolder,'t');
+});
+
+test('the sweep: two idle sets, open tasks keep the newest; no open tasks remove both; a fresh or held set stays', async () => {
+  seed();state.mutateState(s=>{s.jobs[0].repo='/repo';s.jobs[0].maxEnvironments=4;});
+  await claim('t');await claim('u');
+  const [a,b]=pool().map(x=>x.runCode);
+  state.mutateState(s=>{for(const x of s.envPool){x.holder=undefined;}s.envPool[0].lastUsedAt=1;s.envPool[1].lastUsedAt=2;});
+  assert.deepEqual(await environment.reapIdleEnvironments(),[a],'the older idle set comes down');
+  assert.deepEqual(pool().map(x=>x.runCode),[b]);
+  assert.deepEqual(await environment.reapIdleEnvironments(Date.now()),[],'the last set stays while tasks are open');
+  state.mutateState(s=>{for(const t of s.tasks)t.status='done';});
+  assert.deepEqual(await environment.reapIdleEnvironments(),[b],'no open tasks: it comes down too');
+  await claim('t');
+  state.mutateState(s=>{s.tasks[0].status='working';});
+  assert.deepEqual(await environment.reapIdleEnvironments(Date.now()+60*60_000),[],'a held set is never removed');
+});
+
+test('environments from before the pool are adopted: the task gets its own back, a finished task\'s set is swept', async () => {
+  seed();state.mutateState(s=>{s.jobs[0].repo='/repo';s.jobs[0].maxEnvironments=4;Object.assign(s.tasks[0],{portBase:20300,runCode:'consort-t',envReadyAt:5});s.tasks.push({id:'old',jobId:'j',status:'done',portBase:20400,runCode:'consort-old',feature:{stage:'Done'},updatedAt:1});});
+  const got=await claim('t');
+  assert.equal(got.env.CONSORT_RUN,'consort-t');assert.equal(got.env.CONSORT_PORT_BASE,'20300');
+  assert.deepEqual(await environment.reapIdleEnvironments(),['consort-old']);
+});
+
+test('a task moved to another set has its worktree env files pointed at the new code and ports', async () => {
+  const wt=mkdtempSync(join(tmpdir(),'consort-wt-'));
+  const { mkdirSync } = await import('node:fs');
+  mkdirSync(join(wt,'.consort','env'),{recursive:true});mkdirSync(join(wt,'.consort','ship'),{recursive:true});
+  writeFileSync(join(wt,'.consort','env','.env.consort'),'DATABASE_URL=postgres://u:p@localhost:20310/app\nPORT=20300\nOTHER=20500\nPROJECT=consort-t\n');
+  writeFileSync(join(wt,'.consort','ship','ENV.md'),'Postgres on 20310, app on 20300.');
+  assert.equal(environment.retargetEnvFiles(wt,{runCode:'consort-t',portBase:20300},{runCode:'consort-env-ab',portBase:20700}),2);
+  assert.equal(readFileSync(join(wt,'.consort','env','.env.consort'),'utf8'),'DATABASE_URL=postgres://u:p@localhost:20710/app\nPORT=20700\nOTHER=20500\nPROJECT=consort-env-ab\n');
+  assert.equal(readFileSync(join(wt,'.consort','ship','ENV.md'),'utf8'),'Postgres on 20710, app on 20700.');
+  seed();state.mutateState(s=>{s.jobs[0].maxEnvironments=4;Object.assign(s.tasks[0],{worktree:wt,envReadyAt:5,envFilesBase:20700,envFilesCode:'consort-env-ab'});});
+  const lines=[];
+  const env=await environment.claimForTask({id:'t',worktree:wt},{log:l=>lines.push(l)});
+  assert.match(readFileSync(join(wt,'.consort','env','.env.consort'),'utf8'),new RegExp(`localhost:${Number(env.CONSORT_PORT_BASE)+10}/app[\\s\\S]*PROJECT=${env.CONSORT_RUN}`));
+  assert.match(lines[0],/environment moved to/);
+  assert.equal(state.loadState().tasks[0].envFilesCode,env.CONSORT_RUN);
+  rmSync(wt,{recursive:true,force:true});
+});
+
+test('machine turn and task limits apply across scanners', () => {
   seed();state.mutateState(s=>{s.capacity={maxActiveTurns:1,maxOpenTasks:2,maxEnvironments:1};s.jobs.push({id:'other',maxParallel:2});s.tasks[1].jobId='other';});
   const current=state.loadState();assert.equal(capacity.availableTaskSlots(current,current.jobs[0]),0);
   assert.ok(capacity.tryAcquireAgentTurn('t','a'));assert.equal(capacity.tryAcquireAgentTurn('u','a'),undefined);
-  assert.ok(capacity.tryAcquireEnvironment('t'));assert.equal(capacity.tryAcquireEnvironment('u'),false);
 });
 
-test('concurrent real port probes reserve distinct blocks across worker processes', async () => {
-  seed();const modulePath=JSON.stringify(join(dir,'environment.cjs'));
-  const results=await Promise.all(['t','u'].map(id=>child(`require(${modulePath}).allocateEnvironment(s.loadState().tasks.find(t=>t.id===${JSON.stringify(id)})).then(env=>console.log(env.CONSORT_PORT_BASE));`)));
-  assert.equal(new Set(results).size,2);
-  const current=state.loadState();assert.equal(new Set(current.tasks.map(t=>t.portBase)).size,2);
+test('concurrent claims from separate worker processes take distinct sets', async () => {
+  seed();state.mutateState(s=>{s.jobs[0].maxEnvironments=4;});const modulePath=JSON.stringify(join(dir,'environment.cjs'));
+  const results=await Promise.all(['t','u'].map(id=>child(`require(${modulePath}).claimEnvironment(${JSON.stringify(id)},{pid:process.ppid}).then(r=>console.log(r.env.CONSORT_RUN+' '+r.env.CONSORT_PORT_BASE));`)));
+  assert.equal(new Set(results).size,2);assert.equal(new Set(results.map(r=>r.split(' ')[1])).size,2);
 });
-test('parallel writer environments isolate names and ports and clean reservations after failure', async () => {
+test('parallel writers claim their own sets and hand them back, even after a failure', async () => {
   seed();state.mutateState(s=>{s.jobs[0].maxEnvironments=4;});
   const environments=[];
   await Promise.all(['one','two'].map(id=>environment.withChildEnvironment('t',id,async env=>{environments.push(env);await new Promise(r=>setTimeout(r,20));})));
   assert.equal(new Set(environments.map(env=>env.CONSORT_RUN)).size,2);
   assert.equal(new Set(environments.map(env=>env.CONSORT_PORT_BASE)).size,2);
-  assert.equal(state.loadState().tasks[0].childEnvironments.length,0);
+  assert.ok(pool().every(x=>!x.holder),'handed back');
   await assert.rejects(environment.withChildEnvironment('t','fail',async()=>{throw Error('writer failed');}),/writer failed/);
-  assert.equal(state.loadState().tasks[0].childEnvironments.length,0);
+  assert.ok(pool().every(x=>!x.holder));
+  await environment.withChildEnvironment('t','three',async env=>{assert.ok(environments.some(e=>e.CONSORT_RUN===env.CONSORT_RUN),'a later writer reuses a free set');});
 });
 
-test('writer rejects full environment capacity promptly without leaking reservations', async () => {
-  seed();state.mutateState(s=>{s.jobs[0].maxEnvironments=1;s.tasks[0].portBase=20000;});
+test('writer rejects full environment capacity promptly without holding a set', async () => {
+  seed();state.mutateState(s=>{s.jobs[0].maxEnvironments=1;});
+  await claim('t');
   await assert.rejects(environment.withChildEnvironment('t','full',async()=>{assert.fail('writer must not start');}),environment.EnvironmentCapacityError);
-  assert.equal(state.loadState().tasks[0].childEnvironments,undefined);
+  assert.equal(pool().filter(x=>x.holder).length,1);
 });
 
 test('review reservations count coordinator and delegate units against every turn cap', async () => {

@@ -67,28 +67,3 @@ export async function withAgentTurn<T>(taskId: string, accountId: string, action
   while (!(lease = tryAcquireAgentTurn(taskId, accountId, units))) await new Promise(resolve => setTimeout(resolve, 250));
   try { return await action(); } finally { releaseAgentTurn(taskId, lease); }
 }
-
-export function tryAcquireEnvironment(taskId: string): boolean {
-  return mutateState(state => {
-    const task = state.tasks.find(t => t.id === taskId);
-    if (!task || !open(task)) throw new Error(`Task ${taskId} cannot reserve an environment.`);
-    if (task.portBase || task.envReadyAt) return true;
-    const job = state.jobs.find(j => j.id === task.jobId);
-    if (!job) throw new Error(`Missing job for task ${taskId}.`);
-    for (const t of state.tasks) if (t.environmentReservation && !processAlive(t.environmentReservation.pid)) delete t.environmentReservation;
-    const all = state.tasks.filter(t => t.portBase || t.envReadyAt || (open(t) && t.environmentReservation));
-    const used = all.filter(t => t.jobId === job.id);
-    if (used.some(t => t.id === taskId)) return true;
-    if (used.length + state.tasks.filter(t => t.jobId === job.id).reduce((n,t) => n + (t.childEnvironments?.length ?? 0), 0) >= environmentLimit(job) || all.length + state.tasks.reduce((n,t) => n + (t.childEnvironments?.length ?? 0), 0) >= positive(state.capacity?.maxEnvironments, 16)) return false;
-    task.environmentReservation = { pid: process.pid, at: Date.now() };
-    return true;
-  });
-}
-export function releaseEnvironmentReservation(taskId: string) {
-  mutateState(state => { const task = state.tasks.find(t => t.id === taskId); if (task?.environmentReservation?.pid === process.pid) delete task.environmentReservation; });
-}
-/** Reservation covers allocation; portBase/envReadyAt retains capacity until cleanup. */
-export async function withEnvironmentSlot<T>(taskId: string, action: () => Promise<T>): Promise<T> {
-  while (!tryAcquireEnvironment(taskId)) await new Promise(resolve => setTimeout(resolve, 250));
-  try { return await action(); } finally { releaseEnvironmentReservation(taskId); }
-}

@@ -1,16 +1,22 @@
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
+import { join } from "node:path";
 import { promisify } from "node:util";
-import { allocatePortBase, PORT_BLOCK, taskEnv, type TaskEnv } from "../shared/headless.ts";
+import { allocatePortBase, ENV_DIR, ENV_DOC, PORT_BLOCK, taskEnv, type TaskEnv } from "../shared/headless.ts";
 import { environmentLimit } from "./capacity";
-import { loadState, mutateState, processAlive, type Task } from "./state";
+import { loadState, mutateState, processAlive, type CliState, type EnvSlot, type Task } from "./state";
 
 /**
- * The per-task environment on this box (shared/headless.ts): a run code for Docker names and
- * labels, and a port block no other live task holds. Allocation checks the block's key ports
- * are actually free, not just unclaimed. Cleanup removes every container, network and volume
- * labelled with the code, which is how a task leaves nothing behind whether it finished,
- * failed or was released.
+ * The machine's sets of local services (databases, caches…), shared by the tasks on each
+ * repository (shared/headless.ts taskEnv: a run code for Docker names and labels, and a port
+ * block). A task claims a free set for its repository while it works and hands it back when it
+ * waits (on the owner, on GitHub, on AI credits) or finishes; it starts a new set only when every
+ * set for the repository is held. Claims go through the locked state file, so two workers never
+ * take the same set. A set nobody has used for 20 minutes is torn down, except that a repository
+ * with open tasks keeps one set up. Cleanup removes every container, network and volume
+ * labelled with the set's code.
  */
 
 const run = promisify(execFile);
@@ -26,29 +32,6 @@ const free = (port: number) => new Promise<boolean>((resolve) => {
 
 /** the ports the agent is most likely to bind first; a block whose key ports are busy is skipped */
 const KEY_OFFSETS = [0, 1, 2, 10, 11, 12, 13];
-
-export async function allocateEnvironment(task: Task): Promise<TaskEnv> {
-  const current = loadState().tasks.find(t => t.id === task.id);
-  if (current?.portBase) return taskEnv(current.runCode ?? runCodeFor(task), current.portBase);
-  let floor: number | undefined;
-  for (let tries = 0; tries < 200; tries++) {
-    const used = loadState().tasks.flatMap(t => [...(t.id !== task.id && t.portBase ? [t.portBase] : []), ...(t.childEnvironments ?? []).map(child => child.portBase)]);
-    const candidate = allocatePortBase(used, floor);
-    const checks = await Promise.all(KEY_OFFSETS.map(offset => free(candidate + offset)));
-    if (!checks.every(Boolean)) { floor = candidate + PORT_BLOCK; continue; }
-    const reserved = mutateState(state => {
-      const latest = state.tasks.find(t => t.id === task.id);
-      if (!latest) throw new Error(`Task ${task.id} is not in the state file.`);
-      if (latest.portBase) return { code: latest.runCode ?? runCodeFor(latest), base: latest.portBase };
-      if (state.tasks.some(t => (t.id !== task.id && t.portBase === candidate) || t.childEnvironments?.some(child => child.portBase === candidate))) return undefined;
-      latest.portBase = candidate;
-      latest.runCode = runCodeFor(latest);
-      return { code: latest.runCode, base: candidate };
-    });
-    if (reserved) return taskEnv(reserved.code, reserved.base);
-  }
-  throw new Error(`No free port block found for task ${task.id} after 200 probes.`);
-}
 
 export const environmentFor = (task: Task): TaskEnv | undefined => task.portBase ? taskEnv(task.runCode ?? runCodeFor(task), task.portBase) : undefined;
 
@@ -67,51 +50,196 @@ export async function cleanupEnvironment(code: string): Promise<{ containers: nu
   return out;
 }
 
-
 export class EnvironmentCapacityError extends Error {
   constructor(taskId: string) { super(`No writer environment capacity for task ${taskId}; run its implementation serially.`); this.name = "EnvironmentCapacityError"; }
 }
 
-/** Writers in separate worktrees also need separate Docker names and port blocks. */
-export async function withChildEnvironment<T>(taskId: string, childId: string, action: (env: TaskEnv) => Promise<T>): Promise<T> {
-  const task = loadState().tasks.find(t => t.id === taskId);
+/** a set nobody holds is torn down after this, unless it is the last one up for a repository with open tasks */
+export const IDLE_TEARDOWN_MS = 20 * 60_000;
+const OPEN = ["working", "waiting", "monitoring"];
+
+const slotEnv = (slot: EnvSlot) => taskEnv(slot.runCode, slot.portBase);
+const usedBases = (s: CliState) => [...(s.envPool ?? []).map((x) => x.portBase), ...s.tasks.flatMap((t) => (t.childEnvironments ?? []).map((c) => c.portBase))];
+
+/** sets held by holders whose process is gone go back to the pool; tasks still running from before the pool become sets */
+function tidy(s: CliState, now: number) {
+  const pool = (s.envPool ??= []);
+  for (const slot of pool) if (slot.holder && !processAlive(slot.holder.pid)) { slot.lastHolder = slot.holder.id; slot.holder = undefined; slot.lastUsedAt = now; }
+  for (const t of s.tasks) {
+    if (!t.portBase || !t.runCode || pool.some((x) => x.runCode === t.runCode)) continue;
+    const repo = s.jobs.find((j) => j.id === t.jobId)?.repo;
+    if (!repo) continue;
+    // an open task gets its set back on its next claim; a finished one's set is torn down on the next sweep
+    pool.push({ id: `env-${randomBytes(3).toString("hex")}`, repo, runCode: t.runCode, portBase: t.portBase, createdAt: t.envReadyAt ?? now, lastUsedAt: OPEN.includes(t.status) ? now : 0, lastHolder: t.id });
+    if (t.envFilesBase === undefined) Object.assign(t, { envFilesBase: t.portBase, envFilesCode: t.runCode });
+  }
+  for (const t of s.tasks) if (t.portBase && !pool.some((x) => x.holder?.id === t.id)) t.portBase = undefined;
+}
+
+type Claim = { slot: EnvSlot } | { create: true } | { evict: EnvSlot } | { full: true };
+
+/** one pass under the lock: the holder's set, a free one (its own last set first), room for a new one, or full */
+function claimOnce(s: CliState, taskId: string, holderId: string, pid: number, now: number): Claim {
+  tidy(s, now);
+  const task = s.tasks.find((t) => t.id === taskId);
   if (!task) throw new Error(`Task ${taskId} is not in the state file.`);
-  // A restarted worker removes resources left by its crashed writer before reserving more.
-  for (const child of task.childEnvironments ?? []) if (!processAlive(child.pid)) {
-    await cleanupEnvironment(child.runCode);
-    mutateState(s => { const t = s.tasks.find(t => t.id === taskId); if (t) t.childEnvironments = t.childEnvironments?.filter(c => c.id !== child.id); });
+  const job = s.jobs.find((j) => j.id === task.jobId);
+  if (!job) throw new Error(`Missing job for task ${taskId}.`);
+  const pool = s.envPool!;
+  const take = (slot: EnvSlot): Claim => {
+    slot.holder = { id: holderId, taskId, pid, at: now };
+    slot.lastUsedAt = now;
+    if (holderId === taskId) Object.assign(task, { portBase: slot.portBase, runCode: slot.runCode });
+    return { slot };
+  };
+  const mine = pool.find((x) => x.holder?.id === holderId);
+  if (mine) return take(mine);
+  const free = pool.filter((x) => x.repo === job.repo && !x.holder)
+    .sort((a, b) => Number(b.lastHolder === holderId) - Number(a.lastHolder === holderId) || b.lastUsedAt - a.lastUsedAt);
+  if (free.length) return take(free[0]);
+  const held = (pred: (t: Task) => boolean) => pool.filter((x) => { const t = x.holder && s.tasks.find((t) => t.id === x.holder!.taskId); return !!t && pred(t); }).length;
+  if (held((t) => t.jobId === job.id) >= environmentLimit(job)) return { full: true };
+  if (pool.length >= (s.capacity?.maxEnvironments ?? 16)) {
+    const idle = pool.filter((x) => !x.holder).sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
+    if (!idle) return { full: true };
+    s.envPool = pool.filter((x) => x !== idle);
+    return { evict: idle };
   }
-  const id = `${childId}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const code = `${runCodeFor(task)}-${id.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`;
-  let portBase: number | undefined;
+  return { create: true };
+}
+
+/** a free port block whose key ports nothing on the machine is listening on */
+async function freeBlock(): Promise<number> {
   let floor: number | undefined;
-  for (let probes = 0; !portBase; ) {
-    const latest = loadState();
-    const used = latest.tasks.flatMap(t => [...(t.portBase ? [t.portBase] : []), ...(t.childEnvironments ?? []).map(c => c.portBase)]);
-    const candidate = allocatePortBase(used, floor);
-    const checks = await Promise.all(KEY_OFFSETS.map(offset => free(candidate + offset)));
-    if (!checks.every(Boolean)) {
-      if (++probes >= 200) throw new Error(`No free port block found for writer ${childId} after 200 probes.`);
-      floor = candidate + PORT_BLOCK; continue;
+  for (let tries = 0; tries < 200; tries++) {
+    const candidate = allocatePortBase(usedBases(loadState()), floor);
+    if ((await Promise.all(KEY_OFFSETS.map((offset) => free(candidate + offset)))).every(Boolean)) return candidate;
+    floor = candidate + PORT_BLOCK;
+  }
+  throw new Error("No free port block found after 200 probes.");
+}
+
+export type ClaimOptions = { holderId?: string; pid?: number; wait?: boolean; onWait?: () => void; pollMs?: number };
+
+/**
+ * The task's set of services: the one it holds, else a free one for its repository, else a new
+ * one when the limits allow; otherwise it waits (or, with wait false, throws EnvironmentCapacityError).
+ */
+export async function claimEnvironment(taskId: string, o: ClaimOptions = {}): Promise<{ env: TaskEnv; slot: EnvSlot }> {
+  const holderId = o.holderId ?? taskId, pid = o.pid ?? process.pid;
+  let waited = false;
+  for (;;) {
+    const claim = mutateState((s) => claimOnce(s, taskId, holderId, pid, Date.now()));
+    if ("slot" in claim) return { env: slotEnv(claim.slot), slot: claim.slot };
+    if ("evict" in claim) { await cleanupEnvironment(claim.evict.runCode); continue; }
+    if ("create" in claim) {
+      const base = await freeBlock();
+      const made = mutateState((s) => {
+        const again = claimOnce(s, taskId, holderId, pid, Date.now());
+        if (!("create" in again)) return again;
+        if (usedBases(s).includes(base)) return undefined;
+        const task = s.tasks.find((t) => t.id === taskId)!;
+        const slot: EnvSlot = { id: `env-${randomBytes(3).toString("hex")}`, repo: s.jobs.find((j) => j.id === task.jobId)!.repo, runCode: `consort-env-${randomBytes(4).toString("hex")}`, portBase: base, createdAt: Date.now(), lastUsedAt: Date.now() };
+        s.envPool!.push(slot);
+        return claimOnce(s, taskId, holderId, pid, Date.now());
+      });
+      if (made && "slot" in made) return { env: slotEnv(made.slot), slot: made.slot };
+      if (made && "evict" in made) await cleanupEnvironment(made.evict.runCode);
+      if (!made || !("full" in made)) continue;
     }
-    const result = mutateState(s => {
-      const parent = s.tasks.find(t => t.id === taskId);
-      if (!parent || !["working", "waiting", "monitoring"].includes(parent.status)) throw new Error(`Task ${taskId} cannot start writer ${childId}.`);
-      const job = s.jobs.find(j => j.id === parent.jobId);
-      if (!job) throw new Error(`Missing job for task ${taskId}.`);
-      const count = (tasks: Task[]) => tasks.reduce((n,t) => n + (t.portBase || t.envReadyAt || t.environmentReservation ? 1 : 0) + (t.childEnvironments?.length ?? 0), 0);
-      if (count(s.tasks.filter(t => t.jobId === job.id)) >= environmentLimit(job) || count(s.tasks) >= (s.capacity?.maxEnvironments ?? 16)) return "full";
-      if (s.tasks.some(t => t.portBase === candidate || t.childEnvironments?.some(c => c.portBase === candidate))) return "collision";
-      (parent.childEnvironments ??= []).push({ id, portBase: candidate, runCode: code, pid: process.pid });
-      return "reserved";
-    });
-    if (result === "full") throw new EnvironmentCapacityError(taskId);
-    if (result === "reserved") portBase = candidate;
-    else { if (result === "collision" && ++probes >= 200) throw new Error(`Port reservation contention for writer ${childId}.`); await new Promise(resolve => setTimeout(resolve, 250)); }
+    if (o.wait === false) throw new EnvironmentCapacityError(taskId);
+    if (!waited) { waited = true; o.onWait?.(); }
+    await new Promise((r) => setTimeout(r, o.pollMs ?? 5_000));
   }
-  try { return await action(taskEnv(code, portBase)); }
-  finally {
-    try { await cleanupEnvironment(code); }
-    finally { mutateState(s => { const t = s.tasks.find(t => t.id === taskId); if (t) t.childEnvironments = t.childEnvironments?.filter(c => c.id !== id); }); }
+}
+
+/** hand the set back: it stays up for the next task on the repository until it has sat unused for 20 minutes */
+export async function releaseEnvironment(holderId: string): Promise<void> {
+  const slot = mutateState((s) => {
+    const held = (s.envPool ?? []).find((x) => x.holder?.id === holderId);
+    if (!held) return undefined;
+    held.lastHolder = holderId; held.holder = undefined; held.lastUsedAt = Date.now();
+    const task = s.tasks.find((t) => t.id === holderId);
+    if (task) task.portBase = undefined;
+    return { ...held };
+  });
+  // the app the task started from its worktree (up.sh) is its own; the services stay for the next task
+  if (slot) await stopAppProcesses(slot.portBase).catch(() => undefined);
+}
+
+/** the app ports of a block (base+0..9): whatever listens there, other than Docker's own port forwarding */
+async function stopAppProcesses(base: number) {
+  const out = await run("lsof", ["-nP", "-Fpc", ...Array.from({ length: 10 }, (_, i) => `-iTCP:${base + i}`), "-sTCP:LISTEN"], { timeout: 10_000 }).then((r) => r.stdout, () => "");
+  let pid = 0;
+  for (const line of out.split("\n")) {
+    if (line.startsWith("p")) pid = Number(line.slice(1));
+    else if (line.startsWith("c") && pid && pid !== process.pid && !/docker|vpnkit|com\.docker/i.test(line)) { try { process.kill(pid, "SIGTERM"); } catch {} }
   }
+}
+
+/**
+ * The daemon's sweep: sets nobody has used for 20 minutes are torn down, except that a repository
+ * with open tasks keeps its most recently used set; returns the run codes removed.
+ */
+export async function reapIdleEnvironments(now = Date.now()): Promise<string[]> {
+  const doomed = mutateState((s) => {
+    tidy(s, now);
+    const pool = s.envPool!;
+    const idle = (x: EnvSlot) => !x.holder && now - x.lastUsedAt >= IDLE_TEARDOWN_MS;
+    const out: EnvSlot[] = [];
+    for (const repo of new Set(pool.map((x) => x.repo))) {
+      const sets = pool.filter((x) => x.repo === repo);
+      const stale = sets.filter(idle).sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+      // a repository with open tasks keeps one set up: the most recently used, when no other is in use or fresh
+      const repoOpen = s.tasks.some((t) => OPEN.includes(t.status) && s.jobs.find((j) => j.id === t.jobId)?.repo === repo);
+      out.push(...(repoOpen && stale.length === sets.length ? stale.slice(1) : stale));
+    }
+    s.envPool = pool.filter((x) => !out.includes(x));
+    return out;
+  });
+  for (const slot of doomed) await cleanupEnvironment(slot.runCode);
+  return doomed.map((x) => x.runCode);
+}
+
+/**
+ * The worktree's environment files (.consort/env, ENV.md) were written for another set: point them
+ * at this one by swapping the run code and every port of the old block for the same offset in the new.
+ */
+export function retargetEnvFiles(worktree: string, from: { runCode: string; portBase: number }, to: { runCode: string; portBase: number }): number {
+  if (from.runCode === to.runCode && from.portBase === to.portBase) return 0;
+  const files: string[] = [];
+  const walk = (dir: string) => { for (const n of readdirSync(dir)) { const f = join(dir, n); if (statSync(f).isDirectory()) walk(f); else files.push(f); } };
+  if (existsSync(join(worktree, ENV_DIR))) walk(join(worktree, ENV_DIR));
+  if (existsSync(join(worktree, ENV_DOC))) files.push(join(worktree, ENV_DOC));
+  let changed = 0;
+  for (const f of files) {
+    if (statSync(f).size > 1 << 20) continue;
+    const text = readFileSync(f, "utf8");
+    const next = text.split(from.runCode).join(to.runCode)
+      .replace(/(?<![\d])(\d{4,5})(?![\d])/g, (m) => { const n = Number(m); return n >= from.portBase && n < from.portBase + PORT_BLOCK ? String(to.portBase + n - from.portBase) : m; });
+    if (next !== text) { writeFileSync(f, next); changed++; }
+  }
+  return changed;
+}
+
+/** claim, and when the worktree's files point at another set, retarget them; logs what moved */
+export async function claimForTask(task: Pick<Task, "id" | "worktree">, o: ClaimOptions & { log?: (line: string) => void } = {}): Promise<TaskEnv> {
+  const { env, slot } = await claimEnvironment(task.id, o);
+  const latest = loadState().tasks.find((t) => t.id === task.id);
+  const files = latest?.envReadyAt && latest.envFilesBase !== undefined && latest.envFilesCode ? { runCode: latest.envFilesCode, portBase: latest.envFilesBase } : undefined;
+  if (files && (files.runCode !== slot.runCode || files.portBase !== slot.portBase)) {
+    const n = existsSync(task.worktree) ? retargetEnvFiles(task.worktree, files, slot) : 0;
+    o.log?.(`environment moved to ${slot.runCode} on ports ${slot.portBase}-${slot.portBase + PORT_BLOCK - 1} (${n} file(s) updated)`);
+  }
+  if (slot.lastHolder && slot.lastHolder !== task.id) o.log?.(`environment ${slot.runCode} was last used by another task; its data may need a reset`);
+  mutateState((s) => { const t = s.tasks.find((x) => x.id === task.id); if (t) Object.assign(t, { envFilesBase: slot.portBase, envFilesCode: slot.runCode }); });
+  return env;
+}
+
+/** a parallel writer claims a set of its own for the action, then hands it back; full capacity throws so the ticket runs serially */
+export async function withChildEnvironment<T>(taskId: string, childId: string, action: (env: TaskEnv) => Promise<T>): Promise<T> {
+  const holderId = `${taskId}/${childId}`;
+  const { env } = await claimEnvironment(taskId, { holderId, wait: false });
+  try { return await action(env); }
+  finally { await releaseEnvironment(holderId); }
 }

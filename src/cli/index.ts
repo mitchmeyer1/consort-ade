@@ -33,7 +33,7 @@ import { checkCoveredKey } from "./covered";
 import { keyRefFrom, phiSmoke, phiSmokeUncovered, phiStatusLines, storeKeychainKey } from "./phiCommands";
 import { inbound, readIncidents } from "./phiGate";
 import { applyBundle, buildBundle } from "./transfer";
-import { cleanupEnvironment } from "./environment";
+import { reapIdleEnvironments, releaseEnvironment } from "./environment";
 import { alive, DAEMON_LOG, daemonPid, recordDaemon, startDetached, stopDaemon } from "./daemonctl";
 import { banner, cream, dim, mint, ok, bad } from "./theme";
 import { FINISHED, retainedTasks } from "../shared/headless.ts";
@@ -459,9 +459,10 @@ async function main(argv: string[]) {
       await notifyTask(t!.id, "stopped", "Released by you.");
       if (t!.pid) { try { process.kill(t!.pid); } catch {} }
       updateTask(t!.id, { status: "released", pid: undefined, finishedAt: Date.now() });
-      if (t!.runCode) { const r = await cleanupEnvironment(t!.runCode); console.log(`Removed ${r.containers} container(s), ${r.networks} network(s), ${r.volumes} volume(s) of ${t!.runCode}.`); }
-      for (const child of loadState().tasks.find(task => task.id === t!.id)?.childEnvironments ?? []) await cleanupEnvironment(child.runCode);
-      updateTask(t!.id, { portBase: undefined, envReadyAt: undefined, environmentReservation: undefined, childEnvironments: [] });
+      // its set of services goes back to the pool; the daemon tears it down once nothing has used it for 20 minutes
+      await releaseEnvironment(t!.id);
+      for (const holder of (loadState().envPool ?? []).filter(x => x.holder?.taskId === t!.id)) await releaseEnvironment(holder.holder!.id);
+      updateTask(t!.id, { envReadyAt: undefined, environmentReservation: undefined, childEnvironments: [] });
       console.log(`Released ${t!.ticket.id}; the worktree ${t!.worktree} is left in place.`); return;
     }
     case "tasks retry": {
@@ -579,6 +580,11 @@ async function daemon() {
   };
   checkStatusQuestions();
   setInterval(checkStatusQuestions, 15_000);
+  // sets of local services nobody has used for 20 minutes come down (cli/environment.ts)
+  let reaping = false;
+  const reap = () => { if (reaping) return; reaping = true; reapIdleEnvironments().then(codes => { if (codes.length) console.log(`${new Date().toISOString()} removed unused environment(s): ${codes.join(", ")}`); }, e => console.error(`Environment sweep: ${e.message}`)).finally(() => { reaping = false; }); };
+  reap();
+  setInterval(reap, 60_000);
   for (;;) {
     const s = loadState();
     // completed tasks beyond the newest six fall out of the state file (ready-to-merge ones stay); failed ones after a week

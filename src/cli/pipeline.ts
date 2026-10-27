@@ -10,7 +10,7 @@ import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { selectCliModel, type CliModelRole } from "../shared/cliModels.ts";
 import { MAX_STAGE_TURNS, turnMoved, MODEL_ROLE_RULES, BUILD_EFFORT_RULE, parseBuildEffort, parseModelEscalation, roleEffort, stageModelRole } from "../shared/cliTurnPolicy.ts";
-import { AccountUnavailableError, COVERED_ACCOUNT, withAgentTurn, withEnvironmentSlot } from "./capacity";
+import { AccountUnavailableError, COVERED_ACCOUNT, withAgentTurn } from "./capacity";
 import { prepareResearchTasks, readImplementationTasks, recoverImplementation, runImplementation, runResearch, runResourceResearch, type ParallelRun } from "./parallel";
 import type { Resource } from "../shared/resources.ts";
 import { coveredAnswerPrompt, parseCoveredAnalyst, phiSettings, turnAccounts, turnPhi, type CoveredAsk } from "../shared/phi.ts";
@@ -22,7 +22,7 @@ import { runTurn, packageRoot } from "./agent";
 import { readPr, requestReviewers, reviewerSuggestions, validateReviewers, whoAmI } from "./prmonitor";
 import { findBrowser, publishEvidence, validateEvidence, writeScreenshotHelper } from "./evidence";
 import { EVIDENCE_TURN_MS, EVIDENCE_CHECK_MS, TurnTimeoutError, resumeEvidenceTurn, staleEvidenceTimeout, retryEvidencePublication, staleEvidenceNetworkQuestion } from "./evidenceRetry";
-import { allocateEnvironment, cleanupEnvironment, withChildEnvironment } from "./environment";
+import { claimForTask, releaseEnvironment, withChildEnvironment } from "./environment";
 import { flushTaskNotifications, notifyTask } from "./lifecycle";
 import { readUsage, saveUsage, usageFor } from "./usage";
 import { checkpoint } from "./checkpoint";
@@ -100,7 +100,10 @@ export async function workTask(taskId: string): Promise<void> {
     await say(slackLines.working(clean));
   };
   // the task's own ports and Docker names, on every turn from here on
-  const env = await withEnvironmentSlot(taskId, () => allocateEnvironment(task!));
+  // a set of local services from the machine's pool (cli/environment.ts): claimed before each agent turn, handed back while the task waits
+  let env: TaskEnv = {};
+  const holdEnv = async () => (env = await claimForTask(task!, { log: (line) => log(task!, line), onWait: () => { log(task!, "every environment for this repo is in use; waiting for one"); updateTask(taskId, { activity: "waiting for a free environment" }); } }));
+  await holdEnv();
   task = loadState().tasks.find((t) => t.id === taskId)!;
   log(task, `environment ${env.CONSORT_RUN} on ports ${env.CONSORT_PORT_RANGE}`);
 
@@ -154,8 +157,8 @@ export async function workTask(taskId: string): Promise<void> {
   const finish = async (status: Task["status"], note?: string) => {
     updateTask(task.id, { status, note, finishedAt: Date.now(), activity: note ?? status });
     await notifyTask(taskId, status === "ready" ? "completed" : "stopped", note ?? status);
-    await cleanupEnvironment(env.CONSORT_RUN).then((r) => { if (r.containers || r.networks || r.volumes) log(task, `removed ${r.containers} container(s), ${r.networks} network(s), ${r.volumes} volume(s)`); });
-    updateTask(taskId, { portBase: undefined, envReadyAt: undefined });
+    // the services stay up for the next task on this repo; the daemon tears down sets left unused (cli/environment.ts)
+    await releaseEnvironment(taskId);
   };
   const tell = async (text: string) => { await say(text); await source.comment(task.ticket.id, text.replace(/<([^|>]+)\|([^>]+)>/g, "$2 ($1)")).catch((e) => log(task, `ticket comment failed: ${e.message}`)); };
 
@@ -169,6 +172,7 @@ export async function workTask(taskId: string): Promise<void> {
     // the pause reason carries the question itself: it shows in the Paused line, in status replies, and in the view
     await notifyTask(taskId, "paused", `Waiting on you: ${brief(questions[0].split("\n").filter((l) => l.trim()).map((l) => l.replace(SLACK_MARKER, "").replace(/^[•\-\d.\s]*/u, "").replace(/\s*\(<[^>]*\|ticket>\)/, "").replace(/[*_`]/g, "")).join(" · "), 300)}`);
     log(task, `waiting on Slack for ${questions.length} answer(s)`);
+    await releaseEnvironment(taskId);
     let lastEmptyLog = 0;
     let lastCheckResult: string | undefined;
     const reply = await slack.waitForReply(thread, ts, { onCheck: (result) => {
@@ -203,7 +207,7 @@ export async function workTask(taskId: string): Promise<void> {
   let stageTurns = 0;
   const headOf = () => run("git", ["rev-parse", "HEAD"], { cwd: task.worktree }).then((r) => r.stdout.trim(), () => undefined);
   let head = await headOf(); // new commits since the last reply count as progress for the stuck guard
-  const turn = async (prompt: string | ((provider: Provider) => string), provider: Provider = builderProvider, role: CliModelRole = "planning", resume = true, timeoutMs?: number, cwd = task.worktree, fixedModel?: string, turnEnv: TaskEnv = env, smallChange = false): Promise<string> => {
+  const turn = async (prompt: string | ((provider: Provider) => string), provider: Provider = builderProvider, role: CliModelRole = "planning", resume = true, timeoutMs?: number, cwd = task.worktree, fixedModel?: string, turnEnv?: TaskEnv, smallChange = false): Promise<string> => {
     const crashes = new Map<string, number>(); // failures in unrelated parallel jobs never combine
     // accounts that errored on this turn: the next attempt goes to a different account, on either provider
     const tried = new Set<string>();
@@ -264,6 +268,7 @@ export async function workTask(taskId: string): Promise<void> {
         const waiting = `All AI accounts reached their usage limit until ${resetLabel(until)}. Consort retries every 30s. Your action: none; work resumes when credits reset.`;
         updateTask(taskId, { status: "waiting", note: waiting, activity: waiting });
         await notifyTask(taskId, "monitoring", waiting);
+        if (!turnEnv) await releaseEnvironment(taskId);
         await new Promise((r) => setTimeout(r, Math.min(30_000, Math.max(1_000, until - Date.now()))));
         continue;
       }
@@ -315,6 +320,8 @@ export async function workTask(taskId: string): Promise<void> {
       let usageTimer: ReturnType<typeof setInterval> | undefined;
       let res;
       recent.length = 0;
+      // the task's own set, claimed again if it was handed back while waiting; a parallel writer brings its own
+      const runEnv = turnEnv ?? (resourceTurn ? env : await holdEnv());
       const queuedAt=Date.now();
       let startedAt = Date.now();
       try { res = await withAgentTurn(taskId, who.id, () => {
@@ -322,7 +329,7 @@ export async function workTask(taskId: string): Promise<void> {
         quietSince = Date.now();
         usageTimer = setInterval(checkUsage, 60_000);
         deadline = timeoutMs ? setTimeout(() => { timedOut = true; trace.reason = "timeout"; abort.abort(); }, timeoutMs) : undefined;
-        return runTurn({ trace, cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}${feature.stage === "Grilling" && !resourceTurn ? `\n${BUILD_EFFORT_RULE}` : ""}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}${resourceTurn ? "" : `\n\n${ENVIRONMENT_RULES(turnEnv)}`}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: turnEnv, signal: abort.signal, readOnly, ...(resourceTurn ? { offline: true, settingSources: ["user" as const] } : {}), phi: { ...turnPhi(live), task: taskId, ticket: task.ticket.id, base: `origin/${job.base}`, alert: (line: string) => say(line) }, effort, delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { quietSince = Date.now(); const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
+        return runTurn({ trace, cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}${feature.stage === "Grilling" && !resourceTurn ? `\n${BUILD_EFFORT_RULE}` : ""}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}${resourceTurn ? "" : `\n\n${ENVIRONMENT_RULES(runEnv)}`}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: runEnv, signal: abort.signal, readOnly, ...(resourceTurn ? { offline: true, settingSources: ["user" as const] } : {}), phi: { ...turnPhi(live), task: taskId, ticket: task.ticket.id, base: `origin/${job.base}`, alert: (line: string) => say(line) }, effort, delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { quietSince = Date.now(); const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
       }, reviewUnits); }
       catch (e) { if (e instanceof AccountUnavailableError) { continue; } throw e; }
       finally { active = false; mine.set(who.id, (mine.get(who.id) ?? 1) - 1); if (usageTimer) clearInterval(usageTimer); if (deadline) clearTimeout(deadline); }
@@ -521,13 +528,13 @@ export async function workTask(taskId: string): Promise<void> {
     }
   };
   // waits between PR checks end early when the owner posts an update
-  const nap = (ms: number) => new Promise<void>((resolve) => {
+  const nap = (ms: number) => releaseEnvironment(taskId).then(() => new Promise<void>((resolve) => {
     const started=Date.now();
     let finished=false;
     const check = setInterval(() => { if (loadState().tasks.find((t) => t.id === taskId)?.ownerUpdates?.length) done(); }, 15_000);
     const done = () => { if(finished)return; finished=true; clearInterval(check); updateTask(taskId,t=>({externalWaitMs:(t.externalWaitMs??0)+Date.now()-started})); resolve(); };
     setTimeout(done, ms);
-  });
+  }));
 
   log(task, `models: planning, spec and judgement on ${builderModel} at ${roleEffort("planning", job.effortPolicy)} effort; build and routine turns on ${workerModel} at ${roleEffort("implementation", job.effortPolicy, task.plannedEffort?.level)} effort`);
   if (task.rebootedAt) {
@@ -570,10 +577,11 @@ export async function workTask(taskId: string): Promise<void> {
     activity("setting up the local environment");
     // start from what an earlier task on this repo worked out, and keep this one's for the next (cli/repoEnv.ts)
     nextStep = "environment setup";
+    await holdEnv();
     const text = await turn(environmentPrompt(job.repo, task.worktree, env), builderProvider, "implementation");
     await completeReply(text, undefined, "implementation");
     if (saveRepoEnv(job.repo, task.worktree)) log(task, "saved this repo's environment setup for the next task");
-    updateTask(task.id, { envReadyAt: Date.now() });
+    updateTask(task.id, { envReadyAt: Date.now(), envFilesBase: Number(env.CONSORT_PORT_BASE), envFilesCode: env.CONSORT_RUN });
     await say(slackLines.env(env.CONSORT_PORT_RANGE));
   }
   await applyOwnerUpdates();
@@ -714,7 +722,7 @@ export async function workTask(taskId: string): Promise<void> {
     const stat=await run("git",["diff","--numstat",`origin/${job.base}...HEAD`],{cwd:task.worktree,timeout:30000});
     const rows=stat.stdout.trim().split("\n").filter(Boolean).map(line=>line.split("\t"));
     const small=smallReview(rows.map(r=>r.slice(2).join("\t")),rows.reduce((n,r)=>n+(/^\d+$/.test(r[0])&&/^\d+$/.test(r[1])?Number(r[0])+Number(r[1]):100000),0));
-    const reviewText = await turn((active) => reviewSkillPrompt(task.worktree, pr, small ? undefined : modelFor(active, "reader"), small), provider, "frontier", false, undefined, task.worktree, model, env, small);
+    const reviewText = await turn((active) => reviewSkillPrompt(task.worktree, pr, small ? undefined : modelFor(active, "reader"), small), provider, "frontier", false, undefined, task.worktree, model, undefined, small);
     await completeReply(reviewText, undefined, "frontier", provider, model);
     const summary = reviewSummaryOf(pr);
     if (!summary) throw new Error(`Review round ${round} did not write a valid review report`);

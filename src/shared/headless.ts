@@ -869,12 +869,13 @@ export function taskEnv(code: string, portBase: number): TaskEnv {
 }
 
 /** appended to every headless turn: the task's own ports and names, and the rules that keep tasks apart */
-export const ENVIRONMENT_RULES = (env: TaskEnv) => `## Your environment on this machine (other agents share the box; these are yours alone)
+export const ENVIRONMENT_RULES = (env: TaskEnv) => `## Your environment on this machine (other agents share the box; these are yours while this turn runs)
 
-- Docker: every container, network and volume you create must carry the label \`io.consort.run=${env.CONSORT_RUN}\` and a name starting \`${env.CONSORT_RUN}-\`. \`COMPOSE_PROJECT_NAME\` is already \`${env.CONSORT_RUN}\` in your shell, so \`docker compose\` isolates itself; never pass \`-p\` or a fixed \`container_name\` without the prefix. Consort removes everything with this label when the task ends.
+- Docker: every container, network and volume you create must carry the label \`io.consort.run=${env.CONSORT_RUN}\` and a name starting \`${env.CONSORT_RUN}-\`. \`COMPOSE_PROJECT_NAME\` is already \`${env.CONSORT_RUN}\` in your shell, so \`docker compose\` isolates itself; never pass \`-p\` or a fixed \`container_name\` without the prefix.
+- These services are one of the machine's shared sets for this repository: other tasks on it use them when this task is waiting, and Consort tears down sets nobody has used for 20 minutes. They may already be running, or hold another branch's data. Run \`${env.CONSORT_ENV_DIR}/up.sh\` before you rely on them (it migrates and seeds); if the schema has tables or migrations this branch does not know, or the data is wrong for your test, reset the database (drop and recreate it, then up.sh).
 - Ports: use only ${env.CONSORT_PORT_RANGE}. The app on ${env.CONSORT_APP_PORT} (\`PORT\` is set), a second service on ${env.CONSORT_API_PORT}, Postgres on ${env.CONSORT_DB_PORT}, Redis on ${env.CONSORT_REDIS_PORT}, Mongo on ${env.CONSORT_MONGO_PORT}, MySQL on ${env.CONSORT_MYSQL_PORT}, others from ${env.CONSORT_PORT_BASE}+20 up. Never the defaults (5432, 6379, 3000, 8080…): another task may be on them.
 - Configuration: never edit the repo's tracked env or config files. Put your overrides in \`${env.CONSORT_ENV_FILE}\` (DATABASE_URL, REDIS_URL, PORT, hostnames…) and load it before running anything: \`set -a; . ${env.CONSORT_ENV_FILE}; set +a\`. If the repo has a compose file, add \`${env.CONSORT_ENV_DIR}/compose.override.yml\` that remaps its ports into your range and use \`docker compose -f <repo compose> -f ${env.CONSORT_ENV_DIR}/compose.override.yml\`.
-- \`${env.CONSORT_ENV_DIR}/up.sh\` starts your services and the app, \`${env.CONSORT_ENV_DIR}/down.sh\` stops them. Use them in the test session and for evidence; leave nothing running when a turn ends unless the next step needs it.
+- \`${env.CONSORT_ENV_DIR}/up.sh\` starts your services and the app, \`${env.CONSORT_ENV_DIR}/down.sh\` stops them. Use them in the test session and for evidence. When a turn ends, stop the app and any dev servers you started, but leave the database and other services up for the next turn or task; Consort stops sets nobody uses.
 - Secrets: only local, throwaway credentials in your overrides. Never copy production values.`;
 
 /** the first turn of a task: find out what running this repo locally takes, and make it work on this task's ports */

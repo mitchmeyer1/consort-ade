@@ -65,6 +65,12 @@ export class Slack {
     return (await this.api("chat.postMessage", { channel: await this.channel(), text: text.split("\n")[0], parse: "none", unfurl_links: false, unfurl_media: false, blocks: this.monitorBlocks(text) })).ts;
   }
 
+  /** Pin the existing root; a pin provides a shortcut without reposting the dashboard. */
+  async pinMonitor(ts: string): Promise<void> {
+    try { await this.api("pins.add", { channel: await this.channel(), timestamp: ts }); }
+    catch (error) { if (!/already_pinned/.test(String(error))) throw error; }
+  }
+
   /** Block sections keep Slack from splitting a long monitor into multiple root messages. */
   private monitorBlocks(text: string): unknown[] {
     const safe = this.gate ? this.gate(text) : redactPii(text);
