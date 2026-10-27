@@ -7,13 +7,15 @@
 const LIMIT = 2900;
 const MAX_BLOCKS = 50;
 type Row = { icon: string; kind: string; title: string; thread?: string; pending: boolean; byline?: string; status: string; stage?: { name: string; n: number; total: number }; cost?: string; age?: string; action?: string; links: { label: string; url: string }[] };
-type Group = { key: 'reply' | 'ready' | 'working'; icon: string; heading: string; empty: string; rows: Row[]; notes: string[] };
+type Group = { key: 'reply' | 'nudge' | 'ready' | 'working'; icon: string; heading: string; empty: string; rows: Row[]; notes: string[] };
 type Block = Record<string, unknown>;
 
 const mrkdwn = (text: string, max = LIMIT) => ({ type: 'mrkdwn', text: text.length > max ? text.slice(0, max - 1) + '…' : text });
 const section = (text: string): Block => ({ type: 'section', text: mrkdwn(text) });
 const context = (text: string): Block => ({ type: 'context', elements: [mrkdwn(text)] });
 const divider = (): Block => ({ type: 'divider' });
+/** The muses mark, white on transparent, served from the public repo; Slack loads block images by URL. */
+export const CONSORT_MARK_URL = 'https://raw.githubusercontent.com/mitchmeyer1/consort-ade/main/build/consort-muses-white.png';
 /** Monitor text is HTML-escaped for mrkdwn; table cells and plain text need the characters back. */
 const decode = (s: string) => s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
 const unlink = (s: string) => decode(s.replace(/<https?:\/\/[^|>]+\|([^>]+)>/g, '$1'));
@@ -56,7 +58,7 @@ const notable = (status: string) => (['RUNNING', 'WAITING', 'READY TO MERGE', 'D
 const byline = (row: Row) => row.byline?.replace(/^author: /, 'by ');
 /** One card per open task: title, who and how much, the current action, the stage bar, and up to three link buttons. */
 function card(row: Row, group: Group, index: number): Block {
-  const primary = group.key === 'reply' ? 'thread' : group.key === 'ready' ? 'Merge PR' : undefined;
+  const primary = group.key === 'reply' ? 'thread' : group.key === 'ready' ? 'Merge PR' : group.key === 'nudge' ? 'GitHub' : undefined;
   const buttons: Block[] = [];
   if (row.thread) buttons.push(button(group.key === 'reply' ? 'Reply in thread' : 'Open thread', row.thread, `thread-${index}`, primary === 'thread'));
   for (const l of row.links) buttons.push(button(l.label, l.url, `${l.label.toLowerCase().replace(/\W+/g, '-')}-${index}`, primary === l.label));
@@ -111,6 +113,7 @@ export function monitorBlockKit(safe: string, now = Date.now()): Block[] | undef
   if (!lines[0].startsWith('*📊 Consort master monitor*') || !lines.includes('*Working*')) return undefined;
   const groups: Record<Group['key'], Group> = {
     reply: { key: 'reply', icon: '🟠', heading: 'Needs your reply', empty: 'Nothing needs your reply.', rows: [], notes: [] },
+    nudge: { key: 'nudge', icon: '👉', heading: 'Nudge', empty: 'Nobody to nudge.', rows: [], notes: [] },
     ready: { key: 'ready', icon: '📦', heading: 'Ready to merge', empty: 'Nothing waiting to be merged.', rows: [], notes: [] },
     working: { key: 'working', icon: '🔄', heading: 'Working', empty: 'No tasks in progress.', rows: [], notes: [] },
   };
@@ -129,34 +132,37 @@ export function monitorBlockKit(safe: string, now = Date.now()): Block[] | undef
     while (lines[i + 1]?.startsWith('   ')) details.push(lines[++i].trim());
     const row = parseRow(line, details);
     if (!group) completed.push(row);
-    else (group.key === 'working' && row.icon === '🟠' ? groups.reply : group).rows.push(row);
+    else (group.key === 'working' && row.icon === '🟠' ? groups.reply : group.key === 'working' && row.icon === '👉' ? groups.nudge : group).rows.push(row);
   }
   const updated = lines[1]?.match(/^Updated (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}) UTC$/);
   const stamp = updated ? `<!date^${Math.floor(Date.parse(`${updated[1]}T${updated[2]}:00Z`) / 1000)}^{date_short_pretty} {time}|${lines[1]}>` : lines[1] ?? '';
+  const counts = [`*${groups.reply.rows.length}* ${groups.reply.rows.length === 1 ? 'needs' : 'need'} your reply`, `*${groups.nudge.rows.length}* to nudge`, `*${groups.ready.rows.length}* ready to merge`, `*${groups.working.rows.length}* working`, `*${completed.length}* completed`];
+  // The mark sits top right as the summary's accessory; a header block cannot carry an image.
   const blocks: Block[] = [
     { type: 'header', text: { type: 'plain_text', text: 'Consort', emoji: false } },
-    context(`Updated ${stamp}   ·   *${groups.reply.rows.length}* ${groups.reply.rows.length === 1 ? 'needs' : 'need'} your reply   ·   *${groups.ready.rows.length}* ready to merge   ·   *${groups.working.rows.length}* working   ·   *${completed.length}* completed`),
+    { type: 'section', text: mrkdwn(`Updated ${stamp}\n${counts.join('   ·   ')}`), accessory: { type: 'image', image_url: CONSORT_MARK_URL, alt_text: 'Consort' } },
   ];
   let index = 0;
   const groupBlocks = new Map<Group['key'], Block[]>();
-  for (const group of [groups.reply, groups.ready, groups.working]) {
+  // Empty groups are left out; the summary line still carries their counts.
+  for (const group of [groups.reply, groups.nudge, groups.ready, groups.working]) {
+    if (!group.rows.length && !group.notes.length) continue;
     const cards = group.rows.map(r => card(r, group, index++));
     groupBlocks.set(group.key, cards);
-    blocks.push(divider(), section(`*${group.heading}*   ·   ${group.rows.length}`));
-    if (!cards.length) blocks.push(context(`_${group.empty}_`));
-    else blocks.push(...cards);
+    blocks.push(divider(), section(`*${group.heading}*   ·   ${group.rows.length}`), ...cards);
     for (const note of group.notes) blocks.push(context(`_${note}_`));
   }
   blocks.push(divider());
-  blocks.push(container(`completed-${now}`, 'Completed', completed.length ? `most recent ${completed.length}` : undefined,
-    completed.length ? [table(`completed-table-${now}`, ['Task', 'Author', 'Cost', 'Finished', 'Links'], completed.map(completedRow), [{ is_wrapped: true }, {}, { align: 'right' }, {}, {}]), ...completedNotes.map(n => context(`_${n}_`))] : [context('_No completed tasks yet._')], true));
-  blocks.push(container(`capacity-${now}`, 'AI capacity', undefined,
-    accounts.length ? [table(`capacity-table-${now}`, ['Account', 'Status', 'Usage', 'Detail'], accounts.map(accountRow), [{}, {}, {}, { is_wrapped: true }])] : [context('_No accounts configured._')]));
+  if (completed.length) blocks.push(container(`completed-${now}`, 'Completed', `most recent ${completed.length}`,
+    [table(`completed-table-${now}`, ['Task', 'Author', 'Cost', 'Finished', 'Links'], completed.map(completedRow), [{ is_wrapped: true }, {}, { align: 'right' }, {}, {}]), ...completedNotes.map(n => context(`_${n}_`))], true));
+  if (accounts.length) blocks.push(container(`capacity-${now}`, 'AI capacity', undefined,
+    [table(`capacity-table-${now}`, ['Account', 'Status', 'Usage', 'Detail'], accounts.map(accountRow), [{}, {}, {}, { is_wrapped: true }])]));
+  if (!blocks.some(b => b.type === 'card' || b.type === 'container')) blocks.push(context('_Nothing open and nothing finished yet._'));
   blocks.push(context('Reply in a task’s thread. This message updates in place.'));
   // Too many open tasks for Slack's block limit: the later groups fall back to packed text rows, one section per few tasks.
-  for (const group of [groups.working, groups.ready, groups.reply]) {
+  for (const group of [groups.working, groups.ready, groups.nudge, groups.reply]) {
     if (blocks.length <= MAX_BLOCKS) break;
-    const cards = groupBlocks.get(group.key)!; if (!cards.length) continue;
+    const cards = groupBlocks.get(group.key); if (!cards?.length) continue;
     const at = blocks.indexOf(cards[0]); const replacement = packed(group.rows.map(compact));
     blocks.splice(at, cards.length, ...replacement);
   }

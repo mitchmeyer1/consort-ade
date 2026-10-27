@@ -15,6 +15,9 @@ Updated 2026-10-27 16:45 UTC
    Stopped for consort-cli stop
 🔄 Sentry · Analysis only · RUNNING · Triage 2/3
    Reading the Sentry issue
+👉 Feature · <https://slack.example/nudge|Needs a reviewer> · author: <https://github.com/mitch|@mitch> · RUNNING · Watch PR 9/9 · $12 · 3h
+   need one approval from @ada; CI is green. Next check in 3m. Your action: please nudge @ada to review the PR.
+   <https://app.clickup.com/t/5|ticket> · <https://github.com/a/b/pull/5|github>
 
 *Ready to merge · your action*
 📦 Review · <https://slack.example/ready|Ship it> · author: <https://github.com/pmonco|@pmonco> · READY TO MERGE · Approve 5/5 · $9 · ready 3m ago
@@ -35,29 +38,32 @@ STATUS: MONITORING`;
 const NOW=1700000000000;
 const texts=blocks=>JSON.stringify(blocks);
 const cards=blocks=>blocks.filter(b=>b.type==='card');
-test('monitor opens with the header and counts, then groups in the order the owner acts',()=>{
+test('monitor opens with the header, the mark top right and counts, then groups in the order the owner acts',()=>{
  const blocks=monitorBlockKit(text,NOW);
  assert.equal(blocks[0].type,'header');assert.equal(blocks[0].text.text,'Consort');
- assert.match(blocks[1].elements[0].text,/^Updated <!date\^1793119500\^\{date_short_pretty\} \{time\}\|Updated 2026-10-27 16:45 UTC>/);
- assert.match(blocks[1].elements[0].text,/\*1\* needs your reply.*\*1\* ready to merge.*\*3\* working.*\*1\* completed/);
+ assert.equal(blocks[1].type,'section');assert.deepEqual(blocks[1].accessory,{type:'image',image_url:'https://raw.githubusercontent.com/mitchmeyer1/consort-ade/main/build/consort-muses-white.png',alt_text:'Consort'});
+ assert.match(blocks[1].text.text,/^Updated <!date\^1793119500\^\{date_short_pretty\} \{time\}\|Updated 2026-10-27 16:45 UTC>\n/);
+ assert.match(blocks[1].text.text,/\*1\* needs your reply.*\*1\* to nudge.*\*1\* ready to merge.*\*3\* working.*\*1\* completed/);
  const headings=blocks.filter(b=>b.type==='section'&&/^\*[A-Za-z ]+\*   ·   \d+$/.test(b.text.text)).map(b=>b.text.text);
- assert.deepEqual(headings,['*Needs your reply*   ·   1','*Ready to merge*   ·   1','*Working*   ·   3']);
- assert.deepEqual(cards(blocks).map(c=>c.title.text),['Curation &amp; parity','Ship it','Paging shard','Stopped one','Analysis only']);
+ assert.deepEqual(headings,['*Needs your reply*   ·   1','*Nudge*   ·   1','*Ready to merge*   ·   1','*Working*   ·   3']);
+ assert.deepEqual(cards(blocks).map(c=>c.title.text),['Curation &amp; parity','Needs a reviewer','Ship it','Paging shard','Stopped one','Analysis only']);
  assert.deepEqual(blocks.filter(b=>b.type==='container').map(b=>b.title.text),['Completed','AI capacity']);
- assert.doesNotMatch(texts(blocks),/🟠|📦|🔄|✅|⚡|🎉/);
+ assert.doesNotMatch(texts(blocks),/🟠|📦|🔄|✅|⚡|🎉|👉/);
 });
 test('a task card carries who, cost, age, the action, the stage bar and link buttons with one primary action',()=>{
- const [reply,ready,sentry,stopped,analysis]=cards(monitorBlockKit(text,NOW));
+ const [reply,nudge,ready,sentry,stopped,analysis]=cards(monitorBlockKit(text,NOW));
  assert.equal(reply.subtitle.text,'Feature   ·   by <https://github.com/mitch|@mitch>   ·   $608   ·   18m');
  assert.equal(reply.body.text,'Confirm whether parity needs a separate task.');
  assert.equal(reply.subtext.text,'Review 7/9   ▰▰▰▰▰▰▱▱▱');
  assert.deepEqual(reply.actions.map(b=>[b.text.text,b.url,b.style]),[['Reply in thread','https://slack.example/thread','primary'],['ClickUp','https://app.clickup.com/t/123',undefined],['GitHub','https://github.com/a/b/pull/1',undefined]]);
  assert.deepEqual(ready.actions.map(b=>[b.text.text,b.style]),[['Open thread',undefined],['Merge PR','primary']]);
+ assert.deepEqual(nudge.actions.map(b=>[b.text.text,b.style]),[['Open thread',undefined],['ClickUp',undefined],['GitHub','primary']]);
+ assert.match(nudge.body.text,/please nudge @ada/);
  assert.equal(ready.subtext.text,'Approve 5/5   ▰▰▰▰▰');
  assert.equal(sentry.subtitle.text,'Sentry   ·   author unavailable   ·   cost pending   ·   2h');assert.equal(sentry.actions,undefined);
  assert.equal(stopped.subtext.text,'Setup 1/9   ▱▱▱▱▱▱▱▱▱   ·   *STOPPED*   ·   _Slack thread pending_');
  assert.equal(analysis.subtitle.text,'Sentry');assert.equal(analysis.body.text,'Reading the Sentry issue');assert.equal(analysis.subtext.text,'Triage 2/3   ▰▱▱');
- const ids=new Set(cards(monitorBlockKit(text,NOW)).flatMap(c=>(c.actions??[]).map(b=>b.action_id)));assert.equal(ids.size,5);
+ const ids=new Set(cards(monitorBlockKit(text,NOW)).flatMap(c=>(c.actions??[]).map(b=>b.action_id)));assert.equal(ids.size,8);
  assert.ok(cards(monitorBlockKit(text,NOW)).every(c=>c.block_id&&(c.actions??[]).length<=3&&(c.actions??[]).filter(b=>b.style==='primary').length<=1));
 });
 test('completed work and AI capacity are tables inside titled containers',()=>{
@@ -84,11 +90,16 @@ test('escaped characters are decoded for tables and plain text but kept for mrkd
  assert.equal(done.rows[1][0].elements[0].elements[0].text,'Fix & ship <b>');
  assert.equal(cards(blocks)[0].title.text,'Curation &amp; parity');
 });
-test('empty groups say so and non-monitor text gets no blocks',()=>{
+test('empty groups and tables are left out, and non-monitor text gets no blocks',()=>{
  const empty=monitorBlockKit(text.replace(/\n\*Working\*[\s\S]*?\n\n\*Accounts\*/,'\n*Working*\nNo tasks in progress.\n\n*Ready to merge · your action*\nNo tickets waiting to be merged.\n\n*Completed · most recent 6*\nNo completed tasks yet.\n\n*Accounts*'),NOW);
  const all=texts(empty);
- for(const s of ['_Nothing needs your reply._','_Nothing waiting to be merged._','_No tasks in progress._','_No completed tasks yet._'])assert.ok(all.includes(s),s);
- assert.equal(cards(empty).length,0);
+ assert.doesNotMatch(all,/Needs your reply|Nudge|Ready to merge|\*Working\*|Completed/);
+ assert.equal(cards(empty).length,0);assert.equal(empty.filter(b=>b.type==='container').length,1);
+ assert.match(all,/AI capacity/);
+ const partial=monitorBlockKit(text.replace(/\n\*Ready to merge · your action\*\n[^\n]+\n[^\n]+\n/,'\n*Ready to merge · your action*\nNo tickets waiting to be merged.\n'),NOW);
+ assert.doesNotMatch(texts(partial),/Ready to merge\*|Ship it/);assert.match(partial[1].text.text,/\*0\* ready to merge/);
+ const bare=monitorBlockKit(text.replace(/\n\*Working\*[\s\S]*?\n\n\*Accounts\*[\s\S]*?\n\nOpen a ticket/,'\n*Working*\nNo tasks in progress.\n\n*Ready to merge · your action*\nNo tickets waiting to be merged.\n\n*Completed · most recent 6*\nNo completed tasks yet.\n\n*Accounts*\nNo accounts configured.\n\nOpen a ticket'),NOW);
+ assert.match(texts(bare),/_Nothing open and nothing finished yet._/);assert.equal(bare.filter(b=>b.type==='container'||b.type==='card').length,0);
  assert.equal(monitorBlockKit('Content withheld by guard'),undefined);
  assert.equal(monitorBlockKit('*📊 Consort master monitor*\nUpdated monitor'),undefined);
 });

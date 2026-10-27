@@ -21,7 +21,9 @@ export function slackMasterMonitor(state: CliState, threads: Map<string, string>
     const health = taskHealth(t, state.accounts, { workerAlive: !!t.pid && alive(t.pid), logAgeMs: now - t.updatedAt }, now);
     const step = taskStep(t);
     const status = t.status==='ready' ? 'READY TO MERGE' : health.label;
-    const icon = t.status==='ready' ? '📦' : status === 'WAITING' ? '🟠' : status === 'STOPPED' ? '❌' : FINISHED.includes(t.status) ? '🎉🍭🎊' : '🔄';
+    // 👉: the PR has waited an hour for a reviewer (cli/pipeline.ts PR watch); the owner's move is to nudge them.
+    const nudge = /Your action: please nudge /.test(t.activity ?? '');
+    const icon = t.status==='ready' ? '📦' : status === 'WAITING' ? '🟠' : status === 'STOPPED' ? '❌' : FINISHED.includes(t.status) ? '🎉🍭🎊' : nudge ? '👉' : '🔄';
     const age = t.status==='ready' ? `ready ${ago(now-(t.finishedAt??t.updatedAt))} ago` : t.finishedAt ? `finished ${ago(now-t.finishedAt)} ago` : ago(now-t.startedAt);
     const job = state.jobs.find(j=>j.id===t.jobId);
     const kind = t.kind==='review' ? 'Review' : job?.sentryProducerId || job?.source==='sentry' ? 'Sentry' : 'Feature';

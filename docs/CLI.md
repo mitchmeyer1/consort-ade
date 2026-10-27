@@ -404,9 +404,12 @@ The master monitor uses 🟠 for tasks needing a human reply. It attempts to pin
 
 ### Slack monitor layout
 
-The master monitor is native Slack Block Kit, not an image: a Consort header, one line with the
-update time (shown in the reader's time zone) and the counts, then the open work in the order you
-act on it: needs your reply, ready to merge, working. Each open task is a card: the title, who
+The master monitor is native Slack Block Kit, not an image: a Consort header with the white muses
+mark top right (loaded from the public repo), the update time (shown in the reader's time zone) and
+the counts, then the open work in the order you act on it: needs your reply, nudge (a PR that has
+waited an hour for a reviewer; the card's action names whom to ping), ready to merge, working. A
+group with nothing in it is left out, as are the completed and capacity tables when empty. Each
+open task is a card: the title, who
 and how much (kind, author, cost, age), the current action, the workflow stage as a `▰▰▱▱` bar,
 and up to three link buttons (Reply in thread or Open thread, GitHub or Merge PR, ClickUp), the
 main one green. Completed work is a table (task, author, cost, finished, links) in a collapsible
