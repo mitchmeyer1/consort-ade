@@ -81,14 +81,14 @@ test('completed work and AI capacity are tables inside titled containers',()=>{
  assert.deepEqual(row[4].elements[0].elements.map(e=>e.url??e.text),['https://app.clickup.com/t/9','  ·  ','https://github.com/a/b/pull/3']);
  const usage=capacity.child_blocks[0];assert.equal(usage.type,'table');
  assert.deepEqual(usage.rows.slice(1).map(r=>r.map(c=>c.text??c.elements[0].elements[0].text)),[
-  ['Claude 1','Available','⬜⬜⬜⬜◻️◻️◻️◻️◻️◻️  42%','5-hour 42% · weekly 20% · usage 3m ago'],
+  ['Claude 1','Available','🟦🟦🟦🟦⬜⬜⬜⬜⬜⬜  42%','5-hour 42% · weekly 20% · usage 3m ago'],
   ['Claude 2','Blocked','—','weekly limit reached · resume after Oct 28, 2:30 PM EDT'],
   ['Codex 1','Unavailable','—','no reading yet']]);
  assert.equal(bar(3,5),'▰▰▰▱▱');assert.equal(bar(2,40),'');
- assert.equal(meter(0),'◻️'.repeat(10));assert.equal(meter(50),'⬜'.repeat(5)+'◻️'.repeat(5));assert.equal(meter(51),'🟨'.repeat(5)+'◻️'.repeat(5));assert.equal(meter(90),'🟨'.repeat(9)+'◻️');assert.equal(meter(91),'🟧'.repeat(9)+'◻️');assert.equal(meter(100),'🟧'.repeat(10));assert.equal(meter(140),'🟧'.repeat(10));
+ assert.equal(meter(0),'⬜'.repeat(10));assert.equal(meter(50),'🟦'.repeat(5)+'⬜'.repeat(5));assert.equal(meter(51),'🟨'.repeat(5)+'⬜'.repeat(5));assert.equal(meter(90),'🟨'.repeat(9)+'⬜');assert.equal(meter(91),'🟧'.repeat(9)+'⬜');assert.equal(meter(100),'🟧'.repeat(10));assert.equal(meter(140),'🟧'.repeat(10));
  const busy=monitorBlockKit(text.replace('5-hour 42% · weekly 20%','5-hour 12% · weekly 77%').replace('⚪ Codex 1 · usage unavailable','🟠 Codex 1 · available · 5-hour 95%'),NOW);
  const rows=busy.filter(b=>b.type==='container').at(-1).child_blocks[0].rows.slice(1).map(r=>[r[1].text,r[2].text]);
- assert.deepEqual(rows[0],['Busy','🟨🟨🟨🟨🟨🟨🟨🟨◻️◻️  77%']);assert.deepEqual(rows[2],['Nearly full','🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧  95%']);
+ assert.deepEqual(rows[0],['Busy','🟨🟨🟨🟨🟨🟨🟨🟨⬜⬜  77%']);assert.deepEqual(rows[2],['Nearly full','🟧🟧🟧🟧🟧🟧🟧🟧🟧🟧  95%']);
 });
 test('escaped characters are decoded for tables and plain text but kept for mrkdwn',()=>{
  const blocks=monitorBlockKit(text.replace('Finished one','Fix &amp; ship &lt;b&gt;'),NOW);

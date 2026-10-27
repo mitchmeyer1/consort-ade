@@ -22,8 +22,8 @@ const unlink = (s: string) => decode(s.replace(/<https?:\/\/[^|>]+\|([^>]+)>/g, 
 const link = (url: string | undefined, label: string) => (url ? `<${url}|${label}>` : label);
 const button = (label: string, url: string, id: string, primary = false): Block => ({ type: 'button', text: { type: 'plain_text', text: label, emoji: false }, url, action_id: id, ...(primary ? { style: 'primary' } : {}) });
 /** `▰▰▱▱▱`: stages done out of the total, in text that every Slack client renders. */
-/** The usage meter: ten squares, the only coloured text Slack draws. White to 50%, yellow to 90%, orange above; hollow for the rest. */
-export const meter = (percent: number) => { const filled = Math.round(Math.max(0, Math.min(100, percent)) / 10); const square = percent <= 50 ? '⬜' : percent <= 90 ? '🟨' : '🟧'; return square.repeat(filled) + '◻️'.repeat(10 - filled); };
+/** The usage meter: ten squares, the only coloured text Slack draws. Blue to 50%, yellow to 90%, orange above; white for the rest. */
+export const meter = (percent: number) => { const filled = Math.round(Math.max(0, Math.min(100, percent)) / 10); const square = percent <= 50 ? '🟦' : percent <= 90 ? '🟨' : '🟧'; return square.repeat(filled) + '⬜'.repeat(10 - filled); };
 export const bar = (done: number, total: number) => (total > 0 && total <= 30 ? '▰'.repeat(Math.max(0, Math.min(done, total))) + '▱'.repeat(Math.max(0, total - done)) : '');
 type Cell = { type: 'raw_text'; text: string } | { type: 'rich_text'; elements: unknown[] };
 /** Slack rejects an empty cell, so a blank shows as a dash. */
