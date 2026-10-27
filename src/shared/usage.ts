@@ -207,12 +207,52 @@ export function modelLoad(usage: ConnectorUsage | undefined, model: string): num
   return relevant.length ? Math.max(...relevant.map((w) => (w.locked ? 100 : w.percent))) : undefined;
 }
 
+/** resets this close together count as the same day: the one with more room left goes first */
+export const RESET_TIE_MS = 6 * 60 * 60_000;
+/** the preferred login takes new work until it runs this many more turns than the quietest login */
+export const SPREAD_SLACK = 1;
+
+const isWeeklyWindow = (w: UsageWindow) => /week|7-day|seven_day|secondary/i.test(`${w.id} ${w.label}`);
+
 /**
- * The least-used account for this model, by code, not by asking a model: lowest load first, then
- * metered accounts before unmetered ones, then the one used longest ago. Accounts whose own model
- * window is spent are skipped.
+ * When this account's unspent weekly credits for the model expire: the soonest reset among the
+ * weekly windows that meter it (the plan-wide one, and the model's own). Undefined when no
+ * window says.
  */
-export function leastLoaded<A extends { id: string; lastUsedAt?: number }>(accounts: A[], model: string, usage: Map<string, ConnectorUsage>): A | undefined {
-  const scored = accounts.filter((a) => !modelBlock(usage.get(a.id), model)).map((a) => ({ a, load: modelLoad(usage.get(a.id), model) }));
-  return scored.sort((x, y) => (x.load ?? 1_000) - (y.load ?? 1_000) || (x.a.lastUsedAt ?? 0) - (y.a.lastUsedAt ?? 0))[0]?.a;
+export function weeklyReset(usage: ConnectorUsage | undefined, model: string, now: number): number | undefined {
+  if (!usage || usage.unavailable) return undefined;
+  const times = usage.windows.filter((w) => isWeeklyWindow(w) && (!w.model || meters(model, w.model)) && !spent(w))
+    .map((w) => w.resetsAt).filter((t): t is number => !!t && t > now);
+  return times.length ? Math.min(...times) : undefined;
+}
+
+export type Candidate<A> = { a: A; model: string; usage?: ConnectorUsage; running?: number; full?: boolean };
+
+/**
+ * Accounts in the order new work should go to them. Credits left at a weekly reset are lost, so
+ * the account whose week ends soonest goes first (resets within RESET_TIE_MS of each other tie, and
+ * the one with more room wins). To keep one login from being throttled, an account running more
+ * than SPREAD_SLACK turns beyond the quietest one waits behind the others, and an account at its
+ * turn cap goes last. Accounts whose model window is spent are dropped; unmetered ones rank last.
+ */
+export function rankAccounts<A extends { id: string; lastUsedAt?: number }>(candidates: Candidate<A>[], now: number): A[] {
+  const live = candidates.filter((c) => !modelBlock(c.usage, c.model));
+  const open = live.filter((c) => !c.full);
+  const quietest = open.length ? Math.min(...open.map((c) => c.running ?? 0)) : 0;
+  const resets = live.map((c) => weeklyReset(c.usage, c.model, now));
+  const soonest = Math.min(...resets.map((t) => t ?? Infinity));
+  const scored = live.map((c, i) => ({
+    c,
+    full: c.full ? 1 : 0,
+    busy: (c.running ?? 0) > quietest + SPREAD_SLACK ? 1 : 0,
+    tier: resets[i] === undefined ? Infinity : Math.floor((resets[i]! - soonest) / RESET_TIE_MS),
+    load: modelLoad(c.usage, c.model) ?? 1_000,
+  }));
+  return scored.sort((x, y) => x.full - y.full || x.busy - y.busy || (x.tier === y.tier ? 0 : x.tier < y.tier ? -1 : 1)
+    || x.load - y.load || (x.c.a.lastUsedAt ?? 0) - (y.c.a.lastUsedAt ?? 0)).map((x) => x.c.a);
+}
+
+/** the account the next turn on this model should use (rankAccounts' first), skipping spent model windows */
+export function leastLoaded<A extends { id: string; lastUsedAt?: number }>(accounts: A[], model: string, usage: Map<string, ConnectorUsage>, now = Date.now()): A | undefined {
+  return rankAccounts(accounts.map((a) => ({ a, model, usage: usage.get(a.id) })), now)[0];
 }

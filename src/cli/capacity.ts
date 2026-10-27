@@ -24,6 +24,13 @@ export const maxAgentTurnUnits = (taskId: string, accountId: string): number => 
   return Math.min(positive(job.maxParallel, 2), positive(account.maxActiveTurns, 2), positive(state.capacity?.maxActiveTurns, 4));
 };
 
+/** how many agent turns each account is running right now, across every worker */
+export function runningTurns(state: CliState): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const turn of state.tasks.flatMap(t => t.activeTurns ?? [])) if (processAlive(turn.pid)) out.set(turn.accountId, (out.get(turn.accountId) ?? 0) + (turn.units ?? 1));
+  return out;
+}
+
 export function tryAcquireAgentTurn(taskId: string, accountId: string, units = 1): string | undefined {
   if (!Number.isInteger(units) || units < 1) throw new Error("Agent capacity units must be a positive integer.");
   return mutateState(state => {

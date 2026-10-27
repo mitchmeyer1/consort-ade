@@ -24,12 +24,12 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { addTurnCost, approvalReply, ENVIRONMENT_RULES, HEADLESS_RULES, seedModels, parseSlackIdentity, slackAsk, slackHeading, slackMessage, slackProgress, slackStatus, type SlackIdentity } from "../shared/headless.ts";
 import { selectCliModel } from "../shared/cliModels.ts";
-import { modelBlock, modelLoad, usageBlock } from "../shared/usage.ts";
+import { modelBlock, modelLoad, rankAccounts, usageBlock } from "../shared/usage.ts";
 import { parseReview, serializeReview, type Finding, type Review, type ReviewEvent } from "../shared/review.ts";
 import { newShipFeature } from "../shared/ship.ts";
 import type { Provider } from "../shared/types.ts";
 import { runTurn } from "./agent";
-import { tryAcquireAnyAgentTurn, releaseAgentTurn } from "./capacity";
+import { tryAcquireAnyAgentTurn, releaseAgentTurn, runningTurns } from "./capacity";
 import { claimForTask, releaseEnvironment } from "./environment";
 import { oversightModel } from "./oversight";
 import { postReview } from "./reviewPost";
@@ -349,8 +349,10 @@ async function reviewRound(taskId: string, watch: (t: ReviewTarget, repo: string
       if (!open.length) { tried.clear(); await new Promise((r) => setTimeout(r, 60_000)); continue; }
       const modelOn = (a: Account) => role === "frontier" ? selectCliModel(a.provider, models[a.provider], "frontier", policy) : role === "swarm" ? oversightModel(a.provider, policy) : selectCliModel(a.provider, models[a.provider], "implementation", policy);
       const usage = await usageFor(open);
-      const eligible = open.filter((a) => !modelBlock(usage.get(a.id), modelOn(a)) && !usageBlock(usage.get(a.id) ?? { keyId: a.id, at: 0, windows: [] }, now))
-        .sort((x, y) => (modelLoad(usage.get(x.id), modelOn(x)) ?? 1_000) - (modelLoad(usage.get(y.id), modelOn(y)) ?? 1_000) || (x.lastUsedAt ?? 0) - (y.lastUsedAt ?? 0));
+      // the login whose weekly credits expire soonest goes first, but a login already running more turns than the others waits
+      const busy = runningTurns(live);
+      const eligible = rankAccounts(open.filter((a) => !usageBlock(usage.get(a.id) ?? { keyId: a.id, at: 0, windows: [] }, now))
+        .map((a) => ({ a, model: modelOn(a), usage: usage.get(a.id), running: busy.get(a.id) ?? 0, full: (busy.get(a.id) ?? 0) >= (a.maxActiveTurns ?? 2) })), now);
       if (!eligible.length) { open.forEach((a) => tried.add(a.id)); continue; }
       const reserved = tryAcquireAnyAgentTurn(taskId, eligible.map(a=>a.id));
       if (!reserved) { attempt--; await new Promise(r=>setTimeout(r,250)); continue; }

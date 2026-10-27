@@ -204,3 +204,13 @@ test('the monitor reads every login once per refresh, keeps a failed seat stale,
   assert.match(p4.error, /a: usage endpoint 429/);
   assert.equal(published.length, 3);
 });
+
+test('the seat whose week ends soonest wins, unless it is running more chats than the others', () => {
+  const H = 60 * 60_000;
+  const seat = (id, weekly, endsIn) => seatFromUsage(login(id), `/u/.claude-${id}`, usage(id, [w('five_hour', '5-hour', 10), w('seven_day', 'Weekly', weekly, { resetsAt: NOW + endsIn })]), undefined, NOW);
+  const p = buildPool([seat('later', 20, 100 * H), seat('soon', 70, 10 * H), seat('mid', 30, 50 * H)], NOW);
+  assert.equal(pickSeat(p, 'claude', { now: NOW }).dir, '/u/.claude-soon', 'most used, but its credits expire first');
+  assert.equal(pickSeat(p, 'claude', { now: NOW, busy: { '/u/.claude-soon': 1 } }).dir, '/u/.claude-soon', 'one chat ahead is fine');
+  assert.equal(pickSeat(p, 'claude', { now: NOW, busy: { '/u/.claude-soon': 2 } }).dir, '/u/.claude-mid', 'two ahead: the next soonest');
+  assert.equal(pickSeat(p, 'claude', { now: NOW, busy: { '/u/.claude-soon': 2, '/u/.claude-mid': 1, '/u/.claude-later': 1 } }).dir, '/u/.claude-soon', 'everyone busy: preference holds');
+});

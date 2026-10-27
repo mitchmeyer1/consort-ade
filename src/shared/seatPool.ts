@@ -1,12 +1,12 @@
 /**
  * The seat pool: every login connector of a provider is a "seat", and the pool connector ("Any
- * Claude", "Any Codex") runs each chat on the seat with the most plan headroom for its model.
+ * Claude", "Any Codex") runs each chat on the seat whose weekly credits expire soonest, spread so no one seat is crowded.
  * Consort reads each seat's usage itself (the same probe Settings shows) and picks; nothing
  * outside the app is involved. A chat keeps one seat, so its prompt cache stays warm, and
  * moves only when that seat hits a usage limit or the user moves it.
  */
 import type { ApiKey, Provider } from "./types";
-import type { ConnectorUsage, UsageWindow } from "./usage";
+import { RESET_TIE_MS, SPREAD_SLACK, type ConnectorUsage, type UsageWindow } from "./usage.ts";
 
 export type SeatWindow = { pct: number; resetsAt?: number };
 export type Seat = {
@@ -78,20 +78,40 @@ export function seatLoad(seat: Seat, model?: string) {
   return Math.max(seat.fiveHour.pct, seat.sevenDay.pct, fam ? seat.models[fam]?.pct ?? 0 : 0);
 }
 
+/** when the seat's unspent weekly credits for this model expire: the soonest of its weekly window and the model's own */
+export function seatWeekEnds(seat: Seat, model: string | undefined, now: number) {
+  const fam = modelFamily(model);
+  const times = [seat.sevenDay, ...(fam && seat.models[fam] ? [seat.models[fam]] : [])]
+    .filter((w) => w.pct < 100).map((w) => w.resetsAt).filter((t): t is number => !!t && t > now);
+  return times.length ? Math.min(...times) : undefined;
+}
+
 /**
- * The seat a chat on this provider should run on: the live, unblocked seat with the most headroom
- * for the model, never one in `exclude`. With every seat blocked the least-loaded one is named and
- * flagged, so the caller can say the pool is out rather than pretend.
+ * The seat a chat on this provider should run on, never one in `exclude`. Among the live, unblocked
+ * seats, the one whose weekly credits expire soonest wins, since what is left at a reset is lost;
+ * resets within RESET_TIE_MS tie and go to the seat with more headroom. A seat running more chats
+ * (`busy`, by dir) than the quietest open seat plus SPREAD_SLACK waits behind the others so one
+ * login is not throttled. With every seat blocked the least-loaded one is named and flagged, so
+ * the caller can say the pool is out rather than pretend.
  */
-export function pickSeat(pool: SeatPool | undefined, provider: Provider, opts: { model?: string; exclude?: string[] } = {}): SeatPick | undefined {
+export function pickSeat(pool: SeatPool | undefined, provider: Provider, opts: { model?: string; exclude?: string[]; busy?: Record<string, number>; now?: number } = {}): SeatPick | undefined {
   const skip = new Set(opts.exclude ?? []);
   const seats = (pool?.seats ?? []).filter((s) => s.provider === provider && !skip.has(s.dir));
   if (!seats.length) return undefined;
+  const now = opts.now ?? Date.now();
   const load = (s: Seat) => seatLoad(s, opts.model);
   const open = seats.filter((s) => s.live && !s.blocked && load(s) < SEAT_CEILING);
-  const best = (list: Seat[]) => list.reduce((a, b) => (load(b) < load(a) ? b : a));
-  if (open.length) { const s = best(open); return { dir: s.dir, keyId: s.keyId, blocked: false }; }
-  const s = best(seats);
+  if (open.length) {
+    const running = (s: Seat) => opts.busy?.[s.dir] ?? 0;
+    const quietest = Math.min(...open.map(running));
+    const ends = new Map(open.map((s) => [s.dir, seatWeekEnds(s, opts.model, now) ?? Infinity]));
+    const soonest = Math.min(...ends.values());
+    const tier = (s: Seat) => { const t = ends.get(s.dir)!; return t === Infinity ? Infinity : Math.floor((t - soonest) / RESET_TIE_MS); };
+    const busy = (s: Seat) => (running(s) > quietest + SPREAD_SLACK ? 1 : 0);
+    const s = [...open].sort((a, b) => busy(a) - busy(b) || (tier(a) === tier(b) ? 0 : tier(a) < tier(b) ? -1 : 1) || load(a) - load(b))[0];
+    return { dir: s.dir, keyId: s.keyId, blocked: false };
+  }
+  const s = seats.reduce((a, b) => (load(b) < load(a) ? b : a));
   return { dir: s.dir, keyId: s.keyId, blocked: true };
 }
 

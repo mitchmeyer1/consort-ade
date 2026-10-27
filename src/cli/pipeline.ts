@@ -34,7 +34,7 @@ import type { Subtask } from "./sources";
 import { draftBody, draftTitle, ensureDraftPr, updateDraftBody } from "./draftPr";
 import { stepLabel } from "./buildProgress";
 import type { TaskEnv } from "../shared/headless.ts";
-import { modelBlock, modelLoad, usageBlock } from "../shared/usage.ts";
+import { modelBlock, modelLoad, rankAccounts, usageBlock, weeklyReset } from "../shared/usage.ts";
 import { statusEvent } from "./statusLog";
 import { Slack } from "./slack";
 import { ensureSlackIdentity } from "./slackIdentity";
@@ -237,9 +237,9 @@ export async function workTask(taskId: string): Promise<void> {
     for (let attempt = 0; attempt < 12;) {
       const live = loadState();
       const cur = live.tasks.find((t) => t.id === taskId)!;
-      // a turn that resumes a session stays on that session's account; any new agent goes to the least-used account for its model
+      // a turn that resumes a session stays on that session's account; any new agent goes to the account whose weekly credits expire soonest
       const canResume = resume && managesSession && !!cur.sessions[provider] && !!cur.accountIds[provider];
-      // Claude and Codex are interchangeable: a new agent goes to whichever account, on either provider, has the most room
+      // Claude and Codex are interchangeable: a new agent goes to whichever account, on either provider, ranks first
       // for this kind of turn (Fable vs Astra for frontier work, Sonnet/Opus vs Sol otherwise)
       const reserve = (a: Account | undefined) => { if (a) mine.set(a.id, (mine.get(a.id) ?? 0) + 1); return a; };
       const pickAny = async (): Promise<Account | undefined> => {
@@ -255,10 +255,13 @@ export async function workTask(taskId: string): Promise<void> {
         const modelOn = (a: Account) => (fixedModel && a.provider === provider ? fixedModel : modelFor(a.provider, role));
         // accounts already running as many turns as they allow would only queue; parallel tickets spread to the free ones
         const running = (id: string) => (mine.get(id) ?? 0) + loadState().tasks.flatMap((t) => t.activeTurns ?? []).filter((a) => a.accountId === id && a.pid !== process.pid && processAlive(a.pid)).reduce((n, a) => n + (a.units ?? 1), 0);
-        const scored = usable.filter((a) => !modelBlock(usage.get(a.id), modelOn(a))).map((a) => ({ a, full: running(a.id) >= (a.maxActiveTurns ?? 2) ? 1 : 0, load: modelLoad(usage.get(a.id), modelOn(a)) ?? 1_000 }));
-        const pick = scored.sort((x, y) => x.full - y.full || x.load - y.load || (x.a.lastUsedAt ?? 0) - (y.a.lastUsedAt ?? 0))[0]?.a ?? pickAccount(usable, provider, now);
+        // the login whose weekly credits expire soonest goes first, but a login already running more turns than the others waits
+        const busy = new Map(usable.map((a) => [a.id, running(a.id)]));
+        const ranked = rankAccounts(usable.map((a) => ({ a, model: modelOn(a), usage: usage.get(a.id), running: busy.get(a.id), full: busy.get(a.id)! >= (a.maxActiveTurns ?? 2) })), now);
+        const pick = ranked[0] ?? pickAccount(usable, provider, now);
         reserve(pick);
-        log(task, `${role} turn on ${pick ? `${pick.name} (${modelOn(pick)})` : "none"}; use for this turn: ${scored.map((x) => `${x.a.name} ${modelOn(x.a)} ${x.load === 1_000 ? "?" : x.load}%`).join(", ")}`);
+        const describe = (a: Account) => { const load = modelLoad(usage.get(a.id), modelOn(a)); const reset = weeklyReset(usage.get(a.id), modelOn(a), now); return `${a.name} ${modelOn(a)} ${load ?? "?"}% ${busy.get(a.id)} running${reset ? ` week ends ${resetLabel(reset)}` : ""}`; };
+        log(task, `${role} turn on ${pick ? `${pick.name} (${modelOn(pick)})` : "none"}; order for this turn: ${ranked.map(describe).join(", ")}`);
         return pick;
       };
       const who = await pickAny();
@@ -279,7 +282,7 @@ export async function workTask(taskId: string): Promise<void> {
       updateTask(taskId, { status: "working", note: undefined });
       attempt++;
       if (who.provider !== provider) {
-        log(task, `continuing ${role} on ${who.provider} (${who.name}): it has the most room`);
+        log(task, `continuing ${role} on ${who.provider} (${who.name}): it ranks first`);
         provider = who.provider;
         model = modelFor(provider, role);
       }

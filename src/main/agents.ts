@@ -183,6 +183,8 @@ export async function switchAgent(chatId: string, keyId: string, model: string) 
 
 const note = (chat: Chat, text: string) => chat.messages.push({ id: randomUUID(), role: "system", blocks: [{ type: "text", text }], ts: Date.now() });
 const isPool = (chat: Chat) => !!keyOf(chat)?.pool;
+/** running pool chats per seat dir, so the chooser spreads new chats instead of crowding one login */
+const busySeats = (skip?: string) => store.data.chats.reduce<Record<string, number>>((n, c) => { if (c.running && c.seatDir && c.id !== skip) n[c.seatDir] = (n[c.seatDir] ?? 0) + 1; return n; }, {});
 const limitLabel = (hit: LimitHit) => `${describeLimit(hit)}${hit.resetsAt ? ` (resets ${resetLabel(hit.resetsAt)})` : ""}`;
 
 /**
@@ -193,7 +195,7 @@ async function ensureSeat(chat: Chat) {
   const cur = seatOf(store.data.seatPool, chat.seatDir);
   if (chat.seatDir && !(cur && (cur.blocked || seatLoad(cur, chat.model) >= 100))) return;
   const pool = await readPool().catch(() => store.data.seatPool);
-  const pick = pickSeat(pool, chat.provider, { model: chat.model });
+  const pick = pickSeat(pool, chat.provider, { model: chat.model, busy: busySeats(chat.id) });
   chat.seatDir = pick?.dir ?? chat.seatDir ?? defaultSeat(chat.provider);
 }
 
@@ -211,7 +213,7 @@ async function recoverFromLimit(chatId: string, hit: LimitHit) {
   let why = "";
   try { pool = (await readPool({ force: true })) ?? pool; }
   catch (e) { why = ` Reading the seats failed: ${(e as Error).message}.`; }
-  const pick = pickSeat(pool, chat.provider, { exclude: tried, model: chat.model });
+  const pick = pickSeat(pool, chat.provider, { exclude: tried, model: chat.model, busy: busySeats(chat.id) });
   const next = pick && !pick.blocked ? pick.dir : undefined;
   if (!next || tried.includes(next)) {
     const reset = earliestReset(pool, chat.provider);
@@ -243,7 +245,7 @@ export async function switchSeat(chatId: string, dir?: string) {
   let target = dir;
   if (!target) {
     const fresh = await readPool({ force: true });
-    const pick = pickSeat(fresh, chat.provider, { exclude: current ? [current] : [], model: chat.model });
+    const pick = pickSeat(fresh, chat.provider, { exclude: current ? [current] : [], model: chat.model, busy: busySeats(chat.id) });
     if (!pick) throw new Error("No other login to move to.");
     const reset = earliestReset(fresh, chat.provider);
     if (pick.blocked) throw new Error(`Every other login is at its limit${reset ? `; the first frees up ${resetLabel(reset)}` : ""}.`);

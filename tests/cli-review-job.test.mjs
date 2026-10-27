@@ -146,7 +146,7 @@ async function flow(t, findings, extraJobs = [], resume, opts = {}) {
     return { text: 'done' };
   };
   const mocks = {
-    './agent': { runTurn }, './capacity': { tryAcquireAnyAgentTurn:(_,ids)=>{reservations++;return opts.queueOnce&&reservations===1?undefined:{accountId:ids[0],lease:'test'};},releaseAgentTurn(){} },
+    './agent': { runTurn }, './capacity': { tryAcquireAnyAgentTurn:(_,ids)=>{reservations++;return opts.queueOnce&&reservations===1?undefined:{accountId:ids[0],lease:'test'};},releaseAgentTurn(){}, runningTurns:()=>new Map() },
     './environment': { claimForTask: async () => headless.taskEnv('consort-t', 20000), releaseEnvironment: async () => {} },
     './oversight': { oversightModel: p => (p === 'claude' ? 'claude-opus-5' : 'gpt-5.6-sol') },
     './reviewPost': { postReview: async (r, f, event, body) => { posts.push({ event, n: f.length, body }); return { url: 'https://github.com/acme/mono/pull/9#review', event, inline: f.length, general: 0 }; } },
