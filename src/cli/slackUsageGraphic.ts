@@ -128,7 +128,7 @@ function systemBody(system: Record<string, string>, left: number, right = (left 
   let y = PAD, body = heading ? text(heading, x0, y + 18, 17, MUTED, ' letter-spacing="4"') : '';
   y += HEAD_H + 4;
   const counts = [
-    { label: 'DB SETS', value: num(system.Databases, /^(\d+)/)?.[0], note: system.Databases?.match(/(\d+ in use)/)?.[1] },
+    { label: 'DB SETS', value: num(system.Databases, /^(\d+)/)?.[0], note: system.Databases?.match(/(\d+) in use/)?.[1]?.concat(' used') },
     { label: 'WORKTREES', value: num(system.Worktrees, /^(\d+)/)?.[0] },
     { label: 'CONTAINERS', value: num(system.Containers, /^(\d+)/)?.[0] },
   ];
@@ -142,9 +142,9 @@ function systemBody(system: Record<string, string>, left: number, right = (left 
   y += 2;
   const cpu = num(system.CPU, /^(\d+)%/), mem = num(system.Memory, /^(\d+) of (\d+) GB/), disk = num(system.Disk, /^(\d+) GB free of (\d+) GB/);
   const cpu30 = series(system.CPU30), mem30 = series(system.Memory30);
-  if (cpu && cpu30) { body += chart(x0, y - 14, width, 'cpu · 30m', `${cpu[0]}%`, cpu[0]!, cpu30); y += CHART_H; }
+  if (cpu && cpu30) { body += chart(x0, y - 14, width, 'cpu 30m', `${cpu[0]}%`, cpu[0]!, cpu30); y += CHART_H; }
   else if (cpu) { body += bar(x0, y - 14, width, 'cpu', `${cpu[0]}%`, cpu[0]!); y += BAR_H; }
-  if (mem && mem[1] && mem30) { body += chart(x0, y - 14, width, 'memory · 30m', `${mem[0]}/${mem[1]} GB`, (100 * mem[0]!) / mem[1], mem30); y += CHART_H; }
+  if (mem && mem[1] && mem30) { body += chart(x0, y - 14, width, 'mem 30m', `${mem[0]}/${mem[1]} GB`, (100 * mem[0]!) / mem[1], mem30); y += CHART_H; }
   else if (mem && mem[1]) { body += bar(x0, y - 14, width, 'memory', `${mem[0]}/${mem[1]} GB`, (100 * mem[0]!) / mem[1]); y += BAR_H; }
   if (disk && disk[1]) { body += bar(x0, y - 14, width, 'disk', `${disk[0]} GB free`, 100 - (100 * disk[0]!) / disk[1]); y += BAR_H; }
   // The machine on up to two lines: the chip and cores, then the OS.
@@ -170,20 +170,43 @@ export function usageGraphic(safe: string, part?: 'usage' | 'system'): { svg: st
   return { svg: part ? cardSvg(part, accounts, system) : usageSvg(accounts, system), alt: usageAlt(accounts, system) };
 }
 
-// A Slack card shows its picture cropped to 4:3, so each card picture is drawn at 4:3 with its content centred in it.
-const CARD_W = 520, CHARTS = new Set(['CPU', 'CPU30', 'Memory', 'Memory30']);
-/** The usage rows, or the System box as two columns (counts, disk and machine left; CPU and memory charts right), on a 4:3 canvas. */
-export function cardSvg(part: 'usage' | 'system', accounts: AccountUsage[], system: Record<string, string>): string {
-  let content: { body: string; height: number };
-  if (part === 'usage') content = usageBody(accounts, CARD_W, false, { nameW: 112, resumeW: 86, gap: 14 });
-  else {
-    const pick = (charts: boolean) => Object.fromEntries(Object.entries(system).filter(([k]) => CHARTS.has(k) === charts));
-    const mid = CARD_W / 2, left = systemBody(pick(false), PAD, mid - 12), right = systemBody(pick(true), mid + 12, CARD_W - PAD, '');
-    content = { body: left.body + right.body, height: Math.max(left.height, right.height) };
+// A Slack card is a fixed width and crops its picture to 4:3. Each card picture is drawn as narrow as its content
+// allows, at 4:3 with no spare margin, so Slack scales its type up as far as it can.
+const CARD_MIN_W = 384, CARD_M = 8, CARD_ROW = 48, CHARTS = new Set(['CPU', 'CPU30', 'Memory', 'Memory30']);
+const card = (body: string, x: number, y: number, contentH: number) => {
+  const width = Math.max(CARD_MIN_W, Math.ceil((contentH * 4) / 3)), height = Math.round((width * 3) / 4);
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="${x} ${y} ${width} ${height}" font-family="${FONT}">${body}</svg>`;
+};
+/** One account per row: its name over its reset or resume time, then its bars. */
+function cardUsage(accounts: AccountUsage[]): string {
+  const columns = Math.min(4, Math.max(1, ...accounts.map((a) => a.windows.length)));
+  const height = CARD_M + 24 + accounts.length * CARD_ROW + CARD_M, width = Math.max(CARD_MIN_W, Math.ceil((height * 4) / 3));
+  const nameW = 114, gap = 10, barsX = CARD_M + nameW, groupW = (width - CARD_M - barsX - (columns - 1) * gap) / columns;
+  let y = CARD_M, body = text('USAGE', CARD_M, y + 14, 15, MUTED, ' letter-spacing="4"');
+  y += 24;
+  for (const a of accounts) {
+    body += text(clip(a.name, 10), CARD_M, y + 20, 19, INK, ' font-weight="600"');
+    const at = a.blocked ? resumeAt(a.detail) : a.resets ? resumeAt(a.resets) : undefined, tone = a.blocked ? usageColor(100) : MUTED;
+    if (at || a.blocked) body += text(at ? `${at.day} ${at.time}` : 'resume unknown', CARD_M, y + 38, 11, tone);
+    const words = Math.floor((width - CARD_M - barsX) / 8.4);
+    if (a.blocked && !a.windows.length) body += text(clip(`blocked · ${a.detail.replace(/ · resume.*$/, '')}`, words), barsX, y + 26, 14, usageColor(100));
+    else if (!a.windows.length) body += text(clip(a.detail === 'no reading yet' ? 'no reading yet' : `no reading · ${a.detail}`, words), barsX, y + 26, 14, MUTED);
+    else a.windows.slice(0, columns).forEach((w, i) => { body += bar(barsX + i * (groupW + gap), y - 8, groupW, short(w.label), String(w.percent), w.percent); });
+    y += CARD_ROW;
   }
-  const width = Math.max(CARD_W, Math.ceil((content.height * 4) / 3)), height = Math.round((width * 3) / 4);
-  const dx = Math.round((width - CARD_W) / 2), dy = Math.round((height - content.height) / 2);
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="${FONT}"><g transform="translate(${dx} ${dy})">${content.body}</g></svg>`;
+  return card(body, 0, 0, height);
+}
+/** Counts, disk and machine on the left; CPU and memory charts on the right. Drawn by systemBody, then framed without its margin. */
+function cardSystem(system: Record<string, string>): string {
+  const pick = (charts: boolean) => Object.fromEntries(Object.entries(system).filter(([k]) => CHARTS.has(k) === charts));
+  const left = systemBody(pick(false), PAD, PAD + 200), right = systemBody(pick(true), PAD + 216, PAD + CARD_MIN_W - 2 * CARD_M, '');
+  // systemBody leaves PAD - 4 below its last line; the frame keeps CARD_M of it.
+  const contentH = Math.max(left.height, right.height) - PAD + 4 - (PAD - CARD_M) + CARD_M;
+  return card(left.body + right.body, PAD - CARD_M, PAD - CARD_M, contentH);
+}
+/** The usage rows, or the System box, as a 4:3 picture for a Slack card. */
+export function cardSvg(part: 'usage' | 'system', accounts: AccountUsage[], system: Record<string, string>): string {
+  return part === 'usage' ? cardUsage(accounts) : cardSystem(system);
 }
 
 /** PNG at 2x of the SVG's size, so a retina screen shows it sharp; the native rasterizer loads only here, so the rest of the CLI never needs it. */

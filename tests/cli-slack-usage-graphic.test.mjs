@@ -90,7 +90,7 @@ test('a System section draws a System box to the right of the usage rows, and al
   assert.deepEqual(monitorSystem(withSystem), { Databases: '2 sets · 1 in use', Worktrees: '5', Containers: '9 running', CPU: '35%', Memory: '20 of 48 GB', Disk: '480 GB free of 926 GB', Machine: 'Apple M5 Pro · 15 cores · macOS 26.4.1' });
   assert.equal(monitorAccounts(withSystem).length, 6, 'the System lines are not accounts');
   const g = usageGraphic(withSystem), plain = usageGraphic(text);
-  for (const s of ['SYSTEM', 'DB SETS', 'WORKTREES', 'CONTAINERS', '1 in use', '35%', '20/48 GB', '480 GB free', 'Apple M5 Pro']) assert.ok(g.svg.includes(s), s);
+  for (const s of ['SYSTEM', 'DB SETS', 'WORKTREES', 'CONTAINERS', '1 used', '35%', '20/48 GB', '480 GB free', 'Apple M5 Pro']) assert.ok(g.svg.includes(s), s);
   const xOf = (svg, word) => Number(svg.match(new RegExp(`<text x="([\\d.]+)"[^>]*>${word}<`))[1]);
   assert.ok(xOf(g.svg, 'SYSTEM') > 350 && xOf(g.svg, 'USAGE') < 50, 'side by side, System on the right');
   assert.match(g.svg, /^<svg[^>]* width="640"/, 'drawn narrow so its type shows large in Slack');
@@ -122,7 +122,7 @@ test('CPU and memory over the last 30 minutes draw as 15 two-minute bars, with g
   assert.ok(lines.includes(`CPU30: 15 ${'- '.repeat(13)}70`));
   const withCharts = text.replace('\n\nOpen a ticket', `\n\n*System*\n${lines.join('\n')}\n\nOpen a ticket`);
   const g = usageGraphic(withCharts);
-  assert.ok(g.svg.includes('cpu · 30m') && g.svg.includes('memory · 30m'));
+  assert.ok(g.svg.includes('cpu 30m') && g.svg.includes('mem 30m'));
   assert.ok(!/CPU30/.test(g.alt), 'the alt text keeps to the current numbers');
   assert.ok(!monitorBlockKit(withCharts, 0).some(b => /CPU30/.test(JSON.stringify(b))), 'the text fallback leaves the series out');
 });
