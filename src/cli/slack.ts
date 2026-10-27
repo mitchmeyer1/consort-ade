@@ -15,7 +15,7 @@ export type SlackThreadMessage = { ts: string; user?: string; text?: string; bot
  *
  * Scopes the bot token needs: chat:write (post), im:write (open the DM), im:history (read replies in
  * the DM; channels:history or groups:history instead when pointed at a channel), files:read (download
- * documents the owner attaches to an update). Nothing else: no users:read, files:write or
+ * documents the owner attaches to an update), files:write (the PR article in a review thread). No users:read or
  * incoming-webhook. The list the setup wizard shows is SLACK_SCOPES in setup.ts.
  */
 export class Slack {
@@ -102,6 +102,21 @@ export class Slack {
       console.error(`Slack monitor blocks rejected: ${String(error)} ${JSON.stringify((error as { slackMessages?: unknown }).slackMessages ?? [])}; using the text monitor.`);
       return this.api(method, { ...body, blocks: this.monitorBlocks(text, true) });
     }
+  }
+
+  /**
+   * A file into the thread (or the channel): uploaded privately, then shared with its comment. Needs
+   * files:write. The comment passes the same gate as a message; the content is the caller's to gate.
+   */
+  async uploadFile(file: { filename: string; title: string; content: Buffer | string; thread?: string; comment?: string }): Promise<string> {
+    const bytes = typeof file.content === "string" ? Buffer.from(file.content, "utf8") : file.content;
+    const upload = await this.api("files.getUploadURLExternal", { filename: file.filename, length: bytes.length });
+    if (!upload.file_id || !upload.upload_url) throw new Error("Slack file upload URL unavailable");
+    const sent = await this.fetchImpl(upload.upload_url, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: new Uint8Array(bytes), signal: AbortSignal.timeout(30_000) });
+    if (!sent.ok) throw new Error(`Slack file transfer: HTTP ${sent.status}`);
+    const comment = file.comment ? (this.gate ? this.gate(file.comment) : redactPii(file.comment)) : undefined;
+    await this.api("files.completeUploadExternal", { files: [{ id: upload.file_id, title: file.title }], channel_id: await this.channel(), ...(file.thread ? { thread_ts: file.thread } : {}), ...(comment ? { initial_comment: comment } : {}) });
+    return upload.file_id as string;
   }
 
   async permalink(ts: string): Promise<string> {

@@ -10,11 +10,13 @@ import * as review from '../src/shared/review.ts';
 import * as ship from '../src/shared/ship.ts';
 import * as phi from '../src/shared/phi.ts';
 import * as progress from '../src/cli/reviewProgress.ts';
+import * as phiGate from '../src/cli/phiGate.ts';
+import * as prArticle from '../src/shared/prArticle.ts';
 
 const require = createRequire(import.meta.url);
 const compile = name => ts.transpileModule(readFileSync(new URL(`../src/cli/${name}.ts`, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 function load(name, extra = {}) {
-  const mocks = { './reviewProgress': progress, '../shared/phi.ts': phi, '../shared/headless.ts': headless, '../shared/cliModels.ts': cliModels, '../shared/usage.ts': usage, '../shared/review.ts': review, '../shared/ship.ts': ship,
+  const mocks = { './reviewProgress': progress, './phiGate.ts': phiGate, '../shared/prArticle.ts': prArticle, '../shared/phi.ts': phi, '../shared/headless.ts': headless, '../shared/cliModels.ts': cliModels, '../shared/usage.ts': usage, '../shared/review.ts': review, '../shared/ship.ts': ship,
     './state': { WORK_DIR: '/wt', HOME: '/home', newId: p => `${p}-1`, loadState: () => ({ tasks: extra.tasks ?? [], accounts: [], jobs: [] }) }, ...extra.mocks };
   const mod = { exports: {} };
   new Function('require', 'module', 'exports', compile(name))(n => mocks[n] ?? (n.startsWith('.') ? {} : require(n)), mod, mod.exports);
@@ -129,12 +131,14 @@ async function flow(t, findings, extraJobs = [], resume, opts = {}) {
   await writeFile(join(repo, '.env'), 'DB=local\n'); await writeFile(join(repo, '.env.example'), 'x');
   await writeFile(join(wt, '.ai-review-rules.md'), '# rules');
   const task = { id: 't', jobId: 'j', kind: 'review', worktree: wt, status: 'working', envReadyAt: 1, review: { repo: 'acme/mono', pr: 9, url: 'https://github.com/acme/mono/pull/9', title: 'Add CSV export', author: 'dev', head: 'h', base: 'development' } };
-  const state = { tasks: [task], jobs: [{ id: 'j', repo, name: 'reviews', reviewer: 'mitch', source: 'review' }, ...extraJobs.map(j => ({ ...j, repo }))], accounts: [{ id: 'c', provider: 'claude', name: 'C' }, { id: 'x', provider: 'codex', name: 'X' }], slack: { userId: 'u' } };
-  const turns = [], posts = [], slackPosts = [];
+  const state = { tasks: [task], jobs: [{ id: 'j', repo, name: 'reviews', reviewer: 'mitch', source: 'review' }, ...extraJobs.map(j => ({ ...j, repo }))], accounts: [{ id: 'c', provider: 'claude', name: 'C' }, { id: 'x', provider: 'codex', name: 'X' }], slack: { userId: 'u' }, ...(opts.guard ? { phi: { guard: true } } : {}) };
+  const turns = [], posts = [], slackPosts = [], uploads = [];
+  const article = { category: 'feature', headline: opts.headline ?? 'Admins can now download any report as a CSV.', body: 'The Reports page gets an Export button that calls GET /api/v1/reports/:id/export.', caption: 'The export flow', flows: [{ status: 'new', steps: ['Reports page', 'GET /api/v1/reports/:id/export'], note: 'Downloads the report as CSV' }],
+    diagram: { nodes: [{ id: 'page', type: 'page', label: 'Reports page', status: 'changed' }, { id: 'route', type: 'route', label: 'GET /api/v1/reports/:id/export', status: 'new' }], edges: [{ from: 'page', to: 'route', label: 'calls' }] } };
   let reservations=0,finalCrashed=false;
   const runTurn = async o => {
     turns.push({ model: o.model, readOnly: o.readOnly, prompt: o.prompt });
-    if (o.prompt.includes('step 1 of 3')) { await writeFile(join(wt, '.consort', 'review', 'plan.json'), JSON.stringify({ tldr: 'Adds a CSV export.', emoji: '📤', title: 'CSV report export', slices: [{ id: 's1', title: 'API', files: ['src/a.ts'] }, { id: 's2', title: 'UI', files: ['src/b.tsx'] }] })); return { text: 'written' }; }
+    if (o.prompt.includes('step 1 of 3')) { await writeFile(join(wt, '.consort', 'review', 'plan.json'), JSON.stringify({ tldr: 'Adds a CSV export.', emoji: '📤', title: 'CSV report export', article, slices: [{ id: 's1', title: 'API', files: ['src/a.ts'] }, { id: 's2', title: 'UI', files: ['src/b.tsx'] }] })); return { text: 'written' }; }
     if (o.prompt.includes('Review one area') && opts.invalidArea) return {text:'No structured result'};
     if (o.prompt.includes('step 3 of 3') && opts.finalCrashOnce && !finalCrashed) { finalCrashed=true; throw Error('simulated worker interruption'); }
     if (o.prompt.includes('Review one area')) return { text: `[review-findings]\n\`\`\`json\n${JSON.stringify(typeof findings === 'function' ? findings() : findings)}\n\`\`\`` };
@@ -147,7 +151,7 @@ async function flow(t, findings, extraJobs = [], resume, opts = {}) {
     './oversight': { oversightModel: p => (p === 'claude' ? 'claude-opus-5' : 'gpt-5.6-sol') },
     './reviewPost': { postReview: async (r, f, event, body) => { posts.push({ event, n: f.length, body }); return { url: 'https://github.com/acme/mono/pull/9#review', event, inline: f.length, general: 0 }; } },
     './slackIdentity': { slackIdentityFor: title => ({ emoji: '📊', title }), takenEmojis: () => [] },
-    './slack': { Slack: class { async post(text) { slackPosts.push(text); return String(slackPosts.length); } async waitForReply(_t, _ts, o) { return (opts.replies ?? [opts.reply ?? 'yes']).find(r => !o?.accept || o.accept(r)); } } },
+    './slack': { Slack: class { async post(text) { slackPosts.push(text); return String(slackPosts.length); } async uploadFile(file) { uploads.push({ ...file, afterPosts: slackPosts.length }); return 'F1'; } async waitForReply(_t, _ts, o) { return (opts.replies ?? [opts.reply ?? 'yes']).find(r => !o?.accept || o.accept(r)); } } },
     './state': { WORK_DIR: root, HOME: root, newId: () => 'x', loadState: () => state, updateTask: (id, patch) => Object.assign(task, typeof patch === 'function' ? patch(task) : patch), touchAccount() {}, blockAccount() {} },
     './usage': { usageFor: async accts => new Map(accts.map(a => [a.id, { keyId: a.id, at: Date.now(), windows: [{ id: '5h', label: '5h', percent: a.provider === 'claude' ? 90 : 10 }] }])) },
     'node:util': { promisify: () => async () => ({ stdout: '' }) },
@@ -163,7 +167,7 @@ async function flow(t, findings, extraJobs = [], resume, opts = {}) {
   const runReview=()=>reviewTask('t', async () => (await opts.onWatch?.(wt), watches.length > 1 ? watches.shift() : watches[0]), async ms => { sleeps.push(ms); });
   if(opts.finalCrashOnce) await assert.rejects(runReview(),/simulated worker interruption/);
   await runReview();
-  return { task, turns, posts, slackPosts, wt, root, sleeps };
+  return { task, turns, posts, slackPosts, uploads, wt, root, sleeps };
 }
 
 test('a clean review: frontier overview, swarm on Opus/Sol, frontier check, comments posted, approval only after Slack yes', async (t) => {
@@ -178,6 +182,28 @@ test('a clean review: frontier overview, swarm on Opus/Sol, frontier check, comm
   assert.equal(await readFile(join(f.wt, '.env'), 'utf8'), 'DB=local\n', 'root .env copied');
   await assert.rejects(readFile(join(f.wt, '.env.example')), 'templates are not copied');
   assert.match(await readFile(join(f.root, 'reviews', 'acme-mono-pr-9-h.review.json'), 'utf8'), /"Wrong folder"/);
+  assert.ok(f.turns[0].prompt.includes('"article": {"category", "headline", "body", "diagram", "caption", "flows"}'), 'the overview is asked for the article');
+  assert.equal(f.uploads.length, 1, 'the article is posted once');
+  const [article] = f.uploads;
+  assert.equal(article.thread, '1'); assert.equal(article.filename, 'pr-9-h.html'); assert.equal(article.title, 'Admins can now download any report as a CSV.');
+  assert.match(article.comment, /^📤 \*Admins can now download any report as a CSV\.\*\nWhat <https:\/\/github\.com\/acme\/mono\/pull\/9\|PR #9> does/);
+  assert.match(article.content, /<h1><a href="https:\/\/github\.com\/acme\/mono\/pull\/9">Admins can now download any report as a CSV\.<\/a><\/h1>/);
+  assert.match(article.content, /<svg [^>]*>[\s\S]*GET \/api\/v1\/reports\/:id\/export[\s\S]*<\/svg>/); assert.match(article.content, /Reports page<\/code><span class="arrow">→<\/span><code>GET/);
+  assert.equal(article.afterPosts, f.slackPosts.findIndex(p => /\*Approve\?\*/.test(p)), 'the article lands right before the approval question');
+  assert.match(await readFile(join(f.wt, '.consort', 'review', 'pr-9.article.html'), 'utf8'), /Admins can now download/);
+});
+
+test('an article that carries an identifier is withheld by the PII gate; the thread says so and the approval still goes out', async (t) => {
+  const pii = await import('./helpers/fake-pii.mjs');
+  const f = await flow(t, [], [], undefined, { guard: true, headline: `Card ${pii.card()} now exports` });
+  assert.equal(f.uploads.length, 0);
+  assert.ok(f.slackPosts.some(p => /The PR article was withheld by the PII gate \(card ×1\)/.test(p)));
+  assert.ok(f.slackPosts.some(p => /\*Approve\?\*/.test(p))); assert.equal(f.task.note, 'approved');
+});
+
+test('a High finding never posts the article, and a plan without one asks to approve as before', async (t) => {
+  const high = await flow(t, [{ severity: 'high', category: 'logic', title: 'Breaks', file: 'src/a.ts', line: 1, comment: 'Fix.' }], [], undefined, { watches: [{ state: 'MERGED' }] });
+  assert.equal(high.uploads.length, 0);
 });
 
 test('a High finding requests changes and never asks to approve', async (t) => {

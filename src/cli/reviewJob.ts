@@ -40,6 +40,8 @@ import { Slack } from "./slack";
 import { blockAccount, HOME, loadState, newId, touchAccount, updateTask, WORK_DIR, type Account, type Job, type Task } from "./state";
 import { usageFor } from "./usage";
 import { reviewScope, scopeGuidance, ReviewCheckpoints, readReviewJson, saveReviewJson, type ReviewScope } from "./reviewProgress";
+import { gateText } from "./phiGate.ts";
+import { ARTICLE_RULES, articleHtml, articleText, changedFiles, parseArticle, type PrArticle } from "../shared/prArticle.ts";
 
 const run = promisify(execFile);
 const sh = async (cmd: string, args: string[], cwd: string) => (await run(cmd, args, { cwd, timeout: 300_000, maxBuffer: 64 << 20 })).stdout;
@@ -152,7 +154,8 @@ ${RULES_NOTE(wt)}
 1. Learn how this repository is built: its layout and layering, where each kind of code lives, naming, data access, error handling, config and secrets, background jobs, tests, and how existing features are organised so they scale. Read the docs and the existing modules closest to what the PR touches.
 2. Read the change: \`git diff origin/${t.base}...HEAD --stat\`, then the diff itself.
 3. Write .consort/review/OVERVIEW.md: a 2-3 sentence TL;DR of what the PR does; the conventions and rules that apply to it; where it could break at scale; the risky areas.
-4. Write .consort/review/plan.json: {"tldr": "<2-3 sentences>", "emoji": "<one emoji that pictures what this PR changes, e.g. 🚀 for a deploy fix, 🧭 for navigation; never 🔎>", "title": "<2-5 plain words naming the change>", "slices": [{"id": "s1", "title": "<area>", "files": ["<changed files in this area>"], "related": ["<callers, similar existing modules, schemas to compare against>"], "focus": "<what to check here>"}]}. 1 to 10 slices proportional to scope (one for a small change), together covering every changed file, each small enough for one reviewer to crawl thoroughly. Group by area of the code, not by commit.
+4. Write .consort/review/plan.json: {"tldr": "<2-3 sentences>", "emoji": "<one emoji that pictures what this PR changes, e.g. 🚀 for a deploy fix, 🧭 for navigation; never 🔎>", "title": "<2-5 plain words naming the change>", "slices": [{"id": "s1", "title": "<area>", "files": ["<changed files in this area>"], "related": ["<callers, similar existing modules, schemas to compare against>"], "focus": "<what to check here>"}], "article": {"category", "headline", "body", "diagram", "caption", "flows"}}. 1 to 10 slices proportional to scope (one for a small change), together covering every changed file, each small enough for one reviewer to crawl thoroughly. Group by area of the code, not by commit.
+${ARTICLE_RULES}
 Reply with one line when both files are written.`;
 
 export const SLICE_PROMPT = (t: ReviewTarget, wt: string, slice: { id: string; title: string; files: string[]; related?: string[]; focus?: string }) => `## Review one area of PR #${t.pr} "${t.title}"
@@ -215,6 +218,24 @@ async function reviewRound(taskId: string, watch: (t: ReviewTarget, repo: string
     const ts = await slack.post(slackStatus(plain ? text : slackMessage("update", text), status, links()), thread).catch((e) => { log(`slack failed: ${e.message}`); return undefined; });
     if (!thread && ts) { thread = ts; updateTask(taskId, { slackThread: ts }); }
     return ts;
+  };
+  /**
+   * The article: one HTML page saying what the PR does, with its diagram, uploaded into the thread
+   * before the approval question so the owner can read it before answering. Its words pass the PII
+   * gate first; a withheld article is said so in the thread. A failed upload never stops the review.
+   */
+  const postArticle = async (article: PrArticle | null, gate: Parameters<typeof gateText>[2]) => {
+    if (!article || !slack || !thread) return;
+    try {
+      const verdict = gateText("PR article", articleText(article), gate);
+      if (!verdict.ok) { await say(`⚠️ The PR article was withheld by the PII gate (${verdict.categories}).`); return; }
+      const wt = task.worktree;
+      const [numstat, nameStatus] = await Promise.all([sh("git", ["diff", `origin/${t.base}...HEAD`, "--numstat"], wt).catch(() => ""), sh("git", ["diff", `origin/${t.base}...HEAD`, "--name-status"], wt).catch(() => "")]);
+      const html = articleHtml({ repo: t.repo, number: t.pr, title: t.title, author: t.author, url: t.url, base: t.base, head: t.head, files: changedFiles(numstat, nameStatus) }, article);
+      writeFileSync(join(wt, ".consort", "review", `pr-${t.pr}.article.html`), html);
+      await slack.uploadFile({ filename: `pr-${t.pr}-${t.head.slice(0, 7)}.html`, title: article.headline, content: html, thread, comment: `${identity.emoji} *${article.headline}*\nWhat <${t.url}|PR #${t.pr}> does, in one page. Open the article, then answer below.` });
+      log("posted the PR article in the thread");
+    } catch (e) { log(`PR article not posted: ${(e as Error).message}`); }
   };
   /** wait for the owner's word on Slack, then approve or leave it */
   /** "watch" when the owner did not approve: the caller stops the services, then watches the PR */
@@ -382,7 +403,9 @@ async function reviewRound(taskId: string, watch: (t: ReviewTarget, repo: string
       activity("frontier model: reading the repository and planning the review", 2);
       await turn("frontier", OVERVIEW_PROMPT(t, wt)+"\n\n"+guidance, false, 45 * 60_000, "overview and plan");
     }
-    const plan = JSON.parse(readFileSync(planFile, "utf8")) as { tldr?: string; emoji?: string; title?: string; slices?: { id: string; title: string; files: string[]; related?: string[]; focus?: string }[] };
+    const plan = JSON.parse(readFileSync(planFile, "utf8")) as { tldr?: string; emoji?: string; title?: string; article?: unknown; slices?: { id: string; title: string; files: string[]; related?: string[]; focus?: string }[] };
+    // the one-page story of the PR (shared/prArticle.ts), posted in the thread when the owner is asked to approve
+    const article: PrArticle | null = parseArticle(plan.article);
     const picked = parseSlackIdentity(JSON.stringify({ emoji: plan.emoji ?? "", title: plan.title ?? "" }));
     if (picked && picked.emoji !== "🔎" && (picked.emoji !== identity.emoji || picked.title !== identity.title)) await setIdentity(picked);
     let slices = (plan.slices ?? []).filter((s) => s && Array.isArray(s.files) && s.files.length);
@@ -446,6 +469,7 @@ async function reviewRound(taskId: string, watch: (t: ReviewTarget, repo: string
         outcome = "watch";
       } else {
         activity("waiting for the owner's word to approve", 5);
+        await postArticle(article, gate);
         const ts = await say(slackAsk(approvalQuestion(t, review, posted?.url, flows)), "WAITING", true);
         updateTask(taskId, { status: "waiting", pendingQuestion: { questions: [`Approve PR #${t.pr}?`], afterTs: ts ?? String(Date.now() / 1000) } });
         await releaseEnvironment(taskId);
