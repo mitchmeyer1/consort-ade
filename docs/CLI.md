@@ -405,10 +405,12 @@ The master monitor uses 🟠 for tasks needing a human reply. It attempts to pin
 ### Slack monitor layout
 
 The master monitor is native Slack Block Kit, not an image: a Consort header, one line with the
-update time (shown in the reader's time zone) and the counts, then four lists in the order you act
-on them: needs your reply, ready to merge, working, completed. Each task shows its title linked to
-its Slack thread, the workflow stage as a `▰▰▱▱` bar, the author, cost and age, the current action
-as a quote, and Thread / GitHub (or Merge PR) / ClickUp links. AI capacity closes the post with one
-meter per account; a blocked account shows its reason and Eastern resume time instead. Task rows are
-packed into as few sections as fit, so forty tasks stay inside Slack's fifty-block limit. Should Slack
-reject the layout, the same root gets the plain text monitor. No `files:write` scope is needed.
+update time (shown in the reader's time zone) and the counts, then the open work in the order you
+act on it: needs your reply, ready to merge, working. Each open task is a card: the title, who
+and how much (kind, author, cost, age), the current action, the workflow stage as a `▰▰▱▱` bar,
+and up to three link buttons (Reply in thread or Open thread, GitHub or Merge PR, ClickUp), the
+main one green. Completed work is a table (task, author, cost, finished, links) in a collapsible
+container; AI capacity is a table (account, status, usage meter, detail) in another. Table block
+ids carry the refresh time, as Slack asks for a new id on every update. Should the message exceed
+Slack's fifty-block limit, the later groups fall back to packed text rows; should Slack reject the
+layout, the same root gets the plain text monitor. No `files:write` scope is needed.
