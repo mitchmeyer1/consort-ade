@@ -6,7 +6,8 @@
  */
 import { monitorAccounts, type AccountUsage } from './slackMonitorBlocks.ts';
 
-const W = 1600, PAD = 40, NAME_W = 270, ROW_H = 96, HEAD_H = 50, GROUP_GAP = 40;
+// Slack shows an image block about 500px wide; the panel is drawn at twice that so it stays crisp on a retina screen.
+const W = 1000, PAD = 28, NAME_W = 170, ROW_H = 62, HEAD_H = 36, GROUP_GAP = 26;
 const FONT = `Menlo, 'SF Mono', Consolas, 'DejaVu Sans Mono', monospace`;
 const INK = '#ece6d8', MUTED = '#9a9c9e', TRACK = '#33363b';
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -21,24 +22,24 @@ export function usageSvg(accounts: AccountUsage[]): string {
   const groups = new Map<string, AccountUsage[]>();
   for (const a of accounts) { const key = a.name.split(' ')[0] ?? a.name; groups.set(key, [...(groups.get(key) ?? []), a]); }
   const columns = Math.min(4, Math.max(1, ...accounts.map((a) => a.windows.length)));
-  const height = PAD + HEAD_H + [...groups.values()].reduce((h, rows) => h + 44 + rows.length * ROW_H, 0) + 16;
+  const height = PAD + HEAD_H + [...groups.values()].reduce((h, rows) => h + 30 + rows.length * ROW_H, 0) + 10;
   const barsX = PAD + NAME_W, barsW = W - PAD - barsX, groupW = (barsW - (columns - 1) * GROUP_GAP) / columns;
   let y = PAD;
   // No clock in the picture: the footer line carries the update time, and a picture that only changes with the numbers is uploaded far less often.
-  let body = text('USAGE', PAD, y + 28, 26, MUTED, ' letter-spacing="6"');
+  let body = text('USAGE', PAD, y + 18, 17, MUTED, ' letter-spacing="4"');
   y += HEAD_H;
   for (const [provider, rows] of groups) {
-    body += text(provider.toUpperCase(), PAD, y + 30, 22, MUTED, ' letter-spacing="5"');
-    y += 44;
+    body += text(provider.toUpperCase(), PAD, y + 18, 14, MUTED, ' letter-spacing="3"');
+    y += 30;
     for (const a of rows) {
-      body += text(clip(a.name, 14), PAD, y + 56, 32, INK, ' font-weight="600"');
-      if (a.blocked) body += text(clip(`blocked · ${a.detail}`, 70), barsX, y + 54, 24, usageColor(100));
-      else if (!a.windows.length) body += text(clip(a.detail === 'no reading yet' ? 'no reading yet' : `no reading · ${a.detail}`, 70), barsX, y + 54, 24, MUTED);
+      body += text(clip(a.name, 14), PAD, y + 36, 21, INK, ' font-weight="600"');
+      if (a.blocked) body += text(clip(`blocked · ${a.detail}`, 72), barsX, y + 35, 15, usageColor(100));
+      else if (!a.windows.length) body += text(clip(a.detail === 'no reading yet' ? 'no reading yet' : `no reading · ${a.detail}`, 72), barsX, y + 35, 15, MUTED);
       else a.windows.slice(0, columns).forEach((w, i) => {
         const x = barsX + i * (groupW + GROUP_GAP), pct = Math.max(0, Math.min(100, w.percent)), color = usageColor(pct);
-        body += text(short(w.label), x, y + 40, 22, MUTED) + text(String(w.percent), x + groupW, y + 40, 26, color, ' text-anchor="end" font-weight="700"');
-        body += `<rect x="${x}" y="${y + 54}" width="${groupW}" height="10" rx="5" fill="${TRACK}"/>`;
-        if (pct > 0) body += `<rect x="${x}" y="${y + 54}" width="${Math.max(10, (groupW * pct) / 100).toFixed(1)}" height="10" rx="5" fill="${color}"/>`;
+        body += text(short(w.label), x, y + 26, 14, MUTED) + text(String(w.percent), x + groupW, y + 26, 17, color, ' text-anchor="end" font-weight="700"');
+        body += `<rect x="${x}" y="${y + 35}" width="${groupW}" height="7" rx="3.5" fill="${TRACK}"/>`;
+        if (pct > 0) body += `<rect x="${x}" y="${y + 35}" width="${Math.max(7, (groupW * pct) / 100).toFixed(1)}" height="7" rx="3.5" fill="${color}"/>`;
       });
       y += ROW_H;
     }

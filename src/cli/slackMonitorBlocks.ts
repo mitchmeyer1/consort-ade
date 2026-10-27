@@ -170,9 +170,9 @@ export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageIma
   }
   const updated = lines[1]?.match(/^Updated (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}) UTC$/);
   const stamp = updated ? `<!date^${Math.floor(Date.parse(`${updated[1]}T${updated[2]}:00Z`) / 1000)}^{date_short_pretty} {time}|${lines[1]}>` : lines[1] ?? '';
-  // The head is the banner alone; each group heading carries its own count. A bare image block stops at about
-  // 500px; inside a full-width container with a blank title it spans the message, as wide as the tables.
-  const blocks: Block[] = [{ type: 'container', block_id: `head-${now}`, title: { type: 'plain_text', text: ' ' }, width: 'full', has_header_divider: false, child_blocks: [{ type: 'image', image_url: CONSORT_BANNER_URL, alt_text: 'Consort' }] }];
+  // The head is the banner alone; each group heading carries its own count. Image blocks stay at top level:
+  // Slack draws one frame around them there, and an uploaded file inside a container never renders.
+  const blocks: Block[] = [{ type: 'image', block_id: `head-${now}`, image_url: CONSORT_BANNER_URL, alt_text: 'Consort' }];
   let index = 0;
   const groupBlocks = new Map<Group['key'], Block[]>();
   // Empty groups are left out; the summary line still carries their counts.
@@ -186,15 +186,14 @@ export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageIma
   blocks.push(divider());
   if (completed.length) blocks.push(container(`completed-${now}`, 'Completed', { type: 'plain_text', text: `most recent ${completed.length}` },
     [table(`completed-table-${now}`, ['Task', 'Author', 'Cost', 'Finished', 'Links'], completed.map(completedRow), [{ is_wrapped: true }, {}, { align: 'right' }, {}, {}]), ...completedNotes.map(n => context(`_${n}_`))], { collapsed: true }));
+  if (!blocks.some(b => b.type === 'card' || b.type === 'container')) blocks.push(context('_Nothing open and nothing finished yet._'));
   const parsed = accounts.map(parseAccount);
   // The rendered panel says everything the chart and notes would; without one, Slack's own chart stands in.
   const chart = usage ? undefined : usageChart(parsed, now);
-  if (usage) blocks.push({ type: 'container', block_id: `usage-${now}`, title: { type: 'plain_text', text: ' ' }, width: 'full', has_header_divider: false, child_blocks: [{ type: 'image', slack_file: { id: usage.fileId }, alt_text: usage.alt.slice(0, 2000) }] });
+  if (usage) blocks.push({ type: 'image', block_id: `usage-${now}`, slack_file: { id: usage.fileId }, alt_text: usage.alt.slice(0, 2000) });
   else if (chart) blocks.push(chart);
   else if (parsed.length) blocks.push(section('*AI usage*'));
   if (!usage) for (const note of usageNotes(parsed)) blocks.push(context(note));
-  const usageBlocks = usage ? 1 : (chart ? 1 : parsed.length ? 1 : 0) + usageNotes(parsed).length;
-  if (!blocks.some(b => b.type === 'card') && !blocks.some(b => b.type === 'container' && b.block_id !== `head-${now}` && b.block_id !== `usage-${now}`)) blocks.splice(blocks.length - usageBlocks, 0, context('_Nothing open and nothing finished yet._'));
   blocks.push(context(`Updated ${stamp}  ·  Reply in a task’s thread. This message updates in place.`));
   // Too many open tasks for Slack's block limit: the later groups fall back to packed text rows, one section per few tasks.
   for (const group of [groups.working, groups.ready, groups.nudge, groups.reply]) {

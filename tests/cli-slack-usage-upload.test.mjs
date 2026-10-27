@@ -37,7 +37,7 @@ function fake(opts = {}) {
 }
 const sent = calls => calls.filter(c => c.method === 'chat.update').map(c => JSON.parse(c.body.blocks));
 
-test('the panel is uploaded once per picture, shown as slack_file full width, reused while unchanged, and old files retire a generation late', async () => {
+test('the panel is uploaded once per picture, shown as a slack_file image, reused while unchanged, and old files retire a generation late', async () => {
   const { slack, calls, opts } = fake();
   slack.setUsageFile({ file: 'OLD', key: 'old-key', stale: 'OLDER' });
   await slack.updateMonitor('same', text);
@@ -46,8 +46,8 @@ test('the panel is uploaded once per picture, shown as slack_file full width, re
   assert.equal(calls[0].body.filename, 'consort-usage.png'); assert.ok(calls[1].bytes > 1000);
   assert.deepEqual(JSON.parse(calls[2].body.files), [{ id: 'F1', title: 'AI usage' }]); assert.equal(calls[2].body.channel_id, undefined);
   const blocks = sent(calls)[0];
-  const panel = blocks.find(b => b.type === 'container' && b.child_blocks?.[0]?.slack_file);
-  assert.deepEqual(panel.child_blocks[0], { type: 'image', slack_file: { id: 'F1' }, alt_text: 'AI usage: Claude 1 5h 42%, wk 20%' });
+  const panel = blocks.find(b => b.type === 'image' && b.slack_file);
+  assert.deepEqual({ ...panel, block_id: undefined }, { type: 'image', block_id: undefined, slack_file: { id: 'F1' }, alt_text: 'AI usage: Claude 1 5h 42%, wk 20%' });
   assert.ok(!blocks.some(b => b.type === 'data_visualization'));
   assert.equal(calls[4].body.file, 'OLDER', 'the file two generations back is deleted; the one just replaced waits');
   const saved = slack.getUsageFile(); assert.equal(saved.file, 'F1'); assert.equal(saved.stale, 'OLD'); assert.equal(typeof saved.key, 'string');

@@ -36,14 +36,14 @@ test('accounts parse out of the monitor text with every window', () => {
 
 test('the panel draws provider groups, a row per account, a coloured bar per window, and blocked or unread rows as words', () => {
   const svg = usageSvg(monitorAccounts(text));
-  assert.match(svg, /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="1600" height="\d+"/);
+  assert.match(svg, /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="1000" height="\d+"/);
   for (const s of ['>USAGE<', '>CLAUDE<', '>CODEX<', '>Claude 1<', '>Codex 2<', '>5h<', '>wk<', '>fable<']) assert.ok(svg.includes(s), s);
   assert.doesNotMatch(svg, /ago/, 'no clock in the picture, so it only changes with the numbers');
   assert.match(svg, /fill="#e9c46a"[^>]*>77</); assert.match(svg, /fill="#f3ead6"[^>]*>49</); assert.match(svg, /fill="#f08a66"[^>]*>91</);
   assert.equal(usageColor(50), '#f3ead6'); assert.equal(usageColor(51), '#e9c46a'); assert.equal(usageColor(90), '#e9c46a'); assert.equal(usageColor(91), '#f08a66');
   assert.match(svg, />blocked · weekly limit reached · resume after Oct 28, 2:30 PM EDT</); assert.match(svg, />no reading yet</);
   assert.equal((svg.match(/<rect [^>]*fill="#33363b"/g) ?? []).length, 11, 'one track per window drawn');
-  assert.match(svg, /<rect x="[\d.]+" y="\d+" width="[\d.]+" height="10" rx="5" fill="#e9c46a"\/>/);
+  assert.match(svg, /<rect x="[\d.]+" y="\d+" width="[\d.]+" height="7" rx="3.5" fill="#e9c46a"\/>/);
   assert.match(usageAlt(monitorAccounts(text)), /^AI usage: Claude 1 5h 77%, wk 30%, fable 37%; .*Claude 4 blocked, weekly limit reached.*Codex 2 no reading$/);
   assert.equal(usageGraphic('Content withheld by guard'), undefined);
 });
@@ -51,13 +51,14 @@ test('the panel draws provider groups, a row per account, a coloured bar per win
 test('the PNG is a real image at the SVG size', async () => {
   const png = await usagePng(usageGraphic(text).svg);
   assert.equal(png.subarray(1, 4).toString(), 'PNG');
-  assert.equal(png.readUInt32BE(16), 1600, 'width');
+  assert.equal(png.readUInt32BE(16), 1000, 'width');
 });
 
 test('with an uploaded panel the blocks show it full width in place of the chart and notes', () => {
   const blocks = monitorBlockKit(text, 1700000000000, { fileId: 'F77', alt: 'AI usage: all fine' });
   const panel = blocks.find(b => b.block_id === 'usage-1700000000000');
-  assert.deepEqual(panel, { type: 'container', block_id: 'usage-1700000000000', title: { type: 'plain_text', text: ' ' }, width: 'full', has_header_divider: false, child_blocks: [{ type: 'image', slack_file: { id: 'F77' }, alt_text: 'AI usage: all fine' }] });
+  assert.deepEqual(panel, { type: 'image', block_id: 'usage-1700000000000', slack_file: { id: 'F77' }, alt_text: 'AI usage: all fine' });
+  assert.ok(!blocks.some(b => b.type === 'container'), 'images stay at top level: one frame, and an uploaded file renders there');
   assert.ok(!blocks.some(b => b.type === 'data_visualization'));
   assert.ok(!JSON.stringify(blocks).includes('blocked: weekly limit'), 'no notes beside the panel');
   assert.match(JSON.stringify(blocks), /_Nothing open and nothing finished yet._/);

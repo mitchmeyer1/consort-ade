@@ -40,13 +40,13 @@ const texts=blocks=>JSON.stringify(blocks);
 const cards=blocks=>blocks.filter(b=>b.type==='card');
 test('monitor opens with the centered banner, then groups in the order the owner acts, and ends with the update time',()=>{
  const blocks=monitorBlockKit(text,NOW);
- assert.deepEqual(blocks[0],{type:'container',block_id:`head-${NOW}`,title:{type:'plain_text',text:' '},width:'full',has_header_divider:false,child_blocks:[{type:'image',image_url:'https://raw.githubusercontent.com/mitchmeyer1/consort-ade/main/build/consort-banner-white.png',alt_text:'Consort'}]});
+ assert.deepEqual(blocks[0],{type:'image',block_id:`head-${NOW}`,image_url:'https://raw.githubusercontent.com/mitchmeyer1/consort-ade/main/build/consort-banner-white.png',alt_text:'Consort'});
  assert.equal(blocks.at(-1).type,'context');assert.equal(blocks.at(-1).elements[0].text,'Updated <!date^1793119500^{date_short_pretty} {time}|Updated 2026-10-27 16:45 UTC>  ·  Reply in a task’s thread. This message updates in place.');
  assert.ok(!blocks.some(b=>b.type==='header'||b.type==='section'&&/needs your reply/.test(b.text.text)),'no summary line');
  const headings=blocks.filter(b=>b.type==='section'&&/^\*[A-Za-z ]+\*   ·   \d+$/.test(b.text.text)).map(b=>b.text.text);
  assert.deepEqual(headings,['*Needs your reply*   ·   1','*Nudge*   ·   1','*Ready to merge*   ·   1','*Working*   ·   3']);
  assert.deepEqual(cards(blocks).map(c=>c.title.text),['Curation &amp; parity','Needs a reviewer','Ship it','Paging shard','Stopped one','Analysis only']);
- assert.deepEqual(blocks.filter(b=>b.type==='container').map(b=>b.title.text),[' ','Completed']);
+ assert.deepEqual(blocks.filter(b=>b.type==='container').map(b=>b.title.text),['Completed']);
  assert.doesNotMatch(texts(blocks),/🟠|📦|🔄|✅|⚡|🎉|👉/);
 });
 test('a task card carries who, cost, age, the action, the stage bar and link buttons with one primary action',()=>{
@@ -67,7 +67,7 @@ test('a task card carries who, cost, age, the action, the stage bar and link but
 });
 test('completed work is a table in a titled container; AI usage is a bar chart with a note per blocked or unread account',()=>{
  const blocks=monitorBlockKit(text,NOW);
- const [,done]=blocks.filter(b=>b.type==='container');
+ const [done]=blocks.filter(b=>b.type==='container');
  assert.equal(done.subtitle.text,'most recent 1');assert.equal(done.width,'full');assert.equal(done.is_collapsible,true);
  const doneTable=done.child_blocks[0];assert.equal(doneTable.type,'table');assert.equal(doneTable.block_id,`completed-table-${NOW}`);
  assert.deepEqual(doneTable.rows[0].map(c=>c.elements[0].elements[0].text),['Task','Author','Cost','Finished','Links']);
@@ -103,12 +103,12 @@ test('empty groups and tables are left out, and non-monitor text gets no blocks'
  const empty=monitorBlockKit(text.replace(/\n\*Working\*[\s\S]*?\n\n\*Accounts\*/,'\n*Working*\nNo tasks in progress.\n\n*Ready to merge · your action*\nNo tickets waiting to be merged.\n\n*Completed · most recent 6*\nNo completed tasks yet.\n\n*Accounts*'),NOW);
  const all=texts(empty);
  assert.doesNotMatch(all,/Needs your reply|Nudge|Ready to merge|\*Working\*|Completed/);
- assert.equal(cards(empty).length,0);assert.equal(empty.filter(b=>b.type==='container').length,1);assert.ok(empty.some(b=>b.type==='data_visualization'));
+ assert.equal(cards(empty).length,0);assert.equal(empty.filter(b=>b.type==='container').length,0);assert.ok(empty.some(b=>b.type==='data_visualization'));
  assert.match(all,/AI usage, % of each limit/);
  const partial=monitorBlockKit(text.replace(/\n\*Ready to merge · your action\*\n[^\n]+\n[^\n]+\n/,'\n*Ready to merge · your action*\nNo tickets waiting to be merged.\n'),NOW);
  assert.doesNotMatch(texts(partial),/Ready to merge\*|Ship it/);
  const bare=monitorBlockKit(text.replace(/\n\*Working\*[\s\S]*?\n\n\*Accounts\*[\s\S]*?\n\nOpen a ticket/,'\n*Working*\nNo tasks in progress.\n\n*Ready to merge · your action*\nNo tickets waiting to be merged.\n\n*Completed · most recent 6*\nNo completed tasks yet.\n\n*Accounts*\nNo accounts configured.\n\nOpen a ticket'),NOW);
- assert.match(texts(bare),/_Nothing open and nothing finished yet._/);assert.equal(bare.filter(b=>b.type==='container'||b.type==='card'||b.type==='data_visualization').length,1,'only the banner box remains');
+ assert.match(texts(bare),/_Nothing open and nothing finished yet._/);assert.equal(bare.filter(b=>b.type==='container'||b.type==='card'||b.type==='data_visualization').length,0,'only the banner image remains');
  assert.equal(monitorBlockKit('Content withheld by guard'),undefined);
  assert.equal(monitorBlockKit('*📊 Consort master monitor*\nUpdated monitor'),undefined);
 });
@@ -129,7 +129,7 @@ test('Slack receives the blocks on the same root and falls back to text sections
  },s=>s.replaceAll('Curation','MASKED'));
  await slack.postMonitor(text);
  const posted=JSON.parse(calls.find(c=>c.method==='chat.postMessage').body.blocks);
- assert.equal(posted[0].type,'container');assert.equal(posted[0].child_blocks[0].type,'image');assert.match(texts(posted),/MASKED &amp; parity/);assert.doesNotMatch(texts(posted),/Curation/);
+ assert.equal(posted[0].type,'image');assert.match(texts(posted),/MASKED &amp; parity/);assert.doesNotMatch(texts(posted),/Curation/);
  await slack.updateMonitor('same',text);
  const edits=calls.filter(c=>c.method==='chat.update');assert.equal(edits.length,2);
  assert.ok(JSON.parse(edits[1].body.blocks).every(b=>b.type==='section'));assert.match(edits[1].body.blocks,/MASKED/);
