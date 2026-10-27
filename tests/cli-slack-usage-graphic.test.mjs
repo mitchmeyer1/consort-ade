@@ -101,7 +101,15 @@ test('a System section draws a System box to the right of the usage rows, and al
   const png = await usagePng(g.svg); assert.equal(png.subarray(1, 4).toString(), 'PNG');
   const blocks = monitorBlockKit(withSystem, 0);
   assert.ok(blocks.some(b => b.type === 'context' && /\*System\*.*Worktrees 5/.test(JSON.stringify(b))), 'without the picture, one line carries the System numbers');
-  assert.ok(!monitorBlockKit(withSystem, 0, { fileId: 'F1', alt: 'x' }).some(b => /\*System\*/.test(JSON.stringify(b))), 'the picture carries them when uploaded');
+  const u = { fileId: 'F1', alt: 'u' }, s = { fileId: 'F2', alt: 's' };
+  assert.ok(monitorBlockKit(withSystem, 0, u).some(b => /\*System\*/.test(JSON.stringify(b))), 'the usage picture alone leaves the System line');
+  assert.ok(!monitorBlockKit(withSystem, 0, u, undefined, s).some(b => /\*System\*/.test(JSON.stringify(b))), 'the System picture carries them when uploaded');
+  assert.ok(usageGraphic(withSystem, 'usage').svg.includes('USAGE') && !usageGraphic(withSystem, 'usage').svg.includes('SYSTEM'));
+  assert.ok(usageGraphic(withSystem, 'system').svg.includes('SYSTEM') && !usageGraphic(withSystem, 'system').svg.includes('USAGE'));
+  const panels = monitorBlockKit(withSystem, 0, u, undefined, s, true).filter(b => b.type === 'carousel' && b.block_id === 'panels-0');
+  assert.deepEqual(panels[0]?.elements.map(c => [c.type, c.hero_image.slack_file.id]), [['card', 'F1'], ['card', 'F2']], 'usage then System, side by side in a carousel');
+  const stacked = monitorBlockKit(withSystem, 0, u, undefined, s).filter(b => b.type === 'image' && b.slack_file);
+  assert.deepEqual(stacked.map(b => b.slack_file.id), ['F1', 'F2'], 'without the carousel, one under the other');
 });
 
 test('CPU and memory over the last 30 minutes draw as 15 two-minute bars, with gaps where the daemon took no reading', async () => {

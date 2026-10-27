@@ -9,7 +9,7 @@ import { monitorBlockKit, type UsageImage } from "./slackMonitorBlocks.ts";
 /** a rendered picture's file ids and picture hash, as state saves them */
 export type UsageFiles = { file?: string; key?: string; stale?: string };
 /** The monitor's two uploaded pictures: the AI usage panel and the header with the group counts. */
-type ImageSlot = "usage" | "head";
+type ImageSlot = "usage" | "system" | "head";
 type ShownImage = UsageImage & { key: string; reused: boolean };
 
 export type SlackThreadMessage = { ts: string; user?: string; text?: string; bot_id?: string; files?: SlackFile[] };
@@ -110,7 +110,7 @@ export class Slack {
    * again; `stale` was shown before and is deleted on the next change, one generation late, so a client still
    * showing the older message never loses its image. State keeps the triple across restarts (cli/slackMonitor.ts).
    */
-  private files: Record<ImageSlot, UsageFiles> = { usage: {}, head: {} };
+  private files: Record<ImageSlot, UsageFiles> = { usage: {}, system: {}, head: {} };
   setUsageFile(saved: UsageFiles | undefined): void { this.files.usage = { ...(saved ?? {}) }; }
   getUsageFile(): UsageFiles { return { ...this.files.usage }; }
   /** The header picture's files, kept the same way as the usage panel's. */
@@ -142,16 +142,16 @@ export class Slack {
     if (usageUploadsDisabled.has(token)) return undefined;
     try {
       const { usageGraphic, usagePng } = await import("./slackUsageGraphic.ts");
-      const graphic = slot === "usage" ? usageGraphic(safe) : (await import("./slackHeadGraphic.ts")).headGraphic(safe);
+      const graphic = slot === "head" ? (await import("./slackHeadGraphic.ts")).headGraphic(safe) : usageGraphic(safe, slot);
       if (!graphic) return undefined;
       const key = createHash("sha256").update(graphic.svg).digest("hex"), files = this.files[slot];
       if (files.file && files.key === key) return { fileId: files.file, alt: graphic.alt, key, reused: true };
-      const fileId = await this.uploadImage(await usagePng(graphic.svg), `consort-${slot}.png`, slot === "usage" ? "AI usage" : "Consort");
+      const fileId = await this.uploadImage(await usagePng(graphic.svg), `consort-${slot}.png`, slot === "usage" ? "AI usage" : slot === "system" ? "System" : "Consort");
       await this.retryDelay(1500);
       return { fileId, alt: graphic.alt, key, reused: false };
     } catch (error) {
       if (/missing_scope/.test(String(error))) usageUploadsDisabled.add(token);
-      console.error(`Slack ${slot === "usage" ? "usage panel" : "header"}: ${String(error)}; showing the ${slot === "usage" ? "chart" : "banner"} instead.`);
+      console.error(`Slack ${slot === "head" ? "header" : `${slot} panel`}: ${String(error)}; showing the ${slot === "head" ? "banner" : "chart"} instead.`);
       return undefined;
     }
   }
@@ -166,9 +166,12 @@ export class Slack {
     const safe = this.gate ? this.gate(text) : redactPii(text);
     const kit = monitorBlockKit(safe);
     const usage = kit ? await this.renderedImage("usage", safe) : undefined;
+    const system = kit ? await this.renderedImage("system", safe) : undefined;
     const head = kit ? await this.renderedImage("head", safe) : undefined;
     const layouts: { blocks: unknown[]; withImage: boolean }[] = [];
-    if (kit && (usage || head)) layouts.push({ blocks: monitorBlockKit(safe, Date.now(), usage, head)!, withImage: true });
+    // Usage and System as two cards of a carousel; if Slack refuses a picture in a card, the same two as plain image blocks.
+    if (kit && usage && system) layouts.push({ blocks: monitorBlockKit(safe, Date.now(), usage, head, system, true)!, withImage: true });
+    if (kit && (usage || system || head)) layouts.push({ blocks: monitorBlockKit(safe, Date.now(), usage, head, system)!, withImage: true });
     if (kit) layouts.push({ blocks: kit, withImage: false });
     layouts.push({ blocks: this.plainBlocks(safe), withImage: false });
     for (let i = 0; i < layouts.length; i++) {
@@ -177,6 +180,7 @@ export class Slack {
         try {
           const result = await this.api(method, { ...body, blocks: layout.blocks });
           await this.settleFile("usage", layout.withImage ? usage : undefined, usage);
+          await this.settleFile("system", layout.withImage ? system : undefined, system);
           await this.settleFile("head", layout.withImage ? head : undefined, head);
           await this.publishHome(layouts.slice(i).map((l) => l.blocks));
           return result;

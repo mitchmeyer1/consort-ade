@@ -199,7 +199,7 @@ export function monitorCounts(safe: string): Record<Group['key'], number> | unde
   return { reply: reply.rows.length, nudge: nudge.rows.length, ready: ready.rows.length + more(ready), working: working.rows.length + more(working) };
 }
 /** Blocks for a master monitor text; undefined for anything else (guard notices, legacy posts, tests). The head is the uploaded header picture when there is one, else the banner. */
-export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageImage, head?: UsageImage): Block[] | undefined {
+export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageImage, head?: UsageImage, system?: UsageImage, carousel = false): Block[] | undefined {
   const monitor = parseMonitor(safe);
   if (!monitor) return undefined;
   const { lines, groups, completed, completedNotes, accounts } = monitor;
@@ -227,13 +227,17 @@ export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageIma
   const parsed = accounts.map(parseAccount);
   // The rendered panel says everything the chart and notes would; without one, Slack's own chart stands in.
   const chart = usage ? undefined : usageChart(parsed, now);
-  if (usage) blocks.push({ type: 'image', block_id: `usage-${now}`, slack_file: { id: usage.fileId }, alt_text: usage.alt.slice(0, 2000) });
+  // Usage and System are two pictures: side by side as the two cards of a carousel, else one under the other.
+  const picture = (key: string, img: UsageImage) => ({ type: 'image', ...(carousel ? {} : { block_id: `${key}-${now}` }), slack_file: { id: img.fileId }, alt_text: img.alt.slice(0, 2000) });
+  if (carousel && usage && system) blocks.push({ type: 'carousel', block_id: `panels-${now}`, elements: [{ type: 'card', block_id: `usage-${now}`, hero_image: picture('usage', usage) }, { type: 'card', block_id: `system-${now}`, hero_image: picture('system', system) }] });
+  else if (usage) blocks.push(picture('usage', usage));
   else if (chart) blocks.push(chart);
   else if (parsed.length) blocks.push(section('*AI usage*'));
   if (!usage) for (const note of usageNotes(parsed)) blocks.push(context(note));
-  // The rendered panel carries the System box too; without it, one line says the same.
-  const system = monitorSystem(safe);
-  if (!usage && Object.keys(system).length) blocks.push(context(`*System*  ·  ${Object.entries(system).filter(([k]) => !k.endsWith('30')).map(([k, v]) => `${k} ${v}`).join('  ·  ')}`));
+  // System is its own picture; without it, one line says the same.
+  const systemText = monitorSystem(safe);
+  if (system && !(carousel && usage)) blocks.push(picture('system', system));
+  else if (!system && Object.keys(systemText).length) blocks.push(context(`*System*  ·  ${Object.entries(systemText).filter(([k]) => !k.endsWith('30')).map(([k, v]) => `${k} ${v}`).join('  ·  ')}`));
   blocks.push(context(`Updated ${stamp}  ·  Reply in a task’s thread. This message updates in place.`));
   // Too many open tasks for Slack's block limit: the later groups fall back to packed text rows, one section per few tasks.
   for (const group of [groups.working, groups.ready, groups.nudge, groups.reply]) {

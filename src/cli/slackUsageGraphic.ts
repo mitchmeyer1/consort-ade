@@ -160,9 +160,12 @@ export function usageAlt(accounts: AccountUsage[], system: Record<string, string
   return (accounts.length ? 'AI usage: ' : '') + accounts.map((a) => `${a.name} ${a.blocked ? `blocked, ${a.detail}` : a.windows.length ? a.windows.map((w) => `${short(w.label)} ${w.percent}%`).join(', ') : 'no reading'}`).join('; ') + sys;
 }
 
-/** The panel for a master monitor text, or undefined when it lists no accounts and no System section. */
-export function usageGraphic(safe: string): { svg: string; alt: string } | undefined {
-  const accounts = monitorAccounts(safe), system = monitorSystem(safe);
+/**
+ * The panel for a master monitor text, or undefined when it lists no accounts and no System section. `part` draws
+ * the usage rows or the System box alone, each its own picture for the two cards of a Slack carousel.
+ */
+export function usageGraphic(safe: string, part?: 'usage' | 'system'): { svg: string; alt: string } | undefined {
+  const accounts = part === 'system' ? [] : monitorAccounts(safe), system = part === 'usage' ? {} : monitorSystem(safe);
   if (!accounts.length && !Object.keys(system).length) return undefined;
   return { svg: usageSvg(accounts, system), alt: usageAlt(accounts, system) };
 }
