@@ -99,9 +99,9 @@ function completedRow(row: Row): Cell[] {
     richCell(row.links.flatMap((l, i) => [...(i ? [{ text: '  ·  ' }] : []), { text: l.label, url: l.url }])),
   ];
 }
-type AccountUsage = { name: string; blocked: boolean; status: string; windows: { label: string; percent: number }[]; detail: string };
+export type AccountUsage = { name: string; blocked: boolean; status: string; windows: { label: string; percent: number }[]; detail: string };
 /** One monitor account line: `🟢 Claude 1 · available · 5-hour 42% · weekly 20% · usage 3m ago`, or a blocked one with its reason and resume time. */
-function parseAccount(line: string): AccountUsage {
+export function parseAccount(line: string): AccountUsage {
   const p = parts(line); const name = p[0].replace(/^\S+ /, ''); const rest = p.slice(1);
   const windows = rest.flatMap((r) => { const m = r.match(/^(.+?) (\d+)%$/); return m ? [{ label: m[1]!, percent: Number(m[2]) }] : []; });
   const peak = windows.length ? Math.max(...windows.map((w) => w.percent)) : undefined;
@@ -129,8 +129,20 @@ function usageNotes(accounts: AccountUsage[]): string[] {
   return accounts.filter((a) => a.blocked || !a.windows.length).map((a) => `*${a.name}* ${a.blocked ? 'blocked' : 'unavailable'}: ${a.detail}`);
 }
 
+/** The account lines of a master monitor text, parsed; empty for anything else. */
+export function monitorAccounts(safe: string): AccountUsage[] {
+  const lines = safe.split('\n');
+  if (!lines[0]?.startsWith('*📊 Consort master monitor*')) return [];
+  const start = lines.indexOf('*Accounts*');
+  if (start < 0) return [];
+  const out: AccountUsage[] = [];
+  for (const line of lines.slice(start + 1)) { if (!line) break; if (/^[🔴⚪🟢🟡🟠] /u.test(line)) out.push(parseAccount(line)); }
+  return out;
+}
+/** A rendered usage panel already uploaded to Slack (cli/slackUsageGraphic.ts), shown in place of the chart. */
+export type UsageImage = { fileId: string; alt: string };
 /** Blocks for a master monitor text; undefined for anything else (guard notices, legacy posts, tests). */
-export function monitorBlockKit(safe: string, now = Date.now()): Block[] | undefined {
+export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageImage): Block[] | undefined {
   const lines = safe.split('\n');
   if (!lines[0].startsWith('*📊 Consort master monitor*') || !lines.includes('*Working*')) return undefined;
   const groups: Record<Group['key'], Group> = {
@@ -174,12 +186,15 @@ export function monitorBlockKit(safe: string, now = Date.now()): Block[] | undef
   blocks.push(divider());
   if (completed.length) blocks.push(container(`completed-${now}`, 'Completed', { type: 'plain_text', text: `most recent ${completed.length}` },
     [table(`completed-table-${now}`, ['Task', 'Author', 'Cost', 'Finished', 'Links'], completed.map(completedRow), [{ is_wrapped: true }, {}, { align: 'right' }, {}, {}]), ...completedNotes.map(n => context(`_${n}_`))], { collapsed: true }));
-  const usage = accounts.map(parseAccount);
-  const chart = usageChart(usage, now);
-  if (chart) blocks.push(chart);
-  else if (usage.length) blocks.push(section('*AI usage*'));
-  for (const note of usageNotes(usage)) blocks.push(context(note));
-  if (!blocks.some(b => b.type === 'card') && blocks.filter(b => b.type === 'container').length === 1) blocks.splice(blocks.length - (chart ? 1 : 0) - usageNotes(usage).length - (usage.length && !chart ? 1 : 0), 0, context('_Nothing open and nothing finished yet._'));
+  const parsed = accounts.map(parseAccount);
+  // The rendered panel says everything the chart and notes would; without one, Slack's own chart stands in.
+  const chart = usage ? undefined : usageChart(parsed, now);
+  if (usage) blocks.push({ type: 'container', block_id: `usage-${now}`, title: { type: 'plain_text', text: ' ' }, width: 'full', has_header_divider: false, child_blocks: [{ type: 'image', slack_file: { id: usage.fileId }, alt_text: usage.alt.slice(0, 2000) }] });
+  else if (chart) blocks.push(chart);
+  else if (parsed.length) blocks.push(section('*AI usage*'));
+  if (!usage) for (const note of usageNotes(parsed)) blocks.push(context(note));
+  const usageBlocks = usage ? 1 : (chart ? 1 : parsed.length ? 1 : 0) + usageNotes(parsed).length;
+  if (!blocks.some(b => b.type === 'card') && !blocks.some(b => b.type === 'container' && b.block_id !== `head-${now}` && b.block_id !== `usage-${now}`)) blocks.splice(blocks.length - usageBlocks, 0, context('_Nothing open and nothing finished yet._'));
   blocks.push(context(`Updated ${stamp}  ·  Reply in a task’s thread. This message updates in place.`));
   // Too many open tasks for Slack's block limit: the later groups fall back to packed text rows, one section per few tasks.
   for (const group of [groups.working, groups.ready, groups.nudge, groups.reply]) {

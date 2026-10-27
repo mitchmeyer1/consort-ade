@@ -133,5 +133,5 @@ test('Slack receives the blocks on the same root and falls back to text sections
  await slack.updateMonitor('same',text);
  const edits=calls.filter(c=>c.method==='chat.update');assert.equal(edits.length,2);
  assert.ok(JSON.parse(edits[1].body.blocks).every(b=>b.type==='section'));assert.match(edits[1].body.blocks,/MASKED/);
- assert.ok(calls.every(c=>c.body.thread_ts===undefined&&!/^files\./.test(c.method)));
+ assert.ok(calls.every(c=>c.body.thread_ts===undefined&&c.method!=='files.completeUploadExternal'),'no thread, and no upload completed without an upload URL');
 });

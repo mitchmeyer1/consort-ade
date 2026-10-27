@@ -53,7 +53,7 @@
     "package:mac": "pnpm build && electron-rebuild -f -w node-pty && electron-packager . Consort --platform=darwin --arch=arm64 --icon=build/icon.icns --app-bundle-id=com.aligned.consort --extend-info=build/Info.plist --out=dist --overwrite --asar=false --prune=true --ignore='^/(src|dist|tests|scripts|\\.consort|\\.claude|\\.npmrc|electron\\.vite\\.config\\.ts|tsconfig\\.json)$' && codesign --force --deep --sign - dist/Consort-darwin-arm64/Consort.app && echo 'built dist/Consort-darwin-arm64/Consort.app'",
     "install:mac": "pnpm package:mac && (ps -axo args= | grep -q '^/Applications/Consort.app/Contents/MacOS/Consort' && echo 'Quit Consort first: it is running from /Applications' && exit 1 || true) && rm -rf /Applications/Consort.app && ditto dist/Consort-darwin-arm64/Consort.app /Applications/Consort.app && echo 'installed /Applications/Consort.app'",
     "postinstall": "electron-rebuild -f -w node-pty",
-    "build:cli": "esbuild src/cli/index.ts --bundle --platform=node --format=esm --target=node22 --outfile=out/cli/index.js --external:@anthropic-ai/claude-agent-sdk --external:@openai/codex-sdk --external:electron --external:node-pty --log-level=warning",
+    "build:cli": "esbuild src/cli/index.ts --bundle --platform=node --format=esm --target=node22 --outfile=out/cli/index.js --external:@anthropic-ai/claude-agent-sdk --external:@openai/codex-sdk --external:electron --external:node-pty --external:@resvg/resvg-js --log-level=warning",
     "cli": "pnpm build:cli && node out/cli/index.js"
   },
   "dependencies": {
@@ -67,7 +67,8 @@
     "node-pty": "^1.1.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "zod": "^3.25.0"
+    "zod": "^3.25.0",
+    "@resvg/resvg-js": "^2.6.2"
   },
   "devDependencies": {
     "@electron/packager": "^20.3.0",

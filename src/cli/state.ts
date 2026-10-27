@@ -170,7 +170,8 @@ export type Task = {
 };
 export type CliState = {
   /** Local-only identity of the one Slack monitor post; never a ticket thread. */
-  slackMonitor?: { channel: string; ts?: string; key?: string; creating?: boolean; lease?: { id: string; until: number } };
+  /** `usageFile`: the uploaded usage panel the monitor shows, deleted when replaced (cli/slack.ts) */
+  slackMonitor?: { channel: string; ts?: string; key?: string; creating?: boolean; usageFile?: string; lease?: { id: string; until: number } };
  capacity?: { maxActiveTurns?: number; maxOpenTasks?: number; maxEnvironments?: number }; version: 1; accounts: Account[]; slack?: SlackConfig; clickupKey?: string; branchPrefix?: string; jobs: Job[]; tasks: Task[];
   /** where the covered (BAA) Anthropic key lives; Consort never stores the key itself (shared/phi.ts) */
   covered?: import("../shared/phi.ts").CoveredKeyRef;

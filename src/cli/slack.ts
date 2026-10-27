@@ -1,9 +1,11 @@
+import { setTimeout as delay } from "node:timers/promises";
+import { createHash } from "node:crypto";
 import { replyAfter, slackMessage, slackStatus, STATUS_TAIL } from "../shared/headless.ts";
 import type { SlackConfig } from "./state";
 import { redactPii } from "../shared/redact.ts";
 import type { SlackFile } from "./ownerUpdates";
 import { slackGate } from "./phiGate.ts";
-import { monitorBlockKit } from "./slackMonitorBlocks.ts";
+import { monitorBlockKit, type UsageImage } from "./slackMonitorBlocks.ts";
 
 export type SlackThreadMessage = { ts: string; user?: string; text?: string; bot_id?: string; files?: SlackFile[] };
 
@@ -18,12 +20,15 @@ export type SlackThreadMessage = { ts: string; user?: string; text?: string; bot
  * documents the owner attaches to an update), files:write (the PR article in a review thread). No users:read or
  * incoming-webhook. The list the setup wizard shows is SLACK_SCOPES in setup.ts.
  */
+/** Bots whose token lacks files:write: the usage panel upload is not tried again this process. */
+const usageUploadsDisabled = new Set<string>();
 export class Slack {
   private cfg: SlackConfig;
   private fetchImpl: typeof fetch;
   private gate?: (text: string) => string;
+  private retryDelay: (ms: number) => Promise<unknown>;
   /** `gate` turns a message into what may be posted; by default the PHI/PII guard's, read from state (cli/phiGate.ts slackGate) */
-  constructor(cfg: SlackConfig, fetchImpl: typeof fetch = (...a) => fetch(...a), gate: ((text: string) => string) | undefined = slackGate) { this.cfg = cfg; this.fetchImpl = fetchImpl; this.gate = gate; }
+  constructor(cfg: SlackConfig, fetchImpl: typeof fetch = (...a) => fetch(...a), gate: ((text: string) => string) | undefined = slackGate, retryDelay: (ms: number) => Promise<unknown> = delay) { this.cfg = cfg; this.fetchImpl = fetchImpl; this.gate = gate; this.retryDelay = retryDelay; }
 
   private async api(method: string, body: Record<string, unknown>): Promise<any> {
     // form fields, not JSON: Slack's read methods (conversations.replies, conversations.history…) answer
@@ -72,10 +77,8 @@ export class Slack {
     catch (error) { if (!/already_pinned/.test(String(error))) throw error; }
   }
 
-  /** The monitor as Block Kit (cli/slackMonitorBlocks.ts); any other text as plain sections, which keep Slack from splitting a long post. */
-  private monitorBlocks(text: string, plain = false): unknown[] {
-    const safe = this.gate ? this.gate(text) : redactPii(text);
-    if (!plain) { const blocks = monitorBlockKit(safe); if (blocks) return blocks; }
+  /** Plain sections for anything that is not the master monitor; they keep Slack from splitting a long post. */
+  private plainBlocks(safe: string): unknown[] {
     const chunks: string[] = [];
     let chunk = "";
     for (const line of safe.split("\n")) {
@@ -94,14 +97,79 @@ export class Slack {
     await this.sendMonitor("chat.update", { channel: await this.channel(), ts, text: text.split("\n")[0], unfurl_links: false }, text);
   }
 
-  /** Should Slack reject the Block Kit layout, the same root gets the plain-section monitor; nothing else is retried, as a timed-out post may already exist. */
-  private async sendMonitor(method: string, body: Record<string, unknown>, text: string): Promise<any> {
-    try { return await this.api(method, { ...body, blocks: this.monitorBlocks(text) }); }
-    catch (error) {
-      if (!/^Error: Slack chat\.(?:postMessage|update): invalid_blocks/.test(String(error))) throw error;
-      console.error(`Slack monitor blocks rejected: ${String(error)} ${JSON.stringify((error as { slackMessages?: unknown }).slackMessages ?? [])}; using the text monitor.`);
-      return this.api(method, { ...body, blocks: this.monitorBlocks(text, true) });
+  // the usage panel's file: the one shown now, the one the previous process showed (to retire), and the one just uploaded
+  private usageFile?: string;
+  private previousUsageFile?: string;
+  /** the file id state saved for the panel shown before this process started */
+  setUsageFile(id: string | undefined): void { this.previousUsageFile = id; }
+  /** the file id the monitor shows now, for state */
+  getUsageFile(): string | undefined { return this.usageFile ?? this.previousUsageFile; }
+
+  /** Upload privately (files:write); the id goes into an image block as slack_file. */
+  private async uploadImage(png: Buffer, filename: string, title: string): Promise<string> {
+    const upload = await this.api("files.getUploadURLExternal", { filename, length: png.length });
+    if (!upload.file_id || !upload.upload_url) throw new Error("Slack image upload URL unavailable");
+    const sent = await this.fetchImpl(upload.upload_url, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: new Uint8Array(png), signal: AbortSignal.timeout(30_000) });
+    if (!sent.ok) throw new Error(`Slack image transfer: HTTP ${sent.status}`);
+    await this.api("files.completeUploadExternal", { files: [{ id: upload.file_id, title }] });
+    return upload.file_id as string;
+  }
+
+  /** The usage panel rendered and uploaded (cli/slackUsageGraphic.ts), or undefined when there is none or it cannot be uploaded. */
+  private async usageImage(safe: string): Promise<UsageImage | undefined> {
+    const key = createHash("sha256").update(this.cfg.botToken).digest("hex");
+    if (usageUploadsDisabled.has(key)) return undefined;
+    try {
+      const { usageGraphic, usagePng } = await import("./slackUsageGraphic.ts");
+      const graphic = usageGraphic(safe);
+      if (!graphic) return undefined;
+      const fileId = await this.uploadImage(await usagePng(graphic.svg), "consort-usage.png", "AI usage");
+      return { fileId, alt: graphic.alt };
+    } catch (error) {
+      if (/missing_scope/.test(String(error))) usageUploadsDisabled.add(key);
+      console.error(`Slack usage panel: ${String(error)}; showing the chart instead.`);
+      return undefined;
     }
+  }
+
+  /**
+   * The monitor as Block Kit with the uploaded usage panel, else with Slack's chart, else as plain sections:
+   * the first layout Slack accepts wins. A just-uploaded image Slack has not finished processing is retried
+   * on the same layout. Nothing else is retried, as a timed-out post may already exist. After a success the
+   * previous panel's file is deleted, and an uploaded panel that did not get shown is deleted too.
+   */
+  private async sendMonitor(method: string, body: Record<string, unknown>, text: string): Promise<any> {
+    const safe = this.gate ? this.gate(text) : redactPii(text);
+    const kit = monitorBlockKit(safe);
+    const usage = kit ? await this.usageImage(safe) : undefined;
+    const layouts: { blocks: unknown[]; withImage: boolean }[] = [];
+    if (kit && usage) layouts.push({ blocks: monitorBlockKit(safe, Date.now(), usage)!, withImage: true });
+    if (kit) layouts.push({ blocks: kit, withImage: false });
+    layouts.push({ blocks: this.plainBlocks(safe), withImage: false });
+    for (let i = 0; i < layouts.length; i++) {
+      const layout = layouts[i]!;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const result = await this.api(method, { ...body, blocks: layout.blocks });
+          await this.settleUsageFile(layout.withImage ? usage?.fileId : undefined, usage?.fileId);
+          return result;
+        } catch (error) {
+          const messages = (error as Error & { slackMessages?: string[] }).slackMessages ?? [];
+          if (layout.withImage && messages.some((m) => m.includes("invalid slack file")) && attempt < 4) { await this.retryDelay([250, 750, 1500, 3000][attempt]!); continue; }
+          if (!/^Error: Slack chat\.(?:postMessage|update): invalid_blocks/.test(String(error)) || i === layouts.length - 1) throw error;
+          console.error(`Slack monitor blocks rejected: ${String(error)} ${JSON.stringify(messages)}; trying the next layout.`);
+          break;
+        }
+      }
+    }
+  }
+
+  /** After a successful send: remember the shown file, delete the one it replaced and any upload that went unshown. */
+  private async settleUsageFile(shown: string | undefined, uploaded: string | undefined): Promise<void> {
+    const retire = new Set<string>();
+    if (uploaded && uploaded !== shown) retire.add(uploaded);
+    if (shown) { for (const old of [this.previousUsageFile, this.usageFile]) if (old && old !== shown) retire.add(old); this.usageFile = shown; this.previousUsageFile = undefined; }
+    for (const id of retire) await this.api("files.delete", { file: id }).catch(() => undefined);
   }
 
   /**
