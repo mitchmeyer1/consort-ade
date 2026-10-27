@@ -6,7 +6,7 @@
  */
 const LIMIT = 2900;
 const MAX_BLOCKS = 50;
-type Row = { icon: string; kind: string; title: string; thread?: string; pending: boolean; byline?: string; status: string; stage?: { name: string; n: number; total: number }; cost?: string; age?: string; action?: string; links: { label: string; url: string }[] };
+type Row = { icon: string; kind: string; title: string; thread?: string; pending: boolean; ci?: string; turn?: string; byline?: string; status: string; stage?: { name: string; n: number; total: number }; cost?: string; age?: string; action?: string; links: { label: string; url: string }[] };
 type Group = { key: 'reply' | 'nudge' | 'ready' | 'working'; icon: string; heading: string; empty: string; rows: Row[]; notes: string[] };
 type Block = Record<string, unknown>;
 
@@ -51,10 +51,14 @@ function parseRow(line: string, details: string[]): Row {
   for (const d of details) {
     const found = [...d.matchAll(/<(https:\/\/[^|>]+)\|(ticket|github|merge PR)>/g)];
     if (found.length) row.links.push(...found.map(m => ({ label: labels[m[2]], url: m[1] })));
+    else if (d.startsWith('PR: ')) for (const label of d.slice(4).split(' · ')) { if (/turn$/.test(label)) row.turn = label; else row.ci = label; }
     else row.action = row.action ? `${row.action} ${d}` : d;
   }
   return row;
 }
+const CI_MARK: Record<string, string> = { 'CI passing': '🟢', 'CI running': '🟡', 'CI failing': '🔴', 'No CI': '⚪' };
+/** The PR's two labels: its CI verdict with a coloured dot, and whose turn it is, bold when it is yours. */
+const prLabels = (row: Row) => [row.ci ? `${CI_MARK[row.ci] ?? ''} ${row.ci}`.trim() : '', row.turn === 'Your turn' ? '*👤 Your turn*' : row.turn ? `⏳ ${row.turn}` : ''].filter(Boolean).join('   ·   ');
 const notable = (status: string) => (['RUNNING', 'WAITING', 'READY TO MERGE', 'DONE', ''].includes(status) ? undefined : status);
 const byline = (row: Row) => row.byline?.replace(/^author: /, 'by ');
 /** One card per open task: title, who and how much, the current action, the stage bar, and up to three link buttons. */
@@ -64,7 +68,7 @@ function card(row: Row, group: Group, index: number): Block {
   if (row.thread) buttons.push(button(group.key === 'reply' ? 'Reply in thread' : 'Open thread', row.thread, `thread-${index}`, primary === 'thread'));
   for (const l of row.links) buttons.push(button(l.label, l.url, `${l.label.toLowerCase().replace(/\W+/g, '-')}-${index}`, primary === l.label));
   const status = notable(row.status);
-  const subtext = [row.stage ? `${row.stage.name} ${row.stage.n}/${row.stage.total}   ${bar(group.key === 'ready' ? row.stage.n : row.stage.n - 1, row.stage.total)}` : '', status ? `*${status}*` : '', row.pending ? '_Slack thread pending_' : ''].filter(Boolean).join('   ·   ');
+  const subtext = [row.stage ? `${row.stage.name} ${row.stage.n}/${row.stage.total}   ${bar(group.key === 'ready' ? row.stage.n : row.stage.n - 1, row.stage.total)}` : '', prLabels(row), status ? `*${status}*` : '', row.pending ? '_Slack thread pending_' : ''].filter(Boolean).join('   ·   ');
   const subtitle = [row.kind, byline(row), row.cost, row.age].filter(Boolean).join('   ·   ');
   return {
     type: 'card', block_id: `task-${index}`,
@@ -78,7 +82,7 @@ function card(row: Row, group: Group, index: number): Block {
 /** Plain rows, packed into as few sections as fit, for anything that no longer fits as a card. */
 function compact(row: Row): string {
   const status = notable(row.status);
-  return [`*${link(row.thread, row.title)}*`, status ? `*${status}*` : '', byline(row), row.cost, row.age, row.action ? `_${row.action}_` : '', ...row.links.map(l => link(l.url, l.label))].filter(Boolean).join(' · ');
+  return [`*${link(row.thread, row.title)}*`, status ? `*${status}*` : '', row.ci ?? '', row.turn ?? '', byline(row), row.cost, row.age, row.action ? `_${row.action}_` : '', ...row.links.map(l => link(l.url, l.label))].filter(Boolean).join(' · ');
 }
 function packed(texts: string[]): Block[] {
   const out: Block[] = []; let chunk = '';

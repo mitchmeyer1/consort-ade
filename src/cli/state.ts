@@ -153,6 +153,8 @@ export type Task = {
   /** worker crashes so far; the daemon restarts a crashed worker a few times before failing the task */
   restarts?: number;
   startedAt: number; updatedAt: number; lastPrCheckAt?: number; finishedAt?: number;
+  /** the PR as the last watch read saw it (cli/pipeline.ts): its CI verdict, and whether it waits on a reviewer with nothing for Consort to fix */
+  prCheck?: { ci: "pass" | "pending" | "fail" | "none"; theirs: boolean; at: number };
   note?: string;
   /** one line on what the worker is doing right now, for `consort-cli view` */
   activity?: string;

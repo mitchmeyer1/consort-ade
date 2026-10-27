@@ -830,7 +830,9 @@ export async function workTask(taskId: string): Promise<void> {
   let conflictFixes = 0; // merge-conflict repairs pushed on this watch; after a few the owner is asked
   for (;;) {
     const state = await readPr(job.repo, pr).catch((e) => { log(task, `pr read failed: ${e.message}`); return undefined; });
-    updateTask(task.id, { lastPrCheckAt: Date.now() });
+    // The monitor's CI and turn labels: the reviewer's turn when approval is all that is missing and Consort has nothing to fix.
+    const theirs = !!state && !state.unresolved.length && state.ci !== "fail" && state.mergeable !== "CONFLICTING" && (state.reviewDecision === "REVIEW_REQUIRED" || state.reviewDecision === "CHANGES_REQUESTED" || !state.approvals.length);
+    updateTask(task.id, { lastPrCheckAt: Date.now(), ...(state ? { prCheck: { ci: state.ci, theirs, at: Date.now() } } : {}) });
     if (state) {
       try {
       if (recoveryGuidance) {

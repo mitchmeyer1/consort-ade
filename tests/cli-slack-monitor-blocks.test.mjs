@@ -135,3 +135,13 @@ test('Slack receives the blocks on the same root and falls back to text sections
  assert.ok(JSON.parse(edits[1].body.blocks).every(b=>b.type==='section'));assert.match(edits[1].body.blocks,/MASKED/);
  assert.ok(calls.every(c=>c.body.thread_ts===undefined&&c.method!=='files.completeUploadExternal'),'no thread, and no upload completed without an upload URL');
 });
+
+test('a task card with a PR shows its CI verdict and whose turn it is, after the stage bar',()=>{
+ const withPr=text.replace('   need one approval from @ada;','   PR: CI passing · Your turn\n   need one approval from @ada;').replace('   <https://github.com/a/b/pull/2|merge PR>','   PR: CI failing · Consort’s turn\n   <https://github.com/a/b/pull/2|merge PR>');
+ const [nudge]=cards(monitorBlockKit(withPr,NOW)).filter(c=>c.title.text==='Needs a reviewer');
+ assert.equal(nudge.subtext.text,'Watch PR 9/9   ▰▰▰▰▰▰▰▰▱   ·   🟢 CI passing   ·   *👤 Your turn*');
+ assert.match(nudge.body.text,/^need one approval/,'the PR line is not part of the action');
+ const ready=cards(monitorBlockKit(withPr,NOW)).find(c=>c.title.text==='Ship it');
+ assert.match(ready.subtext.text,/🔴 CI failing   ·   ⏳ Consort’s turn/);
+ assert.ok(!cards(monitorBlockKit(text,NOW)).some(c=>/CI |turn/.test(c.subtext?.text??'')),'no PR line, no labels');
+});
