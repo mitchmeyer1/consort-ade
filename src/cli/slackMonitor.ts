@@ -34,6 +34,7 @@ async function refresh(now:number, slackFor:(cfg:SlackConfig)=>Slack):Promise<vo
   if(!acquired) return;
   try {
     let monitor=loadState().slackMonitor!;
+    slack.setDashboardFiles?.(monitor.imageFiles??[]);
     if(!monitor.ts) {
       const existing=await slack.findMonitor(MASTER_MONITOR_HEADING);
       if(existing) mutateState(s=>{if(s.slackMonitor?.lease?.id===lease) Object.assign(s.slackMonitor,{ts:existing,creating:undefined});});
@@ -54,7 +55,7 @@ async function refresh(now:number, slackFor:(cfg:SlackConfig)=>Slack):Promise<vo
     }
     const text=slackMasterMonitor(state,threads,now,alive,cachedUsage(),await monitorAuthors(shown));
     if(text.length>35000) throw new Error('Slack master monitor exceeds the single-post text limit.');
-    const key=createHash('sha256').update(text).digest('hex');
+    const key=createHash('sha256').update('dashboard-v4:'+text).digest('hex');
     monitor=loadState().slackMonitor!;
     if(monitor.key===key && monitor.ts) {
       const identity=`${channel}:${monitor.ts}`;
@@ -78,7 +79,7 @@ async function refresh(now:number, slackFor:(cfg:SlackConfig)=>Slack):Promise<vo
         throw error;
       }
     }
-    mutateState(s=>{if(s.slackMonitor?.lease?.id===lease) Object.assign(s.slackMonitor,{ts,key,creating:undefined});});
+    mutateState(s=>{if(s.slackMonitor?.lease?.id===lease) Object.assign(s.slackMonitor,{ts,key,creating:undefined,imageFiles:slack.getDashboardFiles?.()??s.slackMonitor.imageFiles});});
     const identity=`${channel}:${ts}`;
     if(!reconciled.has(identity)) { await slack.removeDuplicateMonitors(ts!,MASTER_MONITOR_HEADING); reconciled.add(identity); }
     await pinMonitor(slack,channel,ts!);

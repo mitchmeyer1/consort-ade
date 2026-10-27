@@ -229,6 +229,7 @@ Every agent turn (build stages, parallel tickets, self-reviews, environment setu
 | `resources add --name <n> --markdown <path>` / `resources list` / `resources remove <id or name>` | project info resources: notes checkouts every Grilling reads |
 | `run [-d]` / `stop [--all]` | the daemon, in the foreground or detached; stop it, or it and the agents |
 | `cleanup [--dry-run]` | remove leftover Docker environments and unused volumes now; the daemon runs it at start and hourly |
+| `tasks kill <ticket>` | take a ticket over yourself: stops the worker and its agent processes for good (forced after 20 seconds), hands its services back, and no scanner claims the ticket (or a review's PR) again; the worktree, branch and PR stay, and the command prints them. `tasks retry <ticket>` hands it back to Consort |
 | `tasks list` / `tasks logs <id>` / `tasks release <id>` / `tasks retry <id>` | by task id or ticket id; release stops the worker and forgets the claim locally; retry relaunches a failed one |
 | `reboot <id>` / `reboot --all` | stop that ticket's agent (or every live one) and start it again; any open question is dropped and the first turn works out where the last run got to (git state, PR, half-done edits) before continuing |
 | `cli status` / `cli update` | the Claude Code and Codex binaries |
@@ -400,3 +401,20 @@ Repeat reviews compare against the last reviewed head and recheck previous findi
 Evidence capture, capture continuations and acceptance checks use a dedicated `evidence` model role: Opus for Claude accounts and Sol for Codex accounts. Routine implementation/coordination model settings do not apply to evidence. `scanners configure <id> --evidence-model claude:<opus-model>` or `--evidence-model codex:<sol-model>` may pin a newer release in those families; `--evidence-effort` controls its reasoning effort. Provider fallback preserves the evidence role. Existing timeout recovery, acceptance checks and publication gates still apply.
 
 The master monitor uses 🟠 for tasks needing a human reply. It attempts to pin its root once per daemon session; automatic pinning needs Slack's `pins:write` bot scope. Missing permission leaves monitor updates working and logs a manual-pin instruction. Slack pins are available through the conversation's Pins tab; they do not stick a message to the bottom of the conversation.
+
+### Branded Slack monitor
+
+The master monitor renders Consort's cream muses artwork, black panels, task workflow stages,
+costs, GitHub authors, and AI capacity as private PNG images. Existing monitor timestamps and
+per-ticket threads are reused after reboot. Slack requires `files:write` for image uploads;
+without it the bot retains the full text monitor and logs the missing scope.
+
+One SVG dashboard, rasterized to one PNG for Slack, contains every task and its action.
+Task titles and Slack / GitHub / ClickUp links appear as native text below the complete graphic. Slack cannot make destinations embedded in a PNG clickable, and
+native Slack spacing will differ from the HTML design preview. Blocked AI accounts show their
+reason and Eastern resume time instead of usage bars. Uploaded images are reused when unchanged;
+replaced images are retired only after the monitor edit succeeds.
+
+The Slack image overview stays short: up to four active tasks, a completed count, and AI capacity.
+Every task retains its full author, workflow, cost, age, description and links in native text below
+the graphic. This prevents Slack from shrinking a tall task history into an unreadable thumbnail.

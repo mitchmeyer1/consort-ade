@@ -35,6 +35,7 @@ test('picks only PRs that request the reviewer; being assigned does not count; s
     pr(7, { author: { login: 'mitch' }, reviewRequests: [{ login: 'mitch' }] }), pr(8), pr(9, { assignees: [{ login: 'mitch' }] }),
   ];
   assert.deepEqual(reviewCandidates(prs, 'mitch', tasks).map(p => p.number), [1, 2, 4], '4 has new commits; 5 is still being reviewed');
+  assert.deepEqual(reviewCandidates(prs, 'mitch', tasks, ['pr-2']).map(p => p.number), [1, 4], 'a PR whose review the owner killed stays theirs');
 });
 
 test('a review task records the PR and gets its own worktree', () => {

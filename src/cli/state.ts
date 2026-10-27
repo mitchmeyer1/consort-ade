@@ -170,7 +170,7 @@ export type Task = {
 };
 export type CliState = {
   /** Local-only identity of the one Slack monitor post; never a ticket thread. */
-  slackMonitor?: { channel: string; ts?: string; key?: string; creating?: boolean; lease?: { id: string; until: number } };
+  slackMonitor?: { imageFiles?: {id:string;key:string}[]; channel: string; ts?: string; key?: string; creating?: boolean; lease?: { id: string; until: number } };
  capacity?: { maxActiveTurns?: number; maxOpenTasks?: number; maxEnvironments?: number }; version: 1; accounts: Account[]; slack?: SlackConfig; clickupKey?: string; branchPrefix?: string; jobs: Job[]; tasks: Task[];
   /** where the covered (BAA) Anthropic key lives; Consort never stores the key itself (shared/phi.ts) */
   covered?: import("../shared/phi.ts").CoveredKeyRef;
@@ -182,6 +182,8 @@ export type CliState = {
   setupCompletedAt?: number;
   /** this install's claim name: hostname plus a random suffix, minted on first use */
   hostId?: string;
+  /** tickets the owner took over with `tasks kill`: no scanner claims them again (cli/workerControl.ts killTask) */
+  killedTickets?: { jobId: string; ticketId: string; at: number }[];
   /** the shared sets of local services (databases…) tasks claim and hand back (cli/environment.ts) */
   envPool?: EnvSlot[];
 };

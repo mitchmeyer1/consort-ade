@@ -52,9 +52,9 @@ export type OpenPr = { number: number; title: string; url: string; headRefOid: s
 // ── scanning ───────────────────────────────────────────────────────────────────────────────
 
 /** PRs that request `reviewer`'s review and have no review task at their current head yet */
-export function reviewCandidates(prs: OpenPr[], reviewer: string, tasks: Task[]): OpenPr[] {
+export function reviewCandidates(prs: OpenPr[], reviewer: string, tasks: Task[], killed: string[] = []): OpenPr[] {
   const me = reviewer.toLowerCase();
-  return prs.filter((p) => !p.isDraft
+  return prs.filter((p) => !p.isDraft && !killed.includes(`pr-${p.number}`)
     // a reviewer's queue: PRs that request this login's review (being assigned to a PR is the author's side, not a review)
     && (p.reviewRequests ?? []).some((u) => u.login?.toLowerCase() === me)
     && (p.author?.login ?? "").toLowerCase() !== me
@@ -78,7 +78,9 @@ export function newReviewTask(job: Job, pr: OpenPr, now: number): Task {
 export async function scanReviews(job: Job, slots: number, gh: (args: string[], cwd: string) => Promise<string> = (args, cwd) => sh("gh", args, cwd)): Promise<OpenPr[]> {
   if (!job.reviewer) throw new Error(`Review scanner ${job.name} has no --reviewer login`);
   const prs = JSON.parse(await gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,title,url,headRefOid,baseRefName,isDraft,author,assignees,reviewRequests"], job.repo)) as OpenPr[];
-  return reviewCandidates(prs, job.reviewer, loadState().tasks).slice(0, Math.max(0, slots));
+  const s = loadState();
+  // a PR whose review the owner killed stays theirs
+  return reviewCandidates(prs, job.reviewer, s.tasks, (s.killedTickets ?? []).filter((k) => k.jobId === job.id).map((k) => k.ticketId)).slice(0, Math.max(0, slots));
 }
 
 // ── parsing what the agents return ─────────────────────────────────────────────────────────

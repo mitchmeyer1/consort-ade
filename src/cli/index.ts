@@ -14,7 +14,7 @@ import { flushTaskNotifications, notifyTask, runTaskUntilFinished } from "./life
 import { statusEvent } from "./statusLog";
 import { scanSentry, validateSentryConfig } from "./sentry";
 import { Slack } from "./slack";
-import { canStartWorker, handleWorkerExit, requestWorkerStop, workerStopMessage } from "./workerControl";
+import { canStartWorker, handleWorkerExit, isKilled, killTask, requestWorkerStop, workerStopMessage } from "./workerControl";
 import { answerTaskStatusQuestions } from "./slackStatus";
 import { refreshSlackCards } from "./slackCard";
 import { refreshSlackMonitor } from "./slackMonitor";
@@ -123,6 +123,7 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   tasks split <task>                                                      stop that agent, re-split its unfinished build tickets into parallel work, and continue
                                                                           (reboot and split wait for a running parallel wave unless --force)
   tasks retry <task>                                                      queue a failed task again
+  tasks kill <ticket>                                                     stop that agent for good and take the ticket over yourself: nothing claims it again (worktree, branch and PR stay)
   tasks release <task>                                                    stop that agent for good and forget the ticket (worktree stays)
   accounts unblock <id>                                                   clear a usage block early
   cli status | cli update                                                 the Claude Code and Codex binaries
@@ -459,6 +460,20 @@ async function main(argv: string[]) {
       return;
     }
     case "tasks list": { for (const t of s.tasks) console.log(`${t.id}  ${t.status.padEnd(10)}  ${t.ticket.id.padEnd(12)}  ${t.feature.stage.padEnd(14)}  ${t.branch}  ${t.note ?? ""}`); if (!s.tasks.length) console.log("No tasks."); return; }
+    case "tasks kill": {
+      // the owner takes the ticket over: agents stop for good, nothing claims it again, the worktree and branch stay
+      const t = s.tasks.find((x) => x.id === rest[0] || x.ticket.id === rest[0] || x.ticket.id === `pr-${rest[0]}`) ?? fail("no such task; use the ticket id from consort-cli view (or the PR number for a review)");
+      const live = !!t!.pid && alive(t!.pid);
+      if (live) console.log(dim(`stopping the agent (pid ${t!.pid}); it gets 20 seconds to save before it is forced`));
+      const done = await killTask(t!.id);
+      console.log(ok(`Killed ${done.ticket.id}${live ? "" : " (no agent was running)"}; Consort will not pick it up again.`));
+      if (existsSync(done.worktree)) console.log(`  worktree  ${done.worktree}`);
+      if (done.kind !== "review") console.log(`  branch    ${done.branch}`);
+      const pr = done.feature.prs[0] ?? done.review?.url;
+      if (pr) console.log(`  PR        ${pr}`);
+      console.log(dim(`  consort-cli tasks retry ${done.ticket.id} hands it back to Consort`));
+      return;
+    }
     case "tasks release": {
       const t = s.tasks.find((x) => x.id === rest[0] || x.ticket.id === rest[0]) ?? fail("no such task; use the task id or the ticket id from consort-cli view");
       updateTask(t!.id, { status: "released", finishedAt: Date.now() });
@@ -475,7 +490,9 @@ async function main(argv: string[]) {
     case "tasks retry": {
       const t = s.tasks.find((x) => x.id === rest[0] || x.ticket.id === rest[0]) ?? fail("no such task; use the task id or the ticket id");
       if (t!.pid && alive(t!.pid)) fail(`${t!.ticket.id} is still running (pid ${t!.pid})`);
-      t!.status = "working"; t!.note = undefined; t!.pid = undefined; t!.finishedAt = undefined; t!.restarts = 0; t!.updatedAt = Date.now(); saveState(s);
+      t!.status = "working"; t!.note = undefined; t!.pid = undefined; t!.finishedAt = undefined; t!.restarts = 0; t!.updatedAt = Date.now();
+      // a killed ticket comes back to Consort
+      s.killedTickets = s.killedTickets?.filter((k) => !(k.jobId === t!.jobId && k.ticketId === t!.ticket.id)); saveState(s);
       console.log(`${t!.ticket.id} queued again; the daemon starts its worker within 15 seconds${daemonPid() ? "" : " once it runs (consort-cli run -d)"}.`); return;
     }
     case "reboot": case "tasks reboot": case "tasks split": {
@@ -662,9 +679,10 @@ async function daemon() {
         const live = loadState();
         let slots = availableTaskSlots(live, job);
         const availableSlots = slots;
-        const candidates = tickets.filter((t) => !live.tasks.some((old) => old.status !== "released" && old.ticket.id === t.id) && matchesFilters(t, job.filters)).length;
+        const candidates = tickets.filter((t) => !live.tasks.some((old) => old.status !== "released" && old.ticket.id === t.id) && !isKilled(live, job.id, t.id) && matchesFilters(t, job.filters)).length;
         let claimed = 0;
-        const taken = new Set(live.tasks.filter((t) => t.status !== "released").map((t) => t.ticket.id));
+        // tickets the owner killed and is handling stay theirs
+        const taken = new Set([...live.tasks.filter((t) => t.status !== "released").map((t) => t.ticket.id), ...(live.killedTickets ?? []).filter((k) => k.jobId === job.id).map((k) => k.ticketId)]);
         for (const t of tickets) {
           if (slots <= 0) break;
           if (taken.has(t.id) || !matchesFilters(t, job.filters)) continue;
