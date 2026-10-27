@@ -14,6 +14,8 @@ export function slackMonitorGroups(state: Pick<CliState,'tasks'>, now: number) {
   const working=tasks.filter(t=>!FINISHED.includes(t.status)||t.status==='failed');
   return {working,ready,completed};
 }
+/** `Oct 28, 2:30 PM EDT`: a reset or resume time as the monitor shows it. */
+const when=(ms:number)=>new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',timeZoneName:'short'}).format(ms);
 export function slackMasterMonitor(state: CliState, threads: Map<string, string>, now: number, alive: (pid: number) => boolean, usage = new Map<string, ConnectorUsage>(), authors = new Map<string,string>()): string {
   const {working,ready,completed}=slackMonitorGroups(state,now);
   const lines = [MASTER_MONITOR_HEADING, `Updated ${new Date(Math.floor(now / 60_000) * 60_000).toISOString().replace('T', ' ').slice(0,16)} UTC`, '', '*Working*'];
@@ -65,11 +67,13 @@ export function slackMasterMonitor(state: CliState, threads: Map<string, string>
       const reason=clean((limited ? a.blockedWhy : undefined) || cached?.blocked || exhausted.map(w=>`${w.label} limit reached`).join(', ') || 'Usage limit reached',160);
       const resets=[...(limited?[a.blockedUntil!]:[]),...exhausted.flatMap(w=>w.resetsAt && w.resetsAt>now ? [w.resetsAt] : [])];
       const unknownReset=exhausted.some(w=>!w.resetsAt || w.resetsAt<=now);
-      const resume=resets.length && !unknownReset ? `resume after ${new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',timeZoneName:'short'}).format(Math.max(...resets))}` : 'resume time unavailable';
+      const resume=resets.length && !unknownReset ? `resume after ${when(Math.max(...resets))}` : 'resume time unavailable';
       lines.push(`${icon} ${a.provider==='claude'?'Claude':'Codex'} ${number} · blocked: ${reason} · ${resume}${windows?` · ${windows}`:''}`);
     } else {
       const label=peak===undefined ? 'usage unavailable' : 'available';
-      lines.push(`${icon} ${a.provider==='claude'?'Claude':'Codex'} ${number} · ${label}${windows?` · ${windows}`:''}${cached?` · usage ${ago(now-cached.at)} ago`:''}`);
+      // The reset of the account's last weekly window: a model's weekly (Fable) where the plan has one, else the weekly.
+      const weekly=cached?.windows.slice(0,4).filter(w=>w.label!=='5-hour' && w.resetsAt && w.resetsAt>now).at(-1);
+      lines.push(`${icon} ${a.provider==='claude'?'Claude':'Codex'} ${number} · ${label}${windows?` · ${windows}`:''}${weekly?` · resets ${when(weekly.resetsAt!)}`:''}${cached?` · usage ${ago(now-cached.at)} ago`:''}`);
     }
   }
   if(!state.accounts.length) lines.push('No accounts configured.');

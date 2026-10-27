@@ -176,6 +176,14 @@ test('account colors use the highest window with exact usage boundaries and bloc
   assert.match(missing,/⚪ Claude 1 · usage unavailable/);
 });
 
+test('an open account line carries its last weekly window reset: the model weekly where there is one, else the weekly',()=>{
+  const render=(provider,windows)=>slackMasterMonitor({tasks:[],jobs:[],accounts:[{id:'a',provider}]},new Map(),now,()=>true,new Map([['a',{at:now,windows}]]));
+  const claude=render('claude',[{label:'5-hour',percent:10,resetsAt:now+3600000},{label:'Weekly',percent:20,resetsAt:now+86400000},{label:'Weekly · Fable',percent:30,resetsAt:now+2*86400000}]);
+  assert.match(claude,/Weekly · Fable 30% · resets Oct 28, 10:00 AM EDT · usage 0m ago$/m);
+  assert.match(render('codex',[{label:'5-hour',percent:10,resetsAt:now+3600000},{label:'Weekly',percent:20,resetsAt:now+86400000}]),/Weekly 20% · resets Oct 27, 10:00 AM EDT · usage/);
+  assert.doesNotMatch(render('codex',[{label:'5-hour',percent:10,resetsAt:now+3600000}]),/resets/,'a 5-hour reset is not shown');
+});
+
 test('blocked accounts show only the reason and latest applicable Eastern resume time',()=>{
   const render=(at,account,windows)=>slackMasterMonitor({tasks:[],jobs:[],accounts:[{id:'a',provider:'claude',...account}]},new Map(),at,()=>true,new Map([['a',{at,windows}]]));
   const text=render(now,{blockedUntil:now+3600000,blockedWhy:'5-hour limit reached'},[{label:'5-hour',percent:100,resetsAt:now+3600000},{label:'Weekly',percent:10}]);

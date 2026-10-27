@@ -99,16 +99,18 @@ function completedRow(row: Row): Cell[] {
     richCell(row.links.flatMap((l, i) => [...(i ? [{ text: '  ·  ' }] : []), { text: l.label, url: l.url }])),
   ];
 }
-export type AccountUsage = { name: string; blocked: boolean; status: string; windows: { label: string; percent: number }[]; detail: string };
-/** One monitor account line: `🟢 Claude 1 · available · 5-hour 42% · weekly 20% · usage 3m ago`, or a blocked one with its reason, resume time and windows. */
+export type AccountUsage = { name: string; blocked: boolean; status: string; windows: { label: string; percent: number }[]; detail: string; resets?: string };
+/** One monitor account line: `🟢 Claude 1 · available · 5-hour 42% · weekly 20% · resets Oct 30, 3:00 PM EDT · usage 3m ago`, or a blocked one with its reason, resume time and windows. */
 export function parseAccount(line: string): AccountUsage {
-  const p = parts(line); const name = p[0].replace(/^\S+ /, ''); const rest = p.slice(1);
+  const p = parts(line); const name = p[0].replace(/^\S+ /, ''); const all = p.slice(1);
+  // The last weekly window's reset rides apart from the detail.
+  const resets = all.find((r) => r.startsWith('resets '))?.slice(7), rest = all.filter((r) => !r.startsWith('resets '));
   const windows = rest.flatMap((r) => { const m = r.match(/^(.+?) (\d+)%$/); return m ? [{ label: m[1]!, percent: Number(m[2]) }] : []; });
   const peak = windows.length ? Math.max(...windows.map((w) => w.percent)) : undefined;
   // A blocked line keeps its windows after the reason and resume time, so every bar still draws.
-  if (p[0].startsWith('🔴')) return { name, blocked: true, status: 'Blocked', windows, detail: rest.slice(0, rest.findIndex((r) => r.startsWith('resume ')) + 1 || undefined).filter((r) => !/ \d+%$/.test(r)).join(' · ').replace(/^blocked: /, '') };
-  if (peak === undefined) return { name, blocked: false, status: 'Unavailable', windows, detail: rest.filter((r) => r !== 'usage unavailable').join(' · ') || 'no reading yet' };
-  return { name, blocked: false, status: peak <= 50 ? 'Available' : peak <= 90 ? 'Busy' : 'Nearly full', windows, detail: rest.filter((r) => r !== 'available').join(' · ') };
+  if (p[0].startsWith('🔴')) return { name, blocked: true, status: 'Blocked', windows, ...(resets ? { resets } : {}), detail: rest.slice(0, rest.findIndex((r) => r.startsWith('resume ')) + 1 || undefined).filter((r) => !/ \d+%$/.test(r)).join(' · ').replace(/^blocked: /, '') };
+  if (peak === undefined) return { name, blocked: false, status: 'Unavailable', windows, ...(resets ? { resets } : {}), detail: rest.filter((r) => r !== 'usage unavailable').join(' · ') || 'no reading yet' };
+  return { name, blocked: false, status: peak <= 50 ? 'Available' : peak <= 90 ? 'Busy' : 'Nearly full', windows, ...(resets ? { resets } : {}), detail: rest.filter((r) => r !== 'available').join(' · ') };
 }
 /**
  * The usage chart: Slack's own bar chart, one bar per limit window per account (5-hour, weekly, and a model's
