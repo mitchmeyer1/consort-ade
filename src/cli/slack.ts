@@ -108,6 +108,11 @@ export class Slack {
   setUsageFile(saved: UsageFiles | undefined): void { this.usage = { ...(saved ?? {}) }; }
   getUsageFile(): UsageFiles { return { ...this.usage }; }
 
+  /** Delete files this bot uploaded and no longer shows; a failure is left for next time. */
+  async retireFiles(ids: string[]): Promise<void> {
+    for (const id of ids) await this.api("files.delete", { file: id }).catch(() => undefined);
+  }
+
   /** Upload privately (files:write); the id goes into an image block as slack_file. */
   private async uploadImage(png: Buffer, filename: string, title: string): Promise<string> {
     const upload = await this.api("files.getUploadURLExternal", { filename, length: png.length });

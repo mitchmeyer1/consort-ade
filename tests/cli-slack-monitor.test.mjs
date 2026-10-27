@@ -13,7 +13,7 @@ const task=(over={})=>({id:'t',jobId:'j',ticket:{id:'ticket-1',title:'Export loc
 function fixture(over={}) {
   const state={accounts:[],jobs:[],tasks:[task()],slack:{botToken:'secret',userId:'owner',channel:'C123'},...over};
   const calls=[];let existing,failPost,failUpdate,failLink;
-  const slack={pinMonitor:async ts=>{calls.push(['pin',ts]);},removeDuplicateMonitors:async keep=>{calls.push(['cleanup',keep]);},channel:async()=>state.slack.channel,findMonitor:async()=>{calls.push(['find']);return existing;},permalink:async ts=>{calls.push(['link',ts]);if(failLink)throw failLink;return `https://example.slack.com/archives/C123/p${ts.replace('.','')}`;},postMonitor:async text=>{calls.push(['post',text]);if(failPost)throw failPost;return 'monitor-ts';},updateMonitor:async(ts,text)=>{calls.push(['update',ts,text]);if(failUpdate){const err=failUpdate;failUpdate=undefined;throw err;}}};
+  const slack={retireFiles:async ids=>{calls.push(['retire',ids]);},setUsageFile:u=>{calls.push(['usage-in',u]);},getUsageFile:()=>({file:'SHOWN',key:'k'}),pinMonitor:async ts=>{calls.push(['pin',ts]);},removeDuplicateMonitors:async keep=>{calls.push(['cleanup',keep]);},channel:async()=>state.slack.channel,findMonitor:async()=>{calls.push(['find']);return existing;},permalink:async ts=>{calls.push(['link',ts]);if(failLink)throw failLink;return `https://example.slack.com/archives/C123/p${ts.replace('.','')}`;},postMonitor:async text=>{calls.push(['post',text]);if(failPost)throw failPost;return 'monitor-ts';},updateMonitor:async(ts,text)=>{calls.push(['update',ts,text]);if(failUpdate){const err=failUpdate;failUpdate=undefined;throw err;}}};
   const mocks={'./slackMonitorAuthors':{monitorAuthors:async()=>new Map()},'../shared/slackMonitor.ts':monitor,'../shared/headless.ts':headless,'./state':{loadState:()=>state,mutateState:fn=>fn(state)},'./slack':{Slack:class{}},'./daemonctl':{alive:()=>true},'./usage':{cachedUsage:()=>new Map()}};
   const mod={exports:{}};new Function('require','module','exports',compiled)(n=>mocks[n]??require(n),mod,mod.exports);
   return {state,calls,run:(at=now)=>mod.exports.refreshSlackMonitor(at,()=>slack),existing:ts=>{existing=ts;},failLink:err=>{failLink=err;},failPost:err=>{failPost=err;},failUpdate:err=>{failUpdate=err;}};
@@ -219,4 +219,16 @@ test('pin API uses the existing root timestamp and accepts already pinned',async
   calls.push({url,body:Object.fromEntries(new URLSearchParams(init.body))});return Response.json({ok:false,error:'already_pinned'});
  },text=>text);
  await slack.pinMonitor('monitor');assert.equal(calls[0].body.timestamp,'monitor');assert.ok(calls[0].url.endsWith('pins.add'));
+});
+
+test('uploads left in state by earlier layouts are retired, and the last usage panel carries over as the shown file',async()=>{
+  const f=fixture({slackMonitor:{channel:'C123',ts:'monitor-ts',imageFiles:[{id:'IMG1',key:'a'},{id:'IMG2',key:'b'}],usageFile:'PANEL'}});
+  await f.run();
+  assert.deepEqual(f.calls.find(c=>c[0]==='retire')[1],['IMG1','IMG2']);
+  assert.deepEqual(f.calls.find(c=>c[0]==='usage-in')[1],{file:'PANEL'});
+  assert.equal(f.state.slackMonitor.imageFiles,undefined);assert.equal(f.state.slackMonitor.usageFile,undefined);
+  assert.deepEqual(f.state.slackMonitor.usage,{file:'SHOWN',key:'k'},'what the Slack class reports after the edit is saved');
+  const again=fixture({slackMonitor:{channel:'C123',ts:'monitor-ts',usage:{file:'KEEP',key:'k2'}}});
+  await again.run();
+  assert.ok(!again.calls.some(c=>c[0]==='retire'));assert.deepEqual(again.calls.find(c=>c[0]==='usage-in')[1],{file:'KEEP',key:'k2'});
 });

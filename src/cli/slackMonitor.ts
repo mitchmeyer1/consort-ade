@@ -34,6 +34,14 @@ async function refresh(now:number, slackFor:(cfg:SlackConfig)=>Slack):Promise<vo
   if(!acquired) return;
   try {
     let monitor=loadState().slackMonitor!;
+    // earlier layouts left their uploads in state: the dashboard images go now, the last usage panel becomes the shown file and retires a generation late
+    const legacy=monitor as typeof monitor & {imageFiles?:{id:string}[];usageFile?:string};
+    if(legacy.imageFiles?.length || legacy.usageFile) {
+      await slack.retireFiles?.(legacy.imageFiles?.map(f=>f.id)??[]);
+      const usage=monitor.usage ?? (legacy.usageFile ? {file:legacy.usageFile} : undefined);
+      mutateState(s=>{ if(!s.slackMonitor) return; const l=s.slackMonitor as typeof legacy; delete l.imageFiles; delete l.usageFile; if(usage) s.slackMonitor.usage=usage; });
+      monitor=loadState().slackMonitor!;
+    }
     slack.setUsageFile?.(monitor.usage);
     if(!monitor.ts) {
       const existing=await slack.findMonitor(MASTER_MONITOR_HEADING);
