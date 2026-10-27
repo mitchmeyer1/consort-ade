@@ -427,7 +427,7 @@ and up to three link buttons (Reply in thread or Open thread, GitHub or Merge PR
 main one green. Completed work is a table (task, author, cost, finished, links) in a collapsible
 container. AI usage is a picture in the style of `consort-cli view`: a row per account, a thin bar
 per limit window (5h, wk, a model's weekly) in white to 50%, yellow to 90%, orange above, blocked
-accounts in words. Below it, a System box shows Consort's database sets (in use of total), worktrees,
+accounts in words. To its right, in the same picture (Slack never shows two images side by side), a System box shows Consort's database sets (in use of total), worktrees,
 running Docker containers, CPU, memory and disk as bars, and the machine (`src/cli/systemSnapshot.ts`);
 its numbers are rounded (CPU to 5%, disk to 10 GB) so the picture changes only when they move. The daemon renders it (`src/cli/slackUsageGraphic.ts`, rasterized by resvg),
 uploads it privately (`files:write`) and shows it full width. The picture carries no clock, so a

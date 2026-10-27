@@ -28,80 +28,87 @@ export function resumeAt(detail: string): { day: string; time: string } | undefi
  * The SVG, transparent, drawn for Slack's dark theme: one row per account with no provider headings, as the names say
  * the provider. A far-right column carries when the account frees up: a blocked one's resume time in orange, else its
  * last weekly window's reset (Fable for Claude, weekly for Codex) in grey. A blocked reason is in the alt text.
+ * With a System section, the usage rows take the left of the picture and the System box the right: Slack draws an
+ * image block at most about 480px wide and never two side by side, so this is the only way to put them next to each other.
  */
 export function usageSvg(accounts: AccountUsage[], system: Record<string, string> = {}): string {
-  const columns = Math.min(4, Math.max(1, ...accounts.map((a) => a.windows.length)));
-  const resumeW = accounts.some((a) => a.blocked || a.resets) ? RESUME_W : 0;
-  const usageH = accounts.length ? PAD + HEAD_H + accounts.length * ROW_H + 4 : 0;
-  const sys = systemBody(system, usageH);
-  const height = usageH + sys.height;
-  const barsX = PAD + NAME_W, barsW = W - PAD - barsX - resumeW, groupW = (barsW - (columns - 1) * GROUP_GAP) / columns;
-  let y = PAD;
-  if (!accounts.length) return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${height}" viewBox="0 0 ${W} ${height}" font-family="${FONT}">${sys.body}</svg>`;
-  // No clock in the picture: the footer line carries the update time, and a picture that only changes with the numbers is uploaded far less often.
-  let body = text('USAGE', PAD, y + 18, 17, MUTED, ' letter-spacing="4"');
-  if (resumeW) body += text('RESETS', W - PAD, y + 18, 14, MUTED, ' letter-spacing="2" text-anchor="end"');
-  y += HEAD_H;
-  for (const a of accounts) {
-    body += text(clip(a.name, 12), PAD, y + 36, 21, INK, ' font-weight="600"');
-    // Both lines of the column in one size and weight; only the colour says blocked.
-    const at = a.blocked ? resumeAt(a.detail) : a.resets ? resumeAt(a.resets) : undefined, tone = a.blocked ? usageColor(100) : MUTED;
-    if (at) body += text(at.day, W - PAD, y + 26, 14, tone, ' text-anchor="end"') + text(at.time, W - PAD, y + 43, 14, tone, ' text-anchor="end"');
-    else if (a.blocked) body += text('unknown', W - PAD, y + 36, 14, tone, ' text-anchor="end"');
-    if (a.blocked && !a.windows.length) body += text(clip(`blocked · ${a.detail.replace(/ · resume.*$/, '')}`, 48), barsX, y + 35, 14, usageColor(100));
-    else if (!a.windows.length) body += text(clip(a.detail === 'no reading yet' ? 'no reading yet' : `no reading · ${a.detail}`, 48), barsX, y + 35, 15, MUTED);
-    else a.windows.slice(0, columns).forEach((w, i) => {
-      const x = barsX + i * (groupW + GROUP_GAP), pct = Math.max(0, Math.min(100, w.percent)), color = usageColor(pct);
-      body += text(short(w.label), x, y + 26, 14, MUTED) + text(String(w.percent), x + groupW, y + 26, 17, color, ' text-anchor="end" font-weight="700"');
-      body += `<rect x="${x}" y="${y + 35}" width="${groupW.toFixed(1)}" height="7" rx="3.5" fill="${TRACK}"/>`;
-      if (pct > 0) body += `<rect x="${x}" y="${y + 35}" width="${Math.max(7, (groupW * pct) / 100).toFixed(1)}" height="7" rx="3.5" fill="${color}"/>`;
-    });
-    y += ROW_H;
-  }
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${height}" viewBox="0 0 ${W} ${height}" font-family="${FONT}">${body}${sys.body}</svg>`;
+  const hasSystem = Object.keys(system).length > 0;
+  const usageW = !hasSystem ? W : accounts.length ? SPLIT : 0;
+  const usage = accounts.length ? usageBody(accounts, usageW, hasSystem) : { body: '', height: 0 };
+  const sys = hasSystem ? systemBody(system, usageW ? usageW + SYS_GAP : 0) : { body: '', height: 0 };
+  const width = usageW && hasSystem ? W : usageW || SYS_ALONE_W, height = Math.max(usage.height, sys.height);
+  const rule = usageW && hasSystem ? `<line x1="${usageW + SYS_GAP / 2}" y1="${PAD}" x2="${usageW + SYS_GAP / 2}" y2="${height - PAD}" stroke="${TRACK}" stroke-width="2"/>` : '';
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="${FONT}">${usage.body}${rule}${sys.body}</svg>`;
 }
 
-const TILE_H = 74, MACHINE_H = 34;
+/** The usage rows in a column `width` wide from the left edge; narrower columns when the System box shares the picture. */
+function usageBody(accounts: AccountUsage[], width: number, narrow: boolean): { body: string; height: number } {
+  const nameW = narrow ? 108 : NAME_W, gap = narrow ? 14 : GROUP_GAP, right = narrow ? width : width - PAD;
+  const columns = Math.min(4, Math.max(1, ...accounts.map((a) => a.windows.length)));
+  const resumeW = accounts.some((a) => a.blocked || a.resets) ? (narrow ? 84 : RESUME_W) : 0;
+  const barsX = PAD + nameW, barsW = right - barsX - resumeW, groupW = (barsW - (columns - 1) * gap) / columns;
+  let y = PAD;
+  // No clock in the picture: the footer line carries the update time, and a picture that only changes with the numbers is uploaded far less often.
+  let body = text('USAGE', PAD, y + 18, 17, MUTED, ' letter-spacing="4"');
+  if (resumeW) body += text('RESETS', right, y + 18, 14, MUTED, ' letter-spacing="2" text-anchor="end"');
+  y += HEAD_H;
+  for (const a of accounts) {
+    body += text(clip(a.name, narrow ? 8 : 12), PAD, y + 36, 21, INK, ' font-weight="600"');
+    // Both lines of the column in one size and weight; only the colour says blocked.
+    const at = a.blocked ? resumeAt(a.detail) : a.resets ? resumeAt(a.resets) : undefined, tone = a.blocked ? usageColor(100) : MUTED;
+    if (at) body += text(at.day, right, y + 26, 14, tone, ' text-anchor="end"') + text(at.time, right, y + 43, 14, tone, ' text-anchor="end"');
+    else if (a.blocked) body += text('unknown', right, y + 36, 14, tone, ' text-anchor="end"');
+    const words = Math.floor(barsW / 9);
+    if (a.blocked && !a.windows.length) body += text(clip(`blocked · ${a.detail.replace(/ · resume.*$/, '')}`, Math.min(48, words)), barsX, y + 35, 14, usageColor(100));
+    else if (!a.windows.length) body += text(clip(a.detail === 'no reading yet' ? 'no reading yet' : `no reading · ${a.detail}`, Math.min(48, words)), barsX, y + 35, 15, MUTED);
+    else a.windows.slice(0, columns).forEach((w, i) => { body += bar(barsX + i * (groupW + gap), y, groupW, short(w.label), String(w.percent), w.percent); });
+    y += ROW_H;
+  }
+  return { body, height: y + 4 + (narrow ? PAD - 4 : 0) };
+}
+
+/** A label over a thin bar, its value at the right in the bar's colour. */
+function bar(x: number, y: number, width: number, label: string, value: string, percent: number): string {
+  const pct = Math.max(0, Math.min(100, percent)), color = usageColor(pct);
+  let out = text(label, x, y + 26, 14, MUTED) + text(value, x + width, y + 26, 17, color, ' text-anchor="end" font-weight="700"');
+  out += `<rect x="${x}" y="${y + 35}" width="${width.toFixed(1)}" height="7" rx="3.5" fill="${TRACK}"/>`;
+  if (pct > 0) out += `<rect x="${x}" y="${y + 35}" width="${Math.max(7, (width * pct) / 100).toFixed(1)}" height="7" rx="3.5" fill="${color}"/>`;
+  return out;
+}
+
+// The usage rows end at SPLIT; the System box fills the rest, after a gap holding a thin rule.
+const SPLIT = 520, SYS_GAP = 28, SYS_ALONE_W = 320, COUNT_H = 38, BAR_H = 48, LINE_H = 19;
 const num = (s: string | undefined, re: RegExp) => { const m = s?.match(re); return m ? m.slice(1).map(Number) : undefined; };
 /**
- * The System box under the usage rows, drawn the same way: counts of Consort's database sets, worktrees and running
- * containers as large numbers, then CPU, memory and disk as bars, then the machine. Nothing when the text has no System section.
+ * The System box as a column starting at `left`: counts of Consort's database sets, worktrees and running containers as
+ * large numbers, then CPU, memory and disk as bars, then the machine. Drawn the way the usage rows are.
  */
-function systemBody(system: Record<string, string>, top: number): { body: string; height: number } {
-  if (!Object.keys(system).length) return { body: '', height: 0 };
-  let y = top, body = top ? `<line x1="${PAD}" y1="${y + 8}" x2="${W - PAD}" y2="${y + 8}" stroke="${TRACK}" stroke-width="2"/>` : '';
-  y += top ? 16 : 0;
-  body += text('SYSTEM', PAD, y + PAD + 18, 17, MUTED, ' letter-spacing="4"');
-  y += PAD + HEAD_H;
-  const tiles = [
+function systemBody(system: Record<string, string>, left: number): { body: string; height: number } {
+  const x0 = left || PAD, right = (left ? W : SYS_ALONE_W) - PAD, width = right - x0;
+  let y = PAD, body = text('SYSTEM', x0, y + 18, 17, MUTED, ' letter-spacing="4"');
+  y += HEAD_H + 4;
+  const counts = [
     { label: 'DATABASES', value: num(system.Databases, /^(\d+)/)?.[0], note: system.Databases?.match(/(\d+ in use)/)?.[1] },
     { label: 'WORKTREES', value: num(system.Worktrees, /^(\d+)/)?.[0] },
     { label: 'CONTAINERS', value: num(system.Containers, /^(\d+)/)?.[0] },
-  ].filter((t) => t.value !== undefined);
-  const tileW = (W - 2 * PAD) / Math.max(1, tiles.length);
-  tiles.forEach((t, i) => {
-    const x = PAD + i * tileW;
-    body += text(String(t.value), x, y + 34, 36, t.value ? INK : MUTED, ' font-weight="700"');
-    if (t.note) body += text(t.note, x + 26 * String(t.value).length, y + 34, 15, MUTED);
-    body += text(t.label, x, y + 58, 13, MUTED, ' letter-spacing="2"');
-  });
-  if (tiles.length) y += TILE_H;
-  const cpu = num(system.CPU, /^(\d+)%/), mem = num(system.Memory, /^(\d+) of (\d+) GB/), disk = num(system.Disk, /^(\d+) GB free of (\d+) GB/);
-  const bars = [
-    ...(cpu ? [{ label: 'cpu', value: `${cpu[0]}%`, pct: cpu[0]! }] : []),
-    ...(mem && mem[1] ? [{ label: 'memory', value: `${mem[0]}/${mem[1]} GB`, pct: (100 * mem[0]!) / mem[1] }] : []),
-    ...(disk && disk[1] ? [{ label: 'disk', value: `${disk[0]} GB free`, pct: 100 - (100 * disk[0]!) / disk[1] }] : []),
   ];
-  const groupW = (W - 2 * PAD - (Math.max(1, bars.length) - 1) * GROUP_GAP) / Math.max(1, bars.length);
-  bars.forEach((b, i) => {
-    const x = PAD + i * (groupW + GROUP_GAP), pct = Math.max(0, Math.min(100, b.pct)), color = usageColor(pct);
-    body += text(b.label, x, y + 26, 14, MUTED) + text(b.value, x + groupW, y + 26, 17, color, ' text-anchor="end" font-weight="700"');
-    body += `<rect x="${x}" y="${y + 35}" width="${groupW.toFixed(1)}" height="7" rx="3.5" fill="${TRACK}"/>`;
-    if (pct > 0) body += `<rect x="${x}" y="${y + 35}" width="${Math.max(7, (groupW * pct) / 100).toFixed(1)}" height="7" rx="3.5" fill="${color}"/>`;
-  });
-  if (bars.length) y += ROW_H;
-  if (system.Machine) { body += text(clip(system.Machine, 70), PAD, y + 22, 14, MUTED); y += MACHINE_H; }
-  return { body, height: y - top + 8 };
+  for (const c of counts) {
+    if (c.value === undefined) continue;
+    body += text(String(c.value), x0, y + 26, 26, c.value ? INK : MUTED, ' font-weight="700"');
+    body += text(c.label, x0 + 56, y + 24, 13, MUTED, ' letter-spacing="2"');
+    if (c.note) body += text(c.note, right, y + 24, 14, MUTED, ' text-anchor="end"');
+    y += COUNT_H;
+  }
+  y += 2;
+  const cpu = num(system.CPU, /^(\d+)%/), mem = num(system.Memory, /^(\d+) of (\d+) GB/), disk = num(system.Disk, /^(\d+) GB free of (\d+) GB/);
+  if (cpu) { body += bar(x0, y - 14, width, 'cpu', `${cpu[0]}%`, cpu[0]!); y += BAR_H; }
+  if (mem && mem[1]) { body += bar(x0, y - 14, width, 'memory', `${mem[0]}/${mem[1]} GB`, (100 * mem[0]!) / mem[1]); y += BAR_H; }
+  if (disk && disk[1]) { body += bar(x0, y - 14, width, 'disk', `${disk[0]} GB free`, 100 - (100 * disk[0]!) / disk[1]); y += BAR_H; }
+  // The machine on up to two lines: the chip and cores, then the OS.
+  const parts = (system.Machine ?? '').split(' · ').filter(Boolean), chars = Math.floor(width / 8.4);
+  const lines = parts.length > 2 ? [parts.slice(0, -1).join(' · '), parts.at(-1)!] : parts.length ? [parts.join(' · ')] : [];
+  for (const line of lines) { body += text(clip(line, chars), x0, y + 6, 14, MUTED); y += LINE_H; }
+  return { body, height: y + PAD - 4 };
 }
 
 /** Plain words for the image's alt text. */

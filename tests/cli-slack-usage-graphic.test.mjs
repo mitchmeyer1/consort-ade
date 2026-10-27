@@ -82,7 +82,7 @@ test('with an uploaded panel the blocks show it full width in place of the chart
   assert.ok(chart.some(b => b.type === 'data_visualization')); assert.match(JSON.stringify(chart), /\*Claude 4\* blocked: weekly limit reached/);
 });
 
-test('a System section draws a System box under the usage rows, and alone when there are no accounts', async () => {
+test('a System section draws a System box to the right of the usage rows, and alone when there are no accounts', async () => {
   const { systemLines } = await import('../src/shared/slackMonitor.ts');
   const { monitorSystem } = await import('../src/cli/slackMonitorBlocks.ts');
   const lines = systemLines({ databases: 2, databasesInUse: 1, worktrees: 5, containers: 9, cpu: 35, memoryUsed: 20, memoryTotal: 48, diskFree: 480, diskTotal: 926, machine: 'Apple M5 Pro · 15 cores · macOS 26.4.1' });
@@ -91,7 +91,9 @@ test('a System section draws a System box under the usage rows, and alone when t
   assert.equal(monitorAccounts(withSystem).length, 6, 'the System lines are not accounts');
   const g = usageGraphic(withSystem), plain = usageGraphic(text);
   for (const s of ['SYSTEM', 'DATABASES', 'WORKTREES', 'CONTAINERS', '1 in use', '35%', '20/48 GB', '480 GB free', 'Apple M5 Pro']) assert.ok(g.svg.includes(s), s);
-  assert.ok(Number(g.svg.match(/height="(\d+)"/)[1]) > Number(plain.svg.match(/height="(\d+)"/)[1]));
+  const xOf = (svg, word) => Number(svg.match(new RegExp(`<text x="([\\d.]+)"[^>]*>${word}<`))[1]);
+  assert.ok(xOf(g.svg, 'SYSTEM') > 500 && xOf(g.svg, 'USAGE') < 50, 'side by side, System on the right');
+  assert.match(g.svg, /^<svg[^>]* width="800"/, 'the same width as before, so text keeps its size in Slack');
   assert.match(g.alt, /System: Databases 2 sets · 1 in use; Worktrees 5/);
   assert.ok(!plain.svg.includes('SYSTEM'));
   const alone = usageGraphic(withSystem.replace(/\*Accounts\*\n[\s\S]*?\n\n/, ''));
