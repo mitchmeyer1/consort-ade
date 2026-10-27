@@ -127,16 +127,20 @@ test('CPU and memory over the last 30 minutes draw as 15 two-minute bars, with g
   assert.ok(!monitorBlockKit(withCharts, 0).some(b => /CPU30/.test(JSON.stringify(b))), 'the text fallback leaves the series out');
 });
 
-test('with public addresses, Usage and System are two carousel cards and nothing is uploaded or stacked', async () => {
+test('with a public address, Usage and System are one wide picture in a full-width container, and nothing is uploaded or stacked', async () => {
   const { systemLines } = await import('../src/shared/slackMonitor.ts');
   const lines = systemLines({ databases: 2, databasesInUse: 1, worktrees: 5, containers: 9, cpu: 35, memoryUsed: 20, memoryTotal: 48, diskFree: 480, diskTotal: 926, machine: 'Apple M5 Pro · 15 cores · macOS 26.4.1' });
   const withSystem = text.replace('\n\nOpen a ticket', `\n\n*System*\n${lines.join('\n')}\n\nOpen a ticket`);
-  const linked = { usage: { url: 'https://t.example/a/u.png', alt: 'u' }, system: { url: 'https://t.example/a/s.png', alt: 's' } };
+  const linked = { wide: { url: 'https://t.example/a/w.png', alt: 'w' } };
   const blocks = monitorBlockKit(withSystem, 0, undefined, undefined, undefined, linked);
-  const panels = blocks.find(b => b.block_id === 'panels-0');
-  assert.deepEqual(panels.elements.map(c => [c.type, c.hero_image.image_url]), [['card', linked.usage.url], ['card', linked.system.url]]);
+  const panel = blocks.find(b => b.block_id === 'panels-0');
+  assert.equal(panel.type, 'container'); assert.equal(panel.width, 'full');
+  assert.deepEqual(panel.child_blocks, [{ type: 'image', image_url: linked.wide.url, alt_text: 'w' }]);
   assert.ok(!blocks.some(b => b.type === 'image' && b.slack_file), 'no uploaded picture');
-  assert.ok(!blocks.some(b => b.type === 'data_visualization' || /\*System\*/.test(JSON.stringify(b))), 'no chart or System line beside the cards');
+  assert.ok(!blocks.some(b => b.type === 'data_visualization' || /\*System\*/.test(JSON.stringify(b))), 'no chart or System line beside it');
+  const wide = usageGraphic(withSystem, 'wide').svg;
+  const xOf = (word) => Number(wide.match(new RegExp(`<text x="([\\d.]+)"[^>]*>${word}<`))[1]);
+  assert.ok(xOf('USAGE') < 50 && xOf('SYSTEM') > 580, 'Usage left, System right');
 });
 
 test('card pictures are 4:3, as Slack crops a card picture to 4:3', async () => {
