@@ -241,12 +241,12 @@ test('uploads left in state by earlier layouts are retired, and the last usage p
   assert.ok(!again.calls.some(c=>c[0]==='retire'));assert.deepEqual(again.calls.find(c=>c[0]==='usage-in')[1],{file:'KEEP',key:'k2'});
 });
 
-test('a task with a PR gets a PR line: the last CI verdict and whose turn it is',()=>{
+test('a task with a PR gets a PR line with only the last CI verdict',()=>{
   const line=over=>slackMasterMonitor({tasks:[task(over)],jobs:[],accounts:[]},new Map(),now,()=>true).split('\n').find(l=>l.startsWith('   PR: '));
-  assert.equal(line({prCheck:{ci:'pass',theirs:true,at:now}}),'   PR: CI passing · Their turn');
-  assert.equal(line({prCheck:{ci:'fail',theirs:false,at:now}}),'   PR: CI failing · Consort’s turn');
-  assert.equal(line({status:'ready',prCheck:{ci:'pass',theirs:false,at:now}}),'   PR: CI passing · Your turn');
-  assert.equal(line({activity:'need one approval. Your action: please nudge @ada to review the PR.',prCheck:{ci:'pending',theirs:true,at:now}}),'   PR: CI running · Your turn');
-  assert.equal(line({}),'   PR: Consort’s turn','no PR read yet: no CI label');
+  assert.equal(line({prCheck:{ci:'pass',theirs:true,at:now}}),'   PR: CI passing');
+  assert.equal(line({prCheck:{ci:'fail',theirs:false,at:now}}),'   PR: CI failing');
+  assert.equal(line({status:'ready',prCheck:{ci:'pass',theirs:false,at:now}}),'   PR: CI passing');
+  assert.equal(line({activity:'need one approval. Your action: please nudge @ada to review the PR.',prCheck:{ci:'pending',theirs:true,at:now}}),'   PR: CI running');
+  assert.equal(line({}),undefined,'no PR read yet: no line');
   assert.equal(line({feature:{stage:'Implementing',prs:[]}}),undefined,'no PR, no line');
 });

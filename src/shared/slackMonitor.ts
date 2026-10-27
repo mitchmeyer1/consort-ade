@@ -36,12 +36,8 @@ export function slackMasterMonitor(state: CliState, threads: Map<string, string>
     const destinations = [t.ticket.url ? linked('ticket',t.ticket.url) : '', t.review?.url ?? t.feature?.prs?.at(-1) ? linked(t.status==='ready'?'merge PR':'github', t.review?.url ?? t.feature.prs.at(-1)) : ''].filter(Boolean);
     lines.push(`${icon} ${kind} · ${linked(title,threads.get(t.id))}${threads.has(t.id)?'':' (Slack thread pending)'} · ${byline} · ${clean(status)} · ${clean(step.name)} ${step.n}/${step.total} · ${costCell(t.cost) || 'cost pending'} · ${age}`);
     if (detail) lines.push(`   ${clean(t.status === 'waiting' ? t.pauseReason ?? t.note ?? t.activity ?? health.note ?? 'Needs your Slack reply' : health.note ?? t.activity ?? t.note ?? 'Preparing the task', 200)}`);
-    // Whose move the PR waits on: yours to reply, nudge or merge; the reviewer's when approval is all that is missing; else Consort's.
-    if (pr) {
-      const turn = t.status==='ready' || status==='WAITING' || nudge ? 'Your turn' : t.prCheck?.theirs ? 'Their turn' : 'Consort’s turn';
-      const ci = t.prCheck ? {pass:'CI passing',pending:'CI running',fail:'CI failing',none:'No CI'}[t.prCheck.ci] : undefined;
-      lines.push(`   PR: ${[ci,turn].filter(Boolean).join(' · ')}`);
-    }
+    const ci = pr && t.prCheck ? {pass:'CI passing',pending:'CI running',fail:'CI failing',none:'No CI'}[t.prCheck.ci] : undefined;
+    if (ci) lines.push(`   PR: ${ci}`);
     if (destinations.length) lines.push(`   ${destinations.join(' · ')}`);
   };
   const preparation = state.jobs.filter(j => !working.some(t=>t.jobId===`${j.id}-worker` && !FINISHED.includes(t.status))).flatMap(j=>{const row=sentryAnalysisRow(j,now,true);return row?[row]:[];});
