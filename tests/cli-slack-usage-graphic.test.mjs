@@ -39,7 +39,7 @@ test('a blocked account with readings keeps every bar and shows its resume time 
   assert.deepEqual([a.blocked, a.detail, a.windows.map(w => w.percent)], [true, 'weekly limit reached · resume after Oct 28, 2:30 PM EDT', [12, 100, 40]]);
   const svg = usageSvg([a]), plain = usageSvg([{ ...a, blocked: false }]);
   assert.equal((svg.match(/<rect [^>]*fill="#33363b"/g) ?? []).length, 3, 'all three bars');
-  assert.match(svg, />RESETS</); assert.match(svg, /x="1336"[^>]*>Oct 28</); assert.match(svg, /x="1336"[^>]*>2:30 PM</);
+  assert.match(svg, />RESETS</); assert.match(svg, /x="616"[^>]*>Oct 28</); assert.match(svg, /x="616"[^>]*>2:30 PM</);
   assert.doesNotMatch(svg, /limit reached/, 'the reason stays in the alt text');
   assert.equal(svg.match(/height="(\d+)"/)[1], plain.match(/height="(\d+)"/)[1], 'no extra line');
   assert.doesNotMatch(plain, /RESETS/, 'no column without a blocked account or a reset time');
@@ -51,7 +51,7 @@ test('a blocked account with readings keeps every bar and shows its resume time 
 
 test('the panel draws a row per account with no provider headings, a coloured bar per window, and unread rows as words', () => {
   const svg = usageSvg(monitorAccounts(text));
-  assert.match(svg, /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="1360" height="\d+"/);
+  assert.match(svg, /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="640" height="\d+"/);
   for (const s of ['>USAGE<', '>Claude 1<', '>Codex 2<', '>5h<', '>wk<', '>fable<', '>Oct 28<']) assert.ok(svg.includes(s), s);
   assert.doesNotMatch(svg, />CLAUDE<|>CODEX</);
   assert.doesNotMatch(svg, /ago/, 'no clock in the picture, so it only changes with the numbers');
@@ -67,7 +67,7 @@ test('the panel draws a row per account with no provider headings, a coloured ba
 test('the PNG is a real image at the SVG size', async () => {
   const png = await usagePng(usageGraphic(text).svg);
   assert.equal(png.subarray(1, 4).toString(), 'PNG');
-  assert.equal(png.readUInt32BE(16), 1360, 'width');
+  assert.equal(png.readUInt32BE(16), 640, 'width');
 });
 
 test('with an uploaded panel the blocks show it full width in place of the chart and notes', () => {
@@ -90,10 +90,10 @@ test('a System section draws a System box to the right of the usage rows, and al
   assert.deepEqual(monitorSystem(withSystem), { Databases: '2 sets · 1 in use', Worktrees: '5', Containers: '9 running', CPU: '35%', Memory: '20 of 48 GB', Disk: '480 GB free of 926 GB', Machine: 'Apple M5 Pro · 15 cores · macOS 26.4.1' });
   assert.equal(monitorAccounts(withSystem).length, 6, 'the System lines are not accounts');
   const g = usageGraphic(withSystem), plain = usageGraphic(text);
-  for (const s of ['SYSTEM', 'DATABASES', 'WORKTREES', 'CONTAINERS', '1 in use', '35%', '20/48 GB', '480 GB free', 'Apple M5 Pro']) assert.ok(g.svg.includes(s), s);
+  for (const s of ['SYSTEM', 'DB SETS', 'WORKTREES', 'CONTAINERS', '1 in use', '35%', '20/48 GB', '480 GB free', 'Apple M5 Pro']) assert.ok(g.svg.includes(s), s);
   const xOf = (svg, word) => Number(svg.match(new RegExp(`<text x="([\\d.]+)"[^>]*>${word}<`))[1]);
-  assert.ok(xOf(g.svg, 'SYSTEM') > 500 && xOf(g.svg, 'USAGE') < 50, 'side by side, System on the right');
-  assert.match(g.svg, /^<svg[^>]* width="1360"/, '1.7 times the header');
+  assert.ok(xOf(g.svg, 'SYSTEM') > 350 && xOf(g.svg, 'USAGE') < 50, 'side by side, System on the right');
+  assert.match(g.svg, /^<svg[^>]* width="640"/, 'drawn narrow so its type shows large in Slack');
   assert.match(g.alt, /System: Databases 2 sets · 1 in use; Worktrees 5/);
   assert.ok(!plain.svg.includes('SYSTEM'));
   const alone = usageGraphic(withSystem.replace(/\*Accounts\*\n[\s\S]*?\n\n/, ''));
@@ -116,7 +116,7 @@ test('CPU and memory over the last 30 minutes draw as 15 two-minute bars, with g
   assert.ok(lines.includes(`CPU30: 15 ${'- '.repeat(13)}70`));
   const withCharts = text.replace('\n\nOpen a ticket', `\n\n*System*\n${lines.join('\n')}\n\nOpen a ticket`);
   const g = usageGraphic(withCharts);
-  assert.ok(g.svg.includes('cpu · 30 min') && g.svg.includes('memory · 30 min'));
+  assert.ok(g.svg.includes('cpu · 30m') && g.svg.includes('memory · 30m'));
   assert.ok(!/CPU30/.test(g.alt), 'the alt text keeps to the current numbers');
   assert.ok(!monitorBlockKit(withCharts, 0).some(b => /CPU30/.test(JSON.stringify(b))), 'the text fallback leaves the series out');
 });

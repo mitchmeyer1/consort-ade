@@ -6,9 +6,9 @@
  */
 import { monitorAccounts, monitorSystem, type AccountUsage } from './slackMonitorBlocks.ts';
 
-// Drawn 1360px wide, 1.7 times the 800px header, with type sized as before, so the panel shows 1.7 times as wide in
-// Slack if Slack lets an image block grow; the header at 800px showed about 480px wide.
-const W = 1360, PAD = 24, NAME_W = 150, ROW_H = 56, HEAD_H = 30, GROUP_GAP = 22, RESUME_W = 110;
+// Slack shows every image block at the same width (about 480px) however wide it is drawn: a 1360px drawing showed
+// its type at a third of the size. So the panel is drawn narrow, 640px, and its type shows 25% larger than at 800px.
+const W = 640, PAD = 24, NAME_W = 150, ROW_H = 56, HEAD_H = 30, GROUP_GAP = 22, RESUME_W = 110;
 const FONT = `Menlo, 'SF Mono', Consolas, 'DejaVu Sans Mono', monospace`;
 const INK = '#ece6d8', MUTED = '#9a9c9e', TRACK = '#33363b';
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -43,28 +43,52 @@ export function usageSvg(accounts: AccountUsage[], system: Record<string, string
 
 /** The usage rows in a column `width` wide from the left edge; narrower columns when the System box shares the picture. */
 function usageBody(accounts: AccountUsage[], width: number, narrow: boolean): { body: string; height: number } {
-  const nameW = narrow ? 108 : NAME_W, gap = narrow ? 14 : GROUP_GAP, right = narrow ? width : width - PAD;
+  if (narrow) return stackedUsage(accounts, width);
   const columns = Math.min(4, Math.max(1, ...accounts.map((a) => a.windows.length)));
-  const resumeW = accounts.some((a) => a.blocked || a.resets) ? (narrow ? 84 : RESUME_W) : 0;
-  const barsX = PAD + nameW, barsW = right - barsX - resumeW, groupW = (barsW - (columns - 1) * gap) / columns;
+  const resumeW = accounts.some((a) => a.blocked || a.resets) ? RESUME_W : 0, right = width - PAD;
+  const barsX = PAD + NAME_W, barsW = right - barsX - resumeW, groupW = (barsW - (columns - 1) * GROUP_GAP) / columns;
   let y = PAD;
   // No clock in the picture: the footer line carries the update time, and a picture that only changes with the numbers is uploaded far less often.
   let body = text('USAGE', PAD, y + 18, 17, MUTED, ' letter-spacing="4"');
   if (resumeW) body += text('RESETS', right, y + 18, 14, MUTED, ' letter-spacing="2" text-anchor="end"');
   y += HEAD_H;
   for (const a of accounts) {
-    body += text(clip(a.name, narrow ? 8 : 12), PAD, y + 36, 21, INK, ' font-weight="600"');
+    body += text(clip(a.name, 12), PAD, y + 36, 21, INK, ' font-weight="600"');
     // Both lines of the column in one size and weight; only the colour says blocked.
     const at = a.blocked ? resumeAt(a.detail) : a.resets ? resumeAt(a.resets) : undefined, tone = a.blocked ? usageColor(100) : MUTED;
     if (at) body += text(at.day, right, y + 26, 14, tone, ' text-anchor="end"') + text(at.time, right, y + 43, 14, tone, ' text-anchor="end"');
     else if (a.blocked) body += text('unknown', right, y + 36, 14, tone, ' text-anchor="end"');
-    const words = Math.floor(barsW / 9);
-    if (a.blocked && !a.windows.length) body += text(clip(`blocked · ${a.detail.replace(/ · resume.*$/, '')}`, Math.min(48, words)), barsX, y + 35, 14, usageColor(100));
-    else if (!a.windows.length) body += text(clip(a.detail === 'no reading yet' ? 'no reading yet' : `no reading · ${a.detail}`, Math.min(48, words)), barsX, y + 35, 15, MUTED);
-    else a.windows.slice(0, columns).forEach((w, i) => { body += bar(barsX + i * (groupW + gap), y, groupW, short(w.label), String(w.percent), w.percent); });
+    if (a.blocked && !a.windows.length) body += text(clip(`blocked · ${a.detail.replace(/ · resume.*$/, '')}`, 48), barsX, y + 35, 14, usageColor(100));
+    else if (!a.windows.length) body += text(clip(a.detail === 'no reading yet' ? 'no reading yet' : `no reading · ${a.detail}`, 48), barsX, y + 35, 15, MUTED);
+    else a.windows.slice(0, columns).forEach((w, i) => { body += bar(barsX + i * (groupW + GROUP_GAP), y, groupW, short(w.label), String(w.percent), w.percent); });
     y += ROW_H;
   }
-  return { body, height: y + 4 + (narrow ? PAD - 4 : 0) };
+  return { body, height: y + 4 };
+}
+
+const STACK_ROW_H = 72, STACK_GAP = 14;
+/**
+ * The usage rows beside the System box, where width is short: the name with its reset or resume time on one line,
+ * the bars under it across the whole column.
+ */
+function stackedUsage(accounts: AccountUsage[], right: number): { body: string; height: number } {
+  const columns = Math.min(4, Math.max(1, ...accounts.map((a) => a.windows.length)));
+  const groupW = (right - PAD - (columns - 1) * STACK_GAP) / columns;
+  let y = PAD, body = text('USAGE', PAD, y + 18, 17, MUTED, ' letter-spacing="4"');
+  y += HEAD_H + 2;
+  for (const a of accounts) {
+    body += text(clip(a.name, 12), PAD, y + 22, 21, INK, ' font-weight="600"');
+    // Only the colour says blocked.
+    const at = a.blocked ? resumeAt(a.detail) : a.resets ? resumeAt(a.resets) : undefined, tone = a.blocked ? usageColor(100) : MUTED;
+    if (at) body += text(`${at.day} ${at.time}`, right, y + 21, 14, tone, ' text-anchor="end"');
+    else if (a.blocked) body += text('resume unknown', right, y + 21, 14, tone, ' text-anchor="end"');
+    const words = Math.floor((right - PAD) / 8.6);
+    if (a.blocked && !a.windows.length) body += text(clip(`blocked · ${a.detail.replace(/ · resume.*$/, '')}`, words), PAD, y + 48, 14, usageColor(100));
+    else if (!a.windows.length) body += text(clip(a.detail === 'no reading yet' ? 'no reading yet' : `no reading · ${a.detail}`, words), PAD, y + 48, 15, MUTED);
+    else a.windows.slice(0, columns).forEach((w, i) => { body += bar(PAD + i * (groupW + STACK_GAP), y + 20, groupW, short(w.label), String(w.percent), w.percent); });
+    y += STACK_ROW_H;
+  }
+  return { body, height: y + PAD - 8 };
 }
 
 /** A label over a thin bar, its value at the right in the bar's colour. */
@@ -77,7 +101,7 @@ function bar(x: number, y: number, width: number, label: string, value: string, 
 }
 
 // The usage rows end at SPLIT; the System box fills the rest, after a gap holding a thin rule.
-const SPLIT = 860, SYS_GAP = 28, SYS_ALONE_W = 320, COUNT_H = 38, BAR_H = 48, LINE_H = 19;
+const SPLIT = 372, SYS_GAP = 24, SYS_ALONE_W = 320, COUNT_H = 38, BAR_H = 48, LINE_H = 19;
 const CHART_H = 84, CHART_BARS_H = 36;
 /** `10 15 - 20` from the monitor text as numbers, `-` as no reading; undefined without a series. */
 const series = (s: string | undefined) => (s ? s.split(' ').map((v) => (v === '-' ? null : Number(v))) : undefined);
@@ -104,7 +128,7 @@ function systemBody(system: Record<string, string>, left: number): { body: strin
   let y = PAD, body = text('SYSTEM', x0, y + 18, 17, MUTED, ' letter-spacing="4"');
   y += HEAD_H + 4;
   const counts = [
-    { label: 'DATABASES', value: num(system.Databases, /^(\d+)/)?.[0], note: system.Databases?.match(/(\d+ in use)/)?.[1] },
+    { label: 'DB SETS', value: num(system.Databases, /^(\d+)/)?.[0], note: system.Databases?.match(/(\d+ in use)/)?.[1] },
     { label: 'WORKTREES', value: num(system.Worktrees, /^(\d+)/)?.[0] },
     { label: 'CONTAINERS', value: num(system.Containers, /^(\d+)/)?.[0] },
   ];
@@ -118,9 +142,9 @@ function systemBody(system: Record<string, string>, left: number): { body: strin
   y += 2;
   const cpu = num(system.CPU, /^(\d+)%/), mem = num(system.Memory, /^(\d+) of (\d+) GB/), disk = num(system.Disk, /^(\d+) GB free of (\d+) GB/);
   const cpu30 = series(system.CPU30), mem30 = series(system.Memory30);
-  if (cpu && cpu30) { body += chart(x0, y - 14, width, 'cpu · 30 min', `${cpu[0]}%`, cpu[0]!, cpu30); y += CHART_H; }
+  if (cpu && cpu30) { body += chart(x0, y - 14, width, 'cpu · 30m', `${cpu[0]}%`, cpu[0]!, cpu30); y += CHART_H; }
   else if (cpu) { body += bar(x0, y - 14, width, 'cpu', `${cpu[0]}%`, cpu[0]!); y += BAR_H; }
-  if (mem && mem[1] && mem30) { body += chart(x0, y - 14, width, 'memory · 30 min', `${mem[0]}/${mem[1]} GB`, (100 * mem[0]!) / mem[1], mem30); y += CHART_H; }
+  if (mem && mem[1] && mem30) { body += chart(x0, y - 14, width, 'memory · 30m', `${mem[0]}/${mem[1]} GB`, (100 * mem[0]!) / mem[1], mem30); y += CHART_H; }
   else if (mem && mem[1]) { body += bar(x0, y - 14, width, 'memory', `${mem[0]}/${mem[1]} GB`, (100 * mem[0]!) / mem[1]); y += BAR_H; }
   if (disk && disk[1]) { body += bar(x0, y - 14, width, 'disk', `${disk[0]} GB free`, 100 - (100 * disk[0]!) / disk[1]); y += BAR_H; }
   // The machine on up to two lines: the chip and cores, then the OS.
