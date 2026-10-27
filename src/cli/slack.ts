@@ -22,8 +22,9 @@ export type SlackThreadMessage = { ts: string; user?: string; text?: string; bot
  *
  * Scopes the bot token needs: chat:write (post), im:write (open the DM), im:history (read replies in
  * the DM; channels:history or groups:history instead when pointed at a channel), files:read (download
- * documents the owner attaches to an update), files:write (the PR article in a review thread). No users:read or
- * incoming-webhook. The list the setup wizard shows is SLACK_SCOPES in setup.ts.
+ * documents the owner attaches to an update), files:write (the PR article in a review thread, the monitor's pictures),
+ * pins:write (pin the monitor). No users:read or incoming-webhook. The list the setup wizard shows is SLACK_SCOPES in
+ * setup.ts; docs/slack-app-manifest.json creates an app with them and the Home tab the monitor is also published to.
  */
 /** Home tab errors already logged, so a recurring one is reported once per process. */
 const homeErrors = new Set<string>();

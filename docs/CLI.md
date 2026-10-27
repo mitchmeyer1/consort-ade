@@ -41,7 +41,7 @@ consort-cli accounts add --provider codex --name work
 consort-cli accounts add --provider claude --name billing --api-key sk-ant-…
 consort-cli accounts list
 
-# 3. Slack: a bot token (xoxb-…) with chat:write, im:write, im:history and files:read (channels:history if you use --channel); reinstall the app after adding a scope. And your member id.
+# 3. Slack: the team's Consort bot token (xoxb-…), or make the app from docs/slack-app-manifest.json (see Slack app below). And your member id.
 consort-cli slack set --bot-token xoxb-… --user U0123ABC
 consort-cli slack test                      # posts a hello into your DM
 
@@ -137,6 +137,14 @@ The CLI yields after creating the ticket breakdown so the runtime can schedule r
 Defaults allow two active AI units per scanner and per account, four installation-wide, eight open tasks per scanner (or four times its active limit if larger), 32 installation-wide open tasks, and 16 installation-wide environments. A scanner's environment limit defaults to its open-task limit. Parent and writer environments both count. Waiting tasks keep their environment until cleanup, but consume no AI unit. State updates use a cross-process lock and merge unrelated stale-snapshot edits so parallel workers retain each other's changes. Crashed AI leases are reclaimed; child Docker resources are cleaned on completion or recovery.
 
 Slack headings use a local formatter, so naming a task consumes no model call. Export/import preserves role and capacity settings. Building the CLI updates the bundle for new workers; an existing daemon must restart to use the new scanner scheduler, and an already running worker retains its loaded code.
+
+## Slack app
+
+One Consort app serves the whole team. Create it once: [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From a manifest** → pick the workspace → paste [slack-app-manifest.json](slack-app-manifest.json) → **Create** → **Install to Workspace**. Under **Basic Information → Display Information** upload `build/icon_1024.png` as the app icon. The **Bot User OAuth Token** (starts `xoxb-`) on **OAuth & Permissions** is the token everyone uses.
+
+Each person then runs `consort-cli slack set --bot-token xoxb-… --user <their member id>` (the member id is in Slack under Profile → ⋯ → Copy member ID). Every consort-cli posts into its own owner's DM with the bot and publishes that owner's Home tab, so people share the bot but see only their own tasks. Anyone holding the token can post as the bot, so share it like a password.
+
+The manifest asks for chat:write, im:write, im:history, files:write, files:read, pins:write, and channels:history and groups:history for `--channel`; adding a scope later means reinstalling the app.
 
 ## Slack messages you will see
 

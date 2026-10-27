@@ -48,12 +48,13 @@ const why = (title: string, lines: { for: string; where: string; needs?: string[
   if (lines.not) console.log(`  ${dim("It cannot")}  ${lines.not}`);
 };
 
-/** the Slack bot token scopes consort-cli calls, one line each: what the scope is for, so a missing one is obvious */
+/** the Slack bot token scopes consort-cli calls, one line each: what the scope is for, so a missing one is obvious. docs/slack-app-manifest.json asks for the same set. */
 const SLACK_SCOPES: readonly [scope: string, reason: string][] = [
   ["chat:write", "post progress and questions as the bot"],
   ["files:write", "post the PR article in a review thread when asking you to approve"],
   ["im:write", "open the DM with you"],
   ["im:history", "read your replies in the DM thread; without it the bot can post but never hear you"],
+  ["pins:write", "pin the master monitor post in the DM"],
   ["files:read", "download documents you attach to a task update in the thread"],
   ["channels:history", "only if you point it at a public channel instead of the DM (groups:history for a private one)"],
 ];
@@ -416,7 +417,7 @@ export async function runSetup(): Promise<void> {
     console.log(head("6. Slack, where it asks you things"));
     why("Slack bot token", {
       for: "the only way consort-cli talks to you: one DM thread per ticket with progress, the few questions it cannot decide, and the ready-to-merge ping. You answer in the thread.",
-      where: "a Slack app with a bot user, yours or an existing one: api.slack.com/apps → your app → OAuth & Permissions → Bot User OAuth Token (starts xoxb-). A user token (xoxp-) or a webhook URL will not do.",
+      where: "your team's shared Consort app if it has one (ask whoever set it up for the xoxb- token). Otherwise make one: api.slack.com/apps → Create New App → From a manifest → paste docs/slack-app-manifest.json → Install to Workspace → OAuth & Permissions → Bot User OAuth Token (starts xoxb-). A user token (xoxp-) or a webhook URL will not do.",
       needs: [
         "these Bot Token Scopes on that same page (Scopes → Bot Token Scopes → Add an OAuth Scope):",
         ...slackScopeLines(),

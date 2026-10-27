@@ -1,0 +1,36 @@
+{
+  "_metadata": { "major_version": 1, "minor_version": 1 },
+  "display_information": {
+    "name": "Consort",
+    "description": "Tickets in, reviewed PRs out, questions on Slack.",
+    "long_description": "Consort ships tickets with AI agents on your own machine. It DMs you a live dashboard of your tasks (also on this app's Home tab), opens a thread per ticket for progress and questions, and reads your replies in those threads. Each person runs their own consort-cli with this bot's token and their own Slack member id, so everyone sees only their own tasks.",
+    "background_color": "#1a1d21"
+  },
+  "features": {
+    "app_home": {
+      "home_tab_enabled": true,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
+    "bot_user": { "display_name": "Consort", "always_online": true }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "chat:write",
+        "im:write",
+        "im:history",
+        "files:write",
+        "files:read",
+        "pins:write",
+        "channels:history",
+        "groups:history"
+      ]
+    }
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}
