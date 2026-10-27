@@ -109,17 +109,24 @@ function parseAccount(line: string): AccountUsage {
   if (peak === undefined) return { name, blocked: false, status: 'Unavailable', windows, detail: rest.filter((r) => r !== 'usage unavailable').join(' · ') || 'no reading yet' };
   return { name, blocked: false, status: peak <= 50 ? 'Available' : peak <= 90 ? 'Busy' : 'Nearly full', windows, detail: rest.filter((r) => r !== 'available').join(' · ') };
 }
-const accountRow = (a: AccountUsage): Cell[] => [cell(a.name), richCell([{ text: a.status, bold: a.blocked }]), cell(a.detail)];
-/** The usage chart: Slack's own bar chart, one bar per window per account, in percent of the limit. Blocked accounts read as full. */
-const USAGE_WINDOWS = [['5-hour', '5-hour'], ['weekly', 'Weekly']] as const;
+/**
+ * The usage chart: Slack's own bar chart, one bar per limit window per account (5-hour, weekly, and a model's
+ * weekly where the plan has one), in percent of the limit. Slack draws bars upright only. A blocked account reads as full.
+ */
 function usageChart(accounts: AccountUsage[], now: number): Block | undefined {
   const charted = accounts.filter((a) => a.blocked || a.windows.length).slice(0, 20);
-  if (!charted.length) return undefined;
-  const value = (a: AccountUsage, key: string) => a.blocked ? 100 : Math.max(0, Math.min(100, a.windows.find((w) => w.label.toLowerCase() === key)?.percent ?? 0));
+  const labels = [...new Set(charted.flatMap((a) => a.windows.map((w) => w.label)))].slice(0, 12);
+  if (!charted.length || !labels.length) return undefined;
+  const value = (a: AccountUsage, label: string) => a.blocked ? 100 : Math.max(0, Math.min(100, a.windows.find((w) => w.label === label)?.percent ?? 0));
+  const name = (label: string) => (label.toLowerCase() === 'weekly' ? 'Weekly' : label.slice(0, 20));
   return {
     type: 'data_visualization', block_id: `usage-chart-${now}`, title: 'AI usage, % of each limit',
-    chart: { type: 'bar', series: USAGE_WINDOWS.map(([key, name]) => ({ name, data: charted.map((a) => ({ label: a.name.slice(0, 20), value: value(a, key) })) })), axis_config: { categories: charted.map((a) => a.name.slice(0, 20)), y_label: '% used' } },
+    chart: { type: 'bar', series: labels.map((label) => ({ name: name(label), data: charted.map((a) => ({ label: a.name.slice(0, 20), value: value(a, label) })) })), axis_config: { categories: charted.map((a) => a.name.slice(0, 20)), y_label: '% used' } },
   };
+}
+/** What the chart cannot say: which accounts are blocked and until when, and which have no reading. */
+function usageNotes(accounts: AccountUsage[]): string[] {
+  return accounts.filter((a) => a.blocked || !a.windows.length).map((a) => `*${a.name}* ${a.blocked ? 'blocked' : 'unavailable'}: ${a.detail}`);
 }
 
 /** Blocks for a master monitor text; undefined for anything else (guard notices, legacy posts, tests). */
@@ -167,13 +174,12 @@ export function monitorBlockKit(safe: string, now = Date.now()): Block[] | undef
   blocks.push(divider());
   if (completed.length) blocks.push(container(`completed-${now}`, 'Completed', { type: 'plain_text', text: `most recent ${completed.length}` },
     [table(`completed-table-${now}`, ['Task', 'Author', 'Cost', 'Finished', 'Links'], completed.map(completedRow), [{ is_wrapped: true }, {}, { align: 'right' }, {}, {}]), ...completedNotes.map(n => context(`_${n}_`))], { collapsed: true }));
-  // The chart cannot live inside a container, so it stands above the capacity table.
   const usage = accounts.map(parseAccount);
   const chart = usageChart(usage, now);
   if (chart) blocks.push(chart);
-  if (usage.length) blocks.push(container(`capacity-${now}`, 'AI capacity', undefined,
-    [table(`capacity-table-${now}`, ['Account', 'Status', 'Detail'], usage.map(accountRow), [{}, {}, { is_wrapped: true }])]));
-  if (!blocks.some(b => b.type === 'card') && blocks.filter(b => b.type === 'container').length === 1) blocks.push(context('_Nothing open and nothing finished yet._'));
+  else if (usage.length) blocks.push(section('*AI usage*'));
+  for (const note of usageNotes(usage)) blocks.push(context(note));
+  if (!blocks.some(b => b.type === 'card') && blocks.filter(b => b.type === 'container').length === 1) blocks.splice(blocks.length - (chart ? 1 : 0) - usageNotes(usage).length - (usage.length && !chart ? 1 : 0), 0, context('_Nothing open and nothing finished yet._'));
   blocks.push(context(`Updated ${stamp}  ·  Reply in a task’s thread. This message updates in place.`));
   // Too many open tasks for Slack's block limit: the later groups fall back to packed text rows, one section per few tasks.
   for (const group of [groups.working, groups.ready, groups.nudge, groups.reply]) {

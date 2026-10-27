@@ -46,7 +46,7 @@ test('monitor opens with the centered banner, then groups in the order the owner
  const headings=blocks.filter(b=>b.type==='section'&&/^\*[A-Za-z ]+\*   ·   \d+$/.test(b.text.text)).map(b=>b.text.text);
  assert.deepEqual(headings,['*Needs your reply*   ·   1','*Nudge*   ·   1','*Ready to merge*   ·   1','*Working*   ·   3']);
  assert.deepEqual(cards(blocks).map(c=>c.title.text),['Curation &amp; parity','Needs a reviewer','Ship it','Paging shard','Stopped one','Analysis only']);
- assert.deepEqual(blocks.filter(b=>b.type==='container').map(b=>b.title.text),[' ','Completed','AI capacity']);
+ assert.deepEqual(blocks.filter(b=>b.type==='container').map(b=>b.title.text),[' ','Completed']);
  assert.doesNotMatch(texts(blocks),/🟠|📦|🔄|✅|⚡|🎉|👉/);
 });
 test('a task card carries who, cost, age, the action, the stage bar and link buttons with one primary action',()=>{
@@ -65,9 +65,9 @@ test('a task card carries who, cost, age, the action, the stage bar and link but
  const ids=new Set(cards(monitorBlockKit(text,NOW)).flatMap(c=>(c.actions??[]).map(b=>b.action_id)));assert.equal(ids.size,8);
  assert.ok(cards(monitorBlockKit(text,NOW)).every(c=>c.block_id&&(c.actions??[]).length<=3&&(c.actions??[]).filter(b=>b.style==='primary').length<=1));
 });
-test('completed work and AI capacity are tables inside titled containers',()=>{
+test('completed work is a table in a titled container; AI usage is a bar chart with a note per blocked or unread account',()=>{
  const blocks=monitorBlockKit(text,NOW);
- const [,done,capacity]=blocks.filter(b=>b.type==='container');
+ const [,done]=blocks.filter(b=>b.type==='container');
  assert.equal(done.subtitle.text,'most recent 1');assert.equal(done.width,'full');assert.equal(done.is_collapsible,true);
  const doneTable=done.child_blocks[0];assert.equal(doneTable.type,'table');assert.equal(doneTable.block_id,`completed-table-${NOW}`);
  assert.deepEqual(doneTable.rows[0].map(c=>c.elements[0].elements[0].text),['Task','Author','Cost','Finished','Links']);
@@ -76,25 +76,22 @@ test('completed work and AI capacity are tables inside titled containers',()=>{
  assert.deepEqual(row.slice(1,4).map(c=>c.text),['@mitch','$4','33m ago']);
  assert.ok(doneTable.column_settings.every(c=>c&&typeof c==='object'));assert.ok(doneTable.rows.flat().every(c=>c.type!=='raw_text'||c.text.length>0));
  assert.deepEqual(row[4].elements[0].elements.map(e=>e.url??e.text),['https://app.clickup.com/t/9','  ·  ','https://github.com/a/b/pull/3']);
- const usage=capacity.child_blocks[0];assert.equal(usage.type,'table');
- assert.deepEqual(usage.rows.slice(1).map(r=>r.map(c=>c.text??c.elements[0].elements[0].text)),[
-  ['Claude 1','Available','5-hour 42% · weekly 20% · usage 3m ago'],
-  ['Claude 2','Blocked','weekly limit reached · resume after Oct 28, 2:30 PM EDT'],
-  ['Codex 1','Unavailable','no reading yet']]);
  const chart=blocks.find(b=>b.type==='data_visualization');
- assert.equal(blocks.indexOf(chart),blocks.indexOf(capacity)-1,'the chart stands right above the capacity table');
+ assert.equal(blocks.indexOf(chart),blocks.indexOf(done)+1,'the chart follows the completed table');
  assert.equal(chart.block_id,`usage-chart-${NOW}`);assert.equal(chart.title,'AI usage, % of each limit');assert.equal(chart.chart.type,'bar');
  assert.deepEqual(chart.chart.axis_config,{categories:['Claude 1','Claude 2'],y_label:'% used'});
  assert.deepEqual(chart.chart.series,[{name:'5-hour',data:[{label:'Claude 1',value:42},{label:'Claude 2',value:100}]},{name:'Weekly',data:[{label:'Claude 1',value:20},{label:'Claude 2',value:100}]}]);
  assert.equal(blocks.filter(b=>b.type==='data_visualization').length,1);
+ const notes=blocks.slice(blocks.indexOf(chart)+1,-1).map(b=>b.elements[0].text);
+ assert.deepEqual(notes,['*Claude 2* blocked: weekly limit reached · resume after Oct 28, 2:30 PM EDT','*Codex 1* unavailable: no reading yet']);
+ assert.ok(!blocks.some(b=>b.type==='table'&&JSON.stringify(b).includes('Account')),'no capacity table');
  assert.equal(bar(3,5),'▰▰▰▱▱');assert.equal(bar(2,40),'');
- const busy=monitorBlockKit(text.replace('5-hour 42% · weekly 20%','5-hour 12% · weekly 77% · Fable 30%').replace('⚪ Codex 1 · usage unavailable','🟠 Codex 1 · available · 5-hour 95%'),NOW);
- const rows=busy.filter(b=>b.type==='container').at(-1).child_blocks[0].rows.slice(1).map(r=>[r[1].elements[0].elements[0].text,r[2].text]);
- assert.deepEqual(rows[0],['Busy','5-hour 12% · weekly 77% · Fable 30% · usage 3m ago']);assert.deepEqual(rows[2],['Nearly full','5-hour 95%']);
+ const busy=monitorBlockKit(text.replace('5-hour 42% · weekly 20%','5-hour 12% · Weekly 77% · Weekly · Fable 30%').replace('⚪ Codex 1 · usage unavailable','🟠 Codex 1 · available · 5-hour 95%'),NOW);
  const series=busy.find(b=>b.type==='data_visualization').chart.series;
- assert.deepEqual(series.map(x=>x.data.map(d=>d.value)),[[12,100,95],[77,100,0]],'a window an account lacks reads as zero; blocked reads as full');
+ assert.deepEqual(series.map(x=>x.name),['5-hour','Weekly','Fable'],'every window seen becomes a series, the model window included');
+ assert.deepEqual(series.map(x=>x.data.map(d=>d.value)),[[12,100,95],[77,100,0],[30,100,0]],'a window an account lacks reads as zero; blocked reads as full');
  const none=monitorBlockKit(text.replace(/\n🟢 Claude 1[^\n]+\n🔴 Claude 2[^\n]+\n/,'\n'),NOW);
- assert.ok(!none.some(b=>b.type==='data_visualization'),'no readings, no chart');assert.ok(none.some(b=>b.type==='container'&&b.title.text==='AI capacity'));
+ assert.ok(!none.some(b=>b.type==='data_visualization'),'no readings, no chart');assert.match(texts(none),/\*AI usage\*/);assert.match(texts(none),/\*Codex 1\* unavailable: no reading yet/);
 });
 test('escaped characters are decoded for tables and plain text but kept for mrkdwn',()=>{
  const blocks=monitorBlockKit(text.replace('Finished one','Fix &amp; ship &lt;b&gt;'),NOW);
@@ -106,12 +103,12 @@ test('empty groups and tables are left out, and non-monitor text gets no blocks'
  const empty=monitorBlockKit(text.replace(/\n\*Working\*[\s\S]*?\n\n\*Accounts\*/,'\n*Working*\nNo tasks in progress.\n\n*Ready to merge · your action*\nNo tickets waiting to be merged.\n\n*Completed · most recent 6*\nNo completed tasks yet.\n\n*Accounts*'),NOW);
  const all=texts(empty);
  assert.doesNotMatch(all,/Needs your reply|Nudge|Ready to merge|\*Working\*|Completed/);
- assert.equal(cards(empty).length,0);assert.equal(empty.filter(b=>b.type==='container').length,2);
- assert.match(all,/AI capacity/);
+ assert.equal(cards(empty).length,0);assert.equal(empty.filter(b=>b.type==='container').length,1);assert.ok(empty.some(b=>b.type==='data_visualization'));
+ assert.match(all,/AI usage, % of each limit/);
  const partial=monitorBlockKit(text.replace(/\n\*Ready to merge · your action\*\n[^\n]+\n[^\n]+\n/,'\n*Ready to merge · your action*\nNo tickets waiting to be merged.\n'),NOW);
  assert.doesNotMatch(texts(partial),/Ready to merge\*|Ship it/);
  const bare=monitorBlockKit(text.replace(/\n\*Working\*[\s\S]*?\n\n\*Accounts\*[\s\S]*?\n\nOpen a ticket/,'\n*Working*\nNo tasks in progress.\n\n*Ready to merge · your action*\nNo tickets waiting to be merged.\n\n*Completed · most recent 6*\nNo completed tasks yet.\n\n*Accounts*\nNo accounts configured.\n\nOpen a ticket'),NOW);
- assert.match(texts(bare),/_Nothing open and nothing finished yet._/);assert.equal(bare.filter(b=>b.type==='container'||b.type==='card').length,1,'only the banner box remains');
+ assert.match(texts(bare),/_Nothing open and nothing finished yet._/);assert.equal(bare.filter(b=>b.type==='container'||b.type==='card'||b.type==='data_visualization').length,1,'only the banner box remains');
  assert.equal(monitorBlockKit('Content withheld by guard'),undefined);
  assert.equal(monitorBlockKit('*📊 Consort master monitor*\nUpdated monitor'),undefined);
 });
