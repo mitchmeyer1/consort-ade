@@ -22,6 +22,8 @@ const unlink = (s: string) => decode(s.replace(/<https?:\/\/[^|>]+\|([^>]+)>/g, 
 const link = (url: string | undefined, label: string) => (url ? `<${url}|${label}>` : label);
 const button = (label: string, url: string, id: string, primary = false): Block => ({ type: 'button', text: { type: 'plain_text', text: label, emoji: false }, url, action_id: id, ...(primary ? { style: 'primary' } : {}) });
 /** `▰▰▱▱▱`: stages done out of the total, in text that every Slack client renders. */
+/** The usage meter: ten squares, the only coloured text Slack draws. White to 50%, yellow to 90%, orange above; hollow for the rest. */
+export const meter = (percent: number) => { const filled = Math.round(Math.max(0, Math.min(100, percent)) / 10); const square = percent <= 50 ? '⬜' : percent <= 90 ? '🟨' : '🟧'; return square.repeat(filled) + '◻️'.repeat(10 - filled); };
 export const bar = (done: number, total: number) => (total > 0 && total <= 30 ? '▰'.repeat(Math.max(0, Math.min(done, total))) + '▱'.repeat(Math.max(0, total - done)) : '');
 type Cell = { type: 'raw_text'; text: string } | { type: 'rich_text'; elements: unknown[] };
 /** Slack rejects an empty cell, so a blank shows as a dash. */
@@ -105,7 +107,7 @@ function accountRow(line: string): Cell[] {
   const percents = rest.flatMap(r => [...r.matchAll(/(\d+)%/g)].map(m => Number(m[1])));
   const peak = percents.length ? Math.max(...percents) : undefined;
   if (peak === undefined) return [cell(name), cell('Unavailable'), cell(''), cell(rest.filter(r => r !== 'usage unavailable').join(' · ') || 'no reading yet')];
-  return [cell(name), cell(peak < 90 ? 'Available' : 'Nearly full'), cell(`${bar(Math.round(Math.min(100, peak) / 10), 10)}  ${peak}%`), cell(rest.filter(r => r !== 'available').join(' · '))];
+  return [cell(name), cell(peak <= 50 ? 'Available' : peak <= 90 ? 'Busy' : 'Nearly full'), cell(`${meter(peak)}  ${peak}%`), cell(rest.filter(r => r !== 'available').join(' · '))];
 }
 
 /** Blocks for a master monitor text; undefined for anything else (guard notices, legacy posts, tests). */
