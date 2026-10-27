@@ -28,7 +28,8 @@ type Cell = { type: 'raw_text'; text: string } | { type: 'rich_text'; elements: 
 const cell = (text: string): Cell => ({ type: 'raw_text', text: unlink(text) || '—' });
 const richCell = (parts: ({ text: string; url?: string; bold?: boolean })[]): Cell => ({ type: 'rich_text', elements: [{ type: 'rich_text_section', elements: parts.map(p => p.url ? { type: 'link', url: p.url, text: decode(p.text) } : { type: 'text', text: decode(p.text), ...(p.bold ? { style: { bold: true } } : {}) }) }] });
 const table = (id: string, header: string[], rows: Cell[][], settings: { align?: string; is_wrapped?: boolean }[]): Block => ({ type: 'table', block_id: id, column_settings: settings, rows: [header.map(h => richCell([{ text: h, bold: true }])), ...rows] });
-const container = (id: string, title: string, subtitle: string | undefined, children: Block[], collapsed = false): Block => ({ type: 'container', block_id: id, title: { type: 'plain_text', text: title }, ...(subtitle ? { subtitle: { type: 'plain_text', text: subtitle } } : {}), width: 'full', ...(collapsed ? { is_collapsible: true, default_collapsed: true } : { has_header_divider: true }), child_blocks: children.slice(0, 10) });
+/** A full-width titled box; the only block kind Slack lets span the whole message. */
+const container = (id: string, title: string, subtitle: { type: 'plain_text' | 'mrkdwn'; text: string } | undefined, children: Block[], look: { collapsed?: boolean; divider?: boolean } = { divider: true }): Block => ({ type: 'container', block_id: id, title: { type: 'plain_text', text: title }, ...(subtitle ? { subtitle } : {}), width: 'full', ...(look.collapsed ? { is_collapsible: true, default_collapsed: true } : { has_header_divider: !!look.divider }), child_blocks: children.slice(0, 10) });
 
 /** Split on ' · ' without breaking a `<url|label>` whose label contains the separator. */
 function parts(line: string): string[] {
@@ -137,10 +138,11 @@ export function monitorBlockKit(safe: string, now = Date.now()): Block[] | undef
   const updated = lines[1]?.match(/^Updated (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}) UTC$/);
   const stamp = updated ? `<!date^${Math.floor(Date.parse(`${updated[1]}T${updated[2]}:00Z`) / 1000)}^{date_short_pretty} {time}|${lines[1]}>` : lines[1] ?? '';
   const counts = [`*${groups.reply.rows.length}* ${groups.reply.rows.length === 1 ? 'needs' : 'need'} your reply`, `*${groups.nudge.rows.length}* to nudge`, `*${groups.ready.rows.length}* ready to merge`, `*${groups.working.rows.length}* working`, `*${completed.length}* completed`];
-  // The mark sits top right as the summary's accessory; a header block cannot carry an image.
+  // A plain section stops at about 500px, so its accessory never reaches the message's right edge; inside a
+  // full-width container the summary section spans the message and the mark sits all the way right.
   const blocks: Block[] = [
-    { type: 'header', text: { type: 'plain_text', text: 'Consort', emoji: false } },
-    { type: 'section', text: mrkdwn(`Updated ${stamp}\n${counts.join('   ·   ')}`), accessory: { type: 'image', image_url: CONSORT_MARK_URL, alt_text: 'Consort' } },
+    container(`summary-${now}`, 'Consort', { type: 'mrkdwn', text: counts.join('   ·   ').slice(0, 150) },
+      [{ type: 'section', text: mrkdwn(`Updated ${stamp}`), accessory: { type: 'image', image_url: CONSORT_MARK_URL, alt_text: 'Consort' } }], { divider: false }),
   ];
   let index = 0;
   const groupBlocks = new Map<Group['key'], Block[]>();
@@ -153,11 +155,11 @@ export function monitorBlockKit(safe: string, now = Date.now()): Block[] | undef
     for (const note of group.notes) blocks.push(context(`_${note}_`));
   }
   blocks.push(divider());
-  if (completed.length) blocks.push(container(`completed-${now}`, 'Completed', `most recent ${completed.length}`,
-    [table(`completed-table-${now}`, ['Task', 'Author', 'Cost', 'Finished', 'Links'], completed.map(completedRow), [{ is_wrapped: true }, {}, { align: 'right' }, {}, {}]), ...completedNotes.map(n => context(`_${n}_`))], true));
+  if (completed.length) blocks.push(container(`completed-${now}`, 'Completed', { type: 'plain_text', text: `most recent ${completed.length}` },
+    [table(`completed-table-${now}`, ['Task', 'Author', 'Cost', 'Finished', 'Links'], completed.map(completedRow), [{ is_wrapped: true }, {}, { align: 'right' }, {}, {}]), ...completedNotes.map(n => context(`_${n}_`))], { collapsed: true }));
   if (accounts.length) blocks.push(container(`capacity-${now}`, 'AI capacity', undefined,
     [table(`capacity-table-${now}`, ['Account', 'Status', 'Usage', 'Detail'], accounts.map(accountRow), [{}, {}, {}, { is_wrapped: true }])]));
-  if (!blocks.some(b => b.type === 'card' || b.type === 'container')) blocks.push(context('_Nothing open and nothing finished yet._'));
+  if (!blocks.some(b => b.type === 'card') && blocks.filter(b => b.type === 'container').length === 1) blocks.push(context('_Nothing open and nothing finished yet._'));
   blocks.push(context('Reply in a task’s thread. This message updates in place.'));
   // Too many open tasks for Slack's block limit: the later groups fall back to packed text rows, one section per few tasks.
   for (const group of [groups.working, groups.ready, groups.nudge, groups.reply]) {
