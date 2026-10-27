@@ -107,6 +107,8 @@ export type Task = {
   slackCard?: string;
   /** Last thread message inspected by the daemon status responder. */
   slackStatusAfterTs?: string;
+  /** Consort messages in the thread since the owner last wrote there; the monitor's thread button turns red while above 0 */
+  slackUnread?: number;
   /** owner messages from the Slack thread, waiting for the worker to apply (cli/ownerUpdates.ts) */
   ownerUpdates?: import("./ownerUpdates").OwnerUpdate[];
   /** Slack message ts values the daemon saw as answers to pending questions, so they are not queued as updates */

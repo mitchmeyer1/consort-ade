@@ -156,3 +156,14 @@ test('a group with two or more cards scrolls sideways in carousels of up to ten;
  const ready=monitorBlockKit(many,NOW).filter(b=>b.type==='carousel'&&b.block_id.startsWith('ready-'));
  assert.deepEqual(ready.map(c=>c.elements.length),[10,3]);
 });
+test('a thread with unread Consort posts gets a red button with the count; the title keeps its text', () => {
+  const blocks=monitorBlockKit(text.replace('<https://slack.example/thread|Curation &amp; parity>','<https://slack.example/thread|Curation &amp; parity> (3 unread)'),NOW);
+  const card=cards(blocks).find(c=>c.block_id&&/Curation/.test(c.title.text));
+  assert.equal(card.title.text,'Curation &amp; parity');
+  const thread=card.actions.find(a=>a.url==='https://slack.example/thread');
+  assert.equal(thread.style,'danger');
+  assert.match(thread.text.text,/ · 3 new$/);
+  const other=cards(blocks).find(c=>/Needs a reviewer/.test(c.title.text)).actions.find(a=>a.url==='https://slack.example/nudge');
+  assert.equal(other.text.text,'Open thread');
+  assert.notEqual(other.style,'danger');
+});

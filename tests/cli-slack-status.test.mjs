@@ -133,3 +133,15 @@ test('a quiet live worker stays RUNNING and explains that no owner action is nee
   assert.match(h.replies[0].text, /STATUS: RUNNING$/);
   assert.doesNotMatch(h.replies[0].text, /STALLED|STATUS: WAITING/);
 });
+test('Consort posts since the owner last wrote count as unread; an owner message clears them', async () => {
+  const h=harness();
+  h.messages([{ts:'2',user:'B',bot_id:'bot',text:'✅ Build 3/9'},{ts:'3',user:'B',bot_id:'bot',text:'❓ Which column?'}]);
+  await h.run();
+  assert.equal(h.task.slackUnread,2);
+  h.messages([{ts:'4',user:'other',text:'fyi'}]);
+  await h.run();
+  assert.equal(h.task.slackUnread,2,'someone else writing does not mark it read');
+  h.messages([{ts:'5',user:'owner',text:'thanks'},{ts:'6',user:'B',bot_id:'bot',text:'👍'}]);
+  await h.run();
+  assert.equal(h.task.slackUnread,1);
+});

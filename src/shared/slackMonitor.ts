@@ -51,7 +51,7 @@ export function slackMasterMonitor(state: CliState, threads: Map<string, string>
     const byline = author ? `author: ${linked('@'+author, 'https://github.com/'+author)}` : pr ? 'author unavailable' : 'PR not created';
     const title = `${t.slackIdentity?.emoji ?? ''} ${t.slackIdentity?.title ?? t.ticket.title}`.trim();
     const destinations = [t.ticket.url ? linked('ticket',t.ticket.url) : '', t.review?.url ?? t.feature?.prs?.at(-1) ? linked(t.status==='ready'?'merge PR':'github', t.review?.url ?? t.feature.prs.at(-1)) : ''].filter(Boolean);
-    lines.push(`${icon} ${kind} · ${linked(title,threads.get(t.id))}${threads.has(t.id)?'':' (Slack thread pending)'} · ${byline} · ${clean(status)} · ${clean(step.name)} ${step.n}/${step.total} · ${costCell(t.cost) || 'cost pending'} · ${age}`);
+    lines.push(`${icon} ${kind} · ${linked(title,threads.get(t.id))}${threads.has(t.id)?(t.slackUnread?` (${t.slackUnread} unread)`:''):' (Slack thread pending)'} · ${byline} · ${clean(status)} · ${clean(step.name)} ${step.n}/${step.total} · ${costCell(t.cost) || 'cost pending'} · ${age}`);
     if (detail) lines.push(`   ${clean(t.status === 'waiting' ? t.pauseReason ?? t.note ?? t.activity ?? health.note ?? 'Needs your Slack reply' : health.note ?? t.activity ?? t.note ?? 'Preparing the task', 200)}`);
     const ci = pr && t.prCheck ? {pass:'CI passing',pending:'CI running',fail:'CI failing',none:'No CI'}[t.prCheck.ci] : undefined;
     if (ci) lines.push(`   PR: ${ci}`);

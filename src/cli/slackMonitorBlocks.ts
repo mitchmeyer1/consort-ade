@@ -6,7 +6,7 @@
  */
 const LIMIT = 2900;
 const MAX_BLOCKS = 50;
-type Row = { icon: string; kind: string; title: string; thread?: string; pending: boolean; ci?: string; byline?: string; status: string; stage?: { name: string; n: number; total: number }; cost?: string; age?: string; action?: string; links: { label: string; url: string }[] };
+type Row = { icon: string; kind: string; title: string; thread?: string; pending: boolean; unread?: number; ci?: string; byline?: string; status: string; stage?: { name: string; n: number; total: number }; cost?: string; age?: string; action?: string; links: { label: string; url: string }[] };
 type Group = { key: 'reply' | 'nudge' | 'ready' | 'working'; icon: string; heading: string; empty: string; rows: Row[]; notes: string[] };
 type Block = Record<string, unknown>;
 
@@ -20,7 +20,7 @@ export const CONSORT_BANNER_URL = 'https://raw.githubusercontent.com/mitchmeyer1
 const decode = (s: string) => s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
 const unlink = (s: string) => decode(s.replace(/<https?:\/\/[^|>]+\|([^>]+)>/g, '$1'));
 const link = (url: string | undefined, label: string) => (url ? `<${url}|${label}>` : label);
-const button = (label: string, url: string, id: string, primary = false): Block => ({ type: 'button', text: { type: 'plain_text', text: label, emoji: false }, url, action_id: id, ...(primary ? { style: 'primary' } : {}) });
+const button = (label: string, url: string, id: string, style?: 'primary' | 'danger'): Block => ({ type: 'button', text: { type: 'plain_text', text: label, emoji: false }, url, action_id: id, ...(style ? { style } : {}) });
 /** `▰▰▱▱▱`: stages done out of the total, in text that every Slack client renders. */
 export const bar = (done: number, total: number) => (total > 0 && total <= 30 ? '▰'.repeat(Math.max(0, Math.min(done, total))) + '▱'.repeat(Math.max(0, total - done)) : '');
 type Cell = { type: 'raw_text'; text: string } | { type: 'rich_text'; elements: unknown[] };
@@ -40,10 +40,12 @@ function parts(line: string): string[] {
 function parseRow(line: string, details: string[]): Row {
   const p = parts(line);
   const [icon, ...kindWords] = p[0].split(' ');
-  const titleRaw = p[1] ?? '';
+  // ` (3 unread)`: Consort posts in the thread since the owner last wrote there (shared/slackMonitor.ts)
+  const unread = Number((p[1] ?? '').match(/ \((\d+) unread\)$/)?.[1] ?? 0);
+  const titleRaw = (p[1] ?? '').replace(/ \(\d+ unread\)$/, '');
   const pending = / \(Slack thread pending\)$/.test(titleRaw);
   const linked = titleRaw.replace(/ \(Slack thread pending\)$/, '').match(/^<(https:\/\/[^|>]+)\|(.+)>$/);
-  const row: Row = { icon, kind: kindWords.join(' '), title: linked ? linked[2] : titleRaw.replace(/ \(Slack thread pending\)$/, ''), thread: linked?.[1], pending, status: '', links: [] };
+  const row: Row = { icon, kind: kindWords.join(' '), title: linked ? linked[2] : titleRaw.replace(/ \(Slack thread pending\)$/, ''), thread: linked?.[1], pending, ...(unread ? { unread } : {}), status: '', links: [] };
   const stageOf = (s: string) => { const m = s.match(/^(.*?)\s*(\d+)\/(\d+)$/); return m ? { name: m[1], n: Number(m[2]), total: Number(m[3]) } : undefined; };
   if (p.length >= 7) { row.byline = p[2]; row.status = p[3]; row.stage = stageOf(p[4]); row.cost = p[5]; row.age = p.slice(6).join(' · '); }
   else { row.status = p[2] ?? ''; row.stage = stageOf(p[3] ?? ''); }
@@ -65,8 +67,10 @@ const byline = (row: Row) => row.byline?.replace(/^author: /, 'by ');
 function card(row: Row, group: Group, index: number): Block {
   const primary = group.key === 'reply' ? 'thread' : group.key === 'ready' ? 'Merge PR' : group.key === 'nudge' ? 'GitHub' : undefined;
   const buttons: Block[] = [];
-  if (row.thread) buttons.push(button(group.key === 'reply' ? 'Reply in thread' : 'Open thread', row.thread, `thread-${index}`, primary === 'thread'));
-  for (const l of row.links) buttons.push(button(l.label, l.url, `${l.label.toLowerCase().replace(/\W+/g, '-')}-${index}`, primary === l.label));
+  // unread Consort posts turn the thread button red; Slack has no badge, so the count is in the label
+  const threadLabel = `${group.key === 'reply' ? 'Reply in thread' : 'Open thread'}${row.unread ? ` · ${row.unread} new` : ''}`;
+  if (row.thread) buttons.push(button(threadLabel, row.thread, `thread-${index}`, row.unread ? 'danger' : primary === 'thread' ? 'primary' : undefined));
+  for (const l of row.links) buttons.push(button(l.label, l.url, `${l.label.toLowerCase().replace(/\W+/g, '-')}-${index}`, primary === l.label ? 'primary' : undefined));
   const status = notable(row.status);
   const subtext = [row.stage ? `${row.stage.name} ${row.stage.n}/${row.stage.total}   ${bar(group.key === 'ready' ? row.stage.n : row.stage.n - 1, row.stage.total)}` : '', prLabels(row), status ? `*${status}*` : '', row.pending ? '_Slack thread pending_' : ''].filter(Boolean).join('   ·   ');
   const subtitle = [row.kind, byline(row), row.cost, row.age].filter(Boolean).join('   ·   ');
@@ -82,7 +86,7 @@ function card(row: Row, group: Group, index: number): Block {
 /** Plain rows, packed into as few sections as fit, for anything that no longer fits as a card. */
 function compact(row: Row): string {
   const status = notable(row.status);
-  return [`*${link(row.thread, row.title)}*`, status ? `*${status}*` : '', row.ci ?? '', byline(row), row.cost, row.age, row.action ? `_${row.action}_` : '', ...row.links.map(l => link(l.url, l.label))].filter(Boolean).join(' · ');
+  return [`*${link(row.thread, row.title)}*`, row.unread ? `🔴 ${row.unread} new` : '', status ? `*${status}*` : '', row.ci ?? '', byline(row), row.cost, row.age, row.action ? `_${row.action}_` : '', ...row.links.map(l => link(l.url, l.label))].filter(Boolean).join(' · ');
 }
 function packed(texts: string[]): Block[] {
   const out: Block[] = []; let chunk = '';

@@ -47,8 +47,10 @@ async function handleMessages(slack: Slack, taskId: string, messages: SlackThrea
     const state = loadState();
     const task = state.tasks.find(t => t.id === taskId);
     if (!task || !state.slack) return;
-    if (!message.bot_id && message.user === state.slack.userId) await handleOwnerMessage(slack, state, task, message, alive, deps);
-    updateTask(taskId, { slackStatusAfterTs: message.ts }, false);
+    const fromOwner = !message.bot_id && message.user === state.slack.userId;
+    if (fromOwner) await handleOwnerMessage(slack, state, task, message, alive, deps);
+    // the owner writing in the thread counts as reading it; every Consort post after that is unread
+    updateTask(taskId, t => ({ slackStatusAfterTs: message.ts, slackUnread: fromOwner ? 0 : message.bot_id ? (t.slackUnread ?? 0) + 1 : t.slackUnread }), false);
   }
 }
 
