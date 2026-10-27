@@ -6,9 +6,9 @@
  */
 import { monitorAccounts, monitorSystem, type AccountUsage } from './slackMonitorBlocks.ts';
 
-// Slack shows an image block about 500px wide whatever its size. The panel is drawn 800px wide, so it stays crisp
-// on a retina screen and its type and bars show 25% larger than a 1000px drawing would.
-const W = 800, PAD = 24, NAME_W = 150, ROW_H = 56, HEAD_H = 30, GROUP_GAP = 22, RESUME_W = 110;
+// Drawn 1360px wide, 1.7 times the 800px header, with type sized as before, so the panel shows 1.7 times as wide in
+// Slack if Slack lets an image block grow; the header at 800px showed about 480px wide.
+const W = 1360, PAD = 24, NAME_W = 150, ROW_H = 56, HEAD_H = 30, GROUP_GAP = 22, RESUME_W = 110;
 const FONT = `Menlo, 'SF Mono', Consolas, 'DejaVu Sans Mono', monospace`;
 const INK = '#ece6d8', MUTED = '#9a9c9e', TRACK = '#33363b';
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -28,8 +28,8 @@ export function resumeAt(detail: string): { day: string; time: string } | undefi
  * The SVG, transparent, drawn for Slack's dark theme: one row per account with no provider headings, as the names say
  * the provider. A far-right column carries when the account frees up: a blocked one's resume time in orange, else its
  * last weekly window's reset (Fable for Claude, weekly for Codex) in grey. A blocked reason is in the alt text.
- * With a System section, the usage rows take the left of the picture and the System box the right: Slack draws an
- * image block at most about 480px wide and never two side by side, so this is the only way to put them next to each other.
+ * With a System section, the usage rows take the left of the picture and the System box the right: Slack never
+ * draws two image blocks side by side, so this is the only way to put them next to each other.
  */
 export function usageSvg(accounts: AccountUsage[], system: Record<string, string> = {}): string {
   const hasSystem = Object.keys(system).length > 0;
@@ -77,7 +77,7 @@ function bar(x: number, y: number, width: number, label: string, value: string, 
 }
 
 // The usage rows end at SPLIT; the System box fills the rest, after a gap holding a thin rule.
-const SPLIT = 520, SYS_GAP = 28, SYS_ALONE_W = 320, COUNT_H = 38, BAR_H = 48, LINE_H = 19;
+const SPLIT = 860, SYS_GAP = 28, SYS_ALONE_W = 320, COUNT_H = 38, BAR_H = 48, LINE_H = 19;
 const CHART_H = 84, CHART_BARS_H = 36;
 /** `10 15 - 20` from the monitor text as numbers, `-` as no reading; undefined without a series. */
 const series = (s: string | undefined) => (s ? s.split(' ').map((v) => (v === '-' ? null : Number(v))) : undefined);
