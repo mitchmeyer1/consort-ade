@@ -66,7 +66,7 @@ export function slackMasterMonitor(state: CliState, threads: Map<string, string>
       const resets=[...(limited?[a.blockedUntil!]:[]),...exhausted.flatMap(w=>w.resetsAt && w.resetsAt>now ? [w.resetsAt] : [])];
       const unknownReset=exhausted.some(w=>!w.resetsAt || w.resetsAt<=now);
       const resume=resets.length && !unknownReset ? `resume after ${new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',timeZoneName:'short'}).format(Math.max(...resets))}` : 'resume time unavailable';
-      lines.push(`${icon} ${a.provider==='claude'?'Claude':'Codex'} ${number} · blocked: ${reason} · ${resume}`);
+      lines.push(`${icon} ${a.provider==='claude'?'Claude':'Codex'} ${number} · blocked: ${reason} · ${resume}${windows?` · ${windows}`:''}`);
     } else {
       const label=peak===undefined ? 'usage unavailable' : 'available';
       lines.push(`${icon} ${a.provider==='claude'?'Claude':'Codex'} ${number} · ${label}${windows?` · ${windows}`:''}${cached?` · usage ${ago(now-cached.at)} ago`:''}`);

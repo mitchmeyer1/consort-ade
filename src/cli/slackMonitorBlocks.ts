@@ -14,8 +14,8 @@ const mrkdwn = (text: string, max = LIMIT) => ({ type: 'mrkdwn', text: text.leng
 const section = (text: string): Block => ({ type: 'section', text: mrkdwn(text) });
 const context = (text: string): Block => ({ type: 'context', elements: [mrkdwn(text)] });
 const divider = (): Block => ({ type: 'divider' });
-/** The banner: the white muses mark and the word Consort centered on a wide transparent PNG, served from the public repo. Block Kit cannot center text, so the head is one image. */
-export const CONSORT_BANNER_URL = 'https://raw.githubusercontent.com/mitchmeyer1/consort-ade/main/build/consort-banner-white.png';
+/** The banner: the white muses mark and the word Consort centered on a 1280x260 transparent PNG, served from the public repo. Slack shows it about 500px wide, so the narrow margins make the mark larger. Block Kit cannot center text, so the head is one image. */
+export const CONSORT_BANNER_URL = 'https://raw.githubusercontent.com/mitchmeyer1/consort-ade/main/build/consort-banner-slack.png';
 /** Monitor text is HTML-escaped for mrkdwn; table cells and plain text need the characters back. */
 const decode = (s: string) => s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
 const unlink = (s: string) => decode(s.replace(/<https?:\/\/[^|>]+\|([^>]+)>/g, '$1'));
@@ -100,12 +100,13 @@ function completedRow(row: Row): Cell[] {
   ];
 }
 export type AccountUsage = { name: string; blocked: boolean; status: string; windows: { label: string; percent: number }[]; detail: string };
-/** One monitor account line: `🟢 Claude 1 · available · 5-hour 42% · weekly 20% · usage 3m ago`, or a blocked one with its reason and resume time. */
+/** One monitor account line: `🟢 Claude 1 · available · 5-hour 42% · weekly 20% · usage 3m ago`, or a blocked one with its reason, resume time and windows. */
 export function parseAccount(line: string): AccountUsage {
   const p = parts(line); const name = p[0].replace(/^\S+ /, ''); const rest = p.slice(1);
   const windows = rest.flatMap((r) => { const m = r.match(/^(.+?) (\d+)%$/); return m ? [{ label: m[1]!, percent: Number(m[2]) }] : []; });
   const peak = windows.length ? Math.max(...windows.map((w) => w.percent)) : undefined;
-  if (p[0].startsWith('🔴')) return { name, blocked: true, status: 'Blocked', windows, detail: rest.join(' · ').replace(/^blocked: /, '') };
+  // A blocked line keeps its windows after the reason and resume time, so every bar still draws.
+  if (p[0].startsWith('🔴')) return { name, blocked: true, status: 'Blocked', windows, detail: rest.slice(0, rest.findIndex((r) => r.startsWith('resume ')) + 1 || undefined).filter((r) => !/ \d+%$/.test(r)).join(' · ').replace(/^blocked: /, '') };
   if (peak === undefined) return { name, blocked: false, status: 'Unavailable', windows, detail: rest.filter((r) => r !== 'usage unavailable').join(' · ') || 'no reading yet' };
   return { name, blocked: false, status: peak <= 50 ? 'Available' : peak <= 90 ? 'Busy' : 'Nearly full', windows, detail: rest.filter((r) => r !== 'available').join(' · ') };
 }
@@ -117,7 +118,7 @@ function usageChart(accounts: AccountUsage[], now: number): Block | undefined {
   const charted = accounts.filter((a) => a.blocked || a.windows.length).slice(0, 20);
   const labels = [...new Set(charted.flatMap((a) => a.windows.map((w) => w.label)))].slice(0, 12);
   if (!charted.length || !labels.length) return undefined;
-  const value = (a: AccountUsage, label: string) => a.blocked ? 100 : Math.max(0, Math.min(100, a.windows.find((w) => w.label === label)?.percent ?? 0));
+  const value = (a: AccountUsage, label: string) => a.blocked && !a.windows.length ? 100 : Math.max(0, Math.min(100, a.windows.find((w) => w.label === label)?.percent ?? 0));
   const name = (label: string) => (label.toLowerCase() === 'weekly' ? 'Weekly' : label.slice(0, 20));
   return {
     type: 'data_visualization', block_id: `usage-chart-${now}`, title: 'AI usage, % of each limit',

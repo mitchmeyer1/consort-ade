@@ -180,7 +180,7 @@ test('blocked accounts show only the reason and latest applicable Eastern resume
   const render=(at,account,windows)=>slackMasterMonitor({tasks:[],jobs:[],accounts:[{id:'a',provider:'claude',...account}]},new Map(),at,()=>true,new Map([['a',{at,windows}]]));
   const text=render(now,{blockedUntil:now+3600000,blockedWhy:'5-hour limit reached'},[{label:'5-hour',percent:100,resetsAt:now+3600000},{label:'Weekly',percent:10}]);
   assert.match(text,/🔴 Claude 1 · blocked: 5-hour limit reached · resume after Oct 26, 11:00 AM EDT/);
-  assert.doesNotMatch(text,/100%|Weekly|usage 0m/);
+  assert.match(text,/resume after Oct 26, 11:00 AM EDT · 5-hour 100% · Weekly 10%$/m,"a blocked account keeps its windows for the panel");assert.doesNotMatch(text,/usage 0m/);
   const winter=Date.UTC(2026,11,1,14);
   assert.match(render(winter,{},[{label:'Weekly',percent:100,resetsAt:winter+3600000}]),/Dec 1, 10:00 AM EST/);
   assert.match(render(now,{},[{label:'Weekly',percent:100}]),/resume time unavailable/);

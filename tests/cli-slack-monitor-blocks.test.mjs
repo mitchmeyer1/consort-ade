@@ -40,7 +40,7 @@ const texts=blocks=>JSON.stringify(blocks);
 const cards=blocks=>blocks.filter(b=>b.type==='card');
 test('monitor opens with the centered banner, then groups in the order the owner acts, and ends with the update time',()=>{
  const blocks=monitorBlockKit(text,NOW);
- assert.deepEqual(blocks[0],{type:'image',block_id:`head-${NOW}`,image_url:'https://raw.githubusercontent.com/mitchmeyer1/consort-ade/main/build/consort-banner-white.png',alt_text:'Consort'});
+ assert.deepEqual(blocks[0],{type:'image',block_id:`head-${NOW}`,image_url:'https://raw.githubusercontent.com/mitchmeyer1/consort-ade/main/build/consort-banner-slack.png',alt_text:'Consort'});
  assert.equal(blocks.at(-1).type,'context');assert.equal(blocks.at(-1).elements[0].text,'Updated <!date^1793119500^{date_short_pretty} {time}|Updated 2026-10-27 16:45 UTC>  ·  Reply in a task’s thread. This message updates in place.');
  assert.ok(!blocks.some(b=>b.type==='header'||b.type==='section'&&/needs your reply/.test(b.text.text)),'no summary line');
  const headings=blocks.filter(b=>b.type==='section'&&/^\*[A-Za-z ]+\*   ·   \d+$/.test(b.text.text)).map(b=>b.text.text);

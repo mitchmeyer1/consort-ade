@@ -34,9 +34,19 @@ test('accounts parse out of the monitor text with every window', () => {
   assert.deepEqual(monitorAccounts('Content withheld by guard'), []);
 });
 
+test('a blocked account with readings keeps every bar and puts its reason and resume time on a line under them', () => {
+  const [a] = monitorAccounts(text.replace('🔴 Claude 4 · blocked: weekly limit reached · resume after Oct 28, 2:30 PM EDT', '🔴 Claude 4 · blocked: weekly limit reached · resume after Oct 28, 2:30 PM EDT · 5-hour 12% · Weekly 100% · Weekly · Fable 40%')).filter(x => x.name === 'Claude 4');
+  assert.deepEqual([a.blocked, a.detail, a.windows.map(w => w.percent)], [true, 'weekly limit reached · resume after Oct 28, 2:30 PM EDT', [12, 100, 40]]);
+  const svg = usageSvg([a]), plain = usageSvg([{ ...a, blocked: false }]);
+  assert.equal((svg.match(/<rect [^>]*fill="#33363b"/g) ?? []).length, 3, 'all three bars');
+  const note = svg.match(/y="(\d+)"[^>]*>blocked · weekly limit reached · resume after Oct 28, 2:30 PM EDT</);
+  assert.ok(note && Number(note[1]) > Number(svg.match(/<rect x="[\d.]+" y="(\d+)"/)[1]), 'the note sits under the bars');
+  assert.ok(Number(svg.match(/height="(\d+)"/)[1]) > Number(plain.match(/height="(\d+)"/)[1]), 'the row grows for the note');
+});
+
 test('the panel draws provider groups, a row per account, a coloured bar per window, and blocked or unread rows as words', () => {
   const svg = usageSvg(monitorAccounts(text));
-  assert.match(svg, /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="1000" height="\d+"/);
+  assert.match(svg, /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="800" height="\d+"/);
   for (const s of ['>USAGE<', '>CLAUDE<', '>CODEX<', '>Claude 1<', '>Codex 2<', '>5h<', '>wk<', '>fable<']) assert.ok(svg.includes(s), s);
   assert.doesNotMatch(svg, /ago/, 'no clock in the picture, so it only changes with the numbers');
   assert.match(svg, /fill="#e9c46a"[^>]*>77</); assert.match(svg, /fill="#f3ead6"[^>]*>49</); assert.match(svg, /fill="#f08a66"[^>]*>91</);
@@ -51,7 +61,7 @@ test('the panel draws provider groups, a row per account, a coloured bar per win
 test('the PNG is a real image at the SVG size', async () => {
   const png = await usagePng(usageGraphic(text).svg);
   assert.equal(png.subarray(1, 4).toString(), 'PNG');
-  assert.equal(png.readUInt32BE(16), 1000, 'width');
+  assert.equal(png.readUInt32BE(16), 800, 'width');
 });
 
 test('with an uploaded panel the blocks show it full width in place of the chart and notes', () => {
