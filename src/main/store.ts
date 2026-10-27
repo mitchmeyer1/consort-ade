@@ -1,11 +1,12 @@
 import { app, safeStorage } from "electron";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, renameSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { defaultConnector } from "../shared/defaultConnector";
 import { codexModels } from "./codexModels";
 import { MODELS } from "../shared/types";
 import { ensureRootWorktree } from "./rootWorktree";
 import { migrateQuickActions } from "../shared/quickActions";
+import { migrateLegacyShip } from "../shared/legacyShip";
 import { recoverBenignCodexFailure } from "../shared/codexDiagnostics";
 import type { State, Chat, Appearance, Provider } from "../shared/types";
 
@@ -14,16 +15,48 @@ const OPENROUTER_SECRET_ID = "openrouter-jev";
 const CLICKUP_SECRET_ID = "clickup-ship";
 
 const file = () => join(app.getPath("userData"), "state.json");
+/** the previous save, kept so a torn or truncated state.json is never the only copy */
+const backup = () => `${file()}.bak`;
+const temp = () => `${file()}.tmp`;
+/** a state.json that would not parse, set aside so the next save cannot promote it over the backup */
+const corrupt = () => `${file()}.corrupt`;
 const empty = (): Persisted => ({ projects: [], worktrees: [], chats: [], keys: [], secrets: {}, appearance: { theme: "dark", background: "opaque" } as Appearance });
+
+/**
+ * Everything the app owns lives in one file, so a half-written one used to read as an empty state and
+ * silently drop every project, chat and connector. Read defensively: a file that is missing, empty,
+ * truncated mid-write or not shaped like a state is treated as no file at all, never as an empty one.
+ */
+function read(path: string): Persisted | undefined {
+  let parsed: unknown;
+  try { parsed = JSON.parse(readFileSync(path, "utf8")); }
+  catch { return undefined; }
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const p = parsed as Partial<Persisted>;
+  // a real state always carries these four lists; anything else is a truncated or foreign file
+  if (![p.projects, p.worktrees, p.chats, p.keys].every(Array.isArray)) return undefined;
+  return { ...empty(), ...p } as Persisted;
+}
 
 export class Store {
   data: Persisted = empty();
   private listeners = new Set<(s: State) => void>();
 
   load() {
-    try {
-      this.data = { ...empty(), ...JSON.parse(readFileSync(file(), "utf8")) };
-    } catch {}
+    const current = read(file());
+    if (current) this.data = current;
+    else {
+      const previous = read(backup());
+      if (previous) {
+        this.data = previous;
+        // hold the unreadable file aside: the next save renames state.json over the backup, and that
+        // would throw away the one good copy we just recovered from
+        try { if (existsSync(file())) renameSync(file(), corrupt()); } catch {}
+        console.error(`state.json could not be read; recovered the previous save from ${backup()}. The unreadable file is at ${corrupt()}.`);
+      } else if (existsSync(file())) {
+        console.error(`state.json could not be read and no usable backup exists; starting from an empty state. The unreadable file is still at ${file()}.`);
+      }
+    }
     for (const c of this.data.chats) {
       if (c.sessionId) c.sessionKeyId ??= c.keyId;
       // Older builds stored Codex's harmless skill-budget notice as a failed run.
@@ -56,6 +89,8 @@ export class Store {
     for (const w of this.data.worktrees) { w.title ??= w.name; w.archived ??= false; }
     // quick actions used to live on each worktree; they belong to the project
     migrateQuickActions(this.data.projects, this.data.worktrees);
+    // the first /ship board's chats hid behind a flag the rebuilt /ship reads differently
+    migrateLegacyShip(this.data.worktrees, this.data.chats);
   }
 
   public(): State {
@@ -75,7 +110,14 @@ export class Store {
   save() {
     this.data.defaultKeyId = defaultConnector(this.data)?.id;
     mkdirSync(app.getPath("userData"), { recursive: true });
-    writeFileSync(file(), JSON.stringify(this.data));
+    // Serialise before touching disk: a throw here must leave the saved state untouched.
+    const text = JSON.stringify(this.data);
+    // Write beside the real file, then swap it in. Renames are atomic, so the app dying at any point
+    // leaves a whole state.json or a whole backup, never a half-written one. Deliberately no fsync:
+    // this runs every 80ms while a chat streams, and the swap already covers the app being killed.
+    writeFileSync(temp(), text);
+    try { if (existsSync(file())) renameSync(file(), backup()); } catch {}
+    renameSync(temp(), file());
     const pub = this.public();
     for (const l of this.listeners) l(pub);
   }
