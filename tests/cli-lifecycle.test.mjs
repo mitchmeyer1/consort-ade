@@ -285,11 +285,13 @@ test('one root per ticket: questions, pauses, resumes, and retries reuse its thr
   await assert.rejects(h.work(), e => e === halt);
   const roots = h.messages.filter(m => !m.thread);
   assert.equal(roots.length, 1);
-  assert.ok(h.messages.slice(1).every(m => m.thread === h.task.slackThread && !m.broadcast));
+  assert.ok(h.messages.slice(1).every(m => m.thread === h.task.slackThread));
+  assert.deepEqual(h.messages.filter(m => m.broadcast).map(m => /Which design/.test(m.text)), [true], 'only the question also goes to the DM');
   await h.notify('t', 'stopped', 'worker stopped');
   await h.notify('t', 'running', 'worker restarted');
   assert.equal(h.messages.filter(m => !m.thread).length, 1);
-  assert.ok(h.messages.slice(1).every(m => m.thread === h.task.slackThread && !m.broadcast));
+  assert.ok(h.messages.slice(1).every(m => m.thread === h.task.slackThread));
+  assert.equal(h.messages.filter(m => m.broadcast).length, 1, 'a stop or restart does not alert the DM');
 });
 
 
@@ -462,6 +464,8 @@ test('the Paused line says what it is waiting on: the question itself, one line,
   const paused = h.messages.find(m => /Paused:/.test(m.text));
   assert.match(paused.text, /\nWaiting on you: ryangoggin asked to set routeCount to 3500 in a generated file — recommend: leave it/);
   assert.equal(h.task.pauseReason, 'Waiting on you: ryangoggin asked to set routeCount to 3500 in a generated file — recommend: leave it');
+  const question = h.messages.find(m => /STATUS: WAITING$/.test(m.text) && /routeCount/.test(m.text) && !/Paused:/.test(m.text));
+  assert.ok(question?.thread && question.broadcast, 'the question is also sent to the DM so Slack notifies the owner');
   // a preformatted stop report pauses with its lead and first reason, markup and the ticket link stripped
   const h2 = harness({ task: { reviewsDone: 3, evidenceValidatedAt: undefined }, validateEvidence: () => { throw new Error('Map tiles show API KEY REQUIRED'); }, onReply: () => { throw halt; } });
   await assert.rejects(h2.work(), e => e === halt);

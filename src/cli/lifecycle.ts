@@ -87,7 +87,7 @@ async function askForRecovery(taskId: string, cause: unknown, tried?: string): P
       if (!thread) throw new Error("Waiting for the task's Slack thread.");
       const slack = new Slack(state.slack);
       const questions = task.pendingQuestion?.questions ?? [slackLines.problem(problem, task.ticket?.url)];
-      const ts = task.pendingQuestion?.afterTs ?? await slack.post(slackStatus(slackAsk(questions.join("\n")), "WAITING", await taskSlackLinks(task, state.jobs.find(j => j.id === task.jobId)?.repo)), thread);
+      const ts = task.pendingQuestion?.afterTs ?? await slack.post(slackStatus(slackAsk(questions.join("\n")), "WAITING", await taskSlackLinks(task, state.jobs.find(j => j.id === task.jobId)?.repo)), thread, true);
       updateTask(taskId, { pendingQuestion: { questions, afterTs: ts } });
       const answer = await slack.waitForReply(thread, ts, { onTick: () => { updateTask(taskId, {}); void flushTaskNotifications(taskId); } });
       if (!answer) continue;

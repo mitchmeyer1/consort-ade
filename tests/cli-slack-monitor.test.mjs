@@ -13,7 +13,7 @@ const task=(over={})=>({id:'t',jobId:'j',ticket:{id:'ticket-1',title:'Export loc
 function fixture(over={}) {
   const state={accounts:[],jobs:[],tasks:[task()],slack:{botToken:'secret',userId:'owner',channel:'C123'},...over};
   const calls=[];let existing,failPost,failUpdate,failLink;
-  const slack={retireFiles:async ids=>{calls.push(['retire',ids]);},setUsageFile:u=>{calls.push(['usage-in',u]);},getUsageFile:()=>({file:'SHOWN',key:'k'}),pinMonitor:async ts=>{calls.push(['pin',ts]);},removeDuplicateMonitors:async keep=>{calls.push(['cleanup',keep]);},channel:async()=>state.slack.channel,findMonitor:async()=>{calls.push(['find']);return existing;},permalink:async ts=>{calls.push(['link',ts]);if(failLink)throw failLink;return `https://example.slack.com/archives/C123/p${ts.replace('.','')}`;},postMonitor:async text=>{calls.push(['post',text]);if(failPost)throw failPost;return 'monitor-ts';},updateMonitor:async(ts,text)=>{calls.push(['update',ts,text]);if(failUpdate){const err=failUpdate;failUpdate=undefined;throw err;}}};
+  const slack={retireFiles:async ids=>{calls.push(['retire',ids]);},setUsageFile:u=>{calls.push(['usage-in',u]);},getUsageFile:()=>({file:'SHOWN',key:'k'}),unpinMonitor:async ts=>{calls.push(['unpin',ts]);},removeDuplicateMonitors:async keep=>{calls.push(['cleanup',keep]);},channel:async()=>state.slack.channel,findMonitor:async()=>{calls.push(['find']);return existing;},permalink:async ts=>{calls.push(['link',ts]);if(failLink)throw failLink;return `https://example.slack.com/archives/C123/p${ts.replace('.','')}`;},postMonitor:async text=>{calls.push(['post',text]);if(failPost)throw failPost;return 'monitor-ts';},updateMonitor:async(ts,text)=>{calls.push(['update',ts,text]);if(failUpdate){const err=failUpdate;failUpdate=undefined;throw err;}}};
   const mocks={'./slackMonitorAuthors':{monitorAuthors:async()=>new Map()},'./systemSnapshot':{systemSnapshot:()=>undefined},'../shared/slackMonitor.ts':monitor,'../shared/headless.ts':headless,'./state':{loadState:()=>state,mutateState:fn=>fn(state)},'./slack':{Slack:class{}},'./daemonctl':{alive:()=>true},'./usage':{cachedUsage:()=>new Map()}};
   const mod={exports:{}};new Function('require','module','exports',compiled)(n=>mocks[n]??require(n),mod,mod.exports);
   return {state,calls,run:(at=now)=>mod.exports.refreshSlackMonitor(at,()=>slack),existing:ts=>{existing=ts;},failLink:err=>{failLink=err;},failPost:err=>{failPost=err;},failUpdate:err=>{failUpdate=err;}};
@@ -214,19 +214,20 @@ test('human attention is orange while a missing worker stays stopped',()=>{
  const text=slackMasterMonitor({tasks:[task({id:'wait',status:'waiting',ticket:{id:'wait',title:'Needs owner'}}),task({id:'stopped',pid:undefined,ticket:{id:'stopped',title:'Stopped worker'}})],accounts:[],jobs:[]},new Map(),now,()=>true);
  assert.match(text,/^🟠 .*Needs owner.*WAITING/m);assert.match(text,/^❌ .*Stopped worker.*STOPPED/m);
 });
-test('existing and newly created monitors are pinned once without additional posts',async()=>{
+test('existing and newly created monitors lose any old pin once and are never pinned',async()=>{
  for(const saved of [undefined,{channel:'C123',ts:'existing'}]){
    const f=fixture({slackMonitor:saved});await f.run();await f.run(now+60000);
-   assert.equal(f.calls.filter(c=>c[0]==='pin').length,1);
+   assert.equal(f.calls.filter(c=>c[0]==='unpin').length,1);
+   assert.ok(!f.calls.some(c=>c[0]==='pin'));
    assert.equal(f.calls.filter(c=>c[0]==='post').length,saved?0:1);
  }
 });
-test('pin API uses the existing root timestamp and accepts already pinned',async()=>{
+test('unpin API uses the existing root timestamp and accepts a post with no pin',async()=>{
  const {Slack}=await import('../src/cli/slack.ts');const calls=[];
  const slack=new Slack({botToken:'test',userId:'owner',channel:'C1'},async(url,init)=>{
-  calls.push({url,body:Object.fromEntries(new URLSearchParams(init.body))});return Response.json({ok:false,error:'already_pinned'});
+  calls.push({url,body:Object.fromEntries(new URLSearchParams(init.body))});return Response.json({ok:false,error:'no_pin'});
  },text=>text);
- await slack.pinMonitor('monitor');assert.equal(calls[0].body.timestamp,'monitor');assert.ok(calls[0].url.endsWith('pins.add'));
+ await slack.unpinMonitor('monitor');assert.equal(calls[0].body.timestamp,'monitor');assert.ok(calls[0].url.endsWith('pins.remove'));
 });
 
 test('uploads left in state by earlier layouts are retired, and the last usage panel carries over as the shown file',async()=>{
@@ -256,4 +257,14 @@ test('the monitor ends its account list with a System section when given the mac
   const text = slackMasterMonitor({ tasks: [], jobs: [], accounts: [] }, new Map(), now, () => true, new Map(), new Map(), sys);
   assert.match(text, /\*System\*\nDatabases: 2 sets · 0 in use\nWorktrees: 5\nCPU: 80%\nMemory: 37 of 48 GB\nMachine: Apple M5 Pro · 15 cores\n\n/);
   assert.ok(!slackMasterMonitor({ tasks: [], jobs: [], accounts: [] }, new Map(), now, () => true).includes('*System*'));
+});
+
+test('a broadcast thread reply also shows in the DM; an ordinary reply does not',async()=>{
+ const {Slack}=await import('../src/cli/slack.ts');const calls=[];
+ const slack=new Slack({botToken:'test',userId:'owner',channel:'C1'},async(url,init)=>{
+  calls.push(Object.fromEntries(new URLSearchParams(init.body)));return Response.json({ok:true,ts:'1.2'});
+ },text=>text);
+ await slack.post('question','thread-ts',true);await slack.post('update','thread-ts');
+ assert.equal(calls[0].thread_ts,'thread-ts');assert.equal(calls[0].reply_broadcast,'true');
+ assert.equal(calls[1].reply_broadcast,undefined);
 });

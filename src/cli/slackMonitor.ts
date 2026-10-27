@@ -9,13 +9,14 @@ import { monitorAuthors } from './slackMonitorAuthors';
 import { systemSnapshot } from './systemSnapshot';
 const links = new Map<string,string>();
 const reconciled = new Set<string>();
-const pinAttempts = new Set<string>();
-async function pinMonitor(slack: Slack, channel: string, ts: string) {
+const unpinAttempts = new Set<string>();
+/** the monitor is no longer pinned; a pin left by an earlier version comes off once per process */
+async function unpinMonitor(slack: Slack, channel: string, ts: string) {
   const identity=`${channel}:${ts}`;
-  if(pinAttempts.has(identity)) return;
-  pinAttempts.add(identity);
-  try { await slack.pinMonitor(ts); }
-  catch(error) { console.error(`Slack master monitor pin: ${error instanceof Error ? error.message : String(error)}. You can pin this message manually from Slack's message menu.`); }
+  if(unpinAttempts.has(identity)) return;
+  unpinAttempts.add(identity);
+  try { await slack.unpinMonitor(ts); }
+  catch(error) { console.error(`Slack master monitor unpin: ${error instanceof Error ? error.message : String(error)}. You can unpin it from Slack's message menu.`); }
 }
 let active: Promise<void> | undefined;
 export function refreshSlackMonitor(now=Date.now(), slackFor=(cfg:SlackConfig)=>new Slack(cfg)): Promise<void> {
@@ -69,7 +70,7 @@ async function refresh(now:number, slackFor:(cfg:SlackConfig)=>Slack):Promise<vo
     if(monitor.key===key && monitor.ts) {
       const identity=`${channel}:${monitor.ts}`;
       if(!reconciled.has(identity)) { await slack.removeDuplicateMonitors(monitor.ts,MASTER_MONITOR_HEADING); reconciled.add(identity); }
-      await pinMonitor(slack,channel,monitor.ts);
+      await unpinMonitor(slack,channel,monitor.ts);
       return;
     }
     let ts=monitor.ts;
@@ -91,7 +92,7 @@ async function refresh(now:number, slackFor:(cfg:SlackConfig)=>Slack):Promise<vo
     mutateState(s=>{if(s.slackMonitor?.lease?.id===lease) Object.assign(s.slackMonitor,{ts,key,creating:undefined,usage:slack.getUsageFile?.(),head:slack.getHeadFile?.()});});
     const identity=`${channel}:${ts}`;
     if(!reconciled.has(identity)) { await slack.removeDuplicateMonitors(ts!,MASTER_MONITOR_HEADING); reconciled.add(identity); }
-    await pinMonitor(slack,channel,ts!);
+    await unpinMonitor(slack,channel,ts!);
   } finally {
     mutateState(s=>{if(s.slackMonitor?.lease?.id===lease) s.slackMonitor.lease=undefined;});
   }

@@ -54,7 +54,7 @@ const SLACK_SCOPES: readonly [scope: string, reason: string][] = [
   ["files:write", "post the PR article in a review thread when asking you to approve"],
   ["im:write", "open the DM with you"],
   ["im:history", "read your replies in the DM thread; without it the bot can post but never hear you"],
-  ["pins:write", "pin the master monitor post in the DM"],
+  ["pins:write", "unpin the master monitor post older versions pinned in the DM"],
   ["files:read", "download documents you attach to a task update in the thread"],
   ["channels:history", "only if you point it at a public channel instead of the DM (groups:history for a private one)"],
 ];

@@ -23,7 +23,7 @@ export type SlackThreadMessage = { ts: string; user?: string; text?: string; bot
  * Scopes the bot token needs: chat:write (post), im:write (open the DM), im:history (read replies in
  * the DM; channels:history or groups:history instead when pointed at a channel), files:read (download
  * documents the owner attaches to an update), files:write (the PR article in a review thread, the monitor's pictures),
- * pins:write (pin the monitor). No users:read or incoming-webhook. The list the setup wizard shows is SLACK_SCOPES in
+ * pins:write (unpin the monitor older versions pinned). No users:read or incoming-webhook. The list the setup wizard shows is SLACK_SCOPES in
  * setup.ts; docs/slack-app-manifest.json creates an app with them and the Home tab the monitor is also published to.
  */
 /** Home tab errors already logged, so a recurring one is reported once per process. */
@@ -68,9 +68,9 @@ export class Slack {
     return { bot: j.user, team: j.team };
   }
 
-  /** post a message; in `thread` when given. Resolves to the message ts, which is also the thread id for replies. */
-  async post(text: string, thread?: string): Promise<string> {
-    const j = await this.api("chat.postMessage", { channel: await this.channel(), text: slackStatus(STATUS_TAIL.test(text) ? text : slackMessage("update", text)), ...(thread ? { thread_ts: thread } : {}), unfurl_links: false });
+  /** post a message; in `thread` when given. Resolves to the message ts, which is also the thread id for replies. `broadcast` also shows a thread reply in the DM, so Slack notifies the owner. */
+  async post(text: string, thread?: string, broadcast = false): Promise<string> {
+    const j = await this.api("chat.postMessage", { channel: await this.channel(), text: slackStatus(STATUS_TAIL.test(text) ? text : slackMessage("update", text)), ...(thread ? { thread_ts: thread, ...(broadcast ? { reply_broadcast: true } : {}) } : {}), unfurl_links: false });
     return j.ts as string;
   }
 
@@ -79,10 +79,10 @@ export class Slack {
     return (await this.sendMonitor("chat.postMessage", { channel: await this.channel(), text: text.split("\n")[0], parse: "none", unfurl_links: false, unfurl_media: false }, text)).ts;
   }
 
-  /** Pin the existing root; a pin provides a shortcut without reposting the monitor. */
-  async pinMonitor(ts: string): Promise<void> {
-    try { await this.api("pins.add", { channel: await this.channel(), timestamp: ts }); }
-    catch (error) { if (!/already_pinned/.test(String(error))) throw error; }
+  /** Take down the pin earlier versions put on the monitor root; the Home tab is the way in now. */
+  async unpinMonitor(ts: string): Promise<void> {
+    try { await this.api("pins.remove", { channel: await this.channel(), timestamp: ts }); }
+    catch (error) { if (!/no_pin|not_pinned|message_not_found/.test(String(error))) throw error; }
   }
 
   /** Plain sections for anything that is not the master monitor; they keep Slack from splitting a long post. */
