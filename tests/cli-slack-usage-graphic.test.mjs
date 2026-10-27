@@ -67,7 +67,7 @@ test('the panel draws a row per account with no provider headings, a coloured ba
 test('the PNG is a real image at the SVG size', async () => {
   const png = await usagePng(usageGraphic(text).svg);
   assert.equal(png.subarray(1, 4).toString(), 'PNG');
-  assert.equal(png.readUInt32BE(16), 640, 'width');
+  assert.equal(png.readUInt32BE(16), 1280, 'width, drawn at 2x');
 });
 
 test('with an uploaded panel the blocks show it full width in place of the chart and notes', () => {
@@ -125,4 +125,16 @@ test('CPU and memory over the last 30 minutes draw as 15 two-minute bars, with g
   assert.ok(g.svg.includes('cpu · 30m') && g.svg.includes('memory · 30m'));
   assert.ok(!/CPU30/.test(g.alt), 'the alt text keeps to the current numbers');
   assert.ok(!monitorBlockKit(withCharts, 0).some(b => /CPU30/.test(JSON.stringify(b))), 'the text fallback leaves the series out');
+});
+
+test('with public addresses, Usage and System are two carousel cards and nothing is uploaded or stacked', async () => {
+  const { systemLines } = await import('../src/shared/slackMonitor.ts');
+  const lines = systemLines({ databases: 2, databasesInUse: 1, worktrees: 5, containers: 9, cpu: 35, memoryUsed: 20, memoryTotal: 48, diskFree: 480, diskTotal: 926, machine: 'Apple M5 Pro · 15 cores · macOS 26.4.1' });
+  const withSystem = text.replace('\n\nOpen a ticket', `\n\n*System*\n${lines.join('\n')}\n\nOpen a ticket`);
+  const linked = { usage: { url: 'https://t.example/a/u.png', alt: 'u' }, system: { url: 'https://t.example/a/s.png', alt: 's' } };
+  const blocks = monitorBlockKit(withSystem, 0, undefined, undefined, undefined, linked);
+  const panels = blocks.find(b => b.block_id === 'panels-0');
+  assert.deepEqual(panels.elements.map(c => [c.type, c.hero_image.image_url]), [['card', linked.usage.url], ['card', linked.system.url]]);
+  assert.ok(!blocks.some(b => b.type === 'image' && b.slack_file), 'no uploaded picture');
+  assert.ok(!blocks.some(b => b.type === 'data_visualization' || /\*System\*/.test(JSON.stringify(b))), 'no chart or System line beside the cards');
 });

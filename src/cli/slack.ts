@@ -6,6 +6,19 @@ import { redactPii } from "../shared/redact.ts";
 import type { SlackFile } from "./ownerUpdates";
 import { slackGate } from "./phiGate.ts";
 import { monitorBlockKit, type UsageImage } from "./slackMonitorBlocks.ts";
+import { publish, tunnelUp } from "./imageTunnel.ts";
+
+/** Usage and System at the daemon's public picture address, or undefined without the tunnel or either picture. */
+async function linkedPictures(safe: string): Promise<{ usage: { url: string; alt: string }; system: { url: string; alt: string } } | undefined> {
+  if (!tunnelUp()) return undefined;
+  try {
+    const { usageGraphic, usagePng } = await import("./slackUsageGraphic.ts");
+    const u = usageGraphic(safe, "usage"), s = usageGraphic(safe, "system");
+    if (!u || !s) return undefined;
+    const uUrl = publish(await usagePng(u.svg)), sUrl = publish(await usagePng(s.svg));
+    return uUrl && sUrl ? { usage: { url: uUrl, alt: u.alt }, system: { url: sUrl, alt: s.alt } } : undefined;
+  } catch (error) { console.error(`Slack linked pictures: ${String(error)}`); return undefined; }
+}
 /** a rendered picture's file ids and picture hash, as state saves them */
 export type UsageFiles = { file?: string; key?: string; stale?: string };
 /** The monitor's two uploaded pictures: the AI usage panel and the header with the group counts. */
@@ -165,22 +178,33 @@ export class Slack {
   private async sendMonitor(method: string, body: Record<string, unknown>, text: string): Promise<any> {
     const safe = this.gate ? this.gate(text) : redactPii(text);
     const kit = monitorBlockKit(safe);
-    const usage = kit ? await this.renderedImage("usage", safe) : undefined;
-    const system = kit ? await this.renderedImage("system", safe) : undefined;
-    const head = kit ? await this.renderedImage("head", safe) : undefined;
-    const layouts: { blocks: unknown[]; withImage: boolean }[] = [];
-    if (kit && (usage || system || head)) layouts.push({ blocks: monitorBlockKit(safe, Date.now(), usage, head, system)!, withImage: true });
-    if (kit) layouts.push({ blocks: kit, withImage: false });
-    layouts.push({ blocks: this.plainBlocks(safe), withImage: false });
+    // Usage and System side by side as carousel cards, from the daemon's ngrok address; uploads only if Slack refuses that.
+    const linked = kit ? await linkedPictures(safe) : undefined;
+    let usage: ShownImage | undefined, system: ShownImage | undefined, head: ShownImage | undefined;
+    const layouts: (() => Promise<{ blocks: unknown[]; withImage: boolean } | undefined>)[] = [
+      async () => {
+        if (!linked) return undefined;
+        head = await this.renderedImage("head", safe);
+        return { blocks: monitorBlockKit(safe, Date.now(), undefined, head, undefined, linked)!, withImage: true };
+      },
+      async () => {
+        if (!kit) return undefined;
+        usage = await this.renderedImage("usage", safe); system = await this.renderedImage("system", safe); head = await this.renderedImage("head", safe);
+        return usage || system || head ? { blocks: monitorBlockKit(safe, Date.now(), usage, head, system)!, withImage: true } : undefined;
+      },
+      async () => (kit ? { blocks: kit, withImage: false } : undefined),
+      async () => ({ blocks: this.plainBlocks(safe), withImage: false }),
+    ];
     for (let i = 0; i < layouts.length; i++) {
-      const layout = layouts[i]!;
+      const layout = await layouts[i]!();
+      if (!layout) continue;
       for (let attempt = 0; ; attempt++) {
         try {
           const result = await this.api(method, { ...body, blocks: layout.blocks });
           await this.settleFile("usage", layout.withImage ? usage : undefined, usage);
           await this.settleFile("system", layout.withImage ? system : undefined, system);
           await this.settleFile("head", layout.withImage ? head : undefined, head);
-          await this.publishHome(layouts.slice(i).map((l) => l.blocks));
+          await this.publishHome([layout.blocks, ...(kit && layout.blocks !== kit ? [kit] : []), this.plainBlocks(safe)]);
           return result;
         } catch (error) {
           const messages = (error as Error & { slackMessages?: string[] }).slackMessages ?? [];

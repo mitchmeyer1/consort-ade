@@ -170,8 +170,8 @@ export function usageGraphic(safe: string, part?: 'usage' | 'system'): { svg: st
   return { svg: usageSvg(accounts, system), alt: usageAlt(accounts, system) };
 }
 
-/** PNG at 1x of the SVG's size; the native rasterizer loads only here, so the rest of the CLI never needs it. */
+/** PNG at 2x of the SVG's size, so a retina screen shows it sharp; the native rasterizer loads only here, so the rest of the CLI never needs it. */
 export async function usagePng(svg: string): Promise<Buffer> {
   const { Resvg } = await import('@resvg/resvg-js');
-  return Buffer.from(new Resvg(svg, { font: { loadSystemFonts: true, defaultFontFamily: 'Menlo' } }).render().asPng());
+  return Buffer.from(new Resvg(svg, { fitTo: { mode: 'zoom', value: 2 }, font: { loadSystemFonts: true, defaultFontFamily: 'Menlo' } }).render().asPng());
 }

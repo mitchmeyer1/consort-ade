@@ -199,7 +199,7 @@ export function monitorCounts(safe: string): Record<Group['key'], number> | unde
   return { reply: reply.rows.length, nudge: nudge.rows.length, ready: ready.rows.length + more(ready), working: working.rows.length + more(working) };
 }
 /** Blocks for a master monitor text; undefined for anything else (guard notices, legacy posts, tests). The head is the uploaded header picture when there is one, else the banner. */
-export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageImage, head?: UsageImage, system?: UsageImage): Block[] | undefined {
+export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageImage, head?: UsageImage, system?: UsageImage, linked?: { usage: { url: string; alt: string }; system: { url: string; alt: string } }): Block[] | undefined {
   const monitor = parseMonitor(safe);
   if (!monitor) return undefined;
   const { lines, groups, completed, completedNotes, accounts } = monitor;
@@ -226,17 +226,19 @@ export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageIma
   if (!blocks.some(b => b.type === 'card' || b.type === 'carousel' || b.type === 'container')) blocks.push(context('_Nothing open and nothing finished yet._'));
   const parsed = accounts.map(parseAccount);
   // The rendered panel says everything the chart and notes would; without one, Slack's own chart stands in.
-  const chart = usage ? undefined : usageChart(parsed, now);
-  // Usage and System are two pictures, one under the other. An uploaded file in a card's hero image shows blank in Slack, so no carousel.
+  const chart = usage || linked ? undefined : usageChart(parsed, now);
+  // Usage and System are two pictures: side by side as carousel cards when they have public addresses (cli/imageTunnel.ts),
+  // else uploaded and one under the other, as an uploaded file in a card shows blank in Slack.
+  if (linked) blocks.push({ type: 'carousel', block_id: `panels-${now}`, elements: (['usage', 'system'] as const).map(k => ({ type: 'card', block_id: `${k}-${now}`, hero_image: { type: 'image', image_url: linked[k].url, alt_text: linked[k].alt.slice(0, 2000) } })) });
   const picture = (key: string, img: UsageImage) => ({ type: 'image', block_id: `${key}-${now}`, slack_file: { id: img.fileId }, alt_text: img.alt.slice(0, 2000) });
   if (usage) blocks.push(picture('usage', usage));
   else if (chart) blocks.push(chart);
-  else if (parsed.length) blocks.push(section('*AI usage*'));
-  if (!usage) for (const note of usageNotes(parsed)) blocks.push(context(note));
+  else if (parsed.length && !linked) blocks.push(section('*AI usage*'));
+  if (!usage && !linked) for (const note of usageNotes(parsed)) blocks.push(context(note));
   // System is its own picture; without it, one line says the same.
   const systemText = monitorSystem(safe);
   if (system) blocks.push(picture('system', system));
-  else if (!system && Object.keys(systemText).length) blocks.push(context(`*System*  ·  ${Object.entries(systemText).filter(([k]) => !k.endsWith('30')).map(([k, v]) => `${k} ${v}`).join('  ·  ')}`));
+  else if (!system && !linked && Object.keys(systemText).length) blocks.push(context(`*System*  ·  ${Object.entries(systemText).filter(([k]) => !k.endsWith('30')).map(([k, v]) => `${k} ${v}`).join('  ·  ')}`));
   blocks.push(context(`Updated ${stamp}  ·  Reply in a task’s thread. This message updates in place.`));
   // Too many open tasks for Slack's block limit: the later groups fall back to packed text rows, one section per few tasks.
   for (const group of [groups.working, groups.ready, groups.nudge, groups.reply]) {
