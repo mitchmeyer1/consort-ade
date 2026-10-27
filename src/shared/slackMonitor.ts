@@ -14,9 +14,23 @@ export function slackMonitorGroups(state: Pick<CliState,'tasks'>, now: number) {
   const working=tasks.filter(t=>!FINISHED.includes(t.status)||t.status==='failed');
   return {working,ready,completed};
 }
+/** The machine's numbers for the System box (cli/systemSnapshot.ts); GB and percent, already rounded. */
+export type SystemSnapshot = { databases: number; databasesInUse: number; worktrees: number; containers?: number; cpu: number; memoryUsed: number; memoryTotal: number; diskFree?: number; diskTotal?: number; machine: string };
+/** The System section's lines, `Label: value`, read back by cli/slackMonitorBlocks.ts. */
+export function systemLines(s: SystemSnapshot): string[] {
+  return [
+    `Databases: ${s.databases} sets · ${s.databasesInUse} in use`,
+    `Worktrees: ${s.worktrees}`,
+    ...(s.containers === undefined ? [] : [`Containers: ${s.containers} running`]),
+    `CPU: ${s.cpu}%`,
+    `Memory: ${s.memoryUsed} of ${s.memoryTotal} GB`,
+    ...(s.diskFree === undefined ? [] : [`Disk: ${s.diskFree} GB free of ${s.diskTotal} GB`]),
+    `Machine: ${clean(s.machine, 120)}`,
+  ];
+}
 /** `Oct 28, 2:30 PM EDT`: a reset or resume time as the monitor shows it. */
 const when=(ms:number)=>new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',timeZoneName:'short'}).format(ms);
-export function slackMasterMonitor(state: CliState, threads: Map<string, string>, now: number, alive: (pid: number) => boolean, usage = new Map<string, ConnectorUsage>(), authors = new Map<string,string>()): string {
+export function slackMasterMonitor(state: CliState, threads: Map<string, string>, now: number, alive: (pid: number) => boolean, usage = new Map<string, ConnectorUsage>(), authors = new Map<string,string>(), system?: SystemSnapshot): string {
   const {working,ready,completed}=slackMonitorGroups(state,now);
   const lines = [MASTER_MONITOR_HEADING, `Updated ${new Date(Math.floor(now / 60_000) * 60_000).toISOString().replace('T', ' ').slice(0,16)} UTC`, '', '*Working*'];
   const taskRow = (t: CliState['tasks'][number], detail: boolean) => {
@@ -79,6 +93,7 @@ export function slackMasterMonitor(state: CliState, threads: Map<string, string>
     }
   }
   if(!state.accounts.length) lines.push('No accounts configured.');
+  if(system) lines.push('', '*System*', ...systemLines(system));
   lines.push('', 'Open a ticket title to reply in its Slack thread. This monitor updates in place; ticket discussions stay in their own threads.', '', 'STATUS: MONITORING');
   return lines.join('\n');
 }

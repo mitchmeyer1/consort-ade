@@ -6,6 +6,7 @@ import { Slack } from './slack';
 import { alive } from './daemonctl';
 import { cachedUsage } from './usage';
 import { monitorAuthors } from './slackMonitorAuthors';
+import { systemSnapshot } from './systemSnapshot';
 const links = new Map<string,string>();
 const reconciled = new Set<string>();
 const pinAttempts = new Set<string>();
@@ -61,7 +62,7 @@ async function refresh(now:number, slackFor:(cfg:SlackConfig)=>Slack):Promise<vo
         console.error(`Slack master monitor ticket link ${task.ticket.id}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    const text=slackMasterMonitor(state,threads,now,alive,cachedUsage(),await monitorAuthors(shown));
+    const text=slackMasterMonitor(state,threads,now,alive,cachedUsage(),await monitorAuthors(shown),systemSnapshot(state));
     if(text.length>35000) throw new Error('Slack master monitor exceeds the single-post text limit.');
     const key=createHash('sha256').update('blocks-v6:'+text).digest('hex');
     monitor=loadState().slackMonitor!;

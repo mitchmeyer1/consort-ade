@@ -146,6 +146,15 @@ export function monitorAccounts(safe: string): AccountUsage[] {
   for (const line of lines.slice(start + 1)) { if (!line) break; if (/^[🔴⚪🟢🟡🟠] /u.test(line)) out.push(parseAccount(line)); }
   return out;
 }
+/** The System section of a master monitor text as `label → value` (cli/systemSnapshot.ts); empty for anything else. */
+export function monitorSystem(safe: string): Record<string, string> {
+  const lines = safe.split('\n');
+  if (!lines[0]?.startsWith('*📊 Consort master monitor*')) return {};
+  const start = lines.indexOf('*System*'), out: Record<string, string> = {};
+  if (start < 0) return out;
+  for (const line of lines.slice(start + 1)) { if (!line) break; const m = line.match(/^(\w+): (.+)$/); if (m) out[m[1]!] = m[2]!; }
+  return out;
+}
 /** A rendered usage panel already uploaded to Slack (cli/slackUsageGraphic.ts), shown in place of the chart. */
 export type UsageImage = { fileId: string; alt: string };
 /** The monitor text's open tasks by group, its completed rows and its account lines; undefined for any other text. */
@@ -218,6 +227,9 @@ export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageIma
   else if (chart) blocks.push(chart);
   else if (parsed.length) blocks.push(section('*AI usage*'));
   if (!usage) for (const note of usageNotes(parsed)) blocks.push(context(note));
+  // The rendered panel carries the System box too; without it, one line says the same.
+  const system = monitorSystem(safe);
+  if (!usage && Object.keys(system).length) blocks.push(context(`*System*  ·  ${Object.entries(system).map(([k, v]) => `${k} ${v}`).join('  ·  ')}`));
   blocks.push(context(`Updated ${stamp}  ·  Reply in a task’s thread. This message updates in place.`));
   // Too many open tasks for Slack's block limit: the later groups fall back to packed text rows, one section per few tasks.
   for (const group of [groups.working, groups.ready, groups.nudge, groups.reply]) {

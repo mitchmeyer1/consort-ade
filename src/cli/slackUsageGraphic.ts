@@ -4,7 +4,7 @@
  * draws upright bars only and cannot be styled, so the monitor uploads this rendering (cli/slack.ts) and shows
  * it full width; the chart stays as the fallback when the upload is not possible.
  */
-import { monitorAccounts, type AccountUsage } from './slackMonitorBlocks.ts';
+import { monitorAccounts, monitorSystem, type AccountUsage } from './slackMonitorBlocks.ts';
 
 // Slack shows an image block about 500px wide whatever its size. The panel is drawn 800px wide, so it stays crisp
 // on a retina screen and its type and bars show 25% larger than a 1000px drawing would.
@@ -29,12 +29,15 @@ export function resumeAt(detail: string): { day: string; time: string } | undefi
  * the provider. A far-right column carries when the account frees up: a blocked one's resume time in orange, else its
  * last weekly window's reset (Fable for Claude, weekly for Codex) in grey. A blocked reason is in the alt text.
  */
-export function usageSvg(accounts: AccountUsage[]): string {
+export function usageSvg(accounts: AccountUsage[], system: Record<string, string> = {}): string {
   const columns = Math.min(4, Math.max(1, ...accounts.map((a) => a.windows.length)));
   const resumeW = accounts.some((a) => a.blocked || a.resets) ? RESUME_W : 0;
-  const height = PAD + HEAD_H + accounts.length * ROW_H + 4;
+  const usageH = accounts.length ? PAD + HEAD_H + accounts.length * ROW_H + 4 : 0;
+  const sys = systemBody(system, usageH);
+  const height = usageH + sys.height;
   const barsX = PAD + NAME_W, barsW = W - PAD - barsX - resumeW, groupW = (barsW - (columns - 1) * GROUP_GAP) / columns;
   let y = PAD;
+  if (!accounts.length) return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${height}" viewBox="0 0 ${W} ${height}" font-family="${FONT}">${sys.body}</svg>`;
   // No clock in the picture: the footer line carries the update time, and a picture that only changes with the numbers is uploaded far less often.
   let body = text('USAGE', PAD, y + 18, 17, MUTED, ' letter-spacing="4"');
   if (resumeW) body += text('RESETS', W - PAD, y + 18, 14, MUTED, ' letter-spacing="2" text-anchor="end"');
@@ -55,19 +58,63 @@ export function usageSvg(accounts: AccountUsage[]): string {
     });
     y += ROW_H;
   }
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${height}" viewBox="0 0 ${W} ${height}" font-family="${FONT}">${body}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${height}" viewBox="0 0 ${W} ${height}" font-family="${FONT}">${body}${sys.body}</svg>`;
+}
+
+const TILE_H = 74, MACHINE_H = 34;
+const num = (s: string | undefined, re: RegExp) => { const m = s?.match(re); return m ? m.slice(1).map(Number) : undefined; };
+/**
+ * The System box under the usage rows, drawn the same way: counts of Consort's database sets, worktrees and running
+ * containers as large numbers, then CPU, memory and disk as bars, then the machine. Nothing when the text has no System section.
+ */
+function systemBody(system: Record<string, string>, top: number): { body: string; height: number } {
+  if (!Object.keys(system).length) return { body: '', height: 0 };
+  let y = top, body = top ? `<line x1="${PAD}" y1="${y + 8}" x2="${W - PAD}" y2="${y + 8}" stroke="${TRACK}" stroke-width="2"/>` : '';
+  y += top ? 16 : 0;
+  body += text('SYSTEM', PAD, y + PAD + 18, 17, MUTED, ' letter-spacing="4"');
+  y += PAD + HEAD_H;
+  const tiles = [
+    { label: 'DATABASES', value: num(system.Databases, /^(\d+)/)?.[0], note: system.Databases?.match(/(\d+ in use)/)?.[1] },
+    { label: 'WORKTREES', value: num(system.Worktrees, /^(\d+)/)?.[0] },
+    { label: 'CONTAINERS', value: num(system.Containers, /^(\d+)/)?.[0] },
+  ].filter((t) => t.value !== undefined);
+  const tileW = (W - 2 * PAD) / Math.max(1, tiles.length);
+  tiles.forEach((t, i) => {
+    const x = PAD + i * tileW;
+    body += text(String(t.value), x, y + 34, 36, t.value ? INK : MUTED, ' font-weight="700"');
+    if (t.note) body += text(t.note, x + 26 * String(t.value).length, y + 34, 15, MUTED);
+    body += text(t.label, x, y + 58, 13, MUTED, ' letter-spacing="2"');
+  });
+  if (tiles.length) y += TILE_H;
+  const cpu = num(system.CPU, /^(\d+)%/), mem = num(system.Memory, /^(\d+) of (\d+) GB/), disk = num(system.Disk, /^(\d+) GB free of (\d+) GB/);
+  const bars = [
+    ...(cpu ? [{ label: 'cpu', value: `${cpu[0]}%`, pct: cpu[0]! }] : []),
+    ...(mem && mem[1] ? [{ label: 'memory', value: `${mem[0]}/${mem[1]} GB`, pct: (100 * mem[0]!) / mem[1] }] : []),
+    ...(disk && disk[1] ? [{ label: 'disk', value: `${disk[0]} GB free`, pct: 100 - (100 * disk[0]!) / disk[1] }] : []),
+  ];
+  const groupW = (W - 2 * PAD - (Math.max(1, bars.length) - 1) * GROUP_GAP) / Math.max(1, bars.length);
+  bars.forEach((b, i) => {
+    const x = PAD + i * (groupW + GROUP_GAP), pct = Math.max(0, Math.min(100, b.pct)), color = usageColor(pct);
+    body += text(b.label, x, y + 26, 14, MUTED) + text(b.value, x + groupW, y + 26, 17, color, ' text-anchor="end" font-weight="700"');
+    body += `<rect x="${x}" y="${y + 35}" width="${groupW.toFixed(1)}" height="7" rx="3.5" fill="${TRACK}"/>`;
+    if (pct > 0) body += `<rect x="${x}" y="${y + 35}" width="${Math.max(7, (groupW * pct) / 100).toFixed(1)}" height="7" rx="3.5" fill="${color}"/>`;
+  });
+  if (bars.length) y += ROW_H;
+  if (system.Machine) { body += text(clip(system.Machine, 70), PAD, y + 22, 14, MUTED); y += MACHINE_H; }
+  return { body, height: y - top + 8 };
 }
 
 /** Plain words for the image's alt text. */
-export function usageAlt(accounts: AccountUsage[]): string {
-  return 'AI usage: ' + accounts.map((a) => `${a.name} ${a.blocked ? `blocked, ${a.detail}` : a.windows.length ? a.windows.map((w) => `${short(w.label)} ${w.percent}%`).join(', ') : 'no reading'}`).join('; ');
+export function usageAlt(accounts: AccountUsage[], system: Record<string, string> = {}): string {
+  const sys = Object.keys(system).length ? ` System: ${Object.entries(system).map(([k, v]) => `${k} ${v}`).join('; ')}` : '';
+  return (accounts.length ? 'AI usage: ' : '') + accounts.map((a) => `${a.name} ${a.blocked ? `blocked, ${a.detail}` : a.windows.length ? a.windows.map((w) => `${short(w.label)} ${w.percent}%`).join(', ') : 'no reading'}`).join('; ') + sys;
 }
 
-/** The panel for a master monitor text, or undefined when it lists no accounts. */
+/** The panel for a master monitor text, or undefined when it lists no accounts and no System section. */
 export function usageGraphic(safe: string): { svg: string; alt: string } | undefined {
-  const accounts = monitorAccounts(safe);
-  if (!accounts.length) return undefined;
-  return { svg: usageSvg(accounts), alt: usageAlt(accounts) };
+  const accounts = monitorAccounts(safe), system = monitorSystem(safe);
+  if (!accounts.length && !Object.keys(system).length) return undefined;
+  return { svg: usageSvg(accounts, system), alt: usageAlt(accounts, system) };
 }
 
 /** PNG at 1x of the SVG's size; the native rasterizer loads only here, so the rest of the CLI never needs it. */

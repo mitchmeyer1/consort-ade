@@ -14,7 +14,7 @@ function fixture(over={}) {
   const state={accounts:[],jobs:[],tasks:[task()],slack:{botToken:'secret',userId:'owner',channel:'C123'},...over};
   const calls=[];let existing,failPost,failUpdate,failLink;
   const slack={retireFiles:async ids=>{calls.push(['retire',ids]);},setUsageFile:u=>{calls.push(['usage-in',u]);},getUsageFile:()=>({file:'SHOWN',key:'k'}),pinMonitor:async ts=>{calls.push(['pin',ts]);},removeDuplicateMonitors:async keep=>{calls.push(['cleanup',keep]);},channel:async()=>state.slack.channel,findMonitor:async()=>{calls.push(['find']);return existing;},permalink:async ts=>{calls.push(['link',ts]);if(failLink)throw failLink;return `https://example.slack.com/archives/C123/p${ts.replace('.','')}`;},postMonitor:async text=>{calls.push(['post',text]);if(failPost)throw failPost;return 'monitor-ts';},updateMonitor:async(ts,text)=>{calls.push(['update',ts,text]);if(failUpdate){const err=failUpdate;failUpdate=undefined;throw err;}}};
-  const mocks={'./slackMonitorAuthors':{monitorAuthors:async()=>new Map()},'../shared/slackMonitor.ts':monitor,'../shared/headless.ts':headless,'./state':{loadState:()=>state,mutateState:fn=>fn(state)},'./slack':{Slack:class{}},'./daemonctl':{alive:()=>true},'./usage':{cachedUsage:()=>new Map()}};
+  const mocks={'./slackMonitorAuthors':{monitorAuthors:async()=>new Map()},'./systemSnapshot':{systemSnapshot:()=>undefined},'../shared/slackMonitor.ts':monitor,'../shared/headless.ts':headless,'./state':{loadState:()=>state,mutateState:fn=>fn(state)},'./slack':{Slack:class{}},'./daemonctl':{alive:()=>true},'./usage':{cachedUsage:()=>new Map()}};
   const mod={exports:{}};new Function('require','module','exports',compiled)(n=>mocks[n]??require(n),mod,mod.exports);
   return {state,calls,run:(at=now)=>mod.exports.refreshSlackMonitor(at,()=>slack),existing:ts=>{existing=ts;},failLink:err=>{failLink=err;},failPost:err=>{failPost=err;},failUpdate:err=>{failUpdate=err;}};
 }
@@ -249,4 +249,11 @@ test('a task with a PR gets a PR line with only the last CI verdict',()=>{
   assert.equal(line({activity:'need one approval. Your action: please nudge @ada to review the PR.',prCheck:{ci:'pending',theirs:true,at:now}}),'   PR: CI running');
   assert.equal(line({}),undefined,'no PR read yet: no line');
   assert.equal(line({feature:{stage:'Implementing',prs:[]}}),undefined,'no PR, no line');
+});
+
+test('the monitor ends its account list with a System section when given the machine numbers', () => {
+  const sys = { databases: 2, databasesInUse: 0, worktrees: 5, cpu: 80, memoryUsed: 37, memoryTotal: 48, machine: 'Apple M5 Pro · 15 cores' };
+  const text = slackMasterMonitor({ tasks: [], jobs: [], accounts: [] }, new Map(), now, () => true, new Map(), new Map(), sys);
+  assert.match(text, /\*System\*\nDatabases: 2 sets · 0 in use\nWorktrees: 5\nCPU: 80%\nMemory: 37 of 48 GB\nMachine: Apple M5 Pro · 15 cores\n\n/);
+  assert.ok(!slackMasterMonitor({ tasks: [], jobs: [], accounts: [] }, new Map(), now, () => true).includes('*System*'));
 });

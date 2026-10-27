@@ -81,3 +81,23 @@ test('with an uploaded panel the blocks show it full width in place of the chart
   const chart = monitorBlockKit(text, 1700000000000);
   assert.ok(chart.some(b => b.type === 'data_visualization')); assert.match(JSON.stringify(chart), /\*Claude 4\* blocked: weekly limit reached/);
 });
+
+test('a System section draws a System box under the usage rows, and alone when there are no accounts', async () => {
+  const { systemLines } = await import('../src/shared/slackMonitor.ts');
+  const { monitorSystem } = await import('../src/cli/slackMonitorBlocks.ts');
+  const lines = systemLines({ databases: 2, databasesInUse: 1, worktrees: 5, containers: 9, cpu: 35, memoryUsed: 20, memoryTotal: 48, diskFree: 480, diskTotal: 926, machine: 'Apple M5 Pro · 15 cores · macOS 26.4.1' });
+  const withSystem = text.replace('\n\nOpen a ticket', `\n\n*System*\n${lines.join('\n')}\n\nOpen a ticket`);
+  assert.deepEqual(monitorSystem(withSystem), { Databases: '2 sets · 1 in use', Worktrees: '5', Containers: '9 running', CPU: '35%', Memory: '20 of 48 GB', Disk: '480 GB free of 926 GB', Machine: 'Apple M5 Pro · 15 cores · macOS 26.4.1' });
+  assert.equal(monitorAccounts(withSystem).length, 6, 'the System lines are not accounts');
+  const g = usageGraphic(withSystem), plain = usageGraphic(text);
+  for (const s of ['SYSTEM', 'DATABASES', 'WORKTREES', 'CONTAINERS', '1 in use', '35%', '20/48 GB', '480 GB free', 'Apple M5 Pro']) assert.ok(g.svg.includes(s), s);
+  assert.ok(Number(g.svg.match(/height="(\d+)"/)[1]) > Number(plain.svg.match(/height="(\d+)"/)[1]));
+  assert.match(g.alt, /System: Databases 2 sets · 1 in use; Worktrees 5/);
+  assert.ok(!plain.svg.includes('SYSTEM'));
+  const alone = usageGraphic(withSystem.replace(/\*Accounts\*\n[\s\S]*?\n\n/, ''));
+  assert.ok(alone.svg.includes('SYSTEM') && !alone.svg.includes('USAGE'));
+  const png = await usagePng(g.svg); assert.equal(png.subarray(1, 4).toString(), 'PNG');
+  const blocks = monitorBlockKit(withSystem, 0);
+  assert.ok(blocks.some(b => b.type === 'context' && /\*System\*.*Worktrees 5/.test(JSON.stringify(b))), 'without the picture, one line carries the System numbers');
+  assert.ok(!monitorBlockKit(withSystem, 0, { fileId: 'F1', alt: 'x' }).some(b => /\*System\*/.test(JSON.stringify(b))), 'the picture carries them when uploaded');
+});
