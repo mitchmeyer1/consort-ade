@@ -42,11 +42,11 @@ export function usageSvg(accounts: AccountUsage[], system: Record<string, string
 }
 
 /** The usage rows in a column `width` wide from the left edge; narrower columns when the System box shares the picture. */
-function usageBody(accounts: AccountUsage[], width: number, narrow: boolean): { body: string; height: number } {
+function usageBody(accounts: AccountUsage[], width: number, narrow: boolean, size = { nameW: NAME_W, resumeW: RESUME_W, gap: GROUP_GAP }): { body: string; height: number } {
   if (narrow) return stackedUsage(accounts, width);
   const columns = Math.min(4, Math.max(1, ...accounts.map((a) => a.windows.length)));
-  const resumeW = accounts.some((a) => a.blocked || a.resets) ? RESUME_W : 0, right = width - PAD;
-  const barsX = PAD + NAME_W, barsW = right - barsX - resumeW, groupW = (barsW - (columns - 1) * GROUP_GAP) / columns;
+  const resumeW = accounts.some((a) => a.blocked || a.resets) ? size.resumeW : 0, right = width - PAD;
+  const barsX = PAD + size.nameW, barsW = right - barsX - resumeW, groupW = (barsW - (columns - 1) * size.gap) / columns;
   let y = PAD;
   // No clock in the picture: the footer line carries the update time, and a picture that only changes with the numbers is uploaded far less often.
   let body = text('USAGE', PAD, y + 18, 17, MUTED, ' letter-spacing="4"');
@@ -60,7 +60,7 @@ function usageBody(accounts: AccountUsage[], width: number, narrow: boolean): { 
     else if (a.blocked) body += text('unknown', right, y + 36, 14, tone, ' text-anchor="end"');
     if (a.blocked && !a.windows.length) body += text(clip(`blocked · ${a.detail.replace(/ · resume.*$/, '')}`, 48), barsX, y + 35, 14, usageColor(100));
     else if (!a.windows.length) body += text(clip(a.detail === 'no reading yet' ? 'no reading yet' : `no reading · ${a.detail}`, 48), barsX, y + 35, 15, MUTED);
-    else a.windows.slice(0, columns).forEach((w, i) => { body += bar(barsX + i * (groupW + GROUP_GAP), y, groupW, short(w.label), String(w.percent), w.percent); });
+    else a.windows.slice(0, columns).forEach((w, i) => { body += bar(barsX + i * (groupW + size.gap), y, groupW, short(w.label), String(w.percent), w.percent); });
     y += ROW_H;
   }
   return { body, height: y + 4 };
@@ -123,9 +123,9 @@ const num = (s: string | undefined, re: RegExp) => { const m = s?.match(re); ret
  * The System box as a column starting at `left`: counts of Consort's database sets, worktrees and running containers as
  * large numbers, then CPU, memory and disk as bars, then the machine. Drawn the way the usage rows are.
  */
-function systemBody(system: Record<string, string>, left: number): { body: string; height: number } {
-  const x0 = left || PAD, right = (left ? W : SYS_ALONE_W) - PAD, width = right - x0;
-  let y = PAD, body = text('SYSTEM', x0, y + 18, 17, MUTED, ' letter-spacing="4"');
+function systemBody(system: Record<string, string>, left: number, right = (left ? W : SYS_ALONE_W) - PAD, heading = 'SYSTEM'): { body: string; height: number } {
+  const x0 = left || PAD, width = right - x0;
+  let y = PAD, body = heading ? text(heading, x0, y + 18, 17, MUTED, ' letter-spacing="4"') : '';
   y += HEAD_H + 4;
   const counts = [
     { label: 'DB SETS', value: num(system.Databases, /^(\d+)/)?.[0], note: system.Databases?.match(/(\d+ in use)/)?.[1] },
@@ -167,7 +167,23 @@ export function usageAlt(accounts: AccountUsage[], system: Record<string, string
 export function usageGraphic(safe: string, part?: 'usage' | 'system'): { svg: string; alt: string } | undefined {
   const accounts = part === 'system' ? [] : monitorAccounts(safe), system = part === 'usage' ? {} : monitorSystem(safe);
   if (!accounts.length && !Object.keys(system).length) return undefined;
-  return { svg: usageSvg(accounts, system), alt: usageAlt(accounts, system) };
+  return { svg: part ? cardSvg(part, accounts, system) : usageSvg(accounts, system), alt: usageAlt(accounts, system) };
+}
+
+// A Slack card shows its picture cropped to 4:3, so each card picture is drawn at 4:3 with its content centred in it.
+const CARD_W = 520, CHARTS = new Set(['CPU', 'CPU30', 'Memory', 'Memory30']);
+/** The usage rows, or the System box as two columns (counts, disk and machine left; CPU and memory charts right), on a 4:3 canvas. */
+export function cardSvg(part: 'usage' | 'system', accounts: AccountUsage[], system: Record<string, string>): string {
+  let content: { body: string; height: number };
+  if (part === 'usage') content = usageBody(accounts, CARD_W, false, { nameW: 112, resumeW: 86, gap: 14 });
+  else {
+    const pick = (charts: boolean) => Object.fromEntries(Object.entries(system).filter(([k]) => CHARTS.has(k) === charts));
+    const mid = CARD_W / 2, left = systemBody(pick(false), PAD, mid - 12), right = systemBody(pick(true), mid + 12, CARD_W - PAD, '');
+    content = { body: left.body + right.body, height: Math.max(left.height, right.height) };
+  }
+  const width = Math.max(CARD_W, Math.ceil((content.height * 4) / 3)), height = Math.round((width * 3) / 4);
+  const dx = Math.round((width - CARD_W) / 2), dy = Math.round((height - content.height) / 2);
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="${FONT}"><g transform="translate(${dx} ${dy})">${content.body}</g></svg>`;
 }
 
 /** PNG at 2x of the SVG's size, so a retina screen shows it sharp; the native rasterizer loads only here, so the rest of the CLI never needs it. */

@@ -138,3 +138,13 @@ test('with public addresses, Usage and System are two carousel cards and nothing
   assert.ok(!blocks.some(b => b.type === 'image' && b.slack_file), 'no uploaded picture');
   assert.ok(!blocks.some(b => b.type === 'data_visualization' || /\*System\*/.test(JSON.stringify(b))), 'no chart or System line beside the cards');
 });
+
+test('card pictures are 4:3, as Slack crops a card picture to 4:3', async () => {
+  const { systemLines } = await import('../src/shared/slackMonitor.ts');
+  const lines = systemLines({ databases: 2, databasesInUse: 1, worktrees: 5, containers: 9, cpu: 35, memoryUsed: 20, memoryTotal: 48, diskFree: 480, diskTotal: 926, machine: 'Apple M5 Pro · 15 cores · macOS 26.4.1' });
+  const withSystem = text.replace('\n\nOpen a ticket', `\n\n*System*\n${lines.join('\n')}\n\nOpen a ticket`);
+  for (const part of ['usage', 'system']) {
+    const [, w, h] = usageGraphic(withSystem, part).svg.match(/width="(\d+)" height="(\d+)"/).map(Number);
+    assert.ok(Math.abs(w / h - 4 / 3) < 0.01, `${part} is ${w}x${h}`);
+  }
+});
