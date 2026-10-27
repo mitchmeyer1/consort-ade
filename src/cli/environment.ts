@@ -41,7 +41,7 @@ export async function cleanupEnvironment(code: string): Promise<{ containers: nu
   const ids = async (kind: "ps" | "network" | "volume", label: string) =>
     (await docker(kind === "ps" ? ["ps", "-aq", "--filter", `label=${label}`] : [kind, "ls", "-q", "--filter", `label=${label}`])).split("\n").filter(Boolean);
   for (const label of [`io.consort.run=${code}`, `com.docker.compose.project=${code}`]) {
-    const c = await ids("ps", label); if (c.length) { await docker(["rm", "-f", ...c]); out.containers += c.length; }
+    const c = await ids("ps", label); if (c.length) { await docker(["rm", "-f", "-v", ...c]); out.containers += c.length; }
   }
   for (const label of [`io.consort.run=${code}`, `com.docker.compose.project=${code}`]) {
     const n = await ids("network", label); if (n.length) { await docker(["network", "rm", ...n]); out.networks += n.length; }
