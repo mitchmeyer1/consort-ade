@@ -163,6 +163,22 @@ test('a task moved to another set has its worktree env files pointed at the new 
   rmSync(wt,{recursive:true,force:true});
 });
 
+test('a task set up before the pool kept a record: the block is read from its files, else setup runs again', async () => {
+  const wt=mkdtempSync(join(tmpdir(),'consort-wt-'));
+  const { mkdirSync } = await import('node:fs');
+  mkdirSync(join(wt,'.consort','env'),{recursive:true});
+  writeFileSync(join(wt,'.consort','env','.env.consort'),'DATABASE_URL=postgres://localhost:20210/app\nPORT=20200\n');
+  assert.deepEqual(environment.filesBlock(wt,'consort-old'),{runCode:'consort-old',portBase:20200});
+  seed();state.mutateState(s=>{s.jobs[0].maxEnvironments=4;Object.assign(s.tasks[0],{worktree:wt,envReadyAt:5,runCode:'consort-old'});});
+  const env=await environment.claimForTask({id:'t',worktree:wt});
+  assert.match(readFileSync(join(wt,'.consort','env','.env.consort'),'utf8'),new RegExp(`localhost:${Number(env.CONSORT_PORT_BASE)+10}/app`));
+  writeFileSync(join(wt,'.consort','env','.env.consort'),'nothing here\n');
+  seed();state.mutateState(s=>{s.jobs[0].maxEnvironments=4;Object.assign(s.tasks[0],{worktree:wt,envReadyAt:5,runCode:'consort-old'});});
+  await environment.claimForTask({id:'t',worktree:wt});
+  assert.equal(state.loadState().tasks[0].envReadyAt,undefined,'setup runs again');
+  rmSync(wt,{recursive:true,force:true});
+});
+
 test('machine turn and task limits apply across scanners', () => {
   seed();state.mutateState(s=>{s.capacity={maxActiveTurns:1,maxOpenTasks:2,maxEnvironments:1};s.jobs.push({id:'other',maxParallel:2});s.tasks[1].jobId='other';});
   const current=state.loadState();assert.equal(capacity.availableTaskSlots(current,current.jobs[0]),0);

@@ -4,7 +4,7 @@ import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { allocatePortBase, ENV_DIR, ENV_DOC, PORT_BLOCK, taskEnv, type TaskEnv } from "../shared/headless.ts";
+import { allocatePortBase, ENV_DIR, ENV_DOC, PORT_BLOCK, PORT_FLOOR, taskEnv, type TaskEnv } from "../shared/headless.ts";
 import { environmentLimit } from "./capacity";
 import { loadState, mutateState, processAlive, type CliState, type EnvSlot, type Task } from "./state";
 
@@ -222,11 +222,24 @@ export function retargetEnvFiles(worktree: string, from: { runCode: string; port
   return changed;
 }
 
+/** the run code and port block the worktree's .env.consort was written for, when it names them */
+export function filesBlock(worktree: string, runCode: string): { runCode: string; portBase: number } | undefined {
+  const f = join(worktree, ENV_DIR, ".env.consort");
+  if (!existsSync(f)) return undefined;
+  const ports = [...readFileSync(f, "utf8").matchAll(/(?<!\d)(\d{5})(?!\d)/g)].map((m) => Number(m[1])).filter((n) => n >= PORT_FLOOR && n < 60_000);
+  return ports.length ? { runCode, portBase: Math.floor(Math.min(...ports) / PORT_BLOCK) * PORT_BLOCK } : undefined;
+}
+
 /** claim, and when the worktree's files point at another set, retarget them; logs what moved */
 export async function claimForTask(task: Pick<Task, "id" | "worktree">, o: ClaimOptions & { log?: (line: string) => void } = {}): Promise<TaskEnv> {
   const { env, slot } = await claimEnvironment(task.id, o);
   const latest = loadState().tasks.find((t) => t.id === task.id);
-  const files = latest?.envReadyAt && latest.envFilesBase !== undefined && latest.envFilesCode ? { runCode: latest.envFilesCode, portBase: latest.envFilesBase } : undefined;
+  let files = latest?.envReadyAt && latest.envFilesBase !== undefined && latest.envFilesCode ? { runCode: latest.envFilesCode, portBase: latest.envFilesBase } : undefined;
+  // set up before the pool kept a record: read the block from the files, else set the environment up again
+  if (latest?.envReadyAt && !files) {
+    files = latest.runCode ? filesBlock(task.worktree, latest.runCode) : undefined;
+    if (!files) { mutateState((s) => { const t = s.tasks.find((x) => x.id === task.id); if (t) t.envReadyAt = undefined; }); o.log?.("environment files predate the pool and name no port block; setting the environment up again"); }
+  }
   if (files && (files.runCode !== slot.runCode || files.portBase !== slot.portBase)) {
     const n = existsSync(task.worktree) ? retargetEnvFiles(task.worktree, files, slot) : 0;
     o.log?.(`environment moved to ${slot.runCode} on ports ${slot.portBase}-${slot.portBase + PORT_BLOCK - 1} (${n} file(s) updated)`);
