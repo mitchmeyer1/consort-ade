@@ -22,8 +22,6 @@ const unlink = (s: string) => decode(s.replace(/<https?:\/\/[^|>]+\|([^>]+)>/g, 
 const link = (url: string | undefined, label: string) => (url ? `<${url}|${label}>` : label);
 const button = (label: string, url: string, id: string, primary = false): Block => ({ type: 'button', text: { type: 'plain_text', text: label, emoji: false }, url, action_id: id, ...(primary ? { style: 'primary' } : {}) });
 /** `▰▰▱▱▱`: stages done out of the total, in text that every Slack client renders. */
-/** The usage meter: ten squares, the only coloured text Slack draws. Blue to 50%, yellow to 90%, orange above; white for the rest. */
-export const meter = (percent: number) => { const filled = Math.round(Math.max(0, Math.min(100, percent)) / 10); const square = percent <= 50 ? '🟦' : percent <= 90 ? '🟨' : '🟧'; return square.repeat(filled) + '⬜'.repeat(10 - filled); };
 export const bar = (done: number, total: number) => (total > 0 && total <= 30 ? '▰'.repeat(Math.max(0, Math.min(done, total))) + '▱'.repeat(Math.max(0, total - done)) : '');
 type Cell = { type: 'raw_text'; text: string } | { type: 'rich_text'; elements: unknown[] };
 /** Slack rejects an empty cell, so a blank shows as a dash. */
@@ -101,13 +99,27 @@ function completedRow(row: Row): Cell[] {
     richCell(row.links.flatMap((l, i) => [...(i ? [{ text: '  ·  ' }] : []), { text: l.label, url: l.url }])),
   ];
 }
-function accountRow(line: string): Cell[] {
+type AccountUsage = { name: string; blocked: boolean; status: string; windows: { label: string; percent: number }[]; detail: string };
+/** One monitor account line: `🟢 Claude 1 · available · 5-hour 42% · weekly 20% · usage 3m ago`, or a blocked one with its reason and resume time. */
+function parseAccount(line: string): AccountUsage {
   const p = parts(line); const name = p[0].replace(/^\S+ /, ''); const rest = p.slice(1);
-  if (p[0].startsWith('🔴')) return [cell(name), richCell([{ text: 'Blocked', bold: true }]), cell(''), cell(rest.join(' · ').replace(/^blocked: /, ''))];
-  const percents = rest.flatMap(r => [...r.matchAll(/(\d+)%/g)].map(m => Number(m[1])));
-  const peak = percents.length ? Math.max(...percents) : undefined;
-  if (peak === undefined) return [cell(name), cell('Unavailable'), cell(''), cell(rest.filter(r => r !== 'usage unavailable').join(' · ') || 'no reading yet')];
-  return [cell(name), cell(peak <= 50 ? 'Available' : peak <= 90 ? 'Busy' : 'Nearly full'), cell(`${meter(peak)}  ${peak}%`), cell(rest.filter(r => r !== 'available').join(' · '))];
+  const windows = rest.flatMap((r) => { const m = r.match(/^(.+?) (\d+)%$/); return m ? [{ label: m[1]!, percent: Number(m[2]) }] : []; });
+  const peak = windows.length ? Math.max(...windows.map((w) => w.percent)) : undefined;
+  if (p[0].startsWith('🔴')) return { name, blocked: true, status: 'Blocked', windows, detail: rest.join(' · ').replace(/^blocked: /, '') };
+  if (peak === undefined) return { name, blocked: false, status: 'Unavailable', windows, detail: rest.filter((r) => r !== 'usage unavailable').join(' · ') || 'no reading yet' };
+  return { name, blocked: false, status: peak <= 50 ? 'Available' : peak <= 90 ? 'Busy' : 'Nearly full', windows, detail: rest.filter((r) => r !== 'available').join(' · ') };
+}
+const accountRow = (a: AccountUsage): Cell[] => [cell(a.name), richCell([{ text: a.status, bold: a.blocked }]), cell(a.detail)];
+/** The usage chart: Slack's own bar chart, one bar per window per account, in percent of the limit. Blocked accounts read as full. */
+const USAGE_WINDOWS = [['5-hour', '5-hour'], ['weekly', 'Weekly']] as const;
+function usageChart(accounts: AccountUsage[], now: number): Block | undefined {
+  const charted = accounts.filter((a) => a.blocked || a.windows.length).slice(0, 20);
+  if (!charted.length) return undefined;
+  const value = (a: AccountUsage, key: string) => a.blocked ? 100 : Math.max(0, Math.min(100, a.windows.find((w) => w.label.toLowerCase() === key)?.percent ?? 0));
+  return {
+    type: 'data_visualization', block_id: `usage-chart-${now}`, title: 'AI usage, % of each limit',
+    chart: { type: 'bar', series: USAGE_WINDOWS.map(([key, name]) => ({ name, data: charted.map((a) => ({ label: a.name.slice(0, 20), value: value(a, key) })) })), axis_config: { categories: charted.map((a) => a.name.slice(0, 20)), y_label: '% used' } },
+  };
 }
 
 /** Blocks for a master monitor text; undefined for anything else (guard notices, legacy posts, tests). */
@@ -155,8 +167,12 @@ export function monitorBlockKit(safe: string, now = Date.now()): Block[] | undef
   blocks.push(divider());
   if (completed.length) blocks.push(container(`completed-${now}`, 'Completed', { type: 'plain_text', text: `most recent ${completed.length}` },
     [table(`completed-table-${now}`, ['Task', 'Author', 'Cost', 'Finished', 'Links'], completed.map(completedRow), [{ is_wrapped: true }, {}, { align: 'right' }, {}, {}]), ...completedNotes.map(n => context(`_${n}_`))], { collapsed: true }));
-  if (accounts.length) blocks.push(container(`capacity-${now}`, 'AI capacity', undefined,
-    [table(`capacity-table-${now}`, ['Account', 'Status', 'Usage', 'Detail'], accounts.map(accountRow), [{}, {}, {}, { is_wrapped: true }])]));
+  // The chart cannot live inside a container, so it stands above the capacity table.
+  const usage = accounts.map(parseAccount);
+  const chart = usageChart(usage, now);
+  if (chart) blocks.push(chart);
+  if (usage.length) blocks.push(container(`capacity-${now}`, 'AI capacity', undefined,
+    [table(`capacity-table-${now}`, ['Account', 'Status', 'Detail'], usage.map(accountRow), [{}, {}, { is_wrapped: true }])]));
   if (!blocks.some(b => b.type === 'card') && blocks.filter(b => b.type === 'container').length === 1) blocks.push(context('_Nothing open and nothing finished yet._'));
   blocks.push(context(`Updated ${stamp}  ·  Reply in a task’s thread. This message updates in place.`));
   // Too many open tasks for Slack's block limit: the later groups fall back to packed text rows, one section per few tasks.
