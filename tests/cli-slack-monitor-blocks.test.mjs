@@ -37,7 +37,7 @@ Open a ticket title to reply in its Slack thread. This monitor updates in place;
 STATUS: MONITORING`;
 const NOW=1700000000000;
 const texts=blocks=>JSON.stringify(blocks);
-const cards=blocks=>blocks.filter(b=>b.type==='card');
+const cards=blocks=>blocks.flatMap(b=>b.type==='carousel'?b.elements:b.type==='card'?[b]:[]);
 test('monitor opens with the centered banner, then groups in the order the owner acts, and ends with the update time',()=>{
  const blocks=monitorBlockKit(text,NOW);
  assert.deepEqual(blocks[0],{type:'image',block_id:`head-${NOW}`,image_url:'https://raw.githubusercontent.com/mitchmeyer1/consort-ade/main/build/consort-banner-slack.png',alt_text:'Consort'});
@@ -124,7 +124,7 @@ test('Slack receives the blocks on the same root and falls back to text sections
  const calls=[];
  const slack=new Slack({botToken:'blocks-test',channel:'C1',userId:'owner'},async(url,init)=>{
   const method=String(url).split('/').at(-1),body=Object.fromEntries(new URLSearchParams(init.body));calls.push({method,body});
-  if(method==='chat.update'&&JSON.parse(body.blocks).some(b=>b.type==='card')&&calls.filter(c=>c.method==='chat.update').length===1)return Response.json({ok:false,error:'invalid_blocks',response_metadata:{messages:['[ERROR] bad']}});
+  if(method==='chat.update'&&JSON.parse(body.blocks).some(b=>b.type==='card'||b.type==='carousel')&&calls.filter(c=>c.method==='chat.update').length===1)return Response.json({ok:false,error:'invalid_blocks',response_metadata:{messages:['[ERROR] bad']}});
   return Response.json({ok:true,ts:'same'});
  },s=>s.replaceAll('Curation','MASKED'));
  await slack.postMonitor(text);
@@ -144,4 +144,14 @@ test('a task card with a PR shows its CI verdict and whose turn it is, after the
  const ready=cards(monitorBlockKit(withPr,NOW)).find(c=>c.title.text==='Ship it');
  assert.match(ready.subtext.text,/🔴 CI failing   ·   ⏳ Consort’s turn/);
  assert.ok(!cards(monitorBlockKit(text,NOW)).some(c=>/CI |turn/.test(c.subtext?.text??'')),'no PR line, no labels');
+});
+
+test('a group with two or more cards scrolls sideways in carousels of up to ten; a lone card stands alone',()=>{
+ const blocks=monitorBlockKit(text,NOW);
+ const carousels=blocks.filter(b=>b.type==='carousel');
+ assert.ok(carousels.length>=1);assert.ok(carousels.every(c=>c.elements.length>=2&&c.elements.every(e=>e.type==='card')));
+ assert.ok(blocks.some(b=>b.type==='card'&&b.title.text==='Ship it'),'the one ready card is not wrapped');
+ const many=text.replace('*Ready to merge · your action*\n',`*Ready to merge · your action*\n${Array.from({length:12},(_,i)=>`📦 Review · <https://slack.example/r${i}|Ready ${i}> · author: <https://github.com/p|@p> · READY TO MERGE · Approve 5/5 · $1 · ready 1m ago\n   <https://github.com/a/b/pull/${i}|merge PR>\n`).join('')}`);
+ const ready=monitorBlockKit(many,NOW).filter(b=>b.type==='carousel'&&b.block_id.startsWith('ready-'));
+ assert.deepEqual(ready.map(c=>c.elements.length),[10,3]);
 });

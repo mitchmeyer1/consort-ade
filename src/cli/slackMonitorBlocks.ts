@@ -201,14 +201,16 @@ export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageIma
   for (const group of [groups.reply, groups.nudge, groups.ready, groups.working]) {
     if (!group.rows.length && !group.notes.length) continue;
     const cards = group.rows.map(r => card(r, group, index++));
-    groupBlocks.set(group.key, cards);
-    blocks.push(divider(), section(`*${group.heading}*   ·   ${group.rows.length}`), ...cards);
+    // Two or more cards scroll sideways in a carousel (at most ten cards each), so a busy group does not make the post tall.
+    const shown = cards.length > 1 ? Array.from({ length: Math.ceil(cards.length / 10) }, (_, i): Block => ({ type: 'carousel', block_id: `${group.key}-carousel-${i}`, elements: cards.slice(i * 10, i * 10 + 10) })) : cards;
+    groupBlocks.set(group.key, shown);
+    blocks.push(divider(), section(`*${group.heading}*   ·   ${group.rows.length}`), ...shown);
     for (const note of group.notes) blocks.push(context(`_${note}_`));
   }
   blocks.push(divider());
   if (completed.length) blocks.push(container(`completed-${now}`, 'Completed', { type: 'plain_text', text: `most recent ${completed.length}` },
     [table(`completed-table-${now}`, ['Task', 'Author', 'Cost', 'Finished', 'Links'], completed.map(completedRow), [{ is_wrapped: true }, {}, { align: 'right' }, {}, {}]), ...completedNotes.map(n => context(`_${n}_`))], { collapsed: true }));
-  if (!blocks.some(b => b.type === 'card' || b.type === 'container')) blocks.push(context('_Nothing open and nothing finished yet._'));
+  if (!blocks.some(b => b.type === 'card' || b.type === 'carousel' || b.type === 'container')) blocks.push(context('_Nothing open and nothing finished yet._'));
   const parsed = accounts.map(parseAccount);
   // The rendered panel says everything the chart and notes would; without one, Slack's own chart stands in.
   const chart = usage ? undefined : usageChart(parsed, now);
