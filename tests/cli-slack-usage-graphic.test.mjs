@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { usageGraphic, usageSvg, usageAlt, usageColor, usagePng } from '../src/cli/slackUsageGraphic.ts';
+import { usageGraphic, usageSvg, usageAlt, usageColor, usagePng, resumeAt } from '../src/cli/slackUsageGraphic.ts';
 import { monitorAccounts, monitorBlockKit } from '../src/cli/slackMonitorBlocks.ts';
 const text = `*📊 Consort master monitor*
 Updated 2026-10-27 16:45 UTC
@@ -34,24 +34,27 @@ test('accounts parse out of the monitor text with every window', () => {
   assert.deepEqual(monitorAccounts('Content withheld by guard'), []);
 });
 
-test('a blocked account with readings keeps every bar and puts its reason and resume time on a line under them', () => {
+test('a blocked account with readings keeps every bar and shows its resume time in a far-right column', () => {
   const [a] = monitorAccounts(text.replace('🔴 Claude 4 · blocked: weekly limit reached · resume after Oct 28, 2:30 PM EDT', '🔴 Claude 4 · blocked: weekly limit reached · resume after Oct 28, 2:30 PM EDT · 5-hour 12% · Weekly 100% · Weekly · Fable 40%')).filter(x => x.name === 'Claude 4');
   assert.deepEqual([a.blocked, a.detail, a.windows.map(w => w.percent)], [true, 'weekly limit reached · resume after Oct 28, 2:30 PM EDT', [12, 100, 40]]);
   const svg = usageSvg([a]), plain = usageSvg([{ ...a, blocked: false }]);
   assert.equal((svg.match(/<rect [^>]*fill="#33363b"/g) ?? []).length, 3, 'all three bars');
-  const note = svg.match(/y="(\d+)"[^>]*>blocked · weekly limit reached · resume after Oct 28, 2:30 PM EDT</);
-  assert.ok(note && Number(note[1]) > Number(svg.match(/<rect x="[\d.]+" y="(\d+)"/)[1]), 'the note sits under the bars');
-  assert.ok(Number(svg.match(/height="(\d+)"/)[1]) > Number(plain.match(/height="(\d+)"/)[1]), 'the row grows for the note');
+  assert.match(svg, />RESUMES</); assert.match(svg, /x="776"[^>]*>Oct 28</); assert.match(svg, /x="776"[^>]*>2:30 PM</);
+  assert.doesNotMatch(svg, /limit reached/, 'the reason stays in the alt text');
+  assert.equal(svg.match(/height="(\d+)"/)[1], plain.match(/height="(\d+)"/)[1], 'no extra line');
+  assert.doesNotMatch(plain, /RESUMES/, 'the column only appears when something is blocked');
+  assert.deepEqual(resumeAt('x · resume time unavailable'), undefined);
 });
 
-test('the panel draws provider groups, a row per account, a coloured bar per window, and blocked or unread rows as words', () => {
+test('the panel draws a row per account with no provider headings, a coloured bar per window, and unread rows as words', () => {
   const svg = usageSvg(monitorAccounts(text));
   assert.match(svg, /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="800" height="\d+"/);
-  for (const s of ['>USAGE<', '>CLAUDE<', '>CODEX<', '>Claude 1<', '>Codex 2<', '>5h<', '>wk<', '>fable<']) assert.ok(svg.includes(s), s);
+  for (const s of ['>USAGE<', '>Claude 1<', '>Codex 2<', '>5h<', '>wk<', '>fable<', '>Oct 28<']) assert.ok(svg.includes(s), s);
+  assert.doesNotMatch(svg, />CLAUDE<|>CODEX</);
   assert.doesNotMatch(svg, /ago/, 'no clock in the picture, so it only changes with the numbers');
   assert.match(svg, /fill="#e9c46a"[^>]*>77</); assert.match(svg, /fill="#f3ead6"[^>]*>49</); assert.match(svg, /fill="#f08a66"[^>]*>91</);
   assert.equal(usageColor(50), '#f3ead6'); assert.equal(usageColor(51), '#e9c46a'); assert.equal(usageColor(90), '#e9c46a'); assert.equal(usageColor(91), '#f08a66');
-  assert.match(svg, />blocked · weekly limit reached · resume after Oct 28, 2:30 PM EDT</); assert.match(svg, />no reading yet</);
+  assert.match(svg, />blocked · weekly limit reached</); assert.match(svg, />no reading yet</);
   assert.equal((svg.match(/<rect [^>]*fill="#33363b"/g) ?? []).length, 11, 'one track per window drawn');
   assert.match(svg, /<rect x="[\d.]+" y="\d+" width="[\d.]+" height="7" rx="3.5" fill="#e9c46a"\/>/);
   assert.match(usageAlt(monitorAccounts(text)), /^AI usage: Claude 1 5h 77%, wk 30%, fable 37%; .*Claude 4 blocked, weekly limit reached.*Codex 2 no reading$/);

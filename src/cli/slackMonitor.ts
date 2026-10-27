@@ -42,7 +42,7 @@ async function refresh(now:number, slackFor:(cfg:SlackConfig)=>Slack):Promise<vo
       mutateState(s=>{ if(!s.slackMonitor) return; const l=s.slackMonitor as typeof legacy; delete l.imageFiles; delete l.usageFile; if(usage) s.slackMonitor.usage=usage; });
       monitor=loadState().slackMonitor!;
     }
-    slack.setUsageFile?.(monitor.usage);
+    slack.setUsageFile?.(monitor.usage); slack.setHeadFile?.(monitor.head);
     if(!monitor.ts) {
       const existing=await slack.findMonitor(MASTER_MONITOR_HEADING);
       if(existing) mutateState(s=>{if(s.slackMonitor?.lease?.id===lease) Object.assign(s.slackMonitor,{ts:existing,creating:undefined});});
@@ -87,7 +87,7 @@ async function refresh(now:number, slackFor:(cfg:SlackConfig)=>Slack):Promise<vo
         throw error;
       }
     }
-    mutateState(s=>{if(s.slackMonitor?.lease?.id===lease) Object.assign(s.slackMonitor,{ts,key,creating:undefined,usage:slack.getUsageFile?.()});});
+    mutateState(s=>{if(s.slackMonitor?.lease?.id===lease) Object.assign(s.slackMonitor,{ts,key,creating:undefined,usage:slack.getUsageFile?.(),head:slack.getHeadFile?.()});});
     const identity=`${channel}:${ts}`;
     if(!reconciled.has(identity)) { await slack.removeDuplicateMonitors(ts!,MASTER_MONITOR_HEADING); reconciled.add(identity); }
     await pinMonitor(slack,channel,ts!);

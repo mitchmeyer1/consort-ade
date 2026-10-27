@@ -6,8 +6,11 @@ import { redactPii } from "../shared/redact.ts";
 import type { SlackFile } from "./ownerUpdates";
 import { slackGate } from "./phiGate.ts";
 import { monitorBlockKit, type UsageImage } from "./slackMonitorBlocks.ts";
-/** the usage panel's file ids and picture hash, as state saves them */
+/** a rendered picture's file ids and picture hash, as state saves them */
 export type UsageFiles = { file?: string; key?: string; stale?: string };
+/** The monitor's two uploaded pictures: the AI usage panel and the header with the group counts. */
+type ImageSlot = "usage" | "head";
+type ShownImage = UsageImage & { key: string; reused: boolean };
 
 export type SlackThreadMessage = { ts: string; user?: string; text?: string; bot_id?: string; files?: SlackFile[] };
 
@@ -22,7 +25,7 @@ export type SlackThreadMessage = { ts: string; user?: string; text?: string; bot
  * documents the owner attaches to an update), files:write (the PR article in a review thread). No users:read or
  * incoming-webhook. The list the setup wizard shows is SLACK_SCOPES in setup.ts.
  */
-/** Bots whose token lacks files:write: the usage panel upload is not tried again this process. */
+/** Bots whose token lacks files:write: picture uploads are not tried again this process. */
 const usageUploadsDisabled = new Set<string>();
 export class Slack {
   private cfg: SlackConfig;
@@ -104,9 +107,12 @@ export class Slack {
    * again; `stale` was shown before and is deleted on the next change, one generation late, so a client still
    * showing the older message never loses its image. State keeps the triple across restarts (cli/slackMonitor.ts).
    */
-  private usage: UsageFiles = {};
-  setUsageFile(saved: UsageFiles | undefined): void { this.usage = { ...(saved ?? {}) }; }
-  getUsageFile(): UsageFiles { return { ...this.usage }; }
+  private files: Record<ImageSlot, UsageFiles> = { usage: {}, head: {} };
+  setUsageFile(saved: UsageFiles | undefined): void { this.files.usage = { ...(saved ?? {}) }; }
+  getUsageFile(): UsageFiles { return { ...this.files.usage }; }
+  /** The header picture's files, kept the same way as the usage panel's. */
+  setHeadFile(saved: UsageFiles | undefined): void { this.files.head = { ...(saved ?? {}) }; }
+  getHeadFile(): UsageFiles { return { ...this.files.head }; }
 
   /** Delete files this bot uploaded and no longer shows; a failure is left for next time. */
   async retireFiles(ids: string[]): Promise<void> {
@@ -124,25 +130,25 @@ export class Slack {
   }
 
   /**
-   * The usage panel (cli/slackUsageGraphic.ts): the file already shown when the picture is unchanged, else rendered,
-   * uploaded and given a moment to settle, as Slack rejects an edit that shows a file it is still processing.
-   * Undefined when there is no panel or it cannot be uploaded.
+   * A rendered picture, the usage panel (cli/slackUsageGraphic.ts) or the header (cli/slackHeadGraphic.ts): the file
+   * already shown when the picture is unchanged, else rendered, uploaded and given a moment to settle, as Slack
+   * rejects an edit that shows a file it is still processing. Undefined when there is none or it cannot be uploaded.
    */
-  private async usageImage(safe: string): Promise<(UsageImage & { key: string; reused: boolean }) | undefined> {
+  private async renderedImage(slot: ImageSlot, safe: string): Promise<ShownImage | undefined> {
     const token = createHash("sha256").update(this.cfg.botToken).digest("hex");
     if (usageUploadsDisabled.has(token)) return undefined;
     try {
       const { usageGraphic, usagePng } = await import("./slackUsageGraphic.ts");
-      const graphic = usageGraphic(safe);
+      const graphic = slot === "usage" ? usageGraphic(safe) : (await import("./slackHeadGraphic.ts")).headGraphic(safe);
       if (!graphic) return undefined;
-      const key = createHash("sha256").update(graphic.svg).digest("hex");
-      if (this.usage.file && this.usage.key === key) return { fileId: this.usage.file, alt: graphic.alt, key, reused: true };
-      const fileId = await this.uploadImage(await usagePng(graphic.svg), "consort-usage.png", "AI usage");
+      const key = createHash("sha256").update(graphic.svg).digest("hex"), files = this.files[slot];
+      if (files.file && files.key === key) return { fileId: files.file, alt: graphic.alt, key, reused: true };
+      const fileId = await this.uploadImage(await usagePng(graphic.svg), `consort-${slot}.png`, slot === "usage" ? "AI usage" : "Consort");
       await this.retryDelay(1500);
       return { fileId, alt: graphic.alt, key, reused: false };
     } catch (error) {
       if (/missing_scope/.test(String(error))) usageUploadsDisabled.add(token);
-      console.error(`Slack usage panel: ${String(error)}; showing the chart instead.`);
+      console.error(`Slack ${slot === "usage" ? "usage panel" : "header"}: ${String(error)}; showing the ${slot === "usage" ? "chart" : "banner"} instead.`);
       return undefined;
     }
   }
@@ -156,9 +162,10 @@ export class Slack {
   private async sendMonitor(method: string, body: Record<string, unknown>, text: string): Promise<any> {
     const safe = this.gate ? this.gate(text) : redactPii(text);
     const kit = monitorBlockKit(safe);
-    const usage = kit ? await this.usageImage(safe) : undefined;
+    const usage = kit ? await this.renderedImage("usage", safe) : undefined;
+    const head = kit ? await this.renderedImage("head", safe) : undefined;
     const layouts: { blocks: unknown[]; withImage: boolean }[] = [];
-    if (kit && usage) layouts.push({ blocks: monitorBlockKit(safe, Date.now(), usage)!, withImage: true });
+    if (kit && (usage || head)) layouts.push({ blocks: monitorBlockKit(safe, Date.now(), usage, head)!, withImage: true });
     if (kit) layouts.push({ blocks: kit, withImage: false });
     layouts.push({ blocks: this.plainBlocks(safe), withImage: false });
     for (let i = 0; i < layouts.length; i++) {
@@ -166,7 +173,8 @@ export class Slack {
       for (let attempt = 0; ; attempt++) {
         try {
           const result = await this.api(method, { ...body, blocks: layout.blocks });
-          await this.settleUsageFile(layout.withImage ? usage : undefined, usage);
+          await this.settleFile("usage", layout.withImage ? usage : undefined, usage);
+          await this.settleFile("head", layout.withImage ? head : undefined, head);
           return result;
         } catch (error) {
           const messages = (error as Error & { slackMessages?: string[] }).slackMessages ?? [];
@@ -180,12 +188,12 @@ export class Slack {
   }
 
   /** After a successful send: a newly shown file becomes current, the one it replaced waits a generation, the one before that is deleted; an upload that went unshown is deleted at once. */
-  private async settleUsageFile(shown: (UsageImage & { key: string; reused: boolean }) | undefined, uploaded: (UsageImage & { reused: boolean }) | undefined): Promise<void> {
-    const retire = new Set<string>();
+  private async settleFile(slot: ImageSlot, shown: ShownImage | undefined, uploaded: ShownImage | undefined): Promise<void> {
+    const retire = new Set<string>(), files = this.files[slot];
     if (uploaded && !uploaded.reused && uploaded.fileId !== shown?.fileId) retire.add(uploaded.fileId);
     if (shown && !shown.reused) {
-      if (this.usage.stale && this.usage.stale !== shown.fileId && this.usage.stale !== this.usage.file) retire.add(this.usage.stale);
-      this.usage = { file: shown.fileId, key: shown.key, stale: this.usage.file && this.usage.file !== shown.fileId ? this.usage.file : undefined };
+      if (files.stale && files.stale !== shown.fileId && files.stale !== files.file) retire.add(files.stale);
+      this.files[slot] = { file: shown.fileId, key: shown.key, stale: files.file && files.file !== shown.fileId ? files.file : undefined };
     }
     for (const id of retire) await this.api("files.delete", { file: id }).catch(() => undefined);
   }

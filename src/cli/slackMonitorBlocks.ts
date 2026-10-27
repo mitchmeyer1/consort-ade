@@ -142,8 +142,8 @@ export function monitorAccounts(safe: string): AccountUsage[] {
 }
 /** A rendered usage panel already uploaded to Slack (cli/slackUsageGraphic.ts), shown in place of the chart. */
 export type UsageImage = { fileId: string; alt: string };
-/** Blocks for a master monitor text; undefined for anything else (guard notices, legacy posts, tests). */
-export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageImage): Block[] | undefined {
+/** The monitor text's open tasks by group, its completed rows and its account lines; undefined for any other text. */
+function parseMonitor(safe: string) {
   const lines = safe.split('\n');
   if (!lines[0].startsWith('*📊 Consort master monitor*') || !lines.includes('*Working*')) return undefined;
   const groups: Record<Group['key'], Group> = {
@@ -169,11 +169,26 @@ export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageIma
     if (!group) completed.push(row);
     else (group.key === 'working' && row.icon === '🟠' ? groups.reply : group.key === 'working' && row.icon === '👉' ? groups.nudge : group).rows.push(row);
   }
+  return { lines, groups, completed, completedNotes, accounts };
+}
+/** How many tasks sit in each open group, counting the ones a `… N more` note leaves out. Undefined for any other text. */
+export function monitorCounts(safe: string): Record<Group['key'], number> | undefined {
+  const parsed = parseMonitor(safe);
+  if (!parsed) return undefined;
+  const more = (g: Group) => g.notes.reduce((n, note) => n + Number(note.match(/^… (\d+) more/)?.[1] ?? 0), 0);
+  const { reply, nudge, ready, working } = parsed.groups;
+  return { reply: reply.rows.length, nudge: nudge.rows.length, ready: ready.rows.length + more(ready), working: working.rows.length + more(working) };
+}
+/** Blocks for a master monitor text; undefined for anything else (guard notices, legacy posts, tests). The head is the uploaded header picture when there is one, else the banner. */
+export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageImage, head?: UsageImage): Block[] | undefined {
+  const monitor = parseMonitor(safe);
+  if (!monitor) return undefined;
+  const { lines, groups, completed, completedNotes, accounts } = monitor;
   const updated = lines[1]?.match(/^Updated (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}) UTC$/);
   const stamp = updated ? `<!date^${Math.floor(Date.parse(`${updated[1]}T${updated[2]}:00Z`) / 1000)}^{date_short_pretty} {time}|${lines[1]}>` : lines[1] ?? '';
   // The head is the banner alone; each group heading carries its own count. Image blocks stay at top level:
   // Slack draws one frame around them there, and an uploaded file inside a container never renders.
-  const blocks: Block[] = [{ type: 'image', block_id: `head-${now}`, image_url: CONSORT_BANNER_URL, alt_text: 'Consort' }];
+  const blocks: Block[] = [head ? { type: 'image', block_id: `head-${now}`, slack_file: { id: head.fileId }, alt_text: head.alt.slice(0, 2000) } : { type: 'image', block_id: `head-${now}`, image_url: CONSORT_BANNER_URL, alt_text: 'Consort' }];
   let index = 0;
   const groupBlocks = new Map<Group['key'], Block[]>();
   // Empty groups are left out; the summary line still carries their counts.

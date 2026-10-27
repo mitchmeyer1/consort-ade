@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { Slack } from '../src/cli/slack.ts';
+import { headGraphic, headSvg } from '../src/cli/slackHeadGraphic.ts';
 const text = `*📊 Consort master monitor*
 Updated 2026-10-27 16:45 UTC
 
@@ -19,6 +21,7 @@ No completed tasks yet.
 🟢 Claude 1 · available · 5-hour 42% · Weekly 20% · usage 3m ago
 
 STATUS: MONITORING`;
+const headKey = t => createHash('sha256').update(headGraphic(t).svg).digest('hex');
 function fake(opts = {}) {
   const calls = []; let n = 0;
   const slack = new Slack({ botToken: `tok-${Math.random()}`, channel: 'C1', userId: 'owner' }, async (url, init) => {
@@ -33,6 +36,8 @@ function fake(opts = {}) {
     }
     return Response.json({ ok: true, ts: 'same' });
   }, s => s, async ms => { (opts.delays ??= []).push(ms); });
+  // The header is already shown unless a test asks for a fresh one, so the usage tests see only the panel's calls.
+  if (!opts.freshHead) slack.setHeadFile({ file: 'HEAD', key: headKey(text) });
   return { slack, calls, opts };
 }
 const sent = calls => calls.filter(c => c.method === 'chat.update').map(c => JSON.parse(c.body.blocks));
@@ -46,7 +51,7 @@ test('the panel is uploaded once per picture, shown as a slack_file image, reuse
   assert.equal(calls[0].body.filename, 'consort-usage.png'); assert.ok(calls[1].bytes > 1000);
   assert.deepEqual(JSON.parse(calls[2].body.files), [{ id: 'F1', title: 'AI usage' }]); assert.equal(calls[2].body.channel_id, undefined);
   const blocks = sent(calls)[0];
-  const panel = blocks.find(b => b.type === 'image' && b.slack_file);
+  const panel = blocks.find(b => b.type === 'image' && b.block_id.startsWith('usage-'));
   assert.deepEqual({ ...panel, block_id: undefined }, { type: 'image', block_id: undefined, slack_file: { id: 'F1' }, alt_text: 'AI usage: Claude 1 5h 42%, wk 20%' });
   assert.ok(!blocks.some(b => b.type === 'data_visualization'));
   assert.equal(calls[4].body.file, 'OLDER', 'the file two generations back is deleted; the one just replaced waits');
@@ -88,4 +93,21 @@ test('a monitor without accounts uploads nothing; a non-monitor text stays plain
   await slack.postMonitor('*📊 Consort master monitor*\nUpdated monitor');
   assert.ok(!calls.some(c => /^files\./.test(c.method)));
   assert.ok(JSON.parse(calls.find(c => c.method === 'chat.postMessage').body.blocks).every(b => b.type === 'section'));
+});
+
+test('the header shows a count for every open group, zeros included, and uploads again only when a count changes', async () => {
+  const { slack, calls } = fake({ freshHead: true });
+  slack.setUsageFile({ file: 'USAGE', key: 'stale-key' });
+  await slack.updateMonitor('same', text);
+  const uploads = calls.filter(c => c.method === 'files.getUploadURLExternal').map(c => c.body.filename);
+  assert.deepEqual(uploads, ['consort-usage.png', 'consort-head.png']);
+  const head = sent(calls)[0][0];
+  assert.deepEqual({ ...head, block_id: undefined }, { type: 'image', block_id: undefined, slack_file: { id: 'F2' }, alt_text: 'Consort: 0 reply, 0 nudge, 0 ready, 1 working' });
+  assert.equal(slack.getHeadFile().file, 'F2');
+  const before = calls.length;
+  await slack.updateMonitor('same', text.replace('42%', '45%'));
+  assert.deepEqual(calls.slice(before).filter(c => c.method === 'files.getUploadURLExternal').map(c => c.body.filename), ['consort-usage.png'], 'same counts: the header is reused');
+  const svg = headSvg({ reply: 0, nudge: 2, ready: 0, working: 1 });
+  for (const label of ['REPLY', 'NUDGE', 'READY', 'WORKING']) assert.ok(svg.includes(`>${label}<`), label);
+  assert.equal((svg.match(/>0</g) ?? []).length, 2, 'zeros are drawn'); assert.match(svg, /<image [^>]*href="data:image\/png;base64,/);
 });
