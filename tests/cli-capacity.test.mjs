@@ -104,6 +104,15 @@ test('a task gets its own last set back when it is free', async () => {
   assert.equal((await claim('u')).env.CONSORT_RUN,b.env.CONSORT_RUN);
 });
 
+test('a task with no set of its own takes one no other open task last used, so sets do not shuffle', async () => {
+  seed();state.mutateState(s=>{s.jobs[0].maxEnvironments=4;s.tasks.push({id:'v',jobId:'j',status:'working',feature:{stage:'Implementing'},updatedAt:1},{id:'w',jobId:'j',status:'done',feature:{stage:'Done'},updatedAt:1});});
+  const a=await claim('t');const b=await claim('w');
+  await environment.releaseEnvironment('w');await environment.releaseEnvironment('t');
+  state.mutateState(s=>{const x=s.envPool.find(x=>x.runCode===a.env.CONSORT_RUN);x.lastUsedAt=Date.now()+1000;});
+  assert.equal((await claim('v')).env.CONSORT_RUN,b.env.CONSORT_RUN,'not the open task t\'s set, even though it is warmer');
+  assert.equal((await claim('t')).env.CONSORT_RUN,a.env.CONSORT_RUN);
+});
+
 test('at the scanner limit a task waits for a set to be handed back', async () => {
   seed();state.mutateState(s=>{s.jobs[0].maxEnvironments=1;});
   await claim('t');

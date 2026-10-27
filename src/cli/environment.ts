@@ -94,8 +94,10 @@ function claimOnce(s: CliState, taskId: string, holderId: string, pid: number, n
   };
   const mine = pool.find((x) => x.holder?.id === holderId);
   if (mine) return take(mine);
-  const free = pool.filter((x) => x.repo === job.repo && !x.holder)
-    .sort((a, b) => Number(b.lastHolder === holderId) - Number(a.lastHolder === holderId) || b.lastUsedAt - a.lastUsedAt);
+  // its own last set first, then one no other open task last used (so tasks do not shuffle sets), then the warmest
+  const othersOwn = (x: EnvSlot) => !!x.lastHolder && x.lastHolder !== holderId && s.tasks.some((t) => t.id === x.lastHolder && OPEN.includes(t.status));
+  const rank = (x: EnvSlot) => (x.lastHolder === holderId ? 0 : othersOwn(x) ? 2 : 1);
+  const free = pool.filter((x) => x.repo === job.repo && !x.holder).sort((a, b) => rank(a) - rank(b) || b.lastUsedAt - a.lastUsedAt);
   if (free.length) return take(free[0]);
   const held = (pred: (t: Task) => boolean) => pool.filter((x) => { const t = x.holder && s.tasks.find((t) => t.id === x.holder!.taskId); return !!t && pred(t); }).length;
   if (held((t) => t.jobId === job.id) >= environmentLimit(job)) return { full: true };
