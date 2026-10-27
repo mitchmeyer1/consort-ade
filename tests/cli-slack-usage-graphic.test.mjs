@@ -103,3 +103,20 @@ test('a System section draws a System box to the right of the usage rows, and al
   assert.ok(blocks.some(b => b.type === 'context' && /\*System\*.*Worktrees 5/.test(JSON.stringify(b))), 'without the picture, one line carries the System numbers');
   assert.ok(!monitorBlockKit(withSystem, 0, { fileId: 'F1', alt: 'x' }).some(b => /\*System\*/.test(JSON.stringify(b))), 'the picture carries them when uploaded');
 });
+
+test('CPU and memory over the last 30 minutes draw as 15 two-minute bars, with gaps where the daemon took no reading', async () => {
+  const { historyBars, BUCKETS } = await import('../src/cli/systemSnapshot.ts');
+  const end = Date.UTC(2026, 9, 27, 20, 0), at = (min) => end - min * 60_000;
+  const samples = [{ at: at(31), cpu: 99, memory: 0 }, { at: at(29.5), cpu: 10, memory: 50 }, { at: at(29), cpu: 21, memory: 60 }, { at: at(1), cpu: 72, memory: 70 }, { at: end + 30_000, cpu: 5, memory: 5 }];
+  const cpu = historyBars(samples, end + 59_000, (s) => s.cpu);
+  assert.equal(cpu.length, BUCKETS);
+  assert.deepEqual([cpu[0], cpu[1], cpu.at(-1)], [15, null, 70], 'oldest first, averaged and rounded to 5; the unfinished span and readings older than 30 minutes are left out');
+  const { systemLines } = await import('../src/shared/slackMonitor.ts');
+  const lines = systemLines({ databases: 1, databasesInUse: 0, worktrees: 2, cpu: 70, memoryUsed: 30, memoryTotal: 48, cpuHistory: cpu, memoryHistory: historyBars(samples, end + 59_000, (s) => s.memory), machine: 'M5' });
+  assert.ok(lines.includes(`CPU30: 15 ${'- '.repeat(13)}70`));
+  const withCharts = text.replace('\n\nOpen a ticket', `\n\n*System*\n${lines.join('\n')}\n\nOpen a ticket`);
+  const g = usageGraphic(withCharts);
+  assert.ok(g.svg.includes('cpu · 30 min') && g.svg.includes('memory · 30 min'));
+  assert.ok(!/CPU30/.test(g.alt), 'the alt text keeps to the current numbers');
+  assert.ok(!monitorBlockKit(withCharts, 0).some(b => /CPU30/.test(JSON.stringify(b))), 'the text fallback leaves the series out');
+});

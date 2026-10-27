@@ -229,7 +229,7 @@ export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageIma
   if (!usage) for (const note of usageNotes(parsed)) blocks.push(context(note));
   // The rendered panel carries the System box too; without it, one line says the same.
   const system = monitorSystem(safe);
-  if (!usage && Object.keys(system).length) blocks.push(context(`*System*  ·  ${Object.entries(system).map(([k, v]) => `${k} ${v}`).join('  ·  ')}`));
+  if (!usage && Object.keys(system).length) blocks.push(context(`*System*  ·  ${Object.entries(system).filter(([k]) => !k.endsWith('30')).map(([k, v]) => `${k} ${v}`).join('  ·  ')}`));
   blocks.push(context(`Updated ${stamp}  ·  Reply in a task’s thread. This message updates in place.`));
   // Too many open tasks for Slack's block limit: the later groups fall back to packed text rows, one section per few tasks.
   for (const group of [groups.working, groups.ready, groups.nudge, groups.reply]) {

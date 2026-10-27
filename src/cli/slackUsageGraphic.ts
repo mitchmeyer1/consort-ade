@@ -78,6 +78,22 @@ function bar(x: number, y: number, width: number, label: string, value: string, 
 
 // The usage rows end at SPLIT; the System box fills the rest, after a gap holding a thin rule.
 const SPLIT = 520, SYS_GAP = 28, SYS_ALONE_W = 320, COUNT_H = 38, BAR_H = 48, LINE_H = 19;
+const CHART_H = 84, CHART_BARS_H = 36;
+/** `10 15 - 20` from the monitor text as numbers, `-` as no reading; undefined without a series. */
+const series = (s: string | undefined) => (s ? s.split(' ').map((v) => (v === '-' ? null : Number(v))) : undefined);
+/** A label and the current value over a small bar chart, one bar per two minutes, oldest on the left, each coloured by how full it is. */
+function chart(x: number, y: number, width: number, label: string, value: string, percent: number, values: (number | null)[]): string {
+  let out = text(label, x, y + 26, 14, MUTED) + text(value, x + width, y + 26, 17, usageColor(Math.max(0, Math.min(100, percent))), ' text-anchor="end" font-weight="700"');
+  const gap = 3, barW = (width - (values.length - 1) * gap) / values.length, top = y + 36, base = top + CHART_BARS_H;
+  values.forEach((v, i) => {
+    const bx = (x + i * (barW + gap)).toFixed(1);
+    out += `<rect x="${bx}" y="${top}" width="${barW.toFixed(1)}" height="${CHART_BARS_H}" rx="2" fill="${TRACK}"/>`;
+    if (v === null) return;
+    const pct = Math.max(0, Math.min(100, v)), h = Math.max(3, (CHART_BARS_H * pct) / 100);
+    out += `<rect x="${bx}" y="${(base - h).toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" rx="2" fill="${usageColor(pct)}"/>`;
+  });
+  return out;
+}
 const num = (s: string | undefined, re: RegExp) => { const m = s?.match(re); return m ? m.slice(1).map(Number) : undefined; };
 /**
  * The System box as a column starting at `left`: counts of Consort's database sets, worktrees and running containers as
@@ -101,8 +117,11 @@ function systemBody(system: Record<string, string>, left: number): { body: strin
   }
   y += 2;
   const cpu = num(system.CPU, /^(\d+)%/), mem = num(system.Memory, /^(\d+) of (\d+) GB/), disk = num(system.Disk, /^(\d+) GB free of (\d+) GB/);
-  if (cpu) { body += bar(x0, y - 14, width, 'cpu', `${cpu[0]}%`, cpu[0]!); y += BAR_H; }
-  if (mem && mem[1]) { body += bar(x0, y - 14, width, 'memory', `${mem[0]}/${mem[1]} GB`, (100 * mem[0]!) / mem[1]); y += BAR_H; }
+  const cpu30 = series(system.CPU30), mem30 = series(system.Memory30);
+  if (cpu && cpu30) { body += chart(x0, y - 14, width, 'cpu · 30 min', `${cpu[0]}%`, cpu[0]!, cpu30); y += CHART_H; }
+  else if (cpu) { body += bar(x0, y - 14, width, 'cpu', `${cpu[0]}%`, cpu[0]!); y += BAR_H; }
+  if (mem && mem[1] && mem30) { body += chart(x0, y - 14, width, 'memory · 30 min', `${mem[0]}/${mem[1]} GB`, (100 * mem[0]!) / mem[1], mem30); y += CHART_H; }
+  else if (mem && mem[1]) { body += bar(x0, y - 14, width, 'memory', `${mem[0]}/${mem[1]} GB`, (100 * mem[0]!) / mem[1]); y += BAR_H; }
   if (disk && disk[1]) { body += bar(x0, y - 14, width, 'disk', `${disk[0]} GB free`, 100 - (100 * disk[0]!) / disk[1]); y += BAR_H; }
   // The machine on up to two lines: the chip and cores, then the OS.
   const parts = (system.Machine ?? '').split(' · ').filter(Boolean), chars = Math.floor(width / 8.4);
@@ -113,7 +132,7 @@ function systemBody(system: Record<string, string>, left: number): { body: strin
 
 /** Plain words for the image's alt text. */
 export function usageAlt(accounts: AccountUsage[], system: Record<string, string> = {}): string {
-  const sys = Object.keys(system).length ? ` System: ${Object.entries(system).map(([k, v]) => `${k} ${v}`).join('; ')}` : '';
+  const sys = Object.keys(system).length ? ` System: ${Object.entries(system).filter(([k]) => !k.endsWith('30')).map(([k, v]) => `${k} ${v}`).join('; ')}` : '';
   return (accounts.length ? 'AI usage: ' : '') + accounts.map((a) => `${a.name} ${a.blocked ? `blocked, ${a.detail}` : a.windows.length ? a.windows.map((w) => `${short(w.label)} ${w.percent}%`).join(', ') : 'no reading'}`).join('; ') + sys;
 }
 

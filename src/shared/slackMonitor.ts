@@ -15,7 +15,7 @@ export function slackMonitorGroups(state: Pick<CliState,'tasks'>, now: number) {
   return {working,ready,completed};
 }
 /** The machine's numbers for the System box (cli/systemSnapshot.ts); GB and percent, already rounded. */
-export type SystemSnapshot = { databases: number; databasesInUse: number; worktrees: number; containers?: number; cpu: number; memoryUsed: number; memoryTotal: number; diskFree?: number; diskTotal?: number; machine: string };
+export type SystemSnapshot = { databases: number; databasesInUse: number; worktrees: number; containers?: number; cpu: number; memoryUsed: number; memoryTotal: number; cpuHistory?: (number | null)[]; memoryHistory?: (number | null)[]; diskFree?: number; diskTotal?: number; machine: string };
 /** The System section's lines, `Label: value`, read back by cli/slackMonitorBlocks.ts. */
 export function systemLines(s: SystemSnapshot): string[] {
   return [
@@ -24,6 +24,9 @@ export function systemLines(s: SystemSnapshot): string[] {
     ...(s.containers === undefined ? [] : [`Containers: ${s.containers} running`]),
     `CPU: ${s.cpu}%`,
     `Memory: ${s.memoryUsed} of ${s.memoryTotal} GB`,
+    // Two-minute averages over the last 30 minutes, oldest first; `-` where there is no reading.
+    ...(s.cpuHistory ? [`CPU30: ${s.cpuHistory.map((v) => v ?? '-').join(' ')}`] : []),
+    ...(s.memoryHistory ? [`Memory30: ${s.memoryHistory.map((v) => v ?? '-').join(' ')}`] : []),
     ...(s.diskFree === undefined ? [] : [`Disk: ${s.diskFree} GB free of ${s.diskTotal} GB`]),
     `Machine: ${clean(s.machine, 120)}`,
   ];
