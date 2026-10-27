@@ -139,8 +139,9 @@ export function monitorBlockKit(safe: string, now = Date.now()): Block[] | undef
   }
   const updated = lines[1]?.match(/^Updated (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}) UTC$/);
   const stamp = updated ? `<!date^${Math.floor(Date.parse(`${updated[1]}T${updated[2]}:00Z`) / 1000)}^{date_short_pretty} {time}|${lines[1]}>` : lines[1] ?? '';
-  // The head is the banner alone; each group heading carries its own count.
-  const blocks: Block[] = [{ type: 'image', image_url: CONSORT_BANNER_URL, alt_text: 'Consort' }];
+  // The head is the banner alone; each group heading carries its own count. A bare image block stops at about
+  // 500px; inside a full-width container with a blank title it spans the message, as wide as the tables.
+  const blocks: Block[] = [{ type: 'container', block_id: `head-${now}`, title: { type: 'plain_text', text: ' ' }, width: 'full', has_header_divider: false, child_blocks: [{ type: 'image', image_url: CONSORT_BANNER_URL, alt_text: 'Consort' }] }];
   let index = 0;
   const groupBlocks = new Map<Group['key'], Block[]>();
   // Empty groups are left out; the summary line still carries their counts.
@@ -156,7 +157,7 @@ export function monitorBlockKit(safe: string, now = Date.now()): Block[] | undef
     [table(`completed-table-${now}`, ['Task', 'Author', 'Cost', 'Finished', 'Links'], completed.map(completedRow), [{ is_wrapped: true }, {}, { align: 'right' }, {}, {}]), ...completedNotes.map(n => context(`_${n}_`))], { collapsed: true }));
   if (accounts.length) blocks.push(container(`capacity-${now}`, 'AI capacity', undefined,
     [table(`capacity-table-${now}`, ['Account', 'Status', 'Usage', 'Detail'], accounts.map(accountRow), [{}, {}, {}, { is_wrapped: true }])]));
-  if (!blocks.some(b => b.type === 'card' || b.type === 'container')) blocks.push(context('_Nothing open and nothing finished yet._'));
+  if (!blocks.some(b => b.type === 'card') && blocks.filter(b => b.type === 'container').length === 1) blocks.push(context('_Nothing open and nothing finished yet._'));
   blocks.push(context(`Updated ${stamp}  ·  Reply in a task’s thread. This message updates in place.`));
   // Too many open tasks for Slack's block limit: the later groups fall back to packed text rows, one section per few tasks.
   for (const group of [groups.working, groups.ready, groups.nudge, groups.reply]) {
