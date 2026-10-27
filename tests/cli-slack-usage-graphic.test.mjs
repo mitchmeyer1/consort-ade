@@ -106,10 +106,8 @@ test('a System section draws a System box to the right of the usage rows, and al
   assert.ok(!monitorBlockKit(withSystem, 0, u, undefined, s).some(b => /\*System\*/.test(JSON.stringify(b))), 'the System picture carries them when uploaded');
   assert.ok(usageGraphic(withSystem, 'usage').svg.includes('USAGE') && !usageGraphic(withSystem, 'usage').svg.includes('SYSTEM'));
   assert.ok(usageGraphic(withSystem, 'system').svg.includes('SYSTEM') && !usageGraphic(withSystem, 'system').svg.includes('USAGE'));
-  const panels = monitorBlockKit(withSystem, 0, u, undefined, s, true).filter(b => b.type === 'carousel' && b.block_id === 'panels-0');
-  assert.deepEqual(panels[0]?.elements.map(c => [c.type, c.hero_image.slack_file.id]), [['card', 'F1'], ['card', 'F2']], 'usage then System, side by side in a carousel');
   const stacked = monitorBlockKit(withSystem, 0, u, undefined, s).filter(b => b.type === 'image' && b.slack_file);
-  assert.deepEqual(stacked.map(b => b.slack_file.id), ['F1', 'F2'], 'without the carousel, one under the other');
+  assert.deepEqual(stacked.map(b => b.slack_file.id), ['F1', 'F2'], 'one under the other, at top level where an uploaded file renders');
 });
 
 test('CPU and memory over the last 30 minutes draw as 15 two-minute bars, with gaps where the daemon took no reading', async () => {

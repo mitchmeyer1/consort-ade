@@ -169,8 +169,6 @@ export class Slack {
     const system = kit ? await this.renderedImage("system", safe) : undefined;
     const head = kit ? await this.renderedImage("head", safe) : undefined;
     const layouts: { blocks: unknown[]; withImage: boolean }[] = [];
-    // Usage and System as two cards of a carousel; if Slack refuses a picture in a card, the same two as plain image blocks.
-    if (kit && usage && system) layouts.push({ blocks: monitorBlockKit(safe, Date.now(), usage, head, system, true)!, withImage: true });
     if (kit && (usage || system || head)) layouts.push({ blocks: monitorBlockKit(safe, Date.now(), usage, head, system)!, withImage: true });
     if (kit) layouts.push({ blocks: kit, withImage: false });
     layouts.push({ blocks: this.plainBlocks(safe), withImage: false });
