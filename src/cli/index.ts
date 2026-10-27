@@ -18,6 +18,7 @@ import { canStartWorker, handleWorkerExit, isKilled, killTask, requestWorkerStop
 import { answerTaskStatusQuestions } from "./slackStatus";
 import { refreshSlackCards } from "./slackCard";
 import { refreshSlackMonitor } from "./slackMonitor";
+import { settleReadyMerges } from "./readyMerges";
 import { saveLiveChildren } from "./parallel";
 import { refresh } from "./refresh";
 import { historyTurns, readTurns, renderReport, sinceMs } from "./telemetry";
@@ -601,7 +602,8 @@ async function daemon() {
     if (!statusCheck) statusCheck = Promise.all([
       answerTaskStatusQuestions(alive).catch(e => console.error(`Slack status responder: ${e.message}`)),
       refreshSlackCards().catch(e => console.error(`Slack status cards: ${e.message}`)),
-      refreshSlackMonitor().catch(e => console.error(`Slack master monitor: ${e.message}`)),
+      settleReadyMerges().catch(e => console.error(`Ready-to-merge check: ${e.message}`)).then(() =>
+        refreshSlackMonitor().catch(e => console.error(`Slack master monitor: ${e.message}`))),
     ]).then(() => {}).finally(() => { statusCheck = undefined; });
   };
   checkStatusQuestions();
