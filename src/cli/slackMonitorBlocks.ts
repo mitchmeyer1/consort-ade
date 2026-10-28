@@ -249,9 +249,9 @@ export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageIma
   else if (!system && !linked && Object.keys(systemText).length) blocks.push(context(`*System*  ·  ${Object.entries(systemText).filter(([k]) => !k.endsWith('30')).map(([k, v]) => `${k} ${v}`).join('  ·  ')}`));
   // Below usage: each scanner, on or off, how often it scans and how many tickets it may hold open at once.
   const scanners = monitorScanners(safe);
-  if (scanners.length) blocks.push(section('*Scanners*'), table(`scanners-${now}`, ['Scanner', 'Kind', 'State', 'Scans', 'Tickets open', 'AI turns', 'Last scan'],
-    scanners.map(r => r.map((c, i) => cell(i === 2 ? (c === 'on' ? '🟢 on' : '⚪ off') : i === 4 ? c.replace(' tickets', '') : i === 5 ? c.replace(' AI turns', '') : i === 6 ? c.replace(/^scanned /, '') : c))),
-    [{ is_wrapped: true }, {}, {}, {}, { align: 'right' }, { align: 'right' }, {}]));
+  if (scanners.length) blocks.push(section('*Scanners*'), table(`scanners-${now}`, ['Scanner', 'Kind', 'Criteria', 'State', 'Scans', 'Tickets open', 'AI turns', 'Last scan'],
+    scanners.map(r => r.map((c, i) => cell(i === 3 ? (c === 'on' ? '🟢 on' : '⚪ off') : i === 5 ? c.replace(' tickets', '') : i === 6 ? c.replace(' AI turns', '') : i === 7 ? c.replace(/^scanned /, '') : c))),
+    [{ is_wrapped: true }, {}, { is_wrapped: true }, {}, {}, { align: 'right' }, { align: 'right' }, {}]));
   blocks.push(context(`Updated ${stamp}  ·  Reply in a task’s thread. This message updates in place.`));
   // Too many open tasks for Slack's block limit: the later groups fall back to packed text rows, one section per few tasks.
   for (const group of [groups.working, groups.ready, groups.nudge, groups.reply]) {

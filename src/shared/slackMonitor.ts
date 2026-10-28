@@ -15,10 +15,10 @@ export function slackMonitorGroups(state: Pick<CliState,'tasks'>, now: number) {
   return {working,ready,completed};
 }
 /** One scanner for the dashboard's Scanners table (cli/scanners.ts). */
-export type ScannerRow = { name: string; kind: string; on: boolean; everyMinutes: number; open: number; limit: number; turns: number; lastScanAt?: number };
-/** The Scanners section's lines, read back by cli/slackMonitorBlocks.ts: name · kind · on|off · every · open/limit · AI turns · last scan. */
+export type ScannerRow = { name: string; kind: string; criteria?: string; on: boolean; everyMinutes: number; open: number; limit: number; turns: number; lastScanAt?: number };
+/** The Scanners section's lines, read back by cli/slackMonitorBlocks.ts: name · kind · criteria · on|off · every · open/limit · AI turns · last scan. */
 export function scannerLines(rows: ScannerRow[], now: number): string[] {
-  return rows.map(r => [clean(r.name, 60), r.kind, r.on ? 'on' : 'off', `every ${r.everyMinutes}m`, `${r.open}/${r.limit} tickets`, `${r.turns} AI turns`, r.lastScanAt ? `scanned ${ago(now - r.lastScanAt)} ago` : 'not scanned yet'].join(' · '));
+  return rows.map(r => [clean(r.name, 60), r.kind, clean(r.criteria || '—', 120).replaceAll(' · ', ', '), r.on ? 'on' : 'off', `every ${r.everyMinutes}m`, `${r.open}/${r.limit} tickets`, `${r.turns} AI turns`, r.lastScanAt ? `scanned ${ago(now - r.lastScanAt)} ago` : 'not scanned yet'].join(' · '));
 }
 /** The machine's numbers for the System box (cli/systemSnapshot.ts); GB and percent, already rounded. */
 export type SystemSnapshot = { databases: number; databasesInUse: number; worktrees: number; containers?: number; cpu: number; memoryUsed: number; memoryTotal: number; cpuHistory?: (number | null)[]; memoryHistory?: (number | null)[]; diskFree?: number; diskTotal?: number; machine: string };

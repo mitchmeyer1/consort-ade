@@ -3,6 +3,7 @@ import type { CliState, Job, Task } from "./state";
 import { openTaskLimit } from "./capacity";
 import { sentryTicketLimit } from "./sentryCapacity";
 import type { ScannerRow } from "../shared/slackMonitor.ts";
+import { scannerCriteria } from "../shared/scannerCriteria.ts";
 
 const open = (t: Task) => ["working", "waiting", "monitoring"].includes(t.status);
 const KIND: Record<Job["source"], string> = { clickup: "ClickUp", sentry: "Sentry", review: "PR review", github: "GitHub" };
@@ -13,7 +14,7 @@ export function scannerRows(state: Pick<CliState, "jobs" | "tasks">): ScannerRow
     const sentry = j.source === "sentry";
     const ids = new Set([j.id, ...(sentry ? [`${j.id}-worker`] : [])]);
     return {
-      name: j.name, kind: KIND[j.source] ?? j.source, on: j.enabled, everyMinutes: j.everyMinutes,
+      name: j.name, kind: KIND[j.source] ?? j.source, criteria: scannerCriteria(j), on: j.enabled, everyMinutes: j.everyMinutes,
       open: state.tasks.filter((t) => ids.has(t.jobId) && open(t)).length,
       limit: sentry ? sentryTicketLimit(j) : openTaskLimit(j),
       turns: sentry ? sentryTicketLimit(j) : j.maxParallel,
