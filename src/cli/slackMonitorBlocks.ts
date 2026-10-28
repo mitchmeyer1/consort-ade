@@ -159,6 +159,14 @@ export function monitorSystem(safe: string): Record<string, string> {
   for (const line of lines.slice(start + 1)) { if (!line) break; const m = line.match(/^(\w+): (.+)$/); if (m) out[m[1]!] = m[2]!; }
   return out;
 }
+/** The Scanners section's rows, split on ' · ' into the table's columns; empty without the section. */
+export function monitorScanners(safe: string): string[][] {
+  const lines = safe.split('\n'), start = lines.indexOf('*Scanners*');
+  if (!lines[0]?.startsWith('*📊 Consort master monitor*') || start < 0) return [];
+  const rows: string[][] = [];
+  for (const line of lines.slice(start + 1)) { if (!line) break; rows.push(line.split(' · ')); }
+  return rows;
+}
 /** A rendered usage panel already uploaded to Slack (cli/slackUsageGraphic.ts), shown in place of the chart. */
 export type UsageImage = { fileId: string; alt: string };
 /** The monitor text's open tasks by group, its completed rows and its account lines; undefined for any other text. */
@@ -239,6 +247,11 @@ export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageIma
   const systemText = monitorSystem(safe);
   if (system) blocks.push(picture('system', system));
   else if (!system && !linked && Object.keys(systemText).length) blocks.push(context(`*System*  ·  ${Object.entries(systemText).filter(([k]) => !k.endsWith('30')).map(([k, v]) => `${k} ${v}`).join('  ·  ')}`));
+  // Below usage: each scanner, on or off, how often it scans and how many tickets it may hold open at once.
+  const scanners = monitorScanners(safe);
+  if (scanners.length) blocks.push(section('*Scanners*'), table(`scanners-${now}`, ['Scanner', 'Kind', 'State', 'Scans', 'Tickets open', 'AI turns', 'Last scan'],
+    scanners.map(r => r.map((c, i) => cell(i === 2 ? (c === 'on' ? '🟢 on' : '⚪ off') : i === 4 ? c.replace(' tickets', '') : i === 5 ? c.replace(' AI turns', '') : i === 6 ? c.replace(/^scanned /, '') : c))),
+    [{ is_wrapped: true }, {}, {}, {}, { align: 'right' }, { align: 'right' }, {}]));
   blocks.push(context(`Updated ${stamp}  ·  Reply in a task’s thread. This message updates in place.`));
   // Too many open tasks for Slack's block limit: the later groups fall back to packed text rows, one section per few tasks.
   for (const group of [groups.working, groups.ready, groups.nudge, groups.reply]) {
