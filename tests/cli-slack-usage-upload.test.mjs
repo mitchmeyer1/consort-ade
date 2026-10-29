@@ -45,49 +45,40 @@ function fake(opts = {}) {
 }
 const sent = calls => calls.filter(c => c.method === 'chat.update').map(c => JSON.parse(c.body.blocks));
 
-test('the panel is uploaded once per picture, shown as a slack_file image, reused while unchanged, and old files retire a generation late', async () => {
-  const { slack, calls, opts } = fake();
+test('usage is a table, not a picture: pictures an earlier version uploaded are deleted once and nothing is uploaded for usage', async () => {
+  const { slack, calls } = fake();
   slack.setUsageFile({ file: 'OLD', key: 'old-key', stale: 'OLDER' });
   await slack.updateMonitor('same', text);
-  assert.deepEqual(calls.map(c => c.method), ['files.getUploadURLExternal', 'transfer', 'files.completeUploadExternal', 'chat.update', 'files.delete']);
-  assert.deepEqual(opts.delays, [1500], 'the upload settles before the edit');
-  assert.equal(calls[0].body.filename, 'consort-usage.png'); assert.ok(calls[1].bytes > 1000);
-  assert.deepEqual(JSON.parse(calls[2].body.files), [{ id: 'F1', title: 'AI usage' }]); assert.equal(calls[2].body.channel_id, undefined);
+  assert.deepEqual(calls.map(c => c.method), ['chat.update', 'files.delete', 'files.delete']);
+  assert.deepEqual(calls.slice(1).map(c => c.body.file), ['OLD', 'OLDER']); assert.deepEqual(slack.getUsageFile(), {});
   const blocks = sent(calls)[0];
-  const panel = blocks.find(b => b.type === 'image' && b.block_id.startsWith('usage-'));
-  assert.deepEqual({ ...panel, block_id: undefined }, { type: 'image', block_id: undefined, slack_file: { id: 'F1' }, alt_text: 'AI usage: Claude 1 5h 42%, wk 20%' });
-  assert.ok(!blocks.some(b => b.type === 'data_visualization'));
-  assert.equal(calls[4].body.file, 'OLDER', 'the file two generations back is deleted; the one just replaced waits');
-  const saved = slack.getUsageFile(); assert.equal(saved.file, 'F1'); assert.equal(saved.stale, 'OLD'); assert.equal(typeof saved.key, 'string');
-  await slack.updateMonitor('same', text.replace('Updated 2026-10-27 16:45', 'Updated 2026-10-27 16:46'));
-  assert.deepEqual(calls.slice(5).map(c => c.method), ['chat.update'], 'same numbers a minute later: no upload, no delete');
-  assert.ok(JSON.stringify(sent(calls)[1]).includes('"id":"F1"')); assert.deepEqual(slack.getUsageFile(), saved);
+  assert.ok(blocks.some(b => b.type === 'table' && b.block_id.startsWith('usage-')), 'a usage table');
+  assert.ok(!blocks.some(b => b.type === 'data_visualization' || (b.type === 'image' && b.block_id.startsWith('usage-'))));
   await slack.updateMonitor('same', text.replace('42%', '43%'));
-  assert.deepEqual(calls.slice(6).map(c => c.method), ['files.getUploadURLExternal', 'transfer', 'files.completeUploadExternal', 'chat.update', 'files.delete']);
-  assert.equal(calls.at(-1).body.file, 'OLD'); assert.deepEqual([slack.getUsageFile().file, slack.getUsageFile().stale], ['F2', 'F1']);
+  assert.deepEqual(calls.slice(3).map(c => c.method), ['chat.update'], 'nothing left to delete, nothing uploaded');
 });
 
-test('an image Slack has not finished processing is retried on the same layout with growing waits', async () => {
-  const { slack, calls, opts } = fake({ processing: 2 });
+test('a header Slack has not finished processing is retried on the same layout with growing waits', async () => {
+  const { slack, calls, opts } = fake({ freshHead: true, processing: 2 });
   await slack.updateMonitor('same', text);
   const edits = calls.filter(c => c.method === 'chat.update');
   assert.equal(edits.length, 3); assert.deepEqual(opts.delays, [1500, 250, 750]);
   assert.equal(edits[0].body.blocks, edits[2].body.blocks); assert.equal(calls.filter(c => c.method === 'files.getUploadURLExternal').length, 1, 'one upload');
 });
 
-test('when Slack rejects the image layout the chart layout goes out and the unshown upload is deleted', async () => {
-  const { slack, calls } = fake({ rejectImage: true });
+test('when Slack rejects the header picture the banner layout goes out and the unshown upload is deleted', async () => {
+  const { slack, calls } = fake({ freshHead: true, rejectImage: true });
   await slack.updateMonitor('same', text);
   const layouts = sent(calls);
-  assert.equal(layouts.length, 2); assert.ok(JSON.stringify(layouts[0]).includes('slack_file')); assert.ok(layouts[1].some(b => b.type === 'data_visualization'));
-  assert.deepEqual(calls.filter(c => c.method === 'files.delete').map(c => c.body.file), ['F1']); assert.deepEqual(slack.getUsageFile(), {});
+  assert.equal(layouts.length, 2); assert.ok(JSON.stringify(layouts[0]).includes('slack_file')); assert.ok(!JSON.stringify(layouts[1]).includes('slack_file'));
+  assert.deepEqual(calls.filter(c => c.method === 'files.delete').map(c => c.body.file), ['F1']);
 });
 
-test('without files:write the chart layout is used and the upload is not tried again', async () => {
-  const { slack, calls } = fake({ noScope: true });
+test('without files:write the banner layout is used and the upload is not tried again', async () => {
+  const { slack, calls } = fake({ freshHead: true, noScope: true });
   await slack.updateMonitor('same', text); await slack.updateMonitor('same', text.replace('42%', '44%'));
   assert.equal(calls.filter(c => c.method === 'files.getUploadURLExternal').length, 1);
-  assert.ok(sent(calls).every(blocks => blocks.some(b => b.type === 'data_visualization') && !JSON.stringify(blocks).includes('slack_file')));
+  assert.ok(sent(calls).every(blocks => !JSON.stringify(blocks).includes('slack_file')));
 });
 
 test('a monitor without accounts uploads nothing; a non-monitor text stays plain sections', async () => {
@@ -103,13 +94,13 @@ test('the header shows a count for every open group, zeros included, and uploads
   slack.setUsageFile({ file: 'USAGE', key: 'stale-key' });
   await slack.updateMonitor('same', text);
   const uploads = calls.filter(c => c.method === 'files.getUploadURLExternal').map(c => c.body.filename);
-  assert.deepEqual(uploads, ['consort-usage.png', 'consort-head.png']);
+  assert.deepEqual(uploads, ['consort-head.png']);
   const head = sent(calls)[0][0];
-  assert.deepEqual({ ...head, block_id: undefined }, { type: 'image', block_id: undefined, slack_file: { id: 'F2' }, alt_text: 'Consort: 0 reply, 0 nudge, 0 ready, 1 working' });
-  assert.equal(slack.getHeadFile().file, 'F2');
+  assert.deepEqual({ ...head, block_id: undefined }, { type: 'image', block_id: undefined, slack_file: { id: 'F1' }, alt_text: 'Consort: 0 reply, 0 nudge, 0 ready, 1 working' });
+  assert.equal(slack.getHeadFile().file, 'F1');
   const before = calls.length;
   await slack.updateMonitor('same', text.replace('42%', '45%'));
-  assert.deepEqual(calls.slice(before).filter(c => c.method === 'files.getUploadURLExternal').map(c => c.body.filename), ['consort-usage.png'], 'same counts: the header is reused');
+  assert.deepEqual(calls.slice(before).filter(c => c.method === 'files.getUploadURLExternal').map(c => c.body.filename), [], 'same counts: the header is reused');
   const svg = headSvg({ reply: 0, nudge: 2, ready: 0, working: 1 });
   for (const label of ['REPLY', 'NUDGE', 'READY', 'WORKING']) assert.ok(svg.includes(`>${label}<`), label);
   assert.equal((svg.match(/>0</g) ?? []).length, 2, 'zeros are drawn'); assert.match(svg, /<image [^>]*href="data:image\/png;base64,/);

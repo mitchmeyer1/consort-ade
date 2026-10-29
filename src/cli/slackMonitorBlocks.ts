@@ -120,24 +120,30 @@ export function parseAccount(line: string): AccountUsage {
   if (peak === undefined) return { name, blocked: false, status: 'Unavailable', windows, ...(resets ? { resets } : {}), detail: rest.filter((r) => r !== 'usage unavailable').join(' · ') || 'no reading yet' };
   return { name, blocked: false, status: peak <= 50 ? 'Available' : peak <= 90 ? 'Busy' : 'Nearly full', windows, ...(resets ? { resets } : {}), detail: rest.filter((r) => r !== 'available').join(' · ') };
 }
-/**
- * The usage chart: Slack's own bar chart, one bar per limit window per account (5-hour, weekly, and a model's
- * weekly where the plan has one), in percent of the limit. Slack draws bars upright only. A blocked account reads as full.
- */
-function usageChart(accounts: AccountUsage[], now: number): Block | undefined {
-  const charted = accounts.filter((a) => a.blocked || a.windows.length).slice(0, 20);
-  const labels = [...new Set(charted.flatMap((a) => a.windows.map((w) => w.label)))].slice(0, 12);
-  if (!charted.length || !labels.length) return undefined;
-  const value = (a: AccountUsage, label: string) => a.blocked && !a.windows.length ? 100 : Math.max(0, Math.min(100, a.windows.find((w) => w.label === label)?.percent ?? 0));
-  const name = (label: string) => (label.toLowerCase() === 'weekly' ? 'Weekly' : label.slice(0, 20));
-  return {
-    type: 'data_visualization', block_id: `usage-chart-${now}`, title: 'AI usage, % of each limit',
-    chart: { type: 'bar', series: labels.map((label) => ({ name: name(label), data: charted.map((a) => ({ label: a.name.slice(0, 20), value: value(a, label) })) })), axis_config: { categories: charted.map((a) => a.name.slice(0, 20)), y_label: '% used' } },
-  };
+/** White under 50%, yellow under 80%, orange under 100%, red when full. */
+export const usageDot = (percent: number) => (percent >= 100 ? '🔴' : percent >= 80 ? '🟠' : percent >= 50 ? '🟡' : '⚪');
+/** `Oct 27 3:30 PM` from `resume after Oct 27, 3:30 PM EDT`; undefined when the text has no time. */
+const shortWhen = (text: string) => { const m = text.match(/(\w{3} \d{1,2}), (\d{1,2}:\d{2} [AP]M)/); return m ? `${m[1]} ${m[2]}` : undefined; };
+const windowName = (label: string) => (/^5-?hour$/i.test(label) ? '5h' : /^weekly$/i.test(label) ? 'Weekly' : label.replace(/^weekly · /i, ''));
+/** AI usage as a table: one row per account, a coloured dot and percent per limit window, then when it frees up. */
+function usageTable(accounts: AccountUsage[], now: number): Block | undefined {
+  if (!accounts.length) return undefined;
+  const labels = [...new Set(accounts.flatMap((a) => a.windows.map((w) => windowName(w.label))))].slice(0, 6);
+  const rows = accounts.slice(0, 40).map((a) => {
+    const at = shortWhen(a.blocked ? a.detail : a.resets ?? '');
+    const resets = a.blocked ? `🔴 blocked${at ? ` until ${at}` : ''}` : !a.windows.length ? (a.detail === 'no reading yet' ? 'no reading yet' : `no reading · ${a.detail}`).slice(0, 60) : at ?? '';
+    return [cell(a.name), ...labels.map((l) => { const w = a.windows.find((x) => windowName(x.label) === l); return cell(w ? `${usageDot(w.percent)} ${w.percent}%` : '—'); }), cell(resets)];
+  });
+  return table(`usage-${now}`, ['Account', ...labels, 'Resets'], rows, [{}, ...labels.map(() => ({ align: 'right' })), { is_wrapped: true }]);
 }
-/** What the chart cannot say: which accounts are blocked and until when, and which have no reading. */
-function usageNotes(accounts: AccountUsage[]): string[] {
-  return accounts.filter((a) => a.blocked || !a.windows.length).map((a) => `*${a.name}* ${a.blocked ? 'blocked' : 'unavailable'}: ${a.detail}`);
+/** The System numbers as a one-row table; CPU and memory add their peak over the last 30 minutes. */
+function systemTable(system: Record<string, string>, now: number): Block | undefined {
+  const cols = ([['DB sets', system.Databases], ['Worktrees', system.Worktrees], ['Containers', system.Containers], ['CPU', system.CPU], ['Memory', system.Memory], ['Disk', system.Disk], ['Machine', system.Machine]] as const).filter(([, v]) => v);
+  if (!cols.length) return undefined;
+  const peak = (s?: string) => { const v = (s ?? '').split(' ').filter((x) => x !== '-').map(Number).filter(Number.isFinite); return v.length ? Math.max(...v) : undefined; };
+  const cpuPeak = peak(system.CPU30), memPeak = peak(system.Memory30);
+  const value = (k: string, v: string) => k === 'CPU' && cpuPeak !== undefined ? `${v} · peak ${cpuPeak}%` : k === 'Memory' && memPeak !== undefined ? `${v.replace(/ of /, '/')} · peak ${memPeak}%` : v;
+  return table(`system-${now}`, cols.map(([k]) => k), [cols.map(([k, v]) => cell(value(k, v!)))], cols.map(([k]) => (k === 'Machine' ? { is_wrapped: true } : {})));
 }
 
 /** The account lines of a master monitor text, parsed; empty for anything else. */
@@ -167,7 +173,7 @@ export function monitorScanners(safe: string): string[][] {
   for (const line of lines.slice(start + 1)) { if (!line) break; rows.push(line.split(' · ')); }
   return rows;
 }
-/** A rendered usage panel already uploaded to Slack (cli/slackUsageGraphic.ts), shown in place of the chart. */
+/** A rendered picture already uploaded to Slack: the header (cli/slackHeadGraphic.ts). */
 export type UsageImage = { fileId: string; alt: string };
 /** The monitor text's open tasks by group, its completed rows and its account lines; undefined for any other text. */
 function parseMonitor(safe: string) {
@@ -207,7 +213,7 @@ export function monitorCounts(safe: string): Record<Group['key'], number> | unde
   return { reply: reply.rows.length, nudge: nudge.rows.length, ready: ready.rows.length + more(ready), working: working.rows.length + more(working) };
 }
 /** Blocks for a master monitor text; undefined for anything else (guard notices, legacy posts, tests). The head is the uploaded header picture when there is one, else the banner. */
-export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageImage, head?: UsageImage, system?: UsageImage, linked?: { wide: { url: string; alt: string } }): Block[] | undefined {
+export function monitorBlockKit(safe: string, now = Date.now(), head?: UsageImage): Block[] | undefined {
   const monitor = parseMonitor(safe);
   if (!monitor) return undefined;
   const { lines, groups, completed, completedNotes, accounts } = monitor;
@@ -232,22 +238,11 @@ export function monitorBlockKit(safe: string, now = Date.now(), usage?: UsageIma
   if (completed.length) blocks.push(container(`completed-${now}`, 'Completed', { type: 'plain_text', text: `most recent ${completed.length}` },
     [table(`completed-table-${now}`, ['Task', 'Author', 'Cost', 'Finished', 'Links'], completed.map(completedRow), [{ is_wrapped: true }, {}, { align: 'right' }, {}, {}]), ...completedNotes.map(n => context(`_${n}_`))], { collapsed: true }));
   if (!blocks.some(b => b.type === 'card' || b.type === 'carousel' || b.type === 'container')) blocks.push(context('_Nothing open and nothing finished yet._'));
-  const parsed = accounts.map(parseAccount);
-  // The rendered panel says everything the chart and notes would; without one, Slack's own chart stands in.
-  const chart = usage || linked ? undefined : usageChart(parsed, now);
-  // Usage and System side by side in one linked picture (cli/imageTunnel.ts), a bare image block so it has one frame;
-  // without a link they are uploaded and stacked.
-  if (linked) blocks.push({ type: 'image', block_id: `panels-${now}`, image_url: linked.wide.url, alt_text: linked.wide.alt.slice(0, 2000) });
-  const picture = (key: string, img: UsageImage) => ({ type: 'image', block_id: `${key}-${now}`, slack_file: { id: img.fileId }, alt_text: img.alt.slice(0, 2000) });
-  if (usage) blocks.push(picture('usage', usage));
-  else if (chart) blocks.push(chart);
-  else if (parsed.length && !linked) blocks.push(section('*AI usage*'));
-  if (!usage && !linked) for (const note of usageNotes(parsed)) blocks.push(context(note));
-  // System is its own picture; without it, one line says the same.
-  const systemText = monitorSystem(safe);
-  if (system) blocks.push(picture('system', system));
-  else if (!system && !linked && Object.keys(systemText).length) blocks.push(context(`*System*  ·  ${Object.entries(systemText).filter(([k]) => !k.endsWith('30')).map(([k, v]) => `${k} ${v}`).join('  ·  ')}`));
-  // Below usage: each scanner, on or off, how often it scans and how many tickets it may hold open at once.
+  // AI usage, then System, then Scanners: each a table, so Slack draws them full width in its own type.
+  const usage = usageTable(accounts.map(parseAccount), now), system = systemTable(monitorSystem(safe), now);
+  if (usage) blocks.push(section('*AI usage*'), usage);
+  if (system) blocks.push(section('*System*'), system);
+  // Each scanner, on or off, how often it scans and how many tickets it may hold open at once.
   const scanners = monitorScanners(safe);
   if (scanners.length) blocks.push(section('*Scanners*'), table(`scanners-${now}`, ['Scanner', 'Kind', 'Criteria', 'State', 'Scans', 'Tickets open', 'AI turns', 'Last scan'],
     scanners.map(r => r.map((c, i) => cell(i === 3 ? (c === 'on' ? '🟢 on' : '⚪ off') : i === 5 ? c.replace(' tickets', '') : i === 6 ? c.replace(' AI turns', '') : i === 7 ? c.replace(/^scanned /, '') : c))),

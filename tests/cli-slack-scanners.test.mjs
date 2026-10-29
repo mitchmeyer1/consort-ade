@@ -32,3 +32,17 @@ test('criteria name each scanner\'s filters, reviewer or Sentry projects', async
   assert.equal(scannerCriteria({ source: 'sentry', filters: {}, sentry: { projects: ['node'], environments: ['production'], query: 'is:unresolved' } }), 'project node; env production; is:unresolved');
   assert.equal(scannerCriteria({ source: 'clickup', filters: {} }), 'everything');
 });
+
+test('System is a one-row table after AI usage, with CPU and memory peaks over 30 minutes', async () => {
+  const { systemLines } = await import('../src/shared/slackMonitor.ts');
+  const system = { databases: 2, databasesInUse: 1, worktrees: 5, containers: 9, cpu: 35, memoryUsed: 20, memoryTotal: 48, cpuHistory: [null, 10, 60], memoryHistory: [40, 45], diskFree: 480, diskTotal: 926, machine: 'Apple M5 Pro · 15 cores · macOS 26.4.1' };
+  const text = slackMasterMonitor({ accounts: [], jobs: [], tasks: [] }, new Map(), NOW, () => false, new Map(), new Map(), system, rows);
+  assert.ok(systemLines(system).length > 0);
+  const blocks = monitorBlockKit(text, NOW);
+  const t = blocks.find(b => b.block_id === `system-${NOW}`);
+  const cells = t.rows.map(r => r.map(c => c.text ?? c.elements[0].elements.map(e => e.text).join('')));
+  assert.deepEqual(cells[0], ['DB sets', 'Worktrees', 'Containers', 'CPU', 'Memory', 'Disk', 'Machine']);
+  assert.deepEqual(cells[1], ['2 sets · 1 in use', '5', '9 running', '35% · peak 60%', '20/48 GB · peak 45%', '480 GB free of 926 GB', 'Apple M5 Pro · 15 cores · macOS 26.4.1']);
+  assert.ok(blocks.findIndex(b => b.block_id === `system-${NOW}`) < blocks.findIndex(b => b.block_id === `scanners-${NOW}`), 'System comes before Scanners');
+  assert.ok(!blocks.some(b => b.type === 'image' && b.block_id !== undefined && /usage|system|panels/.test(b.block_id)), 'no pictures for usage or System');
+});

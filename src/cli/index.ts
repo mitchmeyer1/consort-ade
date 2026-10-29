@@ -583,8 +583,6 @@ async function daemon() {
   const self = fileURLToPath(import.meta.url);
   mkdirSync(LOG_DIR, { recursive: true });
   console.log(banner("daemon", [dim(`on ${host()}`), dim(`logs in ${LOG_DIR}`), dim("ctrl-c to stop")]));
-  // Public addresses for the Slack monitor's Usage and System cards; without ngrok they are uploaded and stacked instead.
-  if (loadState().slack) void import("./imageTunnel.ts").then((t) => t.startImageTunnel()).catch((e) => console.error(`Image tunnel: ${e.message}`));
   const spawnWorker = (t: Task) => {
     const latest = loadState().tasks.find(task => task.id === t.id);
     if (!latest || !canStartWorker(latest, !!latest.pid && alive(latest.pid))) return;

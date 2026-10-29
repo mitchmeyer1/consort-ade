@@ -44,3 +44,9 @@ export function headGraphic(safe: string): { svg: string; alt: string } | undefi
   const counts = monitorCounts(safe);
   return counts ? { svg: headSvg(counts), alt: headAlt(counts) } : undefined;
 }
+
+/** PNG at 2x of the SVG's size, so a retina screen shows it sharp; the native rasterizer loads only here, so the rest of the CLI never needs it. */
+export async function headPng(svg: string): Promise<Buffer> {
+  const { Resvg } = await import('@resvg/resvg-js');
+  return Buffer.from(new Resvg(svg, { fitTo: { mode: 'zoom', value: 2 }, font: { loadSystemFonts: true, defaultFontFamily: 'Menlo' } }).render().asPng());
+}
