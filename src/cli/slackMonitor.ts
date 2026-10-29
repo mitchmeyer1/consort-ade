@@ -66,7 +66,7 @@ async function refresh(now:number, slackFor:(cfg:SlackConfig)=>Slack):Promise<vo
     }
     const text=slackMasterMonitor(state,threads,now,alive,cachedUsage(),await monitorAuthors(shown),systemSnapshot(state),scannerRows(state));
     if(text.length>35000) throw new Error('Slack master monitor exceeds the single-post text limit.');
-    const key=createHash('sha256').update('blocks-v6:'+text).digest('hex');
+    const key=createHash('sha256').update('blocks-v7:'+text).digest('hex');
     monitor=loadState().slackMonitor!;
     if(monitor.key===key && monitor.ts) {
       const identity=`${channel}:${monitor.ts}`;
