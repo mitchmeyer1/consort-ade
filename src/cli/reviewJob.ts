@@ -4,8 +4,9 @@
  *
  *  1. checks the PR head out in its own worktree, copies the repo root's .env files in, and sets up
  *     the databases and services the repo needs (the same environment turn build tasks run);
- *  2. has the frontier model (Fable or Astra) read the repo, its conventions, .ai-review-rules.md
- *     and the diff, and split the review into areas (.consort/review/OVERVIEW.md, plan.json);
+ *  2. has the frontier model (Fable or Astra) read the repo, its conventions, its review policy
+ *     (.ai-review-rules.md, .ai-review-ignore.md) and the diff, and split the review into areas
+ *     (.consort/review/OVERVIEW.md, plan.json);
  *  3. fans out one read-only reviewer per area on Opus or Sol, each crawling its files, their
  *     callers and similar code for correctness, scaling and convention problems;
  *  4. has the frontier model verify every finding against the code, merge duplicates and settle
@@ -26,6 +27,7 @@ import { addTurnCost, approvalReply, ENVIRONMENT_RULES, HEADLESS_RULES, seedMode
 import { selectCliModel } from "../shared/cliModels.ts";
 import { modelBlock, modelLoad, rankAccounts, usageBlock } from "../shared/usage.ts";
 import { parseReview, serializeReview, type Finding, type Review, type ReviewEvent } from "../shared/review.ts";
+import { reviewPolicyNote } from "../shared/reviewPolicy.ts";
 import { newShipFeature } from "../shared/ship.ts";
 import type { Provider } from "../shared/types.ts";
 import { runTurn } from "./agent";
@@ -144,12 +146,10 @@ export function approvalQuestion(t: ReviewTarget, review: Review, postedUrl: str
 
 // ── prompts ────────────────────────────────────────────────────────────────────────────────
 
-const RULES_NOTE = (wt: string) => existsSync(join(wt, ".ai-review-rules.md")) ? "The repository's own review rules are in .ai-review-rules.md: read them first; a rule's stated severity always wins." : "The repository has no .ai-review-rules.md; judge by its existing conventions.";
-
 export const OVERVIEW_PROMPT = (t: ReviewTarget, wt: string) => `## Review step 1 of 3: understand the repository and plan the review
 
 You lead an automatic review of PR #${t.pr} "${t.title}" by @${t.author} into ${t.base}. The PR head is checked out in this worktree. Do not change source files; write only under .consort/review/.
-${RULES_NOTE(wt)}
+${reviewPolicyNote(wt)}
 
 1. Learn how this repository is built: its layout and layering, where each kind of code lives, naming, data access, error handling, config and secrets, background jobs, tests, and how existing features are organised so they scale. Read the docs and the existing modules closest to what the PR touches.
 2. Read the change: \`git diff origin/${t.base}...HEAD --stat\`, then the diff itself.
@@ -160,7 +160,7 @@ Reply with one line when both files are written.`;
 
 export const SLICE_PROMPT = (t: ReviewTarget, wt: string, slice: { id: string; title: string; files: string[]; related?: string[]; focus?: string }) => `## Review one area of PR #${t.pr} "${t.title}"
 
-Read .consort/review/OVERVIEW.md first. ${RULES_NOTE(wt)}
+Read .consort/review/OVERVIEW.md first. ${reviewPolicyNote(wt)}
 Your area: ${slice.title}
 Changed files: ${slice.files.join(", ")}
 ${slice.related?.length ? `Compare against: ${slice.related.join(", ")}\n` : ""}${slice.focus ? `Focus: ${slice.focus}\n` : ""}
@@ -176,7 +176,7 @@ Reply with [review-findings] followed by a \`\`\`json array: [{"severity", "cate
 
 export const FINAL_PROMPT = (t: ReviewTarget, wt: string, reviewers: number) => `## Review step 3 of 3: verify and settle the findings
 
-${reviewers} reviewers' raw findings for PR #${t.pr} are in .consort/review/swarm.json. ${RULES_NOTE(wt)}
+${reviewers} reviewers' raw findings for PR #${t.pr} are in .consort/review/swarm.json. ${reviewPolicyNote(wt)}
 ${existsSync(join(wt, ".consort", "review", "previous.json")) ? `This is round ${t.round ?? 2}: the author changed the PR after an earlier review. The earlier findings are in .consort/review/previous.json. Check each one at the new head first: drop it if it is fixed; if it is not, keep it with its title starting "Still open: ".
 ` : ""}For each finding, open the file at that line and check it is real at the PR head. Drop false positives and anything a linter catches; merge duplicates; move file/line to a changed line where you can; settle the severity (a rule in .ai-review-rules.md wins; otherwise critical = breaks production, data or security; high = a real bug or a scaling or convention problem that must be fixed before merge; medium = should fix; low = worth a mention); tighten each comment so it is ready to post.
 Reply with [review-final] followed by a \`\`\`json object: {"summary": "<1-2 plain sentences: the work this PR does>", "flows": ["<1 to 4 entries, one sentence each: a user or system flow this PR changes and what now happens in it>"], "headline": "<one-line verdict>", "findings": [same shape as the raw findings]}.`;

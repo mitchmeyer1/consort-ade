@@ -8,6 +8,7 @@ import { shipPrompt } from "../shared/shipPrompt.ts";
 import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUsd, DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, VERIFY_EVIDENCE_PROMPT, parseAskUser, parseReviewerReply, observeReviewBatch, pickAccount, prReadiness, ProblemError, problemOf, REBOOT_PROMPT, RESPOND_TO_REVIEW, REVIEW_QUIET_MS, cliReviewRotation, reviewersWithoutApproval, reviewWaitMessage, seedModels, SLACK_MARKER, slackAsk, slackLines, slackMessage, slackStatus, stripAskUser, type Problem } from "../shared/headless.ts";
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
+import { reviewPolicySection } from "../shared/reviewPolicy.ts";
 import { selectCliModel, type CliModelRole } from "../shared/cliModels.ts";
 import { MAX_STAGE_TURNS, turnMoved, MODEL_ROLE_RULES, BUILD_EFFORT_RULE, parseBuildEffort, parseModelEscalation, roleEffort, stageModelRole } from "../shared/cliTurnPolicy.ts";
 import { AccountUnavailableError, COVERED_ACCOUNT, withAgentTurn } from "./capacity";
@@ -951,6 +952,8 @@ ${skill}
 ## Review rubric you apply in verification
 
 ${categories}
+
+${reviewPolicySection(worktree)}
 
 ${smallChange ? '## Small change override\nInspect this bounded change yourself in one pass. Do not dispatch readers or write a multi-area plan. Check affected callers and required tests; keep the same findings schema and safety rules.' : ''}`;
 }
