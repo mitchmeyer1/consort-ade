@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 export type ReviewScope = { head: string; base: string; context: string; from?: string; files: string[]; lines: number; small: boolean };
-export const reviewContextChanged = (files: string[]) => files.some(f=>/(^|\/)(?:package\.json|.*lock.*|tsconfig[^/]*|[^/]*config[^/]*|\.ai-review-rules\.md|CLAUDE\.md|AGENTS\.md|Dockerfile[^/]*|.*\.ya?ml)$/.test(f));
+export const reviewContextChanged = (files: string[]) => files.some(f=>/(^|\/)(?:package\.json|.*lock.*|tsconfig[^/]*|[^/]*config[^/]*|\.ai-review-(?:rules|ignore)\.md|CLAUDE\.md|AGENTS\.md|Dockerfile[^/]*|.*\.ya?ml)$/.test(f));
 export const smallReview = (files: string[], lines: number) => files.length>0 && files.length<=2 && lines<=200 && !reviewContextChanged(files) && !files.some(f=>/auth|migration|schema|payment|security/i.test(f));
 export function readReviewJson<T>(file: string): T | undefined { try { return JSON.parse(readFileSync(file,'utf8')); } catch { return undefined; } }
 export function saveReviewJson(file: string, value: unknown) { const tmp=file+'.tmp';writeFileSync(tmp,JSON.stringify(value,null,2));renameSync(tmp,file); }

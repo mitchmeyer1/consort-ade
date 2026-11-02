@@ -7,6 +7,7 @@ import * as headless from '../src/shared/headless.ts';
 import * as cliModels from '../src/shared/cliModels.ts';
 import * as usage from '../src/shared/usage.ts';
 import * as review from '../src/shared/review.ts';
+import * as reviewPolicy from '../src/shared/reviewPolicy.ts';
 import * as ship from '../src/shared/ship.ts';
 import * as phi from '../src/shared/phi.ts';
 import * as progress from '../src/cli/reviewProgress.ts';
@@ -16,7 +17,7 @@ import * as prArticle from '../src/shared/prArticle.ts';
 const require = createRequire(import.meta.url);
 const compile = name => ts.transpileModule(readFileSync(new URL(`../src/cli/${name}.ts`, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 function load(name, extra = {}) {
-  const mocks = { './reviewProgress': progress, './phiGate.ts': phiGate, '../shared/prArticle.ts': prArticle, '../shared/phi.ts': phi, '../shared/headless.ts': headless, '../shared/cliModels.ts': cliModels, '../shared/usage.ts': usage, '../shared/review.ts': review, '../shared/ship.ts': ship,
+  const mocks = { './reviewProgress': progress, './phiGate.ts': phiGate, '../shared/prArticle.ts': prArticle, '../shared/phi.ts': phi, '../shared/headless.ts': headless, '../shared/cliModels.ts': cliModels, '../shared/usage.ts': usage, '../shared/review.ts': review, '../shared/reviewPolicy.ts': reviewPolicy, '../shared/ship.ts': ship,
     './state': { WORK_DIR: '/wt', HOME: '/home', newId: p => `${p}-1`, loadState: () => ({ tasks: extra.tasks ?? [], accounts: [], jobs: [] }) }, ...extra.mocks };
   const mod = { exports: {} };
   new Function('require', 'module', 'exports', compile(name))(n => mocks[n] ?? (n.startsWith('.') ? {} : require(n)), mod, mod.exports);
@@ -129,7 +130,7 @@ async function flow(t, findings, extraJobs = [], resume, opts = {}) {
   const repo = join(root, 'repo'), wt = join(root, 'wt');
   await mkdir(repo); await mkdir(wt);
   await writeFile(join(repo, '.env'), 'DB=local\n'); await writeFile(join(repo, '.env.example'), 'x');
-  await writeFile(join(wt, '.ai-review-rules.md'), '# rules');
+  await writeFile(join(wt, '.ai-review-rules.md'), '# rules'); await writeFile(join(wt, '.ai-review-ignore.md'), '# ignore');
   const task = { id: 't', jobId: 'j', kind: 'review', worktree: wt, status: 'working', envReadyAt: 1, review: { repo: 'acme/mono', pr: 9, url: 'https://github.com/acme/mono/pull/9', title: 'Add CSV export', author: 'dev', head: 'h', base: 'development' } };
   const state = { tasks: [task], jobs: [{ id: 'j', repo, name: 'reviews', reviewer: 'mitch', source: 'review' }, ...extraJobs.map(j => ({ ...j, repo }))], accounts: [{ id: 'c', provider: 'claude', name: 'C' }, { id: 'x', provider: 'codex', name: 'X' }], slack: { userId: 'u' }, ...(opts.guard ? { phi: { guard: true } } : {}) };
   const turns = [], posts = [], slackPosts = [], uploads = [];
@@ -175,6 +176,8 @@ test('a clean review: frontier overview, swarm on Opus/Sol, frontier check, comm
   assert.match(f.turns[0].model, /gpt-6-astra|claude-fable/, 'overview on the frontier model');
   assert.ok(f.turns.filter(x => x.prompt.includes('Review one area')).every(x => x.readOnly && /opus|sol/.test(x.model)), 'swarm read-only on Opus/Sol');
   assert.ok(f.turns.at(-1).prompt.includes('step 3 of 3'));
+  const steps = f.turns.filter(x => /step 1 of 3|Review one area|step 3 of 3/.test(x.prompt));
+  assert.ok(steps.length >= 3 && steps.every(x => x.prompt.includes('read them first') && x.prompt.includes('.ai-review-ignore.md')), "every review step reads the repository's rules and suppressions");
   assert.deepEqual(f.posts.map(p => p.event), ['COMMENT', 'APPROVE']);
   assert.ok(f.slackPosts.some(p => /\*Approve\?\*/.test(p) && /^📤 \*CSV REPORT EXPORT\*\n⚠️ Adds a CSV export\./.test(p) && /• Exporting a report now downloads a CSV\./.test(p) && !/✅/.test(p)), 'asked on Slack first');
   assert.deepEqual(f.task.slackIdentity, { emoji: '📤', title: 'CSV report export' }, 'the overview picks the emoji');

@@ -12,6 +12,7 @@ import * as cliModels from '../src/shared/cliModels.ts';
 import * as cliTurnPolicy from '../src/shared/cliTurnPolicy.ts';
 import * as phi from '../src/shared/phi.ts';
 import * as phiGate from '../src/cli/phiGate.ts';
+import * as reviewPolicy from '../src/shared/reviewPolicy.ts';
 import { usageBlock } from '../src/shared/usage.ts';
 import * as usageMod from '../src/shared/usage.ts';
 import * as ownerUpdates from '../src/cli/ownerUpdates.ts';
@@ -37,7 +38,7 @@ function harness(opts = {}) {
     'node:util': { promisify: () => async (cmd, args) => { events.push(args.join(' ')); return opts.exec ? opts.exec(cmd, args) : { stdout: '' }; } },
     './evidenceRetry': evidenceRetry,
     '../shared/headless.ts': headless, '../shared/seatPool.ts': seatPool, '../shared/ship.ts': ship,
-    '../shared/cliModels.ts': cliModels, '../shared/cliTurnPolicy.ts': cliTurnPolicy, '../shared/phi.ts': phi, './phiGate': phiGate,
+    '../shared/cliModels.ts': cliModels, '../shared/cliTurnPolicy.ts': cliTurnPolicy, '../shared/phi.ts': phi, './phiGate': phiGate, '../shared/reviewPolicy.ts': reviewPolicy,
     './covered': { runCoveredTurn: async r => { events.push(`covered:${r.ask.question}`); return opts.covered ? opts.covered(r) : { status: 'unavailable', reason: 'no covered key in tests' }; } },
       './capacity': { AccountUnavailableError: class extends Error {}, withAgentTurn: async (_, __, fn) => fn() },
       './parallel': { runResourceResearch: async o => opts.runResourceResearch ? opts.runResourceResearch(o) : ({ summary: '', sections: [], failed: [] }), prepareResearchTasks: async () => [], recoverImplementation: async () => [], readImplementationTasks: async () => [], runImplementation: async o => opts.runImplementation?.(o) ?? ({ completed: [], commits: [], failed: [] }), runResearch: async o => opts.runResearch?.(o) ?? ({ summary: 'No conflicting flows found', results: [], reused: false }) }, '../shared/usage.ts': usageMod,

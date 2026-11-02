@@ -35,4 +35,5 @@ test('only bounded low-risk changes use a single reviewer',()=>{
  assert.ok(smallReview(['tests/navbar.test.ts'],153));
  assert.ok(!smallReview(['src/auth.ts'],10));assert.ok(!smallReview(['package.json'],10));
  assert.ok(!smallReview(['a','b','c'],20));assert.ok(!smallReview(['a'],201));assert.ok(!smallReview([],0));
+ assert.ok(!smallReview(['.ai-review-rules.md'],3));assert.ok(!smallReview(['.ai-review-ignore.md'],3));
 });

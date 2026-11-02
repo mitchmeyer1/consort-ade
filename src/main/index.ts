@@ -13,6 +13,7 @@ import * as agents from "./agents";
 import { browserLaunch, type BrowserInfo } from "./openArtifact";
 import { editMenuTemplate } from "./editMenu";
 import { deployPrompt, type DeployProfile } from "../shared/deployProfile.ts";
+import { reviewPolicySection } from "../shared/reviewPolicy.ts";
 import { spellingSuggestions } from "./spelling";
 import { homeScopes, homeWorktree, isHome, isScratch, scratchWorktree } from "../shared/scratch";
 import { isWorkspace, repoDirs, reposForPr, slugify, workspaceForCheckout, workspaceSources } from "../shared/workspace";
@@ -1117,7 +1118,7 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     const dir = join(app.getAppPath(), "skills", name);
     const skill = readFileSync(join(dir, "SKILL.md"), "utf8").replace(/^---[\s\S]*?---\n/, "");
     const worktreePath = wt(worktreeId).path;
-    let progress = "", rubric = "", deploy = "";
+    let progress = "", rubric = "", deploy = "", policy = "";
     if (name === "pr-writeup") {
       // The agent brief is shared context: it lives once on disk where every review agent
       // reads it, instead of being pasted into each assignment by the orchestrator.
@@ -1134,12 +1135,13 @@ Runtime rules for this review: dispatch review agents with \`run_in_background: 
       // Phase 0.5 needs either the cached ceilings or the order to go and find them.
       const project = store.data.projects.find((p) => p.id === wt(worktreeId).projectId);
       deploy = `\n\n## Deployment profile for this project (Phase 0.5)\n\n${deployPrompt(project?.deploy)}`;
+      policy = `\n\n${reviewPolicySection(worktreePath)}`;
     }
     const tier = delegateModel ? `You are the orchestrator, running on this session's strongest model. Dispatch every delegated agent on \`${delegateModel}\` by passing that model on the agent call; the runtime already defaults delegated agents to it. Your tokens go to scope, grouping, short assignments, verification decisions and the final prose — not to reading the diff yourself. Escalate a single agent back to your own model only when a specific verification has already failed at the delegate tier, and say why in the summary.\n\n` : "";
     return `${progress}${tier}Run the following skill${args ? ` with argument: ${args}` : " for the current branch"} in ${worktreePath}. Its sibling files live in ${dir}.
 The Artifact tool is not available here. The deliverable is the review file: write it to .consort/pr-review/pr-<n>.review.json in the worktree, in the schema the skill gives. Consort renders that file and lets the user approve or ignore each finding and post the approved ones to GitHub, so do not post comments yourself. Print the operational review summary in chat, then end with a clickable Markdown link to the saved review file using its absolute path.
 
-${skill}${deploy}${rubric}`;
+${skill}${deploy}${rubric}${policy}`;
   },
   // quick actions are the project's: one BUILD for every worktree, run wherever you press it
   addQuickAction: (projectId: string, title: string, command: string) => {
