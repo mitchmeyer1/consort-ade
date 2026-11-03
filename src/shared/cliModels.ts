@@ -42,3 +42,10 @@ export function selectCliModel(provider: Provider, available: string[], role: Cl
   // Do not fall back from ordinary work to an extraction model when a stronger model exists.
   return routine ?? ranked.find((id) => !/fable|mythos|astra/.test(id) && !extraction(id)) ?? top;
 }
+
+/** Fable, Mythos and Astra: the frontier family a scanner set to stay off frontier models never uses */
+export const isFrontierModel = (id: string): boolean => /fable|mythos|astra/.test(id.toLowerCase());
+
+/** the catalog without the frontier family, for a scanner with noFrontier set; every role then picks from what is left */
+export const withoutFrontier = <K extends string>(models: Record<K, string[]>): Record<K, string[]> =>
+  Object.fromEntries(Object.entries<string[]>(models).map(([k, list]) => [k, list.filter((m) => !isFrontierModel(m))])) as Record<K, string[]>;

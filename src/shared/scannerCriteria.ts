@@ -7,5 +7,6 @@ export function scannerCriteria(j: Job): string {
   const f = j.filters ?? {};
   const parts = [f.tags?.length ? `tag ${f.tags.join(", ")}` : "", f.statuses?.length ? `status ${f.statuses.join(", ")}` : "", f.assignees?.length ? `assignee ${f.assignees.join(", ")}` : "",
     f.nameIncludes?.length ? `name has ${f.nameIncludes.join(", ")}` : "", f.nameExcludes?.length ? `name without ${f.nameExcludes.join(", ")}` : ""].filter(Boolean);
+  if (j.noFrontier) parts.push("no Fable/Astra");
   return parts.join("; ") || "everything";
 }

@@ -69,6 +69,8 @@ export type Job = {
   maxOpenTasks?: number;
   maxEnvironments?: number;
   modelPolicy?: import("../shared/cliModels.ts").CliModelPolicy;
+  /** never run a turn on Fable, Mythos or Astra: frontier turns run on the strongest model below them (Opus or Sol) */
+  noFrontier?: boolean;
   effortPolicy?: import("../shared/cliTurnPolicy.ts").CliEffortPolicy;
   parallelResearch?: number;
   parallelImplementation?: number;

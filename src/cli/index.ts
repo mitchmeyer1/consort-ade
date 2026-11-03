@@ -83,7 +83,7 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
   slack monitor                                                         create or refresh the single master monitor post
   clickup set-key <key>
   prefix set <branch-prefix>                                             e.g. "bot" → bot/<slug>-<id>
-  scanners add --name <n> --source clickup --list|--folder|--space <id> --repo <path> --base main [--tag ai-handle] [--status "to do"]
+  scanners add --name <n> --source clickup --list|--folder|--space <id> --repo <path> --base main [--tag ai-handle] [--status "to do"] [--no-frontier]
            [--name-includes <s>] [--name-excludes <s>] [--assignee <who>] [--every 1] [--max-parallel 2]
            [--status-progress "in progress"] [--status-review "in review"] [--status-done complete]
            [--review-models claude:claude-fable-5-1,codex:gpt-6-astra]
@@ -96,7 +96,7 @@ const HELP = `${banner("Consort's ship pipeline, headless", [dim("Tickets in, re
            reads SENTRY_AUTH_TOKEN from the environment; creates bundles for a linked worker; default one open Sentry ticket
   scanners list | scanners remove <id> | scanners enable|disable <id> | scanners scan <id>   (scan: dry run)
                                                                           a scanner watches one place for tickets and hands each match to a worker agent
-  scanners configure <id> [--max-parallel N] [--max-open-tasks N] [--max-environments N] [--planning-model provider:model] [--implementation-model provider:model] [--coordination-model provider:model] [--evidence-model provider:model] [--reader-model provider:model] [--frontier-model provider:model] [--<role>-effort low|medium|high|xhigh|max] [--parallel-research N] [--parallel-implementation N] [--max-model-attempts N]
+  scanners configure <id> [--max-parallel N] [--max-open-tasks N] [--max-environments N] [--planning-model provider:model] [--implementation-model provider:model] [--coordination-model provider:model] [--evidence-model provider:model] [--reader-model provider:model] [--frontier-model provider:model] [--<role>-effort low|medium|high|xhigh|max] [--parallel-research N] [--parallel-implementation N] [--max-model-attempts N] [--no-frontier | --allow-frontier]
   resources add --name <n> --markdown <path>                              a project info resource: a git checkout of notes Grilling reads
   resources list | resources remove <id or name>                          (no patient or personal data in it: agents may quote it)
   phi status                                                              the PHI/PII guard: on or off, where the covered key is, what an agent shell sees
@@ -232,7 +232,7 @@ async function main(argv: string[]) {
         id: newId("job"), name: str(a, "name") ?? scannerName(s), source, repo, base: str(a, "base") ?? "main",
         listId: str(a, "list"), ...(str(a, "space") ? { scope: { kind: "space" as const, id: str(a, "space")! } } : str(a, "folder") ? { scope: { kind: "folder" as const, id: str(a, "folder")! } } : str(a, "list") ? { scope: { kind: "list" as const, id: str(a, "list")! } } : {}), filters, everyMinutes: Number(str(a, "every") ?? 1) || 1, maxParallel: Number(str(a, "max-parallel") ?? 2) || 2,
         statuses: { progress: str(a, "status-progress") ?? DEFAULT_STATUSES.progress, review: str(a, "status-review") ?? DEFAULT_STATUSES.review, done: str(a, "status-done") ?? DEFAULT_STATUSES.done },
-        ...(reviewModels.length ? { reviewModels } : {}), enabled: true, createdAt: Date.now(),
+        ...(reviewModels.length ? { reviewModels } : {}), ...(a["no-frontier"] ? { noFrontier: true } : {}), enabled: true, createdAt: Date.now(),
       };
       if (source === "sentry") {
         job.sentry = { host: str(a, "sentry-host") ?? "https://sentry.io", org: need(a, "sentry-org"), projects: list(a, "sentry-project"), environments: list(a, "environment"), query: str(a, "query") ?? "is:unresolved", token: process.env.SENTRY_AUTH_TOKEN ?? "", workspaceId: need(a, "workspace"), listId: need(a, "list"), ...(str(a, "folder") ? { folderId: str(a, "folder") } : {}), tag: need(a, "tag").toLowerCase(), status: str(a, "create-status") };
@@ -258,7 +258,7 @@ async function main(argv: string[]) {
     case "scanners list": {
       for (const j of s.jobs) {
         const target = j.source === "review" ? ` PRs for @${j.reviewer}` : j.source === "sentry" ? ` ${j.sentry?.org}/${j.sentry?.projects.join(",")} → ClickUp list ${j.sentry?.listId} #${j.sentry?.tag} (${j.sentry?.status ?? "list default"})` : j.scope ? ` ${j.scope.kind} ${j.scope.id}` : j.listId ? ` list ${j.listId}` : "";
-        console.log(`${j.id}  ${j.enabled ? "on " : "off"}  ${j.name.padEnd(20)}  ${j.source}${target}  every ${j.everyMinutes}m  ${j.repo} (${j.base})  filters ${JSON.stringify(j.filters)}  last scan ${j.lastScanAt ? new Date(j.lastScanAt).toLocaleString() : "never"}`);
+        console.log(`${j.id}  ${j.enabled ? "on " : "off"}  ${j.name.padEnd(20)}  ${j.source}${target}  every ${j.everyMinutes}m  ${j.repo} (${j.base})  filters ${JSON.stringify(j.filters)}${j.noFrontier ? "  no Fable/Astra" : ""}  last scan ${j.lastScanAt ? new Date(j.lastScanAt).toLocaleString() : "never"}`);
       }
       if (!s.jobs.length) console.log("No scanners."); return;
     }
@@ -290,7 +290,9 @@ async function main(argv: string[]) {
         if (!isEffortLevel(raw)) fail(`--${role}-effort must be one of ${EFFORT_LEVELS.join(", ")}`);
         job.effortPolicy = { ...job.effortPolicy, [role]: raw };
       }
-      saveState(s); console.log(`Updated scanner ${job.name}.`); return;
+      if (a["no-frontier"]) job.noFrontier = true;
+      if (a["allow-frontier"]) delete job.noFrontier;
+      saveState(s); console.log(`Updated scanner ${job.name}${job.noFrontier ? " (no Fable or Astra)" : ""}.`); return;
     }
     case "resources add": {
       const name = need(a, "name");

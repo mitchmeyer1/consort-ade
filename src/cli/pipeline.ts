@@ -9,7 +9,7 @@ import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUs
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { reviewPolicySection } from "../shared/reviewPolicy.ts";
-import { selectCliModel, type CliModelRole } from "../shared/cliModels.ts";
+import { isFrontierModel, selectCliModel, withoutFrontier, type CliModelRole } from "../shared/cliModels.ts";
 import { MAX_STAGE_TURNS, turnMoved, MODEL_ROLE_RULES, BUILD_EFFORT_RULE, parseBuildEffort, parseModelEscalation, roleEffort, stageModelRole } from "../shared/cliTurnPolicy.ts";
 import { AccountUnavailableError, COVERED_ACCOUNT, withAgentTurn } from "./capacity";
 import { prepareResearchTasks, readImplementationTasks, recoverImplementation, runImplementation, runResearch, runResourceResearch, type ParallelRun } from "./parallel";
@@ -78,8 +78,12 @@ export async function workTask(taskId: string): Promise<void> {
   const have = providersOf(turnAccounts(state));
   const builderProvider: Provider | undefined = have.claude ? "claude" : have.codex ? "codex" : undefined;
   if (!builderProvider) throw new Error("No AI accounts: run `consort-cli accounts add` first.");
-  const models = seedModels();
-  const modelFor = (provider: Provider, role: CliModelRole) => selectCliModel(provider, models[provider], role, job.modelPolicy);
+  // a scanner set to stay off frontier models picks every role, frontier and review included, from the rest of the catalog
+  const models = job.noFrontier ? withoutFrontier(seedModels()) : seedModels();
+  const modelFor = (provider: Provider, role: CliModelRole) => {
+    const picked = selectCliModel(provider, models[provider], role, job.modelPolicy);
+    return job.noFrontier && isFrontierModel(picked) ? selectCliModel(provider, models[provider], role) : picked;
+  };
   const builderModel = modelFor(builderProvider, "planning");
   const workerModel = modelFor(builderProvider, "implementation");
   const rotation = cliReviewRotation({ claude: have.claude ? models.claude : undefined, codex: have.codex ? models.codex : undefined }, job.reviewModels);
