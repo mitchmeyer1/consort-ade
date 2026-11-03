@@ -247,8 +247,10 @@ async function addScanners(ask: Ask, first?: string): Promise<void> {
     }
     job.everyMinutes = Number(await ask("Scan every N minutes", { default: "1" })) || 1;
     job.maxParallel = Number(await ask("Tickets this scanner works on at once", { default: "2" })) || 2;
+    console.log(dim("An easy-ticket scanner never uses the frontier models (Fable, Astra): Opus or Sol plans, Sonnet or a lighter Codex model builds. Cheaper, for small well-scoped tickets; give it its own tag."));
+    if (await yes(ask, "Easy tickets only: keep this scanner off Fable and Astra?", false)) job.noFrontier = true;
     s = loadState(); s.jobs.push(job as Job); saveState(s);
-    console.log(ok(`scanner "${job.name}" saved`));
+    console.log(ok(`scanner "${job.name}" saved${job.noFrontier ? " (no Fable or Astra)" : ""}`));
     if (!(await yes(ask, "Add another scanner? (a ClickUp worker, GitHub worker, or Sentry ticket producer)", false))) break;
   }
 }
