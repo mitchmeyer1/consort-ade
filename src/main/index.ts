@@ -14,6 +14,7 @@ import { browserLaunch, type BrowserInfo } from "./openArtifact";
 import { editMenuTemplate } from "./editMenu";
 import { deployPrompt, type DeployProfile } from "../shared/deployProfile.ts";
 import { reviewPolicySection } from "../shared/reviewPolicy.ts";
+import { appReviewPrompt, prepareAppReview } from "../shared/reviewSteps.ts";
 import { spellingSuggestions } from "./spelling";
 import { homeScopes, homeWorktree, isHome, isScratch, scratchWorktree } from "../shared/scratch";
 import { isWorkspace, repoDirs, reposForPr, slugify, workspaceForCheckout, workspaceSources } from "../shared/workspace";
@@ -377,8 +378,8 @@ async function startShipReview(worktreeId: string, round: number, fromChatId?: s
   w.ship.history.push({ at: Date.now(), stage: w.ship.stage, note: restart ? `Review round ${round} restarted on PR #${pr} after an interruption.` : `Review round ${round} started on PR #${pr}.` });
   store.save();
   // the skill resumes from the agent reports already under .consort/pr-review/agents/, so a restart finishes rather than repeats
-  const resume = restart ? "\n\nThis review was interrupted before it wrote its review file. Resume it: read .consort/pr-review/agents/ first, dispatch only the groups with no report, then verify and write the file." : "";
-  await agents.send(id, handlers.skillPrompt!("pr-writeup", w.id, String(pr), chat.delegateModel) + resume, [], { display: reviewTurnLabel(round, pr) });
+  const resume = restart ? "\n\nThis review was interrupted before it wrote its review file. Resume it: keep .consort/pr-review/plan.json and the area files in .consort/pr-review/agents/, dispatch only the areas with no file, then verify and write the review file." : "";
+  await agents.send(id, (await handlers.skillPrompt!("pr-writeup", w.id, String(pr), chat.delegateModel)) + resume, [], { display: reviewTurnLabel(round, pr) });
   return id;
 }
 /** every feature whose self-review stalled gets it restarted in its ship chat: at launch, and when the review step is asked for */
@@ -1114,7 +1115,15 @@ const handlers: { [K in keyof Api]?: (...a: any[]) => any } = {
     const [issue, repo] = await Promise.all([git.issueDetail(w.path, number), git.repoName(w.path)]);
     return issueBriefPrompt(issue, { repo: repo ?? project(w.projectId).name, worktreePath: w.path, branch: w.branch });
   },
-  skillPrompt: (name: string, worktreeId: string, args?: string, delegateModel?: string) => {
+  skillPrompt: async (name: string, worktreeId: string, args?: string, delegateModel?: string) => {
+    // a PR review runs the CLI review's three steps (shared/reviewSteps.ts): the chat's frontier model plans
+    // and verifies, one reviewer per area runs on the delegate tier (Opus or Sol)
+    if (name === "pr-writeup" && args && /^\d+$/.test(args.trim())) {
+      const path = wt(worktreeId).path;
+      const target = await git.prTarget(path, Number(args.trim()));
+      prepareAppReview(path, target.pr, target.head);
+      return appReviewPrompt(target, path, delegateModel || "opus");
+    }
     const dir = join(app.getAppPath(), "skills", name);
     const skill = readFileSync(join(dir, "SKILL.md"), "utf8").replace(/^---[\s\S]*?---\n/, "");
     const worktreePath = wt(worktreeId).path;

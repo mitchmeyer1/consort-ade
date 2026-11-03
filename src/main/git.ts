@@ -346,6 +346,14 @@ export async function prDetail(cwd: string, n: number): Promise<RepoInfo["prs"][
   return { number: p.number, title: p.title, author: p.author?.login ?? "", branch: p.headRefName, draft: !!p.isDraft, review: p.reviewDecision ?? "", updatedAt: p.updatedAt, url: p.url, ...whoseTurn(p, me) };
 }
 
+/** what a review needs to know about PR `n`: repo, title, author, head and base */
+export async function prTarget(cwd: string, n: number): Promise<{ repo: string; pr: number; url: string; title: string; author: string; head: string; base: string }> {
+  const p = await gh(cwd, ["pr", "view", String(n), "--json", "number,title,url,author,headRefOid,baseRefName"]);
+  if (!p) throw new Error(`Couldn't load PR #${n} from GitHub. Is gh signed in?`);
+  const repo = /github\.com\/([^/]+\/[^/]+)\/pull\//.exec(p.url ?? "")?.[1] ?? "";
+  return { repo, pr: p.number, url: p.url, title: p.title, author: p.author?.login ?? "", head: p.headRefOid, base: p.baseRefName };
+}
+
 export const repoName = (cwd: string): Promise<string | undefined> =>
   gh(cwd, ["repo", "view", "--json", "nameWithOwner"]).then((j) => j?.nameWithOwner || undefined);
 

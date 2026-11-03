@@ -27,7 +27,6 @@ import { addTurnCost, approvalReply, ENVIRONMENT_RULES, HEADLESS_RULES, seedMode
 import { selectCliModel } from "../shared/cliModels.ts";
 import { modelBlock, modelLoad, rankAccounts, usageBlock } from "../shared/usage.ts";
 import { parseReview, serializeReview, type Finding, type Review, type ReviewEvent } from "../shared/review.ts";
-import { reviewPolicyNote } from "../shared/reviewPolicy.ts";
 import { newShipFeature } from "../shared/ship.ts";
 import type { Provider } from "../shared/types.ts";
 import { runTurn } from "./agent";
@@ -43,12 +42,13 @@ import { blockAccount, HOME, loadState, newId, touchAccount, updateTask, WORK_DI
 import { usageFor } from "./usage";
 import { reviewScope, scopeGuidance, ReviewCheckpoints, readReviewJson, saveReviewJson, type ReviewScope } from "./reviewProgress";
 import { gateText } from "./phiGate.ts";
-import { ARTICLE_RULES, articleHtml, articleText, changedFiles, parseArticle, type PrArticle } from "../shared/prArticle.ts";
+import { articleHtml, articleText, changedFiles, parseArticle, type PrArticle } from "../shared/prArticle.ts";
 
 const run = promisify(execFile);
 const sh = async (cmd: string, args: string[], cwd: string) => (await run(cmd, args, { cwd, timeout: 300_000, maxBuffer: 64 << 20 })).stdout;
 
-export type ReviewTarget = { repo: string; pr: number; url: string; title: string; author: string; head: string; base: string; /** 1 for the first review, +1 each time the author asks again */ round?: number };
+export type { ReviewTarget } from "../shared/reviewSteps.ts";
+import type { ReviewTarget } from "../shared/reviewSteps.ts";
 export type PrWatch = { state: string; headRefOid: string; reviewRequests?: { login?: string }[] };
 const WATCH_MS = 2 * 60_000;
 export type OpenPr = { number: number; title: string; url: string; headRefOid: string; baseRefName: string; isDraft: boolean; author?: { login?: string }; assignees?: { login?: string }[]; reviewRequests?: { login?: string }[] };
@@ -146,40 +146,8 @@ export function approvalQuestion(t: ReviewTarget, review: Review, postedUrl: str
 
 // ── prompts ────────────────────────────────────────────────────────────────────────────────
 
-export const OVERVIEW_PROMPT = (t: ReviewTarget, wt: string) => `## Review step 1 of 3: understand the repository and plan the review
-
-You lead an automatic review of PR #${t.pr} "${t.title}" by @${t.author} into ${t.base}. The PR head is checked out in this worktree. Do not change source files; write only under .consort/review/.
-${reviewPolicyNote(wt)}
-
-1. Learn how this repository is built: its layout and layering, where each kind of code lives, naming, data access, error handling, config and secrets, background jobs, tests, and how existing features are organised so they scale. Read the docs and the existing modules closest to what the PR touches.
-2. Read the change: \`git diff origin/${t.base}...HEAD --stat\`, then the diff itself.
-3. Write .consort/review/OVERVIEW.md: a 2-3 sentence TL;DR of what the PR does; the conventions and rules that apply to it; where it could break at scale; the risky areas.
-4. Write .consort/review/plan.json: {"tldr": "<2-3 sentences>", "emoji": "<one emoji that pictures what this PR changes, e.g. 🚀 for a deploy fix, 🧭 for navigation; never 🔎>", "title": "<2-5 plain words naming the change>", "slices": [{"id": "s1", "title": "<area>", "files": ["<changed files in this area>"], "related": ["<callers, similar existing modules, schemas to compare against>"], "focus": "<what to check here>"}], "article": {"category", "headline", "body", "diagram", "caption", "flows"}}. 1 to 10 slices proportional to scope (one for a small change), together covering every changed file, each small enough for one reviewer to crawl thoroughly. Group by area of the code, not by commit.
-${ARTICLE_RULES}
-Reply with one line when both files are written.`;
-
-export const SLICE_PROMPT = (t: ReviewTarget, wt: string, slice: { id: string; title: string; files: string[]; related?: string[]; focus?: string }) => `## Review one area of PR #${t.pr} "${t.title}"
-
-Read .consort/review/OVERVIEW.md first. ${reviewPolicyNote(wt)}
-Your area: ${slice.title}
-Changed files: ${slice.files.join(", ")}
-${slice.related?.length ? `Compare against: ${slice.related.join(", ")}\n` : ""}${slice.focus ? `Focus: ${slice.focus}\n` : ""}
-Crawl: read each changed file in full, the code that calls it, and the existing code that does the same kind of thing, so you judge it against how this repository already works. The diff is \`git diff origin/${t.base}...HEAD -- <file>\`.
-Flag, with evidence:
-- correctness bugs and broken flows;
-- what will not scale: unbounded queries or loops, N+1 queries, missing pagination or indexes, heavy work per request, memory growth, missing limits or timeouts;
-- convention breaks: code in the wrong layer or folder, naming that differs from its neighbours, a new pattern where a shared helper or existing pattern exists, duplicated logic, organisation that will not hold as the feature grows;
-- security and secrets handling, missing tests for new behaviour, and every violation of .ai-review-rules.md at the rule's severity.
-Do not flag what a linter or formatter catches, or taste with no consequence. Point each finding at a changed line at the PR head when you can.
-Severity: critical = breaks production, data or security; high = a real bug, or a scaling or convention problem that must be fixed before merge; medium = should be fixed; low = worth a mention.
-Reply with [review-findings] followed by a \`\`\`json array: [{"severity", "category": "logic|redundant|style|tests|comments|scaling", "title": "<the consequence, one line>", "file", "line", "problem", "fix", "comment": "<the GitHub comment to post: plain, direct, 1-4 sentences, with the fix>"}]. An empty array when you find nothing.`;
-
-export const FINAL_PROMPT = (t: ReviewTarget, wt: string, reviewers: number) => `## Review step 3 of 3: verify and settle the findings
-
-${reviewers} reviewers' raw findings for PR #${t.pr} are in .consort/review/swarm.json. ${reviewPolicyNote(wt)}
-${existsSync(join(wt, ".consort", "review", "previous.json")) ? `This is round ${t.round ?? 2}: the author changed the PR after an earlier review. The earlier findings are in .consort/review/previous.json. Check each one at the new head first: drop it if it is fixed; if it is not, keep it with its title starting "Still open: ".
-` : ""}For each finding, open the file at that line and check it is real at the PR head. Drop false positives and anything a linter catches; merge duplicates; move file/line to a changed line where you can; settle the severity (a rule in .ai-review-rules.md wins; otherwise critical = breaks production, data or security; high = a real bug or a scaling or convention problem that must be fixed before merge; medium = should fix; low = worth a mention); tighten each comment so it is ready to post.
-Reply with [review-final] followed by a \`\`\`json object: {"summary": "<1-2 plain sentences: the work this PR does>", "flows": ["<1 to 4 entries, one sentence each: a user or system flow this PR changes and what now happens in it>"], "headline": "<one-line verdict>", "findings": [same shape as the raw findings]}.`;
+export { OVERVIEW_PROMPT, SLICE_PROMPT, FINAL_PROMPT } from "../shared/reviewSteps.ts";
+import { OVERVIEW_PROMPT, SLICE_PROMPT, FINAL_PROMPT } from "../shared/reviewSteps.ts";
 
 // ── the worker ─────────────────────────────────────────────────────────────────────────────
 
