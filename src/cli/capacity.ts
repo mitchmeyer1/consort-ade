@@ -12,7 +12,7 @@ export const availableTaskSlots = (state: CliState, job: Job) => Math.max(0, Mat
 export const COVERED_ACCOUNT = "covered";
 
 export class AccountUnavailableError extends Error {
-  constructor(public accountId: string) { super(`Account ${accountId} reached its usage limit while waiting for capacity.`); this.name = "AccountUnavailableError"; }
+  constructor(public accountId: string, public busy = false) { super(busy ? `Account ${accountId} had no free turn slot.` : `Account ${accountId} reached its usage limit while waiting for capacity.`); this.name = "AccountUnavailableError"; }
 }
 
 export const maxAgentTurnUnits = (taskId: string, accountId: string): number => {
@@ -69,8 +69,13 @@ export function tryAcquireAnyAgentTurn(taskId: string, accountIds: string[]): { 
 export function releaseAgentTurn(taskId: string, lease: string) {
   mutateState(state => { const t = state.tasks.find(t => t.id === taskId); if (t) t.activeTurns = t.activeTurns?.filter(turn => turn.id !== lease); });
 }
-export async function withAgentTurn<T>(taskId: string, accountId: string, action: () => Promise<T>, units = 1): Promise<T> {
+/** waits for a free turn slot on the account; with `maxWaitMs`, gives up so the caller can try another account */
+export async function withAgentTurn<T>(taskId: string, accountId: string, action: () => Promise<T>, units = 1, maxWaitMs?: number): Promise<T> {
   let lease: string | undefined;
-  while (!(lease = tryAcquireAgentTurn(taskId, accountId, units))) await new Promise(resolve => setTimeout(resolve, 250));
+  const until = maxWaitMs === undefined ? Infinity : Date.now() + maxWaitMs;
+  while (!(lease = tryAcquireAgentTurn(taskId, accountId, units))) {
+    if (Date.now() >= until) throw new AccountUnavailableError(accountId, true);
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
   try { return await action(); } finally { releaseAgentTurn(taskId, lease); }
 }

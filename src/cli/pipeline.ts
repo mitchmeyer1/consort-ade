@@ -54,6 +54,8 @@ import { blockAccount, loadState, processAlive, touchAccount, updateTask, WORK_D
  */
 
 const run = promisify(execFile);
+/** how long a turn waits for a free slot on its chosen login before moving to another */
+const ACCOUNT_SLOT_WAIT_MS = 60_000;
 const PR_POLL_MS = 3 * 60_000;
 const STUCK_AFTER = 3;
 /** an agent turn that prints nothing for this long is treated as hung and restarted on another account */
@@ -343,8 +345,15 @@ export async function workTask(taskId: string): Promise<void> {
         usageTimer = setInterval(checkUsage, 60_000);
         deadline = timeoutMs ? setTimeout(() => { timedOut = true; trace.reason = "timeout"; abort.abort(); }, timeoutMs) : undefined;
         return runTurn({ trace, cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}${feature.stage === "Grilling" && !resourceTurn ? `\n${BUILD_EFFORT_RULE}` : ""}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}${resourceTurn ? "" : `\n\n${ENVIRONMENT_RULES(runEnv)}`}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: runEnv, signal: abort.signal, readOnly, ...(resourceTurn ? { offline: true, settingSources: ["user" as const] } : {}), phi: { ...turnPhi(live), task: taskId, ticket: task.ticket.id, base: `origin/${job.base}`, alert: (line: string) => say(line) }, effort, delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { quietSince = Date.now(); const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
-      }, reviewUnits); }
-      catch (e) { if (e instanceof AccountUnavailableError) { continue; } throw e; }
+      }, reviewUnits, ACCOUNT_SLOT_WAIT_MS); }
+      catch (e) {
+        if (e instanceof AccountUnavailableError) {
+          // a login whose turn slots stay full (another task's long turn) must not hold this one forever: try the next login
+          if (e.busy) { tried.add(who.id); log(task, `${who.name} had no free turn slot for ${Math.round(ACCOUNT_SLOT_WAIT_MS / 1000)}s; trying another account`); }
+          continue;
+        }
+        throw e;
+      }
       finally { active = false; mine.set(who.id, (mine.get(who.id) ?? 1) - 1); if (usageTimer) clearInterval(usageTimer); if (deadline) clearTimeout(deadline); }
       if (usageLimit) res.limit = { text: usageLimit.reason, resetsAt: usageLimit.until };
       updateTask(taskId, t => ({

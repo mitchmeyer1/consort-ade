@@ -239,3 +239,13 @@ test('account reservation skips full and blocked accounts without exceeding limi
   capacity.releaseAgentTurn('t',first.lease);capacity.releaseAgentTurn('u',next.lease);
   assert.equal(state.loadState().tasks.flatMap(t=>t.activeTurns??[]).length,0);
 });
+
+test('a turn waiting on a login whose slots stay full gives up after its wait, so the worker can try another login', async () => {
+  seed();state.mutateState(s=>{s.accounts[0].maxActiveTurns=1;});
+  const held=capacity.tryAcquireAgentTurn('u','a');assert.ok(held);
+  let ran=false;
+  const err=await capacity.withAgentTurn('t','a',async()=>{ran=true;},1,300).catch(e=>e);
+  assert.ok(err instanceof capacity.AccountUnavailableError);assert.equal(err.busy,true);assert.equal(ran,false);
+  capacity.releaseAgentTurn('u',held);
+  assert.equal(await capacity.withAgentTurn('t','a',async()=>'ran',1,300),'ran');
+});
