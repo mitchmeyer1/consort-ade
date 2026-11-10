@@ -98,7 +98,7 @@ function daemon(overrides = {}) {
     './slackLinks': { taskSlackLinks: async () => ({ ticket: task.ticket.url }) },
     './slack': { Slack: class { async threadMessages() { return messages; } async post(text) { replies.push(text); } } },
     './ownerUpdates': owner,
-    'node:fs': { existsSync: () => true },
+    'node:fs': { existsSync: () => true }, 'node:path': { join: (...a) => a.join('/') },
     './oversight': { workerLogTail: () => '' },
     './buildProgress': { stepLabel: name => name },
     './sources': { sourceFor: () => ({ comments: async () => [] }) },

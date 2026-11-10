@@ -211,6 +211,8 @@ export async function workTask(taskId: string): Promise<void> {
   // telemetry labels (cli/telemetry.ts): parallel children by worktree, one-off steps by the next turn they start
   const childSteps = new Map<string, string>();
   let nextStep: string | undefined;
+  // images the owner attached, sent with the next turn's prompt (cli/agent.ts promptImages)
+  let nextImages: string[] | undefined;
   let feature: ShipFeature = task.feature;
   let pendingUser: string | undefined;
   // a push the PHI/PII guard withheld at the last checkpoint: the next stage turn is told what to rewrite
@@ -226,6 +228,8 @@ export async function workTask(taskId: string): Promise<void> {
     let silences = 0;
     // this turn's telemetry label, taken once so every retry keeps it
     const named = childSteps.get(cwd) ?? nextStep;
+    const images = nextImages;
+    nextImages = undefined;
     if (!childSteps.has(cwd)) nextStep = undefined;
     let lastCrash: string | undefined;
     let failedTurns = 0;
@@ -344,7 +348,7 @@ export async function workTask(taskId: string): Promise<void> {
         quietSince = Date.now();
         usageTimer = setInterval(checkUsage, 60_000);
         deadline = timeoutMs ? setTimeout(() => { timedOut = true; trace.reason = "timeout"; abort.abort(); }, timeoutMs) : undefined;
-        return runTurn({ trace, cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}${feature.stage === "Grilling" && !resourceTurn ? `\n${BUILD_EFFORT_RULE}` : ""}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}${resourceTurn ? "" : `\n\n${ENVIRONMENT_RULES(runEnv)}`}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: runEnv, signal: abort.signal, readOnly, ...(resourceTurn ? { offline: true, settingSources: ["user" as const] } : {}), phi: { ...turnPhi(live), task: taskId, ticket: task.ticket.id, base: `origin/${job.base}`, alert: (line: string) => say(line) }, effort, delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { quietSince = Date.now(); const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
+        return runTurn({ trace, cwd, prompt: `${HEADLESS_RULES}\n\n${MODEL_ROLE_RULES(role)}${feature.stage === "Grilling" && !resourceTurn ? `\n${BUILD_EFFORT_RULE}` : ""}\n\n${escalationReason ? `Previous attempt needs deeper analysis: ${escalationReason}. Read the saved task artifacts and continue.\n\n` : ""}${typeof prompt === "function" ? prompt(provider) : prompt}${resourceTurn ? "" : `\n\n${ENVIRONMENT_RULES(runEnv)}`}\n\n## Runtime delegation limit\n${delegation}`, model, account: who, resume: session, env: runEnv, signal: abort.signal, readOnly, ...(images?.length ? { images } : {}), ...(resourceTurn ? { offline: true, settingSources: ["user" as const] } : {}), phi: { ...turnPhi(live), task: taskId, ticket: task.ticket.id, base: `origin/${job.base}`, alert: (line: string) => say(line) }, effort, delegateModel: modelFor(provider, "reader"), maxDelegates: reviewUnits - 1, onText: (t) => { quietSince = Date.now(); const line = t.replace(/\s+/g, " ").trim(); log(task, `agent: ${line.slice(0, 200)}`); if (line) noteProgress(line); } });
       }, reviewUnits, ACCOUNT_SLOT_WAIT_MS); }
       catch (e) {
         if (e instanceof AccountUnavailableError) {
@@ -493,6 +497,7 @@ export async function workTask(taskId: string): Promise<void> {
     rmSync(join(task.worktree, ticketFile), { force: true });
     activity(`applying ${updates.length} owner update${updates.length === 1 ? "" : "s"} from Slack`);
     nextStep = "owner update";
+    nextImages = updates.flatMap((u) => u.files).map((f) => join(task.worktree, f));
     const text = await turn(inbound(ownerUpdatePrompt(updates, { stage: feature.stage, built: !!feature.built, prUrl: feature.prs.at(-1), ticketFile }), phi).text, builderProvider, "implementation");
     await completeReply(text, undefined, "implementation");
     const applied = new Set(updates.map((u) => u.ts));

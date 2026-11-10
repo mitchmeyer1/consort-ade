@@ -52,14 +52,14 @@ function daemon(worktree) {
   const task = { id: 't', jobId: 'j', worktree, ticket: { id: 'T1', url: 'https://app.clickup.com/t/T1' }, slackThread: '1', slackStatusAfterTs: '1', status: 'working', pid: 123, updatedAt: Date.now(), reviewsDone: 0, accountIds: {}, feature: { stage: 'Implementing', built: false, prs: [] } };
   const state = { slack: { userId: 'owner', botToken: 'xoxb' }, tasks: [task], jobs: [{ id: 'j', repo: '/repo' }], accounts: [] };
   const replies = []; let messages = [];
-  const downloads = [];
+  const downloads = []; const seenAttachments = [];
   const mocks = {
     '../shared/headless.ts': headless,
     './state': { loadState: () => state, updateTask: (id, patch) => Object.assign(task, typeof patch === 'function' ? patch(task) : patch) },
     './slackLinks': { taskSlackLinks: async () => ({ ticket: task.ticket.url }) },
     './slack': { Slack: class { async threadMessages() { return messages; } async post(text, thread) { replies.push({ text, thread }); } } },
     './ownerUpdates': { ...owner, downloadSlackFiles: async (token, files, wt, ts) => { downloads.push({ token, ts }); return { saved: files.map(f => `.consort/ship/updates/${ts}/${f.name}`), failed: [] }; } },
-    'node:fs': { existsSync: () => true },
+    'node:fs': { existsSync: () => true }, 'node:path': { join: (...a) => a.join('/') },
     './oversight': { workerLogTail: () => '' },
     './buildProgress': { stepLabel: name => name },
     './testSession': testSession, './workerControl': { requestWorkerStop: () => {} },
@@ -67,7 +67,7 @@ function daemon(worktree) {
   };
   const mod = { exports: {} };
   new Function('require', 'module', 'exports', compile('slackStatus'))(n => mocks[n], mod, mod.exports);
-  return { task, replies, downloads, run: async () => { await mod.exports.answerTaskStatusQuestions(() => true, { answer: async c => ({ answer: `Checked: ${c.question}`, update: /add|rename|change|use/i.test(c.question) ? c.question : undefined, model: 'claude-opus-5' }) }); await mod.exports.settleOwnerReplies(); }, messages: m => { messages = m; } };
+  return { task, replies, downloads, seenAttachments, run: async () => { await mod.exports.answerTaskStatusQuestions(() => true, { answer: async c => (seenAttachments.push(c.attachments ?? []), { answer: `Checked: ${c.question}`, update: /add|rename|change|use/i.test(c.question) ? c.question : undefined, model: 'claude-opus-5' }) }); await mod.exports.settleOwnerReplies(); }, messages: m => { messages = m; } };
 }
 
 test('change requests and files are queued; questions and thanks are not', async () => {
@@ -76,6 +76,7 @@ test('change requests and files are queued; questions and thanks are not', async
   await h.run();
   assert.deepEqual(h.task.ownerUpdates.map(u => [u.ts, u.text, u.files]), [['5', 'Use the attached spec', ['.consort/ship/updates/5/spec.pdf']]]);
   assert.deepEqual(h.downloads, [{ token: 'xoxb', ts: '5' }]);
+  assert.deepEqual(h.seenAttachments.at(-1), ['/wt/.consort/ship/updates/5/spec.pdf'], 'the agent answering sees the attached file, downloaded once');
   assert.equal(h.replies.length, 2);
   assert.match(h.replies[0].text, /^✅ Checked: status\n\n/);
   assert.match(h.replies[1].text, /^✅ Checked: Use the attached spec\n\n\*Queued as a change with 1 file:\* I'll update the ticket and the code after the current step\./);

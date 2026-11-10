@@ -26,6 +26,8 @@ export type OversightContext = {
   ticketComments: { text: string; by?: string; at?: number }[];
   logTail?: string;
   now?: number;
+  /** absolute paths of the files attached to the owner's message, saved in the worktree */
+  attachments?: string[];
 };
 export type OversightAnswer = { answer: string; update?: string; model: string };
 
@@ -81,7 +83,8 @@ export function oversightPrompt(c: OversightContext): string {
     ...(c.task.pendingQuestion ? ["- The worker is paused on the question listed under Task below, and this message is not the answer: the owner wants it clarified. Explain what is being asked, the options and what each would change, so they can decide. If the message reads like an answer phrased as a question, say what you understood and ask them to reply with it plainly."] : []),
     "",
     "## The owner's message",
-    c.question.trim(),
+    c.question.trim() || "(no text: only the attached files)",
+    ...(c.attachments?.length ? ["", "## Files attached to this message", "The owner's question is about these. Images are shown to you with this message; open every other file (and any image you were not shown) with your Read tool before you answer.", ...c.attachments.map((f) => `- ${f}`)] : []),
     "",
     "## Task",
     `- Ticket: ${t.ticket.id} ${t.ticket.title} (${t.ticket.url})`,
@@ -125,7 +128,7 @@ export async function answerOwner(c: OversightContext, runTurn: (o: TurnOptions)
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
     try {
-      const turn = await runTurn({ phi: turnPhi(c.state), trace: { taskId: c.task.id, ticket: c.task.ticket.id, title: c.task.ticket.title, scanner: job?.name, kind: "oversight", stage: c.task.feature.stage, step: "answer the owner", role: "oversight" }, cwd: existsSync(c.task.worktree) ? c.task.worktree : job?.repo ?? HOME, prompt: oversightPrompt(c), model, account, readOnly: true, maxTurns: 25, effort: "medium", maxDelegates: 0, signal: abort.signal });
+      const turn = await runTurn({ phi: turnPhi(c.state), trace: { taskId: c.task.id, ticket: c.task.ticket.id, title: c.task.ticket.title, scanner: job?.name, kind: "oversight", stage: c.task.feature.stage, step: "answer the owner", role: "oversight" }, cwd: existsSync(c.task.worktree) ? c.task.worktree : job?.repo ?? HOME, prompt: oversightPrompt(c), model, account, readOnly: true, ...(c.attachments?.length ? { images: c.attachments } : {}), maxTurns: 25, effort: "medium", maxDelegates: 0, signal: abort.signal });
       if (turn.limit || turn.error || !turn.text.trim()) { errors.push(`${account.name}: ${turn.error ?? (turn.limit ? "usage limit" : "empty reply")}`); continue; }
       return { ...parseOversight(turn.text), model };
     } catch (e) { errors.push(`${account.name}: ${(e as Error).message}`); }

@@ -23,7 +23,7 @@ function harness(answer = checked) {
     './oversight':{workerLogTail:()=>'2026 [T1] turn 3 at Implementing: ported providerDedup'},
     './sources':{sourceFor:()=>({comments:async()=>[{text:'Please rename the CSV column',by:'will',at:1}]})},
     './ownerUpdates':{isAcknowledgement:t=>/^thanks$/i.test(t),downloadSlackFiles:async()=>({saved:[],failed:[]})},
-    'node:fs':{existsSync:()=>true},
+    'node:fs':{existsSync:()=>true},'node:path':{join:(...a)=>a.join('/')},
   };
   const mod={exports:{}};
   new Function('require','module','exports',compile('slackStatus'))(n=>mocks[n],mod,mod.exports);

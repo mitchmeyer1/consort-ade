@@ -14,6 +14,7 @@ import { answerOwner, workerLogTail, type OversightContext, type OversightAnswer
 import { sourceFor } from "./sources";
 import { stepLabel } from "./buildProgress";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { isBareDone, isTestDone, isTestRequest } from "./testSession";
 import { requestWorkerStop } from "./workerControl";
 import { processAlive } from "./state";
@@ -77,16 +78,18 @@ async function handleOwnerMessage(slack: Slack, state: CliState, task: Task, mes
     if (files.length) await post(slack, task, await queueOwnerUpdate(state.slack!.botToken, task.id, message, "(Files attached to the answer above; the answer itself was already applied.)", true) ?? "", links, alive);
     return;
   }
+  // the files first, so the agent answering sees them and the queued update reuses them
+  const saved = files.length ? await saveFiles(state.slack!.botToken, task, message) : undefined;
   let reply: OversightAnswer | undefined;
   try {
-    reply = await deps.answer(await oversightContext(slack, state, task, text, alive));
+    reply = await deps.answer({ ...(await oversightContext(slack, state, task, text, alive)), ...(saved?.saved.length ? { attachments: saved.saved.map(f => join(task.worktree, f)) } : {}) });
   } catch (e) {
     console.error(`Oversight agent for ${task.ticket.id} failed: ${(e as Error).message}`);
   }
   // without the agent: the plain status line, and anything that is not a status question still reaches the worker
   // a review task has no build to change: the oversight agent answers, nothing is queued
   const change = task.kind === "review" ? undefined : reply ? reply.update : isTaskStatusQuestion(text) ? undefined : text;
-  const queued = files.length || change ? await queueOwnerUpdate(state.slack!.botToken, task.id, message, change && change !== text ? `${text}\n\n(Read as: ${change})` : text, false) : undefined;
+  const queued = files.length || change ? await queueOwnerUpdate(state.slack!.botToken, task.id, message, change && change !== text ? `${text}\n\n(Read as: ${change})` : text, false, saved) : undefined;
   const body = reply?.answer || `${statusOf(loadState(), task.id, alive)?.line ?? ""}${reply ? "" : "\n• I could not check the details just now; ask again in a minute."}`;
   const waiting = loadState().tasks.find(t => t.id === task.id)?.pendingQuestion ? "• Still waiting on your answer to the question above." : undefined;
   await post(slack, task, [body, queued, waiting].filter(Boolean).join("\n\n"), links, alive);
@@ -123,13 +126,19 @@ async function post(slack: Slack, task: Task, text: string, links: Awaited<Retur
 const OPEN = ["working", "waiting", "monitoring"];
 
 /** queue one owner message as an update; returns the line to add to the reply */
-async function queueOwnerUpdate(token: string, taskId: string, message: SlackThreadMessage, text: string, filesOnly: boolean): Promise<string | undefined> {
+type Saved = { saved: string[]; failed: string[] };
+async function saveFiles(token: string, task: Task, message: SlackThreadMessage): Promise<Saved> {
+  const files = message.files ?? [];
+  return files.length && existsSync(task.worktree) ? await downloadSlackFiles(token, files, task.worktree, message.ts) : { saved: [], failed: files.map(f => `${f.name ?? "file"}: the task folder is not created yet`) };
+}
+
+async function queueOwnerUpdate(token: string, taskId: string, message: SlackThreadMessage, text: string, filesOnly: boolean, already?: Saved): Promise<string | undefined> {
   const task = loadState().tasks.find(t => t.id === taskId);
   if (!task) return undefined;
   const files = message.files ?? [];
   if (!OPEN.includes(task.status) && task.status !== "ready")
     return `This task is ${task.status === "done" ? `closed (${task.note ?? "PR closed"})` : task.status}, so I can't apply changes here. Post them on a new ticket.`;
-  const saved = files.length && existsSync(task.worktree) ? await downloadSlackFiles(token, files, task.worktree, message.ts) : { saved: [], failed: files.map(f => `${f.name ?? "file"}: the task folder is not created yet`) };
+  const saved = already ?? await saveFiles(token, task, message);
   const update = { ts: message.ts, text, files: saved.saved, ...(saved.failed.length ? { failedFiles: saved.failed } : {}), at: Date.now() };
   const reopen = task.status === "ready";
   updateTask(taskId, t => ({ ownerUpdates: [...(t.ownerUpdates ?? []).filter(u => u.ts !== message.ts), update], ...(reopen ? { status: "monitoring", finishedAt: undefined, note: undefined, activity: "applying an owner update from Slack" } : {}) }), false);

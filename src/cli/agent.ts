@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { join } from "node:path";
+import { extname, join } from "node:path";
+import { readFileSync, statSync } from "node:fs";
 import { promisify } from "node:util";
 import { cliBinary, type Deps as RuntimeDeps } from "../main/cliRuntime";
 import type { Provider } from "../shared/types";
@@ -42,7 +43,17 @@ export const binaryFor = (provider: Provider): string => {
   return bin;
 };
 
-export type TurnOptions = { /** labels for the telemetry log; without it the turn is not recorded */ trace?: TurnTrace; cwd: string; prompt: string; model: string; account: Account; resume?: string; maxTurns?: number; onText?: (t: string) => void; signal?: AbortSignal; readOnly?: boolean; /** no web search or fetch, so what the turn read never leaves this machine except in its reply */ offline?: boolean; /** where Claude Code loads settings, CLAUDE.md and MCP servers from; a project info resource reader skips the notes repo's own */ settingSources?: SettingSource[]; effort?: EffortLevel; delegateModel?: string; maxDelegates?: number; /** the task's own ports and Docker names, on top of the process env */ env?: Record<string, string>; /** the PHI/PII guard (shared/phi.ts): on, every turn carries PHI_RULES, runs under the guard's hooks (cli/phiHooks.ts) with no MCP servers, and Codex does not run */ phi?: TurnPhi };
+export type TurnOptions = { /** labels for the telemetry log; without it the turn is not recorded */ trace?: TurnTrace; cwd: string; prompt: string; model: string; account: Account; resume?: string; maxTurns?: number; onText?: (t: string) => void; signal?: AbortSignal; readOnly?: boolean; /** no web search or fetch, so what the turn read never leaves this machine except in its reply */ offline?: boolean; /** where Claude Code loads settings, CLAUDE.md and MCP servers from; a project info resource reader skips the notes repo's own */ settingSources?: SettingSource[]; effort?: EffortLevel; delegateModel?: string; maxDelegates?: number; /** the task's own ports and Docker names, on top of the process env */ env?: Record<string, string>; /** the PHI/PII guard (shared/phi.ts): on, every turn carries PHI_RULES, runs under the guard's hooks (cli/phiHooks.ts) with no MCP servers, and Codex does not run */ phi?: TurnPhi; /** absolute paths of images the owner attached; the model sees them with the prompt */ images?: string[] };
+
+const IMAGE_TYPES: Record<string, "image/png" | "image/jpeg" | "image/gif" | "image/webp"> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" };
+/** the API takes images up to 5 MB once base64-encoded; a bigger one stays a path the agent opens with its Read tool */
+const MAX_IMAGE_BYTES = 3_750_000;
+const MAX_IMAGES = 5;
+/** the attached images a turn can send with its prompt: known types, small enough, at most five; none while the PHI guard is on, since a picture passes no text gate */
+export function promptImages(o: Pick<TurnOptions, "images" | "phi">): { path: string; mediaType: (typeof IMAGE_TYPES)[string] }[] {
+  if (o.phi?.guard) return [];
+  return (o.images ?? []).flatMap((path) => { const mediaType = IMAGE_TYPES[extname(path).toLowerCase()]; try { return mediaType && statSync(path).size <= MAX_IMAGE_BYTES ? [{ path, mediaType }] : []; } catch { return []; } }).slice(0, MAX_IMAGES);
+}
 /** the guard as a turn sees it: its settings, the task an incident is filed under, the push base, and where the owner hears of one */
 export type TurnPhi = { guard: boolean; settings?: PhiSettings; task?: string; ticket?: string; base?: string; alert?: (line: string) => unknown };
 export type Turn = { text: string; sessionId?: string; error?: string; limit?: LimitHit; /** what the turn spent, per model (Claude Code prices its own; Codex gives tokens only) */ usage?: TurnUsage[] };
@@ -125,8 +136,13 @@ async function runClaude(o: TurnOptions): Promise<Turn> {
   const guard = o.phi?.guard ? phiHooks({ phi: o.phi.settings ?? { ...DEFAULT_PHI, guard: true }, task: o.phi.task, ticket: o.phi.ticket, base: o.phi.base, alert: o.phi.alert }) : undefined;
   const hooks = mergeHooks((o.maxDelegates ?? 0) > 0 ? delegateBudget(1) : undefined, guard);
   try {
+  // attached images go up with the prompt as image blocks, so Claude sees them without a tool call
+  const images = promptImages(o);
+  const prompt = images.length ? (async function* () {
+    yield { type: "user" as const, parent_tool_use_id: null, session_id: o.resume ?? "", message: { role: "user" as const, content: [{ type: "text" as const, text: o.prompt }, ...images.map((i) => ({ type: "image" as const, source: { type: "base64" as const, media_type: i.mediaType, data: readFileSync(i.path).toString("base64") } }))] } };
+  })() : o.prompt;
   q = query({
-    prompt: o.prompt,
+    prompt,
     options: {
       cwd: o.cwd, model: o.model, resume: o.resume, pathToClaudeCodeExecutable: binaryFor("claude"), abortController: ac,
       stderr: (d: string) => { stderr = (stderr + d).slice(-4000); },
@@ -184,7 +200,8 @@ async function runCodex(o: TurnOptions): Promise<Turn> {
   inFlight.add(stop);
   const fail = (message: string) => { if (isCodexLimitText(message)) limit = { text: message }; else error = message; };
   try {
-    const { events } = await thread.runStreamed(o.prompt, { signal: ac.signal });
+    const images = promptImages(o);
+    const { events } = await thread.runStreamed(images.length ? [{ type: "text", text: o.prompt }, ...images.map((i) => ({ type: "local_image" as const, path: i.path }))] : o.prompt, { signal: ac.signal });
     for await (const ev of events as AsyncIterable<any>) {
       if (ev.type === "thread.started") sessionId = ev.thread_id;
       else if (ev.type === "item.completed" && ev.item?.type === "agent_message" && ev.item.text) { texts.push(ev.item.text); o.onText?.(ev.item.text); }
