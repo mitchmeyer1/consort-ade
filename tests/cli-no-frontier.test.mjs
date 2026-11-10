@@ -30,3 +30,8 @@ test('the scanner setup questions ask whether a build scanner stays off Fable an
   assert.match(setup, /if \(await yes\(ask, "Easy tickets only: keep this scanner off Fable and Astra\?", false\)\) job\.noFrontier = true;/);
   assert.ok(setup.indexOf('Easy tickets only') < setup.indexOf('s.jobs.push(job as Job)'), 'asked before the scanner is saved');
 });
+
+test('a self-review round whose provider is fully blocked runs on the other provider instead of waiting', () => {
+  const pipeline = readFileSync(new URL('../src/cli/pipeline.ts', import.meta.url), 'utf8');
+  assert.match(pipeline, /const pick = openOn\(planned\.provider\) \? planned : rotation\.find\(\(r\) => have\[r\.provider\] && openOn\(r\.provider\)\) \?\? planned;/);
+});

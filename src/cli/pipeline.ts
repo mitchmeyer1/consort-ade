@@ -724,7 +724,11 @@ export async function workTask(taskId: string): Promise<void> {
   // ── one review per configured provider, each followed by a fix turn ───────────────────
   for (let round = task.reviewsDone + 1; round <= rotation.length; round++) {
     await applyOwnerUpdates();
-    const pick = rotation[round - 1];
+    // a round whose provider has every login blocked runs on the other provider's review model instead of waiting for the reset
+    const openOn = (p: Provider) => turnAccounts(loadState()).some((a) => a.provider === p && !(a.blockedUntil && a.blockedUntil > Date.now()));
+    const planned = rotation[round - 1];
+    const pick = openOn(planned.provider) ? planned : rotation.find((r) => have[r.provider] && openOn(r.provider)) ?? planned;
+    if (pick !== planned) log(task, `review round ${round}: every ${planned.provider} login is blocked; running it on ${pick.provider}:${pick.model} instead`);
     const provider: Provider = have[pick.provider] ? pick.provider : builderProvider;
     const model = have[pick.provider] ? pick.model : builderModel;
     log(task, `review round ${round} on ${provider}:${model}`);
