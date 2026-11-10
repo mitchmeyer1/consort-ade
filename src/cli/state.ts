@@ -93,6 +93,8 @@ export type Task = {
   notificationQueue?: { id: string; text: string }[];
   /** Persist unanswered questions across worker restarts. */
   pendingQuestion?: { questions: string[]; afterTs: string };
+  /** the owner asked to test the work by hand (cli/testSession.ts); open until they say "done" */
+  testSession?: import("./testSession").TestSessionState;
   reviewersRequested?: string[];
   reviewWaitSince?: number;
   reviewRequestedHead?: string;

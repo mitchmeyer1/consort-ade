@@ -14,6 +14,9 @@ import { answerOwner, workerLogTail, type OversightContext, type OversightAnswer
 import { sourceFor } from "./sources";
 import { stepLabel } from "./buildProgress";
 import { existsSync } from "node:fs";
+import { isBareDone, isTestDone, isTestRequest } from "./testSession";
+import { requestWorkerStop } from "./workerControl";
+import { processAlive } from "./state";
 
 export type ResponderDeps = { answer: (c: OversightContext) => Promise<OversightAnswer> };
 
@@ -57,10 +60,17 @@ async function handleMessages(slack: Slack, taskId: string, messages: SlackThrea
 async function handleOwnerMessage(slack: Slack, state: CliState, task: Task, message: SlackThreadMessage, alive: (pid: number) => boolean, deps: ResponderDeps): Promise<void> {
   const text = (message.text ?? "").trim();
   const files = message.files ?? [];
+  // test sessions (cli/testSession.ts): the worker posts the link and waits for "done"; neither message is an answer or a change
+  if (task.testSession && isTestDone(text)) {
+    if (isBareDone(text) && !files.length) return;
+  } else if (text && isTestRequest(text)) {
+    await post(slack, task, await startTestSession(task, message, alive), await taskSlackLinks(task, state.jobs.find(j => j.id === task.jobId)?.repo), alive);
+    return;
+  }
   // the first owner message with text after a pending question is its answer (headless.ts replyAfter); the worker reads it
   const after = Number(task.pendingQuestion?.afterTs);
   // a question back ("what does B change?") is answered here and the worker keeps waiting; a review's approval takes only a yes or a no
-  const isAnswer = !!task.pendingQuestion && !!text && !isTaskStatusQuestion(text) && !isClarifyingQuestion(text) && (task.kind !== "review" || !!approvalReply(text)) && Number(message.ts) > after && !(task.answeredTs ?? []).some(ts => Number(ts) > after);
+  const isAnswer = !!task.pendingQuestion && !task.testSession && !!text && !isTaskStatusQuestion(text) && !isClarifyingQuestion(text) && (task.kind !== "review" || !!approvalReply(text)) && Number(message.ts) > after && !(task.answeredTs ?? []).some(ts => Number(ts) > after);
   if (isAnswer) updateTask(task.id, t => ({ answeredTs: [...(t.answeredTs ?? []), message.ts].slice(-20) }), false);
   const links = await taskSlackLinks(task, state.jobs.find(j => j.id === task.jobId)?.repo);
   if (isAnswer || (!files.length && isAcknowledgement(text))) {
@@ -127,4 +137,26 @@ async function queueOwnerUpdate(token: string, taskId: string, message: SlackThr
   const failed = saved.failed.length ? `\n• Could not download: ${saved.failed.join("; ")}` : "";
   const got = saved.saved.length ? `${saved.saved.length} file${saved.saved.length === 1 ? "" : "s"}` : "";
   return filesOnly ? `Saved ${got || "no files"}; I'll add ${saved.saved.length === 1 ? "it" : "them"} to the ticket${when}.${failed}` : `*Queued as a change${got ? ` with ${got}` : ""}:* I'll update the ticket and the code${when}.${failed}`;
+}
+
+/**
+ * "I want to test it": mark the task, stop the worker's current step (its progress is saved), and
+ * let the daemon start it again; the new worker opens the session first (cli/pipeline.ts).
+ */
+async function startTestSession(task: Task, message: SlackThreadMessage, alive: (pid: number) => boolean): Promise<string> {
+  if (task.kind === "review") return "A PR review has no app of its own to start here. Check out the PR's branch to try it.";
+  if (!OPEN.includes(task.status) && task.status !== "ready") return `This task is ${task.status === "done" ? `closed (${task.note ?? "PR closed"})` : task.status}, so there is no worker to start the app. Check out \`${task.branch}\` to try it.`;
+  if (task.testSession) return task.testSession.readyTs ? "A test session is already open: the link and logins are above. Tell me 'done' when you are ready for me to continue." : "Already starting a test session; the link and logins come here shortly.";
+  const reopen = task.status === "ready";
+  updateTask(task.id, { testSession: { requestedAt: Date.now(), requestTs: message.ts }, ...(reopen ? { status: "monitoring", finishedAt: undefined, note: undefined } : {}), activity: "starting a test session you asked for in Slack" }, false);
+  const pid = task.pid && alive(task.pid) ? task.pid : undefined;
+  if (pid) {
+    requestWorkerStop(task.id, pid, "a test session (asked in Slack)");
+    try { process.kill(pid, "SIGTERM"); } catch {}
+    // the worker saves its work on the way out; then the daemon starts it again at once instead of after the hold
+    const until = Date.now() + 60_000;
+    while (processAlive(pid) && Date.now() < until) await new Promise(r => setTimeout(r, 500));
+    if (!processAlive(pid)) updateTask(task.id, t => ({ workerStop: t.workerStop && { ...t.workerStop, holdUntil: Date.now() } }), false);
+  }
+  return `🧪 *Starting a test session.* ${pid ? "I stopped the current step; its progress is saved. " : ""}I'll bring the app up, make a login for each role this change needs, and post a link here.`;
 }

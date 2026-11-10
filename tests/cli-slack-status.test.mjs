@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
+import * as testSession from '../src/cli/testSession.ts';
 import * as headless from '../src/shared/headless.ts';
 const compile = name => ts.transpileModule(readFileSync(new URL(`../src/cli/${name}.ts`, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 const checked = async c => ({ answer: `Checked: ${c.question}`, model: 'claude-opus-5' });
@@ -18,6 +19,7 @@ function harness(answer = checked) {
     './slackLinks':{taskSlackLinks:async()=>({ticket:task.ticket.url,github:'https://github.com/a/b/pull/1'})},
     './slack':{Slack:class {async threadMessages(){return messages;} async post(text,thread){if(fail) throw new Error('offline');replies.push({text,thread});}}},
     './buildProgress':{stepLabel:name=>name},
+    './testSession': testSession, './workerControl': { requestWorkerStop: () => {} },
     './oversight':{workerLogTail:()=>'2026 [T1] turn 3 at Implementing: ported providerDedup'},
     './sources':{sourceFor:()=>({comments:async()=>[{text:'Please rename the CSV column',by:'will',at:1}]})},
     './ownerUpdates':{isAcknowledgement:t=>/^thanks$/i.test(t),downloadSlackFiles:async()=>({saved:[],failed:[]})},

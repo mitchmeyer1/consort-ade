@@ -41,6 +41,7 @@ import { Slack } from "./slack";
 import { ensureSlackIdentity } from "./slackIdentity";
 import { taskSlackLinks } from "./slackLinks";
 import { ownerUpdatePrompt, parseUpdateSummary, updateDir } from "./ownerUpdates";
+import { changedBySession, dirtyPaths, isTestDone, isTestRequest, killTree, parseTestFailed, readSessionFile, SESSION_FILE, startTunnel, TEST_DIR, testReadyMessage, testSessionPrompt, waitForPort, type TestSessionState } from "./testSession";
 import { sourceFor, type Source } from "./sources";
 import { gatedSource, inbound, PiiWithheldError, pushGuard, type GateContext } from "./phiGate";
 import { blockAccount, loadState, processAlive, touchAccount, updateTask, WORK_DIR, type Account, type Job, type Task } from "./state";
@@ -183,7 +184,8 @@ export async function workTask(taskId: string): Promise<void> {
     await releaseEnvironment(taskId);
     let lastEmptyLog = 0;
     let lastCheckResult: string | undefined;
-    const reply = await slack.waitForReply(thread, ts, { onCheck: (result) => {
+    // "I want to test it" is a request, never the answer (cli/testSession.ts)
+    const reply = await slack.waitForReply(thread, ts, { accept: (t) => !isTestRequest(t), onCheck: (result) => {
       if (result !== "answer" && result === lastCheckResult && Date.now() - lastEmptyLog < 60_000) return;
       lastCheckResult = result;
       lastEmptyLog = Date.now();
@@ -547,6 +549,69 @@ export async function workTask(taskId: string): Promise<void> {
     setTimeout(done, ms);
   }));
 
+  /**
+   * A test session the owner asked for in Slack (cli/testSession.ts): one turn starts the app and
+   * makes logins, ngrok shares it, and the worker waits for "done" before it carries on.
+   */
+  const closeTestSession = async (s: TestSessionState | undefined): Promise<number> => {
+    if (!s) return 0;
+    killTree(s.tunnelPid);
+    if (s.stop) await run("sh", ["-c", s.stop], { cwd: task.worktree, timeout: 120_000, env: { ...process.env, ...env } }).catch((e: Error) => log(task, `test session stop command failed: ${String(e.message).split("\n")[0]}`));
+    for (const pid of s.pids ?? []) killTree(pid);
+    if (!s.dirtyBefore) return 0;
+    // put back every file the session touched, so no test-only change reaches a commit
+    const changed = changedBySession(s.dirtyBefore, await run("git", ["status", "--porcelain"], { cwd: task.worktree }).then((r) => r.stdout, () => ""));
+    const tracked = changed.filter((c) => !c.untracked).map((c) => c.path);
+    if (tracked.length) await run("git", ["restore", "--source=HEAD", "--staged", "--worktree", "--", ...tracked], { cwd: task.worktree }).catch((e: Error) => log(task, `test session restore failed: ${String(e.message).split("\n")[0]}`));
+    for (const c of changed.filter((c) => c.untracked)) rmSync(join(task.worktree, c.path), { recursive: true, force: true });
+    if (changed.length) log(task, `test session: put back ${changed.map((c) => c.path).join(", ")}`);
+    return changed.length;
+  };
+  const runTestSession = async (): Promise<void> => {
+    const last = loadState().tasks.find((t) => t.id === taskId)?.testSession;
+    if (!last) return;
+    // a session an earlier worker opened: stop what it started; if the owner already said done, carry on
+    await closeTestSession(last);
+    const finished = !!last.readyTs && !!slack && !!thread && !!(await slack.waitForReply(thread, last.readyTs, { accept: isTestDone, timeoutMs: 1 }).catch(() => undefined));
+    if (finished || !slack || !thread) { updateTask(taskId, { testSession: undefined }); return; }
+    const linksNow = async () => taskSlackLinks(loadState().tasks.find((t) => t.id === taskId)!, job.repo);
+    await holdEnv();
+    activity("test session: starting the app and making test logins");
+    await notifyTask(taskId, "running", "Starting a test session: bringing the app up and making test logins.");
+    const before = await run("git", ["status", "--porcelain"], { cwd: task.worktree }).then((r) => dirtyPaths(r.stdout).map((p) => p.path), () => [] as string[]);
+    rmSync(join(task.worktree, SESSION_FILE), { force: true });
+    mkdirSync(join(task.worktree, TEST_DIR), { recursive: true });
+    updateTask(taskId, (t) => ({ testSession: { ...(t.testSession ?? last), readyTs: undefined, pids: undefined, tunnelPid: undefined, stop: undefined, url: undefined, dirtyBefore: before } }));
+    nextStep = "test session";
+    const text = await turn(inbound(testSessionPrompt({ repo: job.repo, worktree: task.worktree, stage: feature.stage, ports: env.CONSORT_PORT_RANGE, prUrl: feature.prs.at(-1) }), phi).text, builderProvider, "implementation", false);
+    const session = readSessionFile(task.worktree);
+    if (session) updateTask(taskId, (t) => ({ testSession: t.testSession && { ...t.testSession, pids: session.pids, stop: session.stop } }));
+    const failed = parseTestFailed(text) ?? (session ? undefined : "the agent did not say which port to open");
+    if (!session || failed) {
+      const put = await closeTestSession(loadState().tasks.find((t) => t.id === taskId)?.testSession);
+      updateTask(taskId, { testSession: undefined });
+      await say(`❌ *The test session did not start:* ${brief(failed ?? "unknown", 300)}${put ? `\n• Put back ${put} file${put === 1 ? "" : "s"} it changed` : ""}\n• Continuing the task. Ask again once that is fixed.`);
+      return;
+    }
+    const up = await waitForPort(session.port);
+    let tunnel = up ? await startTunnel(session.port) : { error: `nothing answers on localhost:${session.port}` };
+    if ("error" in tunnel && /host-header|unknown flag/i.test(tunnel.error)) tunnel = await startTunnel(session.port, { rewriteHost: false });
+    const url = "url" in tunnel ? tunnel.url : undefined;
+    const message = testReadyMessage({ url, localUrl: `http://localhost:${session.port}`, session, tunnelError: "error" in tunnel ? tunnel.error : undefined });
+    const readyTs = await slack.post(slackStatus(message, "WAITING", await linksNow()), thread, true);
+    updateTask(taskId, (t) => ({ status: "waiting", activity: "test session open: waiting for you to say 'done' in Slack", testSession: t.testSession && { ...t.testSession, readyTs, url, ...("pid" in tunnel ? { tunnelPid: tunnel.pid } : {}) } }));
+    log(task, `test session open on port ${session.port}${url ? ` at ${url}` : ""} with ${session.logins?.length ?? 0} login(s); waiting for "done"`);
+    await notifyTask(taskId, "paused", "Test session open. Say 'done' in the thread when you are finished.");
+    await slack.waitForReply(thread, readyTs, { accept: isTestDone, onTick: () => { updateTask(task.id, {}); void flushTaskNotifications(taskId); } });
+    const put = await closeTestSession(loadState().tasks.find((t) => t.id === taskId)?.testSession);
+    const waitingOn = loadState().tasks.find((t) => t.id === taskId)?.pendingQuestion;
+    // a question asked before the session still needs its answer: only replies from now on count
+    updateTask(taskId, { status: waitingOn ? "waiting" : "working", testSession: undefined, ...(waitingOn ? { pendingQuestion: { ...waitingOn, afterTs: String(Date.now() / 1000) } } : {}) });
+    log(task, "test session closed");
+    await say(`✅ Closed the test session; continuing from *${feature.stage}*.${put ? `\n• Put back ${put} file${put === 1 ? "" : "s"} the session changed` : ""}${waitingOn ? "\n• Still waiting on your answer to the question above." : ""}`);
+    await notifyTask(taskId, "running", "Test session closed; continuing.");
+  };
+
   log(task, `models: planning, spec and judgement on ${builderModel} at ${roleEffort("planning", job.effortPolicy)} effort; build and routine turns on ${workerModel} at ${roleEffort("implementation", job.effortPolicy, task.plannedEffort?.level)} effort`);
   if (task.rebootedAt) {
     // `consort-cli reboot`: the owner stopped the last worker; open by working out where it got to
@@ -578,6 +643,8 @@ export async function workTask(taskId: string): Promise<void> {
     task.pendingQuestion = undefined;
     await say("✅ Resuming evidence after the old 15-minute limit or a publication network failure. No action needed from you.");
   }
+  // "I want to test it" in Slack: before anything else, once the services exist
+  if (task.envReadyAt) await runTestSession();
   if (task.pendingQuestion) {
     const answer = await ask(task.pendingQuestion.questions);
     await completeReply(await turn(`The owner answered on Slack:\n${answer}\nContinue from where you stopped.`));
@@ -595,6 +662,7 @@ export async function workTask(taskId: string): Promise<void> {
     updateTask(task.id, { envReadyAt: Date.now(), envFilesBase: Number(env.CONSORT_PORT_BASE), envFilesCode: env.CONSORT_RUN });
     await note(slackLines.env(env.CONSORT_PORT_RANGE));
   }
+  await runTestSession();
   await applyOwnerUpdates();
   await openDraft();
 

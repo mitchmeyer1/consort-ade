@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import ts from 'typescript';
+import * as testSession from '../src/cli/testSession.ts';
 import * as headless from '../src/shared/headless.ts';
 import * as owner from '../src/cli/ownerUpdates.ts';
 
@@ -61,6 +62,7 @@ function daemon(worktree) {
     'node:fs': { existsSync: () => true },
     './oversight': { workerLogTail: () => '' },
     './buildProgress': { stepLabel: name => name },
+    './testSession': testSession, './workerControl': { requestWorkerStop: () => {} },
     './sources': { sourceFor: () => ({ comments: async () => [] }) },
   };
   const mod = { exports: {} };

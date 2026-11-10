@@ -352,7 +352,7 @@ export function slackStatus(text: string, status?: SlackTaskStatus, links?: Slac
   return `${body}\n\nSTATUS: ${current}${progress ? `\n${progress}` : ""}`;
 }
 export const slackLines = {
-  claimed: (title: string, url: string, branch: string) => `✅ *Picked up:* <${url}|${title}>\n• branch \`${branch}\``,
+  claimed: (title: string, url: string, branch: string) => `✅ *Picked up:* <${url}|${title}>\n• branch \`${branch}\`\n• Say *I want to test it* here any time: I pause, start the app with test logins, and post a link`,
   stage: (stage: string, note?: string) => `✅ *${stage}*${note ? ` · ${brief(note, 160)}` : ""}`,
   buildEffort: (level: string, reason?: string) => `✅ *Build effort: ${level}*${reason ? ` · ${brief(reason, 160)}` : ""}`,
   question: (qs: string[], url: string) => `❓ *Need you* (<${url}|ticket>)\n${qs.map((q, i) => `${qs.length > 1 ? `${i + 1}. ` : "• "}${brief(q, 600)}`).join("\n")}\n_Reply in this thread._`,
