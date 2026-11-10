@@ -63,7 +63,7 @@ async function handleOwnerMessage(slack: Slack, state: CliState, task: Task, mes
   // test sessions (cli/testSession.ts): the worker posts the link and waits for "done"; neither message is an answer or a change
   if (task.testSession && isTestDone(text)) {
     if (isBareDone(text) && !files.length) return;
-  } else if (text && isTestRequest(text)) {
+  } else if (text && !task.testSession && isTestRequest(text)) {
     await post(slack, task, await startTestSession(task, message, alive), await taskSlackLinks(task, state.jobs.find(j => j.id === task.jobId)?.repo), alive);
     return;
   }

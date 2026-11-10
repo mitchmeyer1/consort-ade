@@ -24,9 +24,11 @@ const plain = (text: string) => text.toLowerCase().replace(/<@[A-Z0-9]+>/gi, "")
 export function isTestRequest(text: string): boolean {
   const t = plain(text);
   if (!t || t.length > 400) return false;
-  const meTry = /\b(?:i|we) (?:want to|wanna|would like to|'d like to|need to) (?:test|try|demo|play with|click through|check out|poke at|see)\b|\b(?:let me|can i|could i|so i can|so we can|for me to) (?:test|try|demo|play with|click through|check out|poke at)\b/;
+  const meTry = /\b(?:i|we) (?:want to|wanna|would like to|'d like to|need to) (?:test|try|demo|play with|click through|check out|poke at)\b|\b(?:let me|can i|could i|so i can|so we can|for me to) (?:test|try|demo|play with|click through|check out|poke at)\b/;
   const giveMe = /\b(?:spin up|start|bring up|stand up|fire up|give me|send me|share)\b.{0,40}\b(?:localhost|local server|server|test link|test url|test session|ngrok|demo|preview)\b/;
-  return meTry.test(t) || giveMe.test(t) || /\b(?:test session|test it myself|manual(?:ly)? test|ngrok)\b/.test(t);
+  // "why does your ngrok say…", "I didn't ask for a test session": talking about one is not asking for one
+  if (/\b(?:didn'?t|did not|don'?t|do not|never|not) (?:ask|want|need)\b/.test(t)) return false;
+  return meTry.test(t) || giveMe.test(t) || /\btest it myself\b|\bmanual(?:ly)? test (?:it|this)\b/.test(t);
 }
 
 /** "done", "ok done", "done testing", "continue": the owner is finished testing */

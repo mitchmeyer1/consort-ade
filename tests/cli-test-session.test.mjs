@@ -12,7 +12,7 @@ import * as session from '../src/cli/testSession.ts';
 test('asking to test or demo starts a session; ordinary messages do not', () => {
   for (const text of ['I want to test it', 'i wanna try it', 'cool can you spin up a server with a localhost and check it out so i can demo it', 'let me click through it', 'give me a test link', 'start a test session', 'can I test this myself?', 'send me an ngrok link'])
     assert.equal(session.isTestRequest(text), true, text);
-  for (const text of ['did you test it?', 'run the tests again', 'add a CSV export', 'status', 'thanks', 'why is CI red', 'the test for notes is flaky'])
+  for (const text of ['so why all over your ngrok does it say partially mocked?', 'i didn\'t ask for a test session, i asked you a question', 'I want to see why CI failed', 'did you test it?', 'run the tests again', 'add a CSV export', 'status', 'thanks', 'why is CI red', 'the test for notes is flaky'])
     assert.equal(session.isTestRequest(text), false, text);
 });
 
@@ -145,7 +145,8 @@ test('during a session: "done" is left for the worker; feedback is answered and 
   assert.equal(h.task.answeredTs, undefined);
   assert.equal(h.replies.length, 1);
   const again = daemon({ testSession: { requestedAt: 1, requestTs: '2', readyTs: '3' } });
-  again.messages([{ ts: '4', user: 'owner', text: 'I want to test it' }]);
+  again.messages([{ ts: '4', user: 'owner', text: 'so why all over your ngrok does it say "partially mocked" on many surfaces… what does that mean?' }, { ts: '5', user: 'owner', text: 'i didn\'t ask for a test session, i asked you a question… can we remove this "partial mock" label?' }]);
   await again.run();
-  assert.match(again.replies[0], /already open/);
+  assert.equal(again.asked.length, 2, 'questions during a session reach the oversight agent');
+  assert.ok(again.replies.every(r => !/already open/.test(r)));
 });
