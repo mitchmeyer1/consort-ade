@@ -41,7 +41,7 @@ import { Slack } from "./slack";
 import { ensureSlackIdentity } from "./slackIdentity";
 import { taskSlackLinks } from "./slackLinks";
 import { ownerUpdatePrompt, parseUpdateSummary, updateDir } from "./ownerUpdates";
-import { changedBySession, dirtyPaths, isTestDone, isTestRequest, killTree, parseTestFailed, readSessionFile, SESSION_FILE, startTunnel, TEST_DIR, testReadyMessage, testSessionPrompt, waitForPort, type TestSessionState } from "./testSession";
+import { changedBySession, dirtyPaths, tearsDownEnvironment, isTestDone, isTestRequest, killTree, parseTestFailed, readSessionFile, SESSION_FILE, startTunnel, TEST_DIR, testReadyMessage, testSessionPrompt, waitForPort, type TestSessionState } from "./testSession";
 import { sourceFor, type Source } from "./sources";
 import { gatedSource, inbound, PiiWithheldError, pushGuard, type GateContext } from "./phiGate";
 import { blockAccount, loadState, processAlive, touchAccount, updateTask, WORK_DIR, type Account, type Job, type Task } from "./state";
@@ -565,7 +565,8 @@ export async function workTask(taskId: string): Promise<void> {
   const closeTestSession = async (s: TestSessionState | undefined): Promise<number> => {
     if (!s) return 0;
     killTree(s.tunnelPid);
-    if (s.stop) await run("sh", ["-c", s.stop], { cwd: task.worktree, timeout: 120_000, env: { ...process.env, ...env } }).catch((e: Error) => log(task, `test session stop command failed: ${String(e.message).split("\n")[0]}`));
+    if (s.stop && tearsDownEnvironment(s.stop)) log(task, `test session: skipped its stop command (${s.stop}); it would take down the services this task still uses`);
+    else if (s.stop) await run("sh", ["-c", s.stop], { cwd: task.worktree, timeout: 120_000, env: { ...process.env, ...env } }).catch((e: Error) => log(task, `test session stop command failed: ${String(e.message).split("\n")[0]}`));
     for (const pid of s.pids ?? []) killTree(pid);
     if (!s.dirtyBefore) return 0;
     // put back every file the session touched, so no test-only change reaches a commit

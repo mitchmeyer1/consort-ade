@@ -150,3 +150,9 @@ test('during a session: "done" is left for the worker; feedback is answered and 
   assert.equal(again.asked.length, 2, 'questions during a session reach the oversight agent');
   assert.ok(again.replies.every(r => !/already open/.test(r)));
 });
+
+test('a stop command that would take the services down is recognised; stopping a process is not', () => {
+  for (const cmd of ['.consort/env/down.sh', 'bash .consort/env/down.sh', 'docker compose -p x down', 'docker stop web']) assert.equal(session.tearsDownEnvironment(cmd), true, cmd);
+  for (const cmd of ['kill 4242', 'pkill -f "vite --port 20000"']) assert.equal(session.tearsDownEnvironment(cmd), false, cmd);
+  assert.match(session.testSessionPrompt({ repo: '/r', worktree: '/w', stage: 'In Review' }), /Never put the environment's own teardown/);
+});

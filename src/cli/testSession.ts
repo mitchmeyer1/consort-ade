@@ -54,7 +54,8 @@ Do this:
 5. Seed the data a person needs to see the change (for example one record the new page shows), the same way.
 6. Check it: request the port with curl until it answers, and sign in with each login if you can.
 7. Write ${SESSION_FILE} as JSON:
-   {"port": 5173, "path": "/the/page/to/open", "pids": [1234], "logins": [{"role": "admin", "username": "admin@test.local", "password": "…", "notes": "can edit everyone's notes"}], "notes": ["one short line per thing the tester should know"], "stop": "optional shell command that stops what you started, run from the worktree"}
+   {"port": 5173, "path": "/the/page/to/open", "pids": [1234], "logins": [{"role": "admin", "username": "admin@test.local", "password": "…", "notes": "can edit everyone's notes"}], "notes": ["one short line per thing the tester should know"], "stop": "optional shell command that stops only the processes you started in step 2, run from the worktree"}
+   Never put the environment's own teardown (down.sh, docker compose down) in "stop": the task keeps using those services after the session.
 End with [test-ready] when the app answers on that port, or [test-failed: what stopped it, in one sentence].`;
 }
 
@@ -153,3 +154,6 @@ export const dirtyPaths = (porcelain: string) => porcelain.split("\n").filter((l
 
 /** what the session changed: listed now, not before */
 export const changedBySession = (before: string[], porcelainNow: string) => dirtyPaths(porcelainNow).filter((p) => !before.includes(p.path));
+
+/** a stop command that would take down the task's services, which the worker still needs after the session */
+export const tearsDownEnvironment = (cmd: string) => /\bdown\.sh\b|\bcompose\b[^;&|]*\bdown\b|\bdocker\s+(?:rm|stop|kill)\b/.test(cmd);
