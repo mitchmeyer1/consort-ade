@@ -121,6 +121,9 @@ export class Slack {
   setUsageFile(saved: UsageFiles | undefined): void { this.files.usage = { ...(saved ?? {}) }; }
   getUsageFile(): UsageFiles { return { ...this.files.usage }; }
   /** The header picture's files, kept the same way as the usage panel's. */
+  /** the board's Test/Resume links (cli/localActions.ts) */
+  private actionLinks?: { port: number; key: string };
+  setActionLinks(links: { port: number; key: string } | undefined): void { this.actionLinks = links; }
   setHeadFile(saved: UsageFiles | undefined): void { this.files.head = { ...(saved ?? {}) }; }
   getHeadFile(): UsageFiles { return { ...this.files.head }; }
 
@@ -171,10 +174,10 @@ export class Slack {
    */
   private async sendMonitor(method: string, body: Record<string, unknown>, text: string): Promise<any> {
     const safe = this.gate ? this.gate(text) : redactPii(text);
-    const kit = monitorBlockKit(safe);
+    const kit = monitorBlockKit(safe, Date.now(), undefined, { links: this.actionLinks });
     let head: ShownImage | undefined;
     const layouts: (() => Promise<{ blocks: unknown[]; withImage: boolean } | undefined>)[] = [
-      async () => { if (!kit) return undefined; head = await this.renderedImage("head", safe); return head ? { blocks: monitorBlockKit(safe, Date.now(), head)!, withImage: true } : undefined; },
+      async () => { if (!kit) return undefined; head = await this.renderedImage("head", safe); return head ? { blocks: monitorBlockKit(safe, Date.now(), head, { links: this.actionLinks })!, withImage: true } : undefined; },
       async () => (kit ? { blocks: kit, withImage: false } : undefined),
       async () => ({ blocks: this.plainBlocks(safe), withImage: false }),
     ];

@@ -93,7 +93,10 @@ function card(row: Row, group: Group, index: number, o: BlockOptions = {}): Bloc
   const primary = group.key === 'ready' ? 'Merge PR' : group.key === 'nudge' ? 'GitHub' : undefined;
   const buttons: Block[] = [];
   const ref = threadRef(row.thread);
-  if (o.testButtons !== false && ref) buttons.push(group.key === 'testing' ? actionButton('Resume', `${RESUME_ACTION}-${index}`, ref) : actionButton('Test', `${TEST_ACTION}-${index}`, ref));
+  // a link to Consort's local page when it runs one (cli/localActions.ts); a click button only with Socket Mode (cli/slackSocket.ts)
+  const testing = group.key === 'testing';
+  const label = testing ? 'Resume' : 'Test', id = `${testing ? RESUME_ACTION : TEST_ACTION}-${index}`;
+  if (o.testButtons !== false && ref) buttons.push(o.links ? button(label, `http://127.0.0.1:${o.links.port}/${testing ? 'resume' : 'test'}?thread=${encodeURIComponent(ref.split(':')[1])}&k=${encodeURIComponent(o.links.key)}`, id) : actionButton(label, id, ref));
   const testLink = row.links.find(l => l.label === 'Open test');
   for (const label of ['ClickUp', 'GitHub', 'Merge PR']) {
     const l = row.links.find(x => x.label === label);
@@ -243,7 +246,7 @@ export function monitorCounts(safe: string): Record<Group['key'], number> | unde
   return { reply: reply.rows.length, testing: testing.rows.length, nudge: nudge.rows.length, ready: ready.rows.length + more(ready), working: working.rows.length + more(working) };
 }
 /** Blocks for a master monitor text; undefined for anything else (guard notices, legacy posts, tests). The head is the uploaded header picture when there is one, else the banner. */
-export type BlockOptions = { /** Test and Resume buttons, on by default; a click reaches Consort once it has an app-level token (cli/slackSocket.ts) */ testButtons?: boolean };
+export type BlockOptions = { /** Test and Resume buttons, on by default */ testButtons?: boolean; /** Consort's local page: the buttons become links to it (cli/localActions.ts) */ links?: { port: number; key: string } };
 export function monitorBlockKit(safe: string, now = Date.now(), head?: UsageImage, o: BlockOptions = {}): Block[] | undefined {
   const monitor = parseMonitor(safe);
   if (!monitor) return undefined;

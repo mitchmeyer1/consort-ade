@@ -8,6 +8,7 @@ import { cachedUsage } from './usage';
 import { monitorAuthors } from './slackMonitorAuthors';
 import { systemSnapshot } from './systemSnapshot';
 import { scannerRows } from './scanners';
+import { localActions } from './localActions';
 const links = new Map<string,string>();
 const reconciled = new Set<string>();
 const unpinAttempts = new Set<string>();
@@ -45,7 +46,7 @@ async function refresh(now:number, slackFor:(cfg:SlackConfig)=>Slack):Promise<vo
       mutateState(s=>{ if(!s.slackMonitor) return; const l=s.slackMonitor as typeof legacy; delete l.imageFiles; delete l.usageFile; if(usage) s.slackMonitor.usage=usage; });
       monitor=loadState().slackMonitor!;
     }
-    slack.setUsageFile?.(monitor.usage); slack.setHeadFile?.(monitor.head);
+    slack.setUsageFile?.(monitor.usage); slack.setHeadFile?.(monitor.head); slack.setActionLinks?.(localActions());
     if(!monitor.ts) {
       const existing=await slack.findMonitor(MASTER_MONITOR_HEADING);
       if(existing) mutateState(s=>{if(s.slackMonitor?.lease?.id===lease) Object.assign(s.slackMonitor,{ts:existing,creating:undefined});});
@@ -66,7 +67,7 @@ async function refresh(now:number, slackFor:(cfg:SlackConfig)=>Slack):Promise<vo
     }
     const text=slackMasterMonitor(state,threads,now,alive,cachedUsage(),await monitorAuthors(shown),systemSnapshot(state),scannerRows(state));
     if(text.length>35000) throw new Error('Slack master monitor exceeds the single-post text limit.');
-    const key=createHash('sha256').update('blocks-v7:'+text).digest('hex');
+    const key=createHash('sha256').update('blocks-v8:'+text).digest('hex');
     monitor=loadState().slackMonitor!;
     if(monitor.key===key && monitor.ts) {
       const identity=`${channel}:${monitor.ts}`;

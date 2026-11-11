@@ -14,6 +14,8 @@ import { flushTaskNotifications, notifyTask, runTaskUntilFinished } from "./life
 import { statusEvent } from "./statusLog";
 import { scanSentry, validateSentryConfig } from "./sentry";
 import { Slack } from "./slack";
+import { serveLocalActions } from "./localActions";
+import { resumeFromBoard, testFromBoard } from "./slackStatus";
 import { listenForClicks } from "./slackSocket";
 import { canStartWorker, handleWorkerExit, isKilled, killTask, requestWorkerStop, workerStopMessage } from "./workerControl";
 import { answerTaskStatusQuestions } from "./slackStatus";
@@ -619,6 +621,8 @@ async function daemon() {
   checkStatusQuestions();
   // board buttons (the Test button): only with an app-level token; one Socket Mode connection for the daemon's life (cli/slackSocket.ts)
   if (loadState().slack?.appToken) void listenForClicks(loadState().slack!).catch(e => console.error(`Slack Socket Mode: ${e.message}`));
+  // the board's Test and Resume buttons are links to a page served here (cli/localActions.ts)
+  if (loadState().slack) serveLocalActions({ test: (id) => testFromBoard(id, alive), resume: (id) => resumeFromBoard(id) });
   setInterval(checkStatusQuestions, 15_000);
   // sets of local services nobody has used for 20 minutes come down (cli/environment.ts)
   let reaping = false;
