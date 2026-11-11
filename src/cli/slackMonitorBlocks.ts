@@ -78,17 +78,19 @@ function linkedTitle(row: Row, max = 150): string {
   return url ? `<${url}|${title}>` : title;
 }
 function card(row: Row, group: Group, index: number): Block {
-  // ClickUp and GitHub (Merge PR when ready), always buttons, in that order.
-  // The title is the link to the task's thread (the chat), and the test link sits in the card's text.
+  // Chat, ClickUp and GitHub (Merge PR when ready), always buttons, in that order.
+  // The title also links to the thread, and the test link sits in the card's text.
   const primary = group.key === 'ready' ? 'Merge PR' : group.key === 'nudge' ? 'GitHub' : undefined;
   const buttons: Block[] = [];
+  // unread Consort posts turn Chat red; Slack has no badge, so the count is in the label
+  if (row.thread) buttons.push(button(`Chat${row.unread ? ` · ${row.unread} new` : ''}`, row.thread, `thread-${index}`, row.unread ? 'danger' : group.key === 'reply' ? 'primary' : undefined));
   const testLink = row.links.find(l => l.label === 'Open test');
   for (const label of ['ClickUp', 'GitHub', 'Merge PR']) {
     const l = row.links.find(x => x.label === label);
     if (l) buttons.push(button(l.label, l.url, `${l.label.toLowerCase().replace(/\W+/g, '-')}-${index}`, primary === l.label ? 'primary' : undefined));
   }
   const status = notable(row.status);
-  const subtext = [row.unread ? `🔴 *${row.unread} new in the thread*` : '', row.stage ? `${row.stage.name} ${row.stage.n}/${row.stage.total}   ${bar(group.key === 'ready' ? row.stage.n : row.stage.n - 1, row.stage.total)}` : '', prLabels(row), status ? `*${status}*` : '', row.pending ? '_Slack thread pending_' : ''].filter(Boolean).join('   ·   ');
+  const subtext = [row.stage ? `${row.stage.name} ${row.stage.n}/${row.stage.total}   ${bar(group.key === 'ready' ? row.stage.n : row.stage.n - 1, row.stage.total)}` : '', prLabels(row), status ? `*${status}*` : '', row.pending ? '_Slack thread pending_' : ''].filter(Boolean).join('   ·   ');
   const subtitle = [row.kind, byline(row), row.cost, row.age].filter(Boolean).join('   ·   ');
   const body = testLink ? `🧪 <${testLink.url}|Open the test app>${row.action ? `  ·  ${row.action.replace(/^Testing at \S+\.\s*/, '')}` : ''}` : row.action;
   return {

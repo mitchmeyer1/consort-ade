@@ -57,15 +57,15 @@ test('a task card carries who, cost, age, the action, the stage bar and link but
  assert.equal(reply.body.text,'Confirm whether parity needs a separate task.');
  assert.equal(reply.subtext.text,'Review 7/9   ▰▰▰▰▰▰▱▱▱');
  assert.equal(reply.title.text,'<https://slack.example/thread|Curation &amp; parity>','the title is the link to the thread');
- assert.deepEqual(reply.actions.map(b=>[b.text.text,b.url,b.style]),[['ClickUp','https://app.clickup.com/t/123',undefined],['GitHub','https://github.com/a/b/pull/1',undefined]]);
- assert.deepEqual(ready.actions.map(b=>[b.text.text,b.style]),[['Merge PR','primary']]);
- assert.deepEqual(nudge.actions.map(b=>[b.text.text,b.style]),[['ClickUp',undefined],['GitHub','primary']]);
+ assert.deepEqual(reply.actions.map(b=>[b.text.text,b.url,b.style]),[['Chat','https://slack.example/thread','primary'],['ClickUp','https://app.clickup.com/t/123',undefined],['GitHub','https://github.com/a/b/pull/1',undefined]]);
+ assert.deepEqual(ready.actions.map(b=>[b.text.text,b.style]),[['Chat',undefined],['Merge PR','primary']]);
+ assert.deepEqual(nudge.actions.map(b=>[b.text.text,b.style]),[['Chat',undefined],['ClickUp',undefined],['GitHub','primary']]);
  assert.match(nudge.body.text,/please nudge @ada/);
  assert.equal(ready.subtext.text,'Approve 5/5   ▰▰▰▰▰');
  assert.equal(sentry.subtitle.text,'Sentry   ·   author unavailable   ·   cost pending   ·   2h');assert.equal(sentry.actions,undefined);
  assert.equal(stopped.subtext.text,'Setup 1/9   ▱▱▱▱▱▱▱▱▱   ·   *STOPPED*   ·   _Slack thread pending_');
  assert.equal(analysis.subtitle.text,'Sentry');assert.equal(analysis.body.text,'Reading the Sentry issue');assert.equal(analysis.subtext.text,'Triage 2/3   ▰▱▱');
- const ids=new Set(cards(monitorBlockKit(text,NOW)).flatMap(c=>(c.actions??[]).map(b=>b.action_id)));assert.equal(ids.size,5);
+ const ids=new Set(cards(monitorBlockKit(text,NOW)).flatMap(c=>(c.actions??[]).map(b=>b.action_id)));assert.equal(ids.size,8);
  assert.ok(cards(monitorBlockKit(text,NOW)).every(c=>c.block_id&&(c.actions??[]).length<=3&&(c.actions??[]).filter(b=>b.style==='primary').length<=1));
 });
 test('completed work is a table in a titled container; AI usage is a table with a coloured dot per window and when each account frees up',()=>{
@@ -155,13 +155,13 @@ test('a group with two or more cards scrolls sideways in carousels of up to ten;
  const ready=monitorBlockKit(many,NOW).filter(b=>b.type==='carousel'&&b.block_id.startsWith('ready-'));
  assert.deepEqual(ready.map(c=>c.elements.length),[10,3]);
 });
-test('a thread with unread Consort posts shows the count in red in the small print; the title keeps its text', () => {
+test('a thread with unread Consort posts turns Chat red with the count; the title keeps its text', () => {
   const blocks=monitorBlockKit(text.replace('Curation &amp; parity> ·','Curation &amp; parity> (3 unread) ·'),NOW);
   const card=cards(blocks).find(c=>c.block_id&&/Curation/.test(c.title.text));
   assert.equal(name(card),'Curation &amp; parity');
-  assert.match(card.subtext.text,/^🔴 \*3 new in the thread\*/);
+  assert.deepEqual([card.actions[0].text.text,card.actions[0].style],['Chat · 3 new','danger']);
   const other=cards(blocks).find(c=>/Needs a reviewer/.test(c.title.text));
-  assert.doesNotMatch(other.subtext?.text ?? '',/new in the thread/);
+  assert.ok(!other.actions?.some(a=>/new/.test(a.text.text)));
 });
 
 test('a task in a test session gets its own "In testing" group with the test link; cards have no Test or Resume buttons', () => {
@@ -183,7 +183,7 @@ No tickets waiting to be merged.`;
   const plain = monitorBlockKit(t, 0);
   assert.ok(titles(plain).some(x => /^\*In testing\*/.test(x)));
   const testing = all(plain).find(c => /Notes rail/.test(c.title.text));
-  assert.deepEqual(testing.actions.map(b => [b.text.text, b.url]), [['ClickUp', 'https://app.clickup.com/t/9'], ['GitHub', 'https://github.com/a/b/pull/9']]);
+  assert.deepEqual(testing.actions.map(b => [b.text.text, b.url]), [['Chat', 'https://x.slack.com/archives/D0ABC/p1794351179831059'], ['ClickUp', 'https://app.clickup.com/t/9'], ['GitHub', 'https://github.com/a/b/pull/9']]);
   assert.match(testing.body.text, /<https:\/\/ab12\.ngrok-free\.app\|Open the test app>/);
   assert.ok(all(plain).every(c => !c.actions.some(a => /^(?:Test|Resume)$/.test(a.text.text))), 'no Test or Resume buttons');
 });
