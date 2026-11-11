@@ -14,9 +14,6 @@ import { flushTaskNotifications, notifyTask, runTaskUntilFinished } from "./life
 import { statusEvent } from "./statusLog";
 import { scanSentry, validateSentryConfig } from "./sentry";
 import { Slack } from "./slack";
-import { serveLocalActions } from "./localActions";
-import { resumeFromBoard, testFromBoard } from "./slackStatus";
-import { listenForClicks } from "./slackSocket";
 import { canStartWorker, handleWorkerExit, isKilled, killTask, requestWorkerStop, workerStopMessage } from "./workerControl";
 import { answerTaskStatusQuestions } from "./slackStatus";
 import { refreshSlackCards } from "./slackCard";
@@ -199,16 +196,7 @@ async function main(argv: string[]) {
     }
     case "accounts remove": { const id = rest[0] ?? fail("account id required"); s.accounts = s.accounts.filter((x) => x.id !== id); saveState(s); console.log("Removed."); return; }
 
-    case "slack set": { s.slack = { botToken: need(a, "bot-token"), userId: need(a, "user"), channel: str(a, "channel"), ...(str(a, "app-token") ?? s.slack?.appToken ? { appToken: str(a, "app-token") ?? s.slack?.appToken } : {}) }; saveState(s); console.log("Slack saved. Test it with: consort-cli slack test"); return; }
-    case "slack app-token": {
-      if (!s.slack) fail("Slack is not configured. Run consort-cli setup first.");
-      const token = rest[0] ?? fail("usage: consort-cli slack app-token xapp-…   (or: consort-cli slack app-token --clear)");
-      if (token === "--clear" || a.clear) { delete s.slack!.appToken; saveState(s); console.log("App token removed; the board's Test button is hidden. Restart the daemon."); return; }
-      if (!/^xapp-/.test(token!)) fail("an app-level token starts with xapp- (Slack app settings → Basic Information → App-Level Tokens, scope connections:write)");
-      s.slack!.appToken = token; saveState(s);
-      console.log("App token saved. Restart the daemon (consort-cli stop && consort-cli run -d) and the board shows a Test button on each card.");
-      return;
-    }
+    case "slack set": { s.slack = { botToken: need(a, "bot-token"), userId: need(a, "user"), channel: str(a, "channel") }; saveState(s); console.log("Slack saved. Test it with: consort-cli slack test"); return; }
     case "slack monitor": {
       if (!s.slack) fail("Slack is not configured. Run consort-cli setup first.");
       await refreshSlackMonitor();
@@ -619,10 +607,6 @@ async function daemon() {
     ]).then(() => {}).finally(() => { statusCheck = undefined; });
   };
   checkStatusQuestions();
-  // board buttons (the Test button): only with an app-level token; one Socket Mode connection for the daemon's life (cli/slackSocket.ts)
-  if (loadState().slack?.appToken) void listenForClicks(loadState().slack!).catch(e => console.error(`Slack Socket Mode: ${e.message}`));
-  // the board's Test and Resume buttons are links to a page served here (cli/localActions.ts)
-  if (loadState().slack) serveLocalActions({ test: (id) => testFromBoard(id, alive), resume: (id) => resumeFromBoard(id) });
   setInterval(checkStatusQuestions, 15_000);
   // sets of local services nobody has used for 20 minutes come down (cli/environment.ts)
   let reaping = false;

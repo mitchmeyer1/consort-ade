@@ -16,7 +16,7 @@ export const SESSION_FILE = `${TEST_DIR}/session.json`;
 export type TestLogin = { role: string; username: string; password?: string; notes?: string };
 export type TestSessionFile = { port: number; path?: string; pids?: number[]; logins?: TestLogin[]; /** what to try by hand: one line per story, with the login and page it needs */ tries?: { story: string; login?: string; path?: string }[]; notes?: string[]; stop?: string };
 /** what the task remembers while a session is open, so a restarted worker can clean up after the last one */
-export type TestSessionState = { /** the owner pressed Resume on the board: the worker closes the session (cli/slackSocket.ts) */ endRequested?: number; requestedAt: number; requestTs: string; readyTs?: string; url?: string; pids?: number[]; tunnelPid?: number; stop?: string; dirtyBefore?: string[] };
+export type TestSessionState = { requestedAt: number; requestTs: string; readyTs?: string; url?: string; pids?: number[]; tunnelPid?: number; stop?: string; dirtyBefore?: string[] };
 
 const plain = (text: string) => text.toLowerCase().replace(/<@[A-Z0-9]+>/gi, "").replace(/:[a-z0-9_+-]+:/g, "").replace(/[’']/g, "'").replace(/[^\p{L}\p{N}'\s/]/gu, " ").replace(/\s+/g, " ").trim();
 
@@ -28,6 +28,8 @@ export function isTestRequest(text: string): boolean {
   const giveMe = /\b(?:spin up|start|bring up|stand up|fire up|give me|send me|share)\b.{0,40}\b(?:localhost|local server|server|test link|test url|test session|ngrok|demo|preview)\b/;
   // "why does your ngrok say…", "I didn't ask for a test session": talking about one is not asking for one
   if (/\b(?:didn'?t|did not|don'?t|do not|never|not) (?:ask|want|need)\b/.test(t)) return false;
+  // "test" on its own, as the footer of every thread message says
+  if (/^(?:test|test it|test this|test mode|test server|testing)$/.test(t)) return true;
   return meTry.test(t) || giveMe.test(t) || /\btest it myself\b|\bmanual(?:ly)? test (?:it|this)\b/.test(t);
 }
 

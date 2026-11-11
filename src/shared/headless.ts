@@ -323,7 +323,7 @@ export function slackHeading(title: string, identity?: SlackIdentity): string {
   const clean = (identity?.title ?? title).replace(/[<>|*`\r\n]/g, " ").trim().split(/\s+/).slice(0, 5).join(" ").slice(0, 80);
   return `${identity?.emoji ?? "📋"} ${clean}`;
 }
-export type SlackTaskLinks = { ticket: string; github?: string; heading?: string; /** the one-line step tracker under STATUS (slackProgress) */ progress?: string };
+export type SlackTaskLinks = { ticket: string; github?: string; heading?: string; /** the one-line step tracker under STATUS (slackProgress) */ progress?: string; /** feature tasks: the footer says how to start a test session (cli/testSession.ts) */ testHint?: boolean };
 /** GitHub SSH and HTTPS remotes produce the same credential-free branch link. */
 export function githubBranchUrl(remote: string, branch: string): string | undefined {
   const match = remote.match(/^(?:https?:\/\/(?:[^/@]+@)?github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/\s]+)\/([^/\s]+?)\/?$/i);
@@ -338,10 +338,10 @@ export function slackStatus(text: string, status?: SlackTaskStatus, links?: Slac
   const current = status ?? saved?.[1] ?? (lead.startsWith("🎉🍭🎊") ? "COMPLETED" : lead.startsWith("⏹️") ? "STOPPED" : /^(?:⚠️|❌|⏳|❓)/u.test(lead) ? "WAITING" : "RUNNING");
   let body = text.replace(STATUS_TAIL, "").trimEnd();
   if (links) {
-    body = body.replace(/\n\n<[^>\n]+\|ticket>(?: · <[^>\n]+\|github>)?$/, "");
+    body = body.replace(/\n\n<[^>\n]+\|ticket>(?: · <[^>\n]+\|github>)?(?: · type \*test\* for a remote test server)?$/, "");
     const safe = (url: string) => /^https?:\/\//i.test(url) ? url.replace(/&/g, "&amp;").replace(/</g, "%3C").replace(/>/g, "%3E").replace(/\|/g, "%7C") : undefined;
     const ticket = safe(links.ticket), github = links.github && safe(links.github);
-    if (ticket) body += `\n\n<${ticket}|ticket>${github ? ` · <${github}|github>` : ""}`;
+    if (ticket) body += `\n\n<${ticket}|ticket>${github ? ` · <${github}|github>` : ""}${links.testHint ? ` · type *test* for a remote test server` : ""}`;
   }
   if (links?.heading) {
     // the heading is the one bold line: emoji, then the title in bold capitals; the lines under it stay plain
@@ -596,7 +596,7 @@ export function slackCard(t: SlackCardTask, links: SlackTaskLinks, opts: { owner
     ...(detail ? [`_${brief(detail, 220).replace(/_/g, " ")}_`] : []),
     ...(links.progress ? [links.progress] : []),
     // a review has no ticket: its link is the PR
-    [t.kind === "review" ? (github ?? ticket) && `<${github ?? ticket}|github>` : ticket && `<${ticket}|ticket>${github && github !== ticket ? ` · <${github}|github>` : ""}`, opts.byline].filter(Boolean).join(" · "),
+    [t.kind === "review" ? (github ?? ticket) && `<${github ?? ticket}|github>` : ticket && `<${ticket}|ticket>${github && github !== ticket ? ` · <${github}|github>` : ""}`, opts.byline, links.testHint && "type *test* for a remote test server"].filter(Boolean).join(" · "),
   ];
   // key: what the card says, without the time, so the daemon edits the post only when that changes
   const key = body.filter(Boolean).join("\n");

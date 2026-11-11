@@ -42,7 +42,7 @@ export type Account = {
   /** set when the account hit a usage limit; the pool skips it until then (shared/headless.ts pickAccount) */
   blockedUntil?: number; blockedWhy?: string; lastUsedAt?: number;
 };
-export type SlackConfig = { botToken: string; userId: string; channel?: string; /** app-level token (xapp-…, connections:write): Consort listens for board button clicks over Socket Mode (cli/slackSocket.ts) */ appToken?: string };
+export type SlackConfig = { botToken: string; userId: string; channel?: string };
 export type StatusNames = { progress: string; review: string; done: string };
 export type Job = {
   id: string; name: string;
@@ -182,7 +182,7 @@ export type CliState = {
   /** Local-only identity of the one Slack monitor post; never a ticket thread. */
   /** `usage`: the uploaded usage panel the monitor shows, its picture hash, and the one before it, deleted a generation later (cli/slack.ts) */
   slackMonitor?: { channel: string; ts?: string; key?: string; creating?: boolean; usage?: { file?: string; key?: string; stale?: string }; head?: { file?: string; key?: string; stale?: string }; lease?: { id: string; until: number } };
- capacity?: { maxActiveTurns?: number; maxOpenTasks?: number; maxEnvironments?: number }; /** the board's Test/Resume links: the local page's port and secret (cli/localActions.ts) */ localActions?: { port: number; key: string }; version: 1; accounts: Account[]; slack?: SlackConfig; clickupKey?: string; branchPrefix?: string; jobs: Job[]; tasks: Task[];
+ capacity?: { maxActiveTurns?: number; maxOpenTasks?: number; maxEnvironments?: number }; version: 1; accounts: Account[]; slack?: SlackConfig; clickupKey?: string; branchPrefix?: string; jobs: Job[]; tasks: Task[];
   /** where the covered (BAA) Anthropic key lives; Consort never stores the key itself (shared/phi.ts) */
   covered?: import("../shared/phi.ts").CoveredKeyRef;
   /** the PHI/PII guard's settings; absent means off */

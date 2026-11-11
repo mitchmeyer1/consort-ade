@@ -596,7 +596,7 @@ export async function workTask(taskId: string): Promise<void> {
     if (!last) return;
     // a session an earlier worker opened: stop what it started; if the owner already said done, carry on
     await closeTestSession(last);
-    const finished = !!last.readyTs && (!!last.endRequested || !!loadState().tasks.find((t) => t.id === taskId)?.ownerUpdates?.length || (!!slack && !!thread && !!(await slack.waitForReply(thread, last.readyTs, { accept: isTestDone, timeoutMs: 1 }).catch(() => undefined))));
+    const finished = !!last.readyTs && (!!loadState().tasks.find((t) => t.id === taskId)?.ownerUpdates?.length || (!!slack && !!thread && !!(await slack.waitForReply(thread, last.readyTs, { accept: isTestDone, timeoutMs: 1 }).catch(() => undefined))));
     if (finished || !slack || !thread) { updateTask(taskId, { testSession: undefined }); return; }
     const linksNow = async () => taskSlackLinks(loadState().tasks.find((t) => t.id === taskId)!, job.repo);
     await holdEnv();
@@ -631,7 +631,6 @@ export async function workTask(taskId: string): Promise<void> {
     for (;;) {
       if (await slack.waitForReply(thread, readyTs, { accept: isTestDone, timeoutMs: 1 }).catch(() => undefined)) break;
       if (loadState().tasks.find((t) => t.id === taskId)?.ownerUpdates?.length) { endedBy = "change"; break; }
-      if (loadState().tasks.find((t) => t.id === taskId)?.testSession?.endRequested) break;
       updateTask(task.id, {}); void flushTaskNotifications(taskId);
       await new Promise((r) => setTimeout(r, 10_000));
     }

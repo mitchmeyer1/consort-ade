@@ -23,16 +23,6 @@ const decode = (s: string) => s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').rep
 const unlink = (s: string) => decode(s.replace(/<https?:\/\/[^|>]+\|([^>]+)>/g, '$1'));
 const link = (url: string | undefined, label: string) => (url ? `<${url}|${label}>` : label);
 const button = (label: string, url: string, id: string, style?: 'primary' | 'danger'): Block => ({ type: 'button', text: { type: 'plain_text', text: label, emoji: false }, url, action_id: id, ...(style ? { style } : {}) });
-/** the Test button's action id; its value is the task thread's channel and ts (cli/slackSocket.ts) */
-export const TEST_ACTION = 'consort-test';
-/** the Resume button on an In testing card: ends the test session, same value as Test */
-export const RESUME_ACTION = 'consort-resume';
-/** `D0123:1794351179.831059` from a thread permalink `…/archives/D0123/p1794351179831059` */
-export function threadRef(permalink: string | undefined): string | undefined {
-  const m = permalink?.match(/\/archives\/([A-Z0-9]+)\/p(\d{10})(\d{6})/);
-  return m ? `${m[1]}:${m[2]}.${m[3]}` : undefined;
-}
-const actionButton = (label: string, id: string, value: string): Block => ({ type: 'button', text: { type: 'plain_text', text: label, emoji: false }, action_id: id, value });
 /** `▰▰▱▱▱`: stages done out of the total, in text that every Slack client renders. */
 export const bar = (done: number, total: number) => (total > 0 && total <= 30 ? '▰'.repeat(Math.max(0, Math.min(done, total))) + '▱'.repeat(Math.max(0, total - done)) : '');
 type Cell = { type: 'raw_text'; text: string } | { type: 'rich_text'; elements: unknown[] };
@@ -87,16 +77,11 @@ function linkedTitle(row: Row, max = 150): string {
   const title = row.title.length > room ? `${row.title.slice(0, Math.max(1, room - 1)).trimEnd()}…` : row.title;
   return url ? `<${url}|${title}>` : title;
 }
-function card(row: Row, group: Group, index: number, o: BlockOptions = {}): Block {
-  // Slack allows three buttons on a card: Test (Resume while testing), ClickUp and GitHub, always in that order.
+function card(row: Row, group: Group, index: number): Block {
+  // ClickUp and GitHub (Merge PR when ready), always buttons, in that order.
   // The title is the link to the task's thread (the chat), and the test link sits in the card's text.
   const primary = group.key === 'ready' ? 'Merge PR' : group.key === 'nudge' ? 'GitHub' : undefined;
   const buttons: Block[] = [];
-  const ref = threadRef(row.thread);
-  // a link to Consort's local page when it runs one (cli/localActions.ts); a click button only with Socket Mode (cli/slackSocket.ts)
-  const testing = group.key === 'testing';
-  const label = testing ? 'Resume' : 'Test', id = `${testing ? RESUME_ACTION : TEST_ACTION}-${index}`;
-  if (o.testButtons !== false && ref) buttons.push(o.links ? button(label, `http://127.0.0.1:${o.links.port}/${testing ? 'resume' : 'test'}?thread=${encodeURIComponent(ref.split(':')[1])}&k=${encodeURIComponent(o.links.key)}`, id) : actionButton(label, id, ref));
   const testLink = row.links.find(l => l.label === 'Open test');
   for (const label of ['ClickUp', 'GitHub', 'Merge PR']) {
     const l = row.links.find(x => x.label === label);
@@ -246,8 +231,7 @@ export function monitorCounts(safe: string): Record<Group['key'], number> | unde
   return { reply: reply.rows.length, testing: testing.rows.length, nudge: nudge.rows.length, ready: ready.rows.length + more(ready), working: working.rows.length + more(working) };
 }
 /** Blocks for a master monitor text; undefined for anything else (guard notices, legacy posts, tests). The head is the uploaded header picture when there is one, else the banner. */
-export type BlockOptions = { /** Test and Resume buttons, on by default */ testButtons?: boolean; /** Consort's local page: the buttons become links to it (cli/localActions.ts) */ links?: { port: number; key: string } };
-export function monitorBlockKit(safe: string, now = Date.now(), head?: UsageImage, o: BlockOptions = {}): Block[] | undefined {
+export function monitorBlockKit(safe: string, now = Date.now(), head?: UsageImage): Block[] | undefined {
   const monitor = parseMonitor(safe);
   if (!monitor) return undefined;
   const { lines, groups, completed, completedNotes, accounts } = monitor;
@@ -261,7 +245,7 @@ export function monitorBlockKit(safe: string, now = Date.now(), head?: UsageImag
   // Empty groups are left out; the summary line still carries their counts.
   for (const group of [groups.reply, groups.testing, groups.nudge, groups.ready, groups.working]) {
     if (!group.rows.length && !group.notes.length) continue;
-    const cards = group.rows.map(r => card(r, group, index++, o));
+    const cards = group.rows.map(r => card(r, group, index++));
     // Two or more cards scroll sideways in a carousel (at most ten cards each), so a busy group does not make the post tall.
     const shown = cards.length > 1 ? Array.from({ length: Math.ceil(cards.length / 10) }, (_, i): Block => ({ type: 'carousel', block_id: `${group.key}-carousel-${i}`, elements: cards.slice(i * 10, i * 10 + 10) })) : cards;
     groupBlocks.set(group.key, shown);

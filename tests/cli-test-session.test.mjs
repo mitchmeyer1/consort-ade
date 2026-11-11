@@ -103,7 +103,7 @@ function daemon(overrides = {}) {
     './buildProgress': { stepLabel: name => name },
     './sources': { sourceFor: () => ({ comments: async () => [] }) },
     './testSession': session,
-    './workerControl': { requestWorkerStop: (id, pid, why) => stops.push([id, pid, why]) }, './slackSocket': { TEST_RELAY: 'consort_test', RESUME_RELAY: 'consort_resume' },
+    './workerControl': { requestWorkerStop: (id, pid, why) => stops.push([id, pid, why]) },
   };
   const mod = { exports: {} };
   new Function('require', 'module', 'exports', compile('slackStatus'))(n => mocks[n], mod, mod.exports);
@@ -157,16 +157,9 @@ test('a stop command that would take the services down is recognised; stopping a
   assert.match(session.testSessionPrompt({ repo: '/r', worktree: '/w', stage: 'In Review' }), /Never put the environment's own teardown/);
 });
 
-test('a Test click relayed by the bot starts a session for the owner; a relay naming someone else does nothing', async () => {
-  const h = daemon();
-  h.messages([{ ts: '7', bot_id: 'B1', text: 'pressed Test', metadata: { event_type: 'consort_test', event_payload: { user: 'owner' } } }]);
-  await h.run();
-  assert.equal(h.task.testSession.requestTs, '7');
-  assert.match(h.replies[0], /Starting a test session/);
-  const other = daemon();
-  other.messages([{ ts: '7', bot_id: 'B1', text: 'pressed Test', metadata: { event_type: 'consort_test', event_payload: { user: 'someone-else' } } }]);
-  await other.run();
-  assert.equal(other.task.testSession, undefined);
+test('a plain "test" reply starts a session, as the thread footer says', () => {
+  for (const t of ['test', 'Test', 'test it', 'testing']) assert.equal(session.isTestRequest(t), true, t);
+  for (const t of ['test the login page later', 'I ran the tests']) assert.equal(session.isTestRequest(t), false, t);
 });
 
 test('the session plans seed data and logins from the stories, and posts a what-to-try list with links', () => {
@@ -177,12 +170,4 @@ test('the session plans seed data and logins from the stories, and posts a what-
   assert.match(p, /"try": \[/);
   const text = session.testReadyMessage({ url: 'https://ab.ngrok-free.app', localUrl: 'http://localhost:1', session: { port: 1, tries: [{ story: 'An admin edits someone else\'s note', login: 'admin', path: '/apc-admin/1' }] } });
   assert.match(text, /\*What to try\*\n• An admin edits someone else's note \(as \*admin\*\) → <https:\/\/ab\.ngrok-free\.app\/apc-admin\/1\|\/apc-admin\/1>/);
-});
-
-test('Resume on the board flags the open session for the worker to close', async () => {
-  const h = daemon({ testSession: { requestedAt: 1, requestTs: '2', readyTs: '3' } });
-  h.messages([{ ts: '8', bot_id: 'B1', text: 'pressed Resume', metadata: { event_type: 'consort_resume', event_payload: { user: 'owner' } } }]);
-  await h.run();
-  assert.ok(h.task.testSession.endRequested);
-  assert.deepEqual(h.asked, []);
 });

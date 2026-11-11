@@ -164,7 +164,7 @@ test('a thread with unread Consort posts shows the count in red in the small pri
   assert.doesNotMatch(other.subtext?.text ?? '',/new in the thread/);
 });
 
-test('a task in a test session gets its own "In testing" group with the test link; other cards get a Test button only with an app token', () => {
+test('a task in a test session gets its own "In testing" group with the test link; cards have no Test or Resume buttons', () => {
   const t = `*📊 Consort master monitor*
 Updated 2026-10-27 16:45 UTC
 
@@ -183,20 +183,9 @@ No tickets waiting to be merged.`;
   const plain = monitorBlockKit(t, 0);
   assert.ok(titles(plain).some(x => /^\*In testing\*/.test(x)));
   const testing = all(plain).find(c => /Notes rail/.test(c.title.text));
-  assert.deepEqual(testing.actions.map(b => [b.text.text, b.url]), [['Resume', undefined], ['ClickUp', 'https://app.clickup.com/t/9'], ['GitHub', 'https://github.com/a/b/pull/9']]);
+  assert.deepEqual(testing.actions.map(b => [b.text.text, b.url]), [['ClickUp', 'https://app.clickup.com/t/9'], ['GitHub', 'https://github.com/a/b/pull/9']]);
   assert.match(testing.body.text, /<https:\/\/ab12\.ngrok-free\.app\|Open the test app>/);
-  for (const c of all(monitorBlockKit(t, 0, undefined, { testButtons: true }))) assert.ok(c.actions.length <= 3, 'Slack rejects more than three buttons');
-  assert.ok(all(monitorBlockKit(t, 0, undefined, { testButtons: false })).every(c => !c.actions.some(a => a.text.text === 'Test')), 'buttons can be turned off');
-  assert.ok(all(plain).find(c => /List pages/.test(c.title.text)).actions.some(a => a.text.text === 'Test'), 'Test shows by default');
-  const live = all(monitorBlockKit(t, 0, undefined, { testButtons: true }));
-  const test = live.find(c => /List pages/.test(c.title.text)).actions.find(a => a.text.text === 'Test');
-  assert.equal(test.value, 'D0ABC:1794351000.000100');
-  assert.ok(test.action_id.startsWith('consort-test'));
-  assert.equal(test.url, undefined);
-  assert.ok(!live.find(c => /Notes rail/.test(c.title.text)).actions.some(a => a.text.text === 'Test'), 'a task already in testing has no Test button');
-  const testingLive = live.find(c => /Notes rail/.test(c.title.text));
-  assert.deepEqual(testingLive.actions.map(a => a.text.text), ['Resume', 'ClickUp', 'GitHub']);
-  assert.equal(testingLive.actions[0].value, 'D0ABC:1794351179.831059');
+  assert.ok(all(plain).every(c => !c.actions.some(a => /^(?:Test|Resume)$/.test(a.text.text))), 'no Test or Resume buttons');
 });
 
 test('a long title is shortened inside its link, never cutting the link; the permalink query is dropped', () => {

@@ -62,7 +62,7 @@ function daemon(worktree) {
     'node:fs': { existsSync: () => true }, 'node:path': { join: (...a) => a.join('/') },
     './oversight': { workerLogTail: () => '' },
     './buildProgress': { stepLabel: name => name },
-    './testSession': testSession, './workerControl': { requestWorkerStop: () => {} }, './slackSocket': { TEST_RELAY: 'consort_test', RESUME_RELAY: 'consort_resume' },
+    './testSession': testSession, './workerControl': { requestWorkerStop: () => {} },
     './sources': { sourceFor: () => ({ comments: async () => [] }) },
   };
   const mod = { exports: {} };

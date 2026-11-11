@@ -13,7 +13,7 @@ export type UsageFiles = { file?: string; key?: string; stale?: string };
 type ImageSlot = "usage" | "system" | "head";
 type ShownImage = UsageImage & { key: string; reused: boolean };
 
-export type SlackThreadMessage = { ts: string; user?: string; text?: string; bot_id?: string; files?: SlackFile[]; /** a relayed board click (cli/slackSocket.ts) */ metadata?: { event_type?: string; event_payload?: Record<string, unknown> } };
+export type SlackThreadMessage = { ts: string; user?: string; text?: string; bot_id?: string; files?: SlackFile[] };
 
 /**
  * The one channel to the owner: a Slack bot token posting into a DM with them (or a channel they
@@ -75,12 +75,6 @@ export class Slack {
     return j.ts as string;
   }
 
-  /** A board click handed to the owner's consort-cli: a thread reply carrying metadata it reads on its usual poll (cli/slackSocket.ts). */
-  async postRelay(channel: string, thread: string, text: string, eventType: string, payload: Record<string, unknown>): Promise<string> {
-    const j = await this.api("chat.postMessage", { channel, thread_ts: thread, text, metadata: { event_type: eventType, event_payload: payload }, unfurl_links: false });
-    return j.ts as string;
-  }
-
   /** A single monitor root, with no automatic per-ticket STATUS footer or thread reply. */
   async postMonitor(text: string): Promise<string> {
     return (await this.sendMonitor("chat.postMessage", { channel: await this.channel(), text: text.split("\n")[0], parse: "none", unfurl_links: false, unfurl_media: false }, text)).ts;
@@ -121,9 +115,6 @@ export class Slack {
   setUsageFile(saved: UsageFiles | undefined): void { this.files.usage = { ...(saved ?? {}) }; }
   getUsageFile(): UsageFiles { return { ...this.files.usage }; }
   /** The header picture's files, kept the same way as the usage panel's. */
-  /** the board's Test/Resume links (cli/localActions.ts) */
-  private actionLinks?: { port: number; key: string };
-  setActionLinks(links: { port: number; key: string } | undefined): void { this.actionLinks = links; }
   setHeadFile(saved: UsageFiles | undefined): void { this.files.head = { ...(saved ?? {}) }; }
   getHeadFile(): UsageFiles { return { ...this.files.head }; }
 
@@ -174,10 +165,10 @@ export class Slack {
    */
   private async sendMonitor(method: string, body: Record<string, unknown>, text: string): Promise<any> {
     const safe = this.gate ? this.gate(text) : redactPii(text);
-    const kit = monitorBlockKit(safe, Date.now(), undefined, { links: this.actionLinks });
+    const kit = monitorBlockKit(safe);
     let head: ShownImage | undefined;
     const layouts: (() => Promise<{ blocks: unknown[]; withImage: boolean } | undefined>)[] = [
-      async () => { if (!kit) return undefined; head = await this.renderedImage("head", safe); return head ? { blocks: monitorBlockKit(safe, Date.now(), head, { links: this.actionLinks })!, withImage: true } : undefined; },
+      async () => { if (!kit) return undefined; head = await this.renderedImage("head", safe); return head ? { blocks: monitorBlockKit(safe, Date.now(), head)!, withImage: true } : undefined; },
       async () => (kit ? { blocks: kit, withImage: false } : undefined),
       async () => ({ blocks: this.plainBlocks(safe), withImage: false }),
     ];
@@ -302,7 +293,7 @@ export class Slack {
     const messages: SlackThreadMessage[] = [];
     let cursor: string | undefined;
     do {
-      const j = await this.api("conversations.replies", { channel: await this.channel(), ts: thread, oldest: afterTs, limit: 100, include_all_metadata: true, ...(cursor ? { cursor } : {}) });
+      const j = await this.api("conversations.replies", { channel: await this.channel(), ts: thread, oldest: afterTs, limit: 100, ...(cursor ? { cursor } : {}) });
       messages.push(...(j.messages ?? []));
       const next = j.response_metadata?.next_cursor;
       if (j.has_more && (!next || next === cursor)) throw new Error("Slack thread pagination did not advance.");

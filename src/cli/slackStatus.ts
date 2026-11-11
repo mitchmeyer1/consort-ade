@@ -16,7 +16,6 @@ import { stepLabel } from "./buildProgress";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { isBareDone, isTestDone, isTestRequest } from "./testSession";
-import { RESUME_RELAY, TEST_RELAY } from "./slackSocket";
 import { requestWorkerStop } from "./workerControl";
 import { processAlive } from "./state";
 
@@ -53,12 +52,6 @@ async function handleMessages(slack: Slack, taskId: string, messages: SlackThrea
     const task = state.tasks.find(t => t.id === taskId);
     if (!task || !state.slack) return;
     const fromOwner = !message.bot_id && message.user === state.slack.userId;
-    // a Test click on the board, relayed into this thread by whichever consort-cli got it (cli/slackSocket.ts)
-    const testRelay = !!message.bot_id && message.metadata?.event_type === TEST_RELAY && message.metadata.event_payload?.user === state.slack.userId;
-    if (testRelay && !task.testSession) await post(slack, task, await startTestSession(task, message, alive), await taskSlackLinks(task, state.jobs.find(j => j.id === task.jobId)?.repo), alive);
-    // Resume on the board: the worker sees the flag and closes the session, as if the owner said done
-    const resumeRelay = !!message.bot_id && message.metadata?.event_type === RESUME_RELAY && message.metadata.event_payload?.user === state.slack.userId;
-    if (resumeRelay && task.testSession) updateTask(taskId, t => ({ testSession: t.testSession && { ...t.testSession, endRequested: Date.now() } }), false);
     if (fromOwner) await handleOwnerMessage(slack, state, task, message, alive, deps);
     // the owner writing in the thread counts as reading it; every Consort post after that is unread
     updateTask(taskId, t => ({ slackStatusAfterTs: message.ts, slackUnread: fromOwner ? 0 : message.bot_id ? (t.slackUnread ?? 0) + 1 : t.slackUnread }), false);
@@ -175,24 +168,4 @@ async function startTestSession(task: Task, message: SlackThreadMessage, alive: 
     if (!processAlive(pid)) updateTask(task.id, t => ({ workerStop: t.workerStop && { ...t.workerStop, holdUntil: Date.now() } }), false);
   }
   return `🧪 *Starting a test session.* ${pid ? "I stopped the current step; its progress is saved. " : ""}I'll bring the app up, make a login for each role this change needs, and post a link here.`;
-}
-
-/** the board's Test link (cli/localActions.ts): start a test session as if the owner asked in the thread */
-export async function testFromBoard(taskId: string, alive: (pid: number) => boolean): Promise<string> {
-  const state = loadState();
-  const task = state.tasks.find(t => t.id === taskId);
-  if (!task || !state.slack) return "Slack is not set up for this task.";
-  if (task.testSession) return task.testSession.url ? `A test session is already open at ${task.testSession.url}.` : "A test session is already starting; the link comes to the Slack thread shortly.";
-  const slack = new Slack(state.slack);
-  const reply = await startTestSession(task, { ts: String(Date.now() / 1000) }, alive);
-  await post(slack, task, reply, await taskSlackLinks(task, state.jobs.find(j => j.id === task.jobId)?.repo), alive);
-  return loadState().tasks.find(t => t.id === taskId)?.testSession ? "Starting a test session. The link and logins come to the Slack thread in a few minutes." : reply.replace(/[*_`]/g, "");
-}
-
-/** the board's Resume link: close the open test session; the worker carries on */
-export async function resumeFromBoard(taskId: string): Promise<string> {
-  const task = loadState().tasks.find(t => t.id === taskId);
-  if (!task?.testSession) return "No test session is open for this task.";
-  updateTask(taskId, t => ({ testSession: t.testSession && { ...t.testSession, endRequested: Date.now() } }), false);
-  return "Closing the test session; the task carries on within a few seconds.";
 }
