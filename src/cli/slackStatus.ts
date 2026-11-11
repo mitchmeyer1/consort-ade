@@ -63,6 +63,8 @@ async function handleOwnerMessage(slack: Slack, state: CliState, task: Task, mes
   const files = message.files ?? [];
   // test sessions (cli/testSession.ts): the worker posts the link and waits for "done"; neither message is an answer or a change
   if (task.testSession && isTestDone(text)) {
+    // "done" before the link is up: the owner no longer wants the session, so cancel it
+    if (!task.testSession.readyTs) { await post(slack, task, await cancelTestSession(task, alive), await taskSlackLinks(task, state.jobs.find(j => j.id === task.jobId)?.repo), alive); return; }
     if (isBareDone(text) && !files.length) return;
   } else if (text && !task.testSession && isTestRequest(text)) {
     await post(slack, task, await startTestSession(task, message, alive), await taskSlackLinks(task, state.jobs.find(j => j.id === task.jobId)?.repo), alive);
@@ -149,6 +151,23 @@ async function queueOwnerUpdate(token: string, taskId: string, message: SlackThr
 }
 
 /**
+ * "done" while a test session is still starting: stop the worker's session turn and drop the session.
+ * A task that was ready to merge goes back to ready; any other task's worker carries on where it was.
+ */
+async function cancelTestSession(task: Task, alive: (pid: number) => boolean): Promise<string> {
+  const reopened = task.testSession?.reopened;
+  const pid = task.pid && alive(task.pid) ? task.pid : undefined;
+  if (pid) {
+    requestWorkerStop(task.id, pid, "the test session was cancelled in Slack");
+    try { process.kill(pid, "SIGTERM"); } catch {}
+    const until = Date.now() + 60_000;
+    while (processAlive(pid) && Date.now() < until) await new Promise(r => setTimeout(r, 500));
+  }
+  updateTask(task.id, t => ({ testSession: undefined, ...(reopened ? { status: "ready", note: reopened.note ?? "ready to merge", finishedAt: reopened.finishedAt ?? Date.now(), pid: undefined, activity: "ready to merge" } : { activity: "test session cancelled; continuing" }), workerStop: t.workerStop && { ...t.workerStop, holdUntil: Date.now() } }), false);
+  return `⏹️ *Cancelled the test session* before it started.${reopened ? " The task is back to ready to merge." : " Continuing the task."}`;
+}
+
+/**
  * "I want to test it": mark the task, stop the worker's current step (its progress is saved), and
  * let the daemon start it again; the new worker opens the session first (cli/pipeline.ts).
  */
@@ -157,7 +176,7 @@ async function startTestSession(task: Task, message: SlackThreadMessage, alive: 
   if (!OPEN.includes(task.status) && task.status !== "ready") return `This task is ${task.status === "done" ? `closed (${task.note ?? "PR closed"})` : task.status}, so there is no worker to start the app. Check out \`${task.branch}\` to try it.`;
   if (task.testSession) return task.testSession.readyTs ? "A test session is already open: the link and logins are above. Tell me 'done' when you are ready for me to continue." : "Already starting a test session; the link and logins come here shortly.";
   const reopen = task.status === "ready";
-  updateTask(task.id, { testSession: { requestedAt: Date.now(), requestTs: message.ts }, ...(reopen ? { status: "monitoring", finishedAt: undefined, note: undefined } : {}), activity: "starting a test session you asked for in Slack" }, false);
+  updateTask(task.id, { testSession: { requestedAt: Date.now(), requestTs: message.ts, ...(reopen ? { reopened: { note: task.note, finishedAt: task.finishedAt } } : {}) }, ...(reopen ? { status: "monitoring", finishedAt: undefined, note: undefined } : {}), activity: "starting a test session you asked for in Slack" }, false);
   const pid = task.pid && alive(task.pid) ? task.pid : undefined;
   if (pid) {
     requestWorkerStop(task.id, pid, "a test session (asked in Slack)");

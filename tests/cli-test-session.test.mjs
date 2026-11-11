@@ -171,3 +171,21 @@ test('the session plans seed data and logins from the stories, and posts a what-
   const text = session.testReadyMessage({ url: 'https://ab.ngrok-free.app', localUrl: 'http://localhost:1', session: { port: 1, tries: [{ story: 'An admin edits someone else\'s note', login: 'admin', path: '/apc-admin/1' }] } });
   assert.match(text, /\*What to try\*\n• An admin edits someone else's note \(as \*admin\*\) → <https:\/\/ab\.ngrok-free\.app\/apc-admin\/1\|\/apc-admin\/1>/);
 });
+
+test('"done" while the session is still starting cancels it; a task that was ready to merge goes back to ready', async () => {
+  const ready = daemon({ status: 'ready', note: 'ready to merge', finishedAt: 5 });
+  ready.messages([{ ts: '2', user: 'owner', text: 'test' }]);
+  await ready.run();
+  assert.deepEqual(ready.task.testSession.reopened, { note: 'ready to merge', finishedAt: 5 });
+  ready.messages([{ ts: '2', user: 'owner', text: 'test' }, { ts: '3', user: 'owner', text: 'done' }]);
+  await ready.run();
+  assert.equal(ready.task.testSession, undefined);
+  assert.equal(ready.task.status, 'ready');
+  assert.equal(ready.task.finishedAt, 5);
+  assert.match(ready.replies.at(-1), /Cancelled the test session[\s\S]*back to ready to merge/);
+  const working = daemon({ testSession: { requestedAt: 1, requestTs: '2' } });
+  working.messages([{ ts: '3', user: 'owner', text: 'done' }]);
+  await working.run();
+  assert.equal(working.task.testSession, undefined);
+  assert.equal(working.task.status, 'working');
+});

@@ -16,7 +16,7 @@ export const SESSION_FILE = `${TEST_DIR}/session.json`;
 export type TestLogin = { role: string; username: string; password?: string; notes?: string };
 export type TestSessionFile = { port: number; path?: string; pids?: number[]; logins?: TestLogin[]; /** what to try by hand: one line per story, with the login and page it needs */ tries?: { story: string; login?: string; path?: string }[]; notes?: string[]; stop?: string };
 /** what the task remembers while a session is open, so a restarted worker can clean up after the last one */
-export type TestSessionState = { requestedAt: number; requestTs: string; readyTs?: string; url?: string; pids?: number[]; tunnelPid?: number; stop?: string; dirtyBefore?: string[] };
+export type TestSessionState = { /** the task was ready to merge when the session was asked for: cancelling puts it back */ reopened?: { note?: string; finishedAt?: number }; requestedAt: number; requestTs: string; readyTs?: string; url?: string; pids?: number[]; tunnelPid?: number; stop?: string; dirtyBefore?: string[] };
 
 const plain = (text: string) => text.toLowerCase().replace(/<@[A-Z0-9]+>/gi, "").replace(/:[a-z0-9_+-]+:/g, "").replace(/[’']/g, "'").replace(/[^\p{L}\p{N}'\s/]/gu, " ").replace(/\s+/g, " ").trim();
 
