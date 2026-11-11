@@ -13,7 +13,7 @@ export type UsageFiles = { file?: string; key?: string; stale?: string };
 type ImageSlot = "usage" | "system" | "head";
 type ShownImage = UsageImage & { key: string; reused: boolean };
 
-export type SlackThreadMessage = { ts: string; user?: string; text?: string; bot_id?: string; files?: SlackFile[] };
+export type SlackThreadMessage = { ts: string; user?: string; text?: string; bot_id?: string; files?: SlackFile[]; /** a relayed board click (cli/slackSocket.ts) */ metadata?: { event_type?: string; event_payload?: Record<string, unknown> } };
 
 /**
  * The one channel to the owner: a Slack bot token posting into a DM with them (or a channel they
@@ -72,6 +72,12 @@ export class Slack {
   /** post a message; in `thread` when given. Resolves to the message ts, which is also the thread id for replies. `broadcast` also shows a thread reply in the DM, so Slack notifies the owner. */
   async post(text: string, thread?: string, broadcast = false): Promise<string> {
     const j = await this.api("chat.postMessage", { channel: await this.channel(), text: slackStatus(STATUS_TAIL.test(text) ? text : slackMessage("update", text)), ...(thread ? { thread_ts: thread, ...(broadcast ? { reply_broadcast: true } : {}) } : {}), unfurl_links: false });
+    return j.ts as string;
+  }
+
+  /** A board click handed to the owner's consort-cli: a thread reply carrying metadata it reads on its usual poll (cli/slackSocket.ts). */
+  async postRelay(channel: string, thread: string, text: string, eventType: string, payload: Record<string, unknown>): Promise<string> {
+    const j = await this.api("chat.postMessage", { channel, thread_ts: thread, text, metadata: { event_type: eventType, event_payload: payload }, unfurl_links: false });
     return j.ts as string;
   }
 
@@ -293,7 +299,7 @@ export class Slack {
     const messages: SlackThreadMessage[] = [];
     let cursor: string | undefined;
     do {
-      const j = await this.api("conversations.replies", { channel: await this.channel(), ts: thread, oldest: afterTs, limit: 100, ...(cursor ? { cursor } : {}) });
+      const j = await this.api("conversations.replies", { channel: await this.channel(), ts: thread, oldest: afterTs, limit: 100, include_all_metadata: true, ...(cursor ? { cursor } : {}) });
       messages.push(...(j.messages ?? []));
       const next = j.response_metadata?.next_cursor;
       if (j.has_more && (!next || next === cursor)) throw new Error("Slack thread pagination did not advance.");

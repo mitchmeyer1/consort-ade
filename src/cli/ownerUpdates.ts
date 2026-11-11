@@ -72,3 +72,9 @@ End with one line: [update-summary: what changed in the ticket and the code, und
 }
 
 export const parseUpdateSummary = (text: string) => /\[update-summary:\s*([^\]]+)\]/i.exec(text)?.[1].trim();
+
+/** "fix them, no more questions", "stop pausing and just upload them", "proceed": the owner wants the work done, not asked about */
+export function isGoAhead(text: string): boolean {
+  const t = text.toLowerCase().replace(/[’']/g, "'").replace(/\s+/g, " ");
+  return /\bno more questions\b|\bstop (?:asking|pausing|confirming)\b|\bdon'?t (?:ask|wait|pause)\b|\bjust (?:do|fix|upload|ship|go|push|make)\b|\b(?:go ahead|proceed|carry on|use your (?:judg(?:e)?ment|recommendation)|go with (?:your|the) recommendation)\b/.test(t);
+}

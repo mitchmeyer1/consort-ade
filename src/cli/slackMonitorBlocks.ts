@@ -5,9 +5,11 @@
  * after the PHI guard has run, so a guard replacement never reaches a block as task content.
  */
 const LIMIT = 2900;
+/** Slack rejects a card with more than three buttons */
+const MAX_CARD_BUTTONS = 3;
 const MAX_BLOCKS = 50;
 type Row = { icon: string; kind: string; title: string; thread?: string; pending: boolean; unread?: number; ci?: string; byline?: string; status: string; stage?: { name: string; n: number; total: number }; cost?: string; age?: string; action?: string; links: { label: string; url: string }[] };
-type Group = { key: 'reply' | 'nudge' | 'ready' | 'working'; icon: string; heading: string; empty: string; rows: Row[]; notes: string[] };
+type Group = { key: 'reply' | 'testing' | 'nudge' | 'ready' | 'working'; icon: string; heading: string; empty: string; rows: Row[]; notes: string[] };
 type Block = Record<string, unknown>;
 
 const mrkdwn = (text: string, max = LIMIT) => ({ type: 'mrkdwn', text: text.length > max ? text.slice(0, max - 1) + '…' : text });
@@ -21,6 +23,16 @@ const decode = (s: string) => s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').rep
 const unlink = (s: string) => decode(s.replace(/<https?:\/\/[^|>]+\|([^>]+)>/g, '$1'));
 const link = (url: string | undefined, label: string) => (url ? `<${url}|${label}>` : label);
 const button = (label: string, url: string, id: string, style?: 'primary' | 'danger'): Block => ({ type: 'button', text: { type: 'plain_text', text: label, emoji: false }, url, action_id: id, ...(style ? { style } : {}) });
+/** the Test button's action id; its value is the task thread's channel and ts (cli/slackSocket.ts) */
+export const TEST_ACTION = 'consort-test';
+/** the Resume button on an In testing card: ends the test session, same value as Test */
+export const RESUME_ACTION = 'consort-resume';
+/** `D0123:1794351179.831059` from a thread permalink `…/archives/D0123/p1794351179831059` */
+export function threadRef(permalink: string | undefined): string | undefined {
+  const m = permalink?.match(/\/archives\/([A-Z0-9]+)\/p(\d{10})(\d{6})/);
+  return m ? `${m[1]}:${m[2]}.${m[3]}` : undefined;
+}
+const actionButton = (label: string, id: string, value: string): Block => ({ type: 'button', text: { type: 'plain_text', text: label, emoji: false }, action_id: id, value });
 /** `▰▰▱▱▱`: stages done out of the total, in text that every Slack client renders. */
 export const bar = (done: number, total: number) => (total > 0 && total <= 30 ? '▰'.repeat(Math.max(0, Math.min(done, total))) + '▱'.repeat(Math.max(0, total - done)) : '');
 type Cell = { type: 'raw_text'; text: string } | { type: 'rich_text'; elements: unknown[] };
@@ -49,9 +61,9 @@ function parseRow(line: string, details: string[]): Row {
   const stageOf = (s: string) => { const m = s.match(/^(.*?)\s*(\d+)\/(\d+)$/); return m ? { name: m[1], n: Number(m[2]), total: Number(m[3]) } : undefined; };
   if (p.length >= 7) { row.byline = p[2]; row.status = p[3]; row.stage = stageOf(p[4]); row.cost = p[5]; row.age = p.slice(6).join(' · '); }
   else { row.status = p[2] ?? ''; row.stage = stageOf(p[3] ?? ''); }
-  const labels: Record<string, string> = { ticket: 'ClickUp', github: 'GitHub', 'merge PR': 'Merge PR' };
+  const labels: Record<string, string> = { ticket: 'ClickUp', github: 'GitHub', 'merge PR': 'Merge PR', 'test link': 'Open test' };
   for (const d of details) {
-    const found = [...d.matchAll(/<(https:\/\/[^|>]+)\|(ticket|github|merge PR)>/g)];
+    const found = [...d.matchAll(/<(https:\/\/[^|>]+)\|(test link|ticket|github|merge PR)>/g)];
     if (found.length) row.links.push(...found.map(m => ({ label: labels[m[2]], url: m[1] })));
     else if (d.startsWith('PR: ')) row.ci = d.slice(4);
     else row.action = row.action ? `${row.action} ${d}` : d;
@@ -64,15 +76,26 @@ const prLabels = (row: Row) => row.ci ? `${CI_MARK[row.ci] ?? ''} ${row.ci}`.tri
 const notable = (status: string) => (['RUNNING', 'WAITING', 'READY TO MERGE', 'DONE', ''].includes(status) ? undefined : status);
 const byline = (row: Row) => row.byline?.replace(/^author: /, 'by ');
 /** One card per open task: title, who and how much, the current action, the stage bar, and up to three link buttons. */
-function card(row: Row, group: Group, index: number): Block {
-  const primary = group.key === 'reply' ? 'thread' : group.key === 'ready' ? 'Merge PR' : group.key === 'nudge' ? 'GitHub' : undefined;
+function card(row: Row, group: Group, index: number, o: BlockOptions = {}): Block {
+  const primary = group.key === 'reply' ? 'thread' : group.key === 'testing' ? 'Open test' : group.key === 'ready' ? 'Merge PR' : group.key === 'nudge' ? 'GitHub' : undefined;
   const buttons: Block[] = [];
   // unread Consort posts turn the thread button red; Slack has no badge, so the count is in the label
-  const threadLabel = `${group.key === 'reply' ? 'Reply in thread' : 'Open thread'}${row.unread ? ` · ${row.unread} new` : ''}`;
+  const threadLabel = `Chat${row.unread ? ` · ${row.unread} new` : ''}`;
   if (row.thread) buttons.push(button(threadLabel, row.thread, `thread-${index}`, row.unread ? 'danger' : primary === 'thread' ? 'primary' : undefined));
-  for (const l of row.links) buttons.push(button(l.label, l.url, `${l.label.toLowerCase().replace(/\W+/g, '-')}-${index}`, primary === l.label ? 'primary' : undefined));
+  // Test: start a test session from the board; only where Consort listens for clicks (an app-level token, cli/slackSocket.ts)
+  const ref = threadRef(row.thread);
+  if (o.testButtons !== false && ref && group.key !== 'testing') buttons.push(actionButton('Test', `${TEST_ACTION}-${index}`, ref));
+  // a task in testing: Resume ends the session; it goes after the Open test link so the link keeps its place
+  const resume = o.testButtons !== false && ref && group.key === 'testing' ? actionButton('Resume', `${RESUME_ACTION}-${index}`, ref) : undefined;
+  // Slack allows three buttons on a card: the group's main link first, then the rest; any link left over goes in the small print
+  const room = Math.max(0, MAX_CARD_BUTTONS - buttons.length - (resume ? 1 : 0));
+  const ordered = row.links.length <= room ? row.links : [...row.links].sort((a, b) => Number(b.label === primary) - Number(a.label === primary));
+  const fit = ordered.slice(0, room);
+  for (const l of fit) buttons.push(button(l.label, l.url, `${l.label.toLowerCase().replace(/\W+/g, '-')}-${index}`, primary === l.label ? 'primary' : undefined));
+  if (resume) buttons.push(resume);
+  const overflow = ordered.slice(fit.length).map(l => link(l.url, l.label)).join('  ');
   const status = notable(row.status);
-  const subtext = [row.stage ? `${row.stage.name} ${row.stage.n}/${row.stage.total}   ${bar(group.key === 'ready' ? row.stage.n : row.stage.n - 1, row.stage.total)}` : '', prLabels(row), status ? `*${status}*` : '', row.pending ? '_Slack thread pending_' : ''].filter(Boolean).join('   ·   ');
+  const subtext = [overflow, row.stage ? `${row.stage.name} ${row.stage.n}/${row.stage.total}   ${bar(group.key === 'ready' ? row.stage.n : row.stage.n - 1, row.stage.total)}` : '', prLabels(row), status ? `*${status}*` : '', row.pending ? '_Slack thread pending_' : ''].filter(Boolean).join('   ·   ');
   const subtitle = [row.kind, byline(row), row.cost, row.age].filter(Boolean).join('   ·   ');
   return {
     type: 'card', block_id: `task-${index}`,
@@ -80,7 +103,7 @@ function card(row: Row, group: Group, index: number): Block {
     ...(subtitle ? { subtitle: mrkdwn(subtitle, 150) } : {}),
     ...(row.action ? { body: mrkdwn(row.action, 200) } : {}),
     ...(subtext ? { subtext: mrkdwn(subtext, 200) } : {}),
-    ...(buttons.length ? { actions: buttons.slice(0, 3) } : {}),
+    ...(buttons.length ? { actions: buttons.slice(0, MAX_CARD_BUTTONS) } : {}),
   };
 }
 /** Plain rows, packed into as few sections as fit, for anything that no longer fits as a card. */
@@ -181,6 +204,7 @@ function parseMonitor(safe: string) {
   if (!lines[0].startsWith('*📊 Consort master monitor*') || !lines.includes('*Working*')) return undefined;
   const groups: Record<Group['key'], Group> = {
     reply: { key: 'reply', icon: '🟠', heading: 'Needs your reply', empty: 'Nothing needs your reply.', rows: [], notes: [] },
+    testing: { key: 'testing', icon: '🧪', heading: 'In testing', empty: 'Nothing in testing.', rows: [], notes: [] },
     nudge: { key: 'nudge', icon: '👉', heading: 'Nudge', empty: 'Nobody to nudge.', rows: [], notes: [] },
     ready: { key: 'ready', icon: '📦', heading: 'Ready to merge', empty: 'Nothing waiting to be merged.', rows: [], notes: [] },
     working: { key: 'working', icon: '🔄', heading: 'Working', empty: 'No tasks in progress.', rows: [], notes: [] },
@@ -200,7 +224,7 @@ function parseMonitor(safe: string) {
     while (lines[i + 1]?.startsWith('   ')) details.push(lines[++i].trim());
     const row = parseRow(line, details);
     if (!group) completed.push(row);
-    else (group.key === 'working' && row.icon === '🟠' ? groups.reply : group.key === 'working' && row.icon === '👉' ? groups.nudge : group).rows.push(row);
+    else (group.key === 'working' && row.icon === '🟠' ? groups.reply : group.key === 'working' && row.icon === '🧪' ? groups.testing : group.key === 'working' && row.icon === '👉' ? groups.nudge : group).rows.push(row);
   }
   return { lines, groups, completed, completedNotes, accounts };
 }
@@ -209,11 +233,12 @@ export function monitorCounts(safe: string): Record<Group['key'], number> | unde
   const parsed = parseMonitor(safe);
   if (!parsed) return undefined;
   const more = (g: Group) => g.notes.reduce((n, note) => n + Number(note.match(/^… (\d+) more/)?.[1] ?? 0), 0);
-  const { reply, nudge, ready, working } = parsed.groups;
-  return { reply: reply.rows.length, nudge: nudge.rows.length, ready: ready.rows.length + more(ready), working: working.rows.length + more(working) };
+  const { reply, testing, nudge, ready, working } = parsed.groups;
+  return { reply: reply.rows.length, testing: testing.rows.length, nudge: nudge.rows.length, ready: ready.rows.length + more(ready), working: working.rows.length + more(working) };
 }
 /** Blocks for a master monitor text; undefined for anything else (guard notices, legacy posts, tests). The head is the uploaded header picture when there is one, else the banner. */
-export function monitorBlockKit(safe: string, now = Date.now(), head?: UsageImage): Block[] | undefined {
+export type BlockOptions = { /** Test and Resume buttons, on by default; a click reaches Consort once it has an app-level token (cli/slackSocket.ts) */ testButtons?: boolean };
+export function monitorBlockKit(safe: string, now = Date.now(), head?: UsageImage, o: BlockOptions = {}): Block[] | undefined {
   const monitor = parseMonitor(safe);
   if (!monitor) return undefined;
   const { lines, groups, completed, completedNotes, accounts } = monitor;
@@ -225,9 +250,9 @@ export function monitorBlockKit(safe: string, now = Date.now(), head?: UsageImag
   let index = 0;
   const groupBlocks = new Map<Group['key'], Block[]>();
   // Empty groups are left out; the summary line still carries their counts.
-  for (const group of [groups.reply, groups.nudge, groups.ready, groups.working]) {
+  for (const group of [groups.reply, groups.testing, groups.nudge, groups.ready, groups.working]) {
     if (!group.rows.length && !group.notes.length) continue;
-    const cards = group.rows.map(r => card(r, group, index++));
+    const cards = group.rows.map(r => card(r, group, index++, o));
     // Two or more cards scroll sideways in a carousel (at most ten cards each), so a busy group does not make the post tall.
     const shown = cards.length > 1 ? Array.from({ length: Math.ceil(cards.length / 10) }, (_, i): Block => ({ type: 'carousel', block_id: `${group.key}-carousel-${i}`, elements: cards.slice(i * 10, i * 10 + 10) })) : cards;
     groupBlocks.set(group.key, shown);
@@ -249,7 +274,7 @@ export function monitorBlockKit(safe: string, now = Date.now(), head?: UsageImag
     [{ is_wrapped: true }, {}, { is_wrapped: true }, {}, {}, { align: 'right' }, { align: 'right' }, {}]));
   blocks.push(context(`Updated ${stamp}  ·  Reply in a task’s thread. This message updates in place.`));
   // Too many open tasks for Slack's block limit: the later groups fall back to packed text rows, one section per few tasks.
-  for (const group of [groups.working, groups.ready, groups.nudge, groups.reply]) {
+  for (const group of [groups.working, groups.ready, groups.nudge, groups.testing, groups.reply]) {
     if (blocks.length <= MAX_BLOCKS) break;
     const cards = groupBlocks.get(group.key); if (!cards?.length) continue;
     const at = blocks.indexOf(cards[0]); const replacement = packed(group.rows.map(compact));

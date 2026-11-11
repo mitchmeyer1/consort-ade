@@ -42,7 +42,7 @@ export type Account = {
   /** set when the account hit a usage limit; the pool skips it until then (shared/headless.ts pickAccount) */
   blockedUntil?: number; blockedWhy?: string; lastUsedAt?: number;
 };
-export type SlackConfig = { botToken: string; userId: string; channel?: string };
+export type SlackConfig = { botToken: string; userId: string; channel?: string; /** app-level token (xapp-…, connections:write): Consort listens for board button clicks over Socket Mode (cli/slackSocket.ts) */ appToken?: string };
 export type StatusNames = { progress: string; review: string; done: string };
 export type Job = {
   id: string; name: string;
@@ -95,6 +95,8 @@ export type Task = {
   pendingQuestion?: { questions: string[]; afterTs: string };
   /** the owner asked to test the work by hand (cli/testSession.ts); open until they say "done" */
   testSession?: import("./testSession").TestSessionState;
+  /** the owner said "no more questions" / "proceed" in Slack (cli/ownerUpdates.ts isGoAhead): later questions take the agent's recommendation */
+  goAhead?: string;
   reviewersRequested?: string[];
   reviewWaitSince?: number;
   reviewRequestedHead?: string;

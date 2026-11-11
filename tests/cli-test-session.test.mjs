@@ -17,7 +17,7 @@ test('asking to test or demo starts a session; ordinary messages do not', () => 
 });
 
 test('"done" and its variants end a session; other replies do not', () => {
-  for (const text of ['done', 'Done!', 'ok done', "I'm done testing", 'all done', 'finished', 'continue', 'go ahead', 'done, but the save button is grey']) assert.equal(session.isTestDone(text), true, text);
+  for (const text of ['right sorry wrong thread - where are we at for this task, whats our blockers? I am “Done” with the test server btw', 'finished testing, looks good', 'close the test server', 'done', 'Done!', 'ok done', "I'm done testing", 'all done', 'finished', 'continue', 'go ahead', 'done, but the save button is grey']) assert.equal(session.isTestDone(text), true, text);
   for (const text of ['not done yet', 'the save button is grey', 'is it done?', 'what is left to be done']) assert.equal(session.isTestDone(text), false, text);
   assert.equal(session.isBareDone('ok done'), true);
   assert.equal(session.isBareDone('done, but the save button is grey when I add a note'), false);
@@ -29,7 +29,7 @@ test('the prompt is about any repo: env setup, one port, a login per role, local
   assert.match(p, /20400-20499/);
   assert.match(p, /nohup/);
   assert.match(p, /ngrok/);
-  assert.match(p, /one login per role in the LOCAL database only/);
+  assert.match(p, /one login per role those stories need, in the LOCAL database only/);
   assert.match(p, /Never touch production/);
   assert.match(p, /\.consort\/test-session\/session\.json/);
   assert.match(p, /\[test-ready\][\s\S]*\[test-failed:/);
@@ -43,7 +43,7 @@ test('the session file is read defensively', async (t) => {
   await writeFile(join(root, session.SESSION_FILE), JSON.stringify({ port: 'nope' }));
   assert.equal(session.readSessionFile(root), undefined);
   await writeFile(join(root, session.SESSION_FILE), JSON.stringify({ port: 5173, path: '/apc-admin/1', pids: [1, 4242, 'x'], logins: [{ role: 'admin', username: 'admin@test.local', password: 'pw1' }, { role: 'bad' }], notes: ['seeded one group'], stop: ' ./down.sh ' }));
-  assert.deepEqual(session.readSessionFile(root), { port: 5173, path: '/apc-admin/1', pids: [4242], logins: [{ role: 'admin', username: 'admin@test.local', password: 'pw1' }], notes: ['seeded one group'], stop: './down.sh' });
+  assert.deepEqual(session.readSessionFile(root), { port: 5173, path: '/apc-admin/1', pids: [4242], logins: [{ role: 'admin', username: 'admin@test.local', password: 'pw1' }], tries: [], notes: ['seeded one group'], stop: './down.sh' });
 });
 
 test('the ready message has the link, the local address, every login and the done line', () => {
@@ -103,7 +103,7 @@ function daemon(overrides = {}) {
     './buildProgress': { stepLabel: name => name },
     './sources': { sourceFor: () => ({ comments: async () => [] }) },
     './testSession': session,
-    './workerControl': { requestWorkerStop: (id, pid, why) => stops.push([id, pid, why]) },
+    './workerControl': { requestWorkerStop: (id, pid, why) => stops.push([id, pid, why]) }, './slackSocket': { TEST_RELAY: 'consort_test', RESUME_RELAY: 'consort_resume' },
   };
   const mod = { exports: {} };
   new Function('require', 'module', 'exports', compile('slackStatus'))(n => mocks[n], mod, mod.exports);
@@ -155,4 +155,34 @@ test('a stop command that would take the services down is recognised; stopping a
   for (const cmd of ['.consort/env/down.sh', 'bash .consort/env/down.sh', 'docker compose -p x down', 'docker stop web']) assert.equal(session.tearsDownEnvironment(cmd), true, cmd);
   for (const cmd of ['kill 4242', 'pkill -f "vite --port 20000"']) assert.equal(session.tearsDownEnvironment(cmd), false, cmd);
   assert.match(session.testSessionPrompt({ repo: '/r', worktree: '/w', stage: 'In Review' }), /Never put the environment's own teardown/);
+});
+
+test('a Test click relayed by the bot starts a session for the owner; a relay naming someone else does nothing', async () => {
+  const h = daemon();
+  h.messages([{ ts: '7', bot_id: 'B1', text: 'pressed Test', metadata: { event_type: 'consort_test', event_payload: { user: 'owner' } } }]);
+  await h.run();
+  assert.equal(h.task.testSession.requestTs, '7');
+  assert.match(h.replies[0], /Starting a test session/);
+  const other = daemon();
+  other.messages([{ ts: '7', bot_id: 'B1', text: 'pressed Test', metadata: { event_type: 'consort_test', event_payload: { user: 'someone-else' } } }]);
+  await other.run();
+  assert.equal(other.task.testSession, undefined);
+});
+
+test('the session plans seed data and logins from the stories, and posts a what-to-try list with links', () => {
+  const p = session.testSessionPrompt({ repo: '/r', worktree: '/w', stage: 'In Review' });
+  assert.match(p, /from THIS task/);
+  assert.match(p, /user stories[\s\S]*git diff/);
+  assert.match(p, /empty, one, many/);
+  assert.match(p, /"try": \[/);
+  const text = session.testReadyMessage({ url: 'https://ab.ngrok-free.app', localUrl: 'http://localhost:1', session: { port: 1, tries: [{ story: 'An admin edits someone else\'s note', login: 'admin', path: '/apc-admin/1' }] } });
+  assert.match(text, /\*What to try\*\n• An admin edits someone else's note \(as \*admin\*\) → <https:\/\/ab\.ngrok-free\.app\/apc-admin\/1\|\/apc-admin\/1>/);
+});
+
+test('Resume on the board flags the open session for the worker to close', async () => {
+  const h = daemon({ testSession: { requestedAt: 1, requestTs: '2', readyTs: '3' } });
+  h.messages([{ ts: '8', bot_id: 'B1', text: 'pressed Resume', metadata: { event_type: 'consort_resume', event_payload: { user: 'owner' } } }]);
+  await h.run();
+  assert.ok(h.task.testSession.endRequested);
+  assert.deepEqual(h.asked, []);
 });

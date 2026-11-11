@@ -16,6 +16,7 @@ import { stepLabel } from "./buildProgress";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { isBareDone, isTestDone, isTestRequest } from "./testSession";
+import { RESUME_RELAY, TEST_RELAY } from "./slackSocket";
 import { requestWorkerStop } from "./workerControl";
 import { processAlive } from "./state";
 
@@ -52,6 +53,12 @@ async function handleMessages(slack: Slack, taskId: string, messages: SlackThrea
     const task = state.tasks.find(t => t.id === taskId);
     if (!task || !state.slack) return;
     const fromOwner = !message.bot_id && message.user === state.slack.userId;
+    // a Test click on the board, relayed into this thread by whichever consort-cli got it (cli/slackSocket.ts)
+    const testRelay = !!message.bot_id && message.metadata?.event_type === TEST_RELAY && message.metadata.event_payload?.user === state.slack.userId;
+    if (testRelay && !task.testSession) await post(slack, task, await startTestSession(task, message, alive), await taskSlackLinks(task, state.jobs.find(j => j.id === task.jobId)?.repo), alive);
+    // Resume on the board: the worker sees the flag and closes the session, as if the owner said done
+    const resumeRelay = !!message.bot_id && message.metadata?.event_type === RESUME_RELAY && message.metadata.event_payload?.user === state.slack.userId;
+    if (resumeRelay && task.testSession) updateTask(taskId, t => ({ testSession: t.testSession && { ...t.testSession, endRequested: Date.now() } }), false);
     if (fromOwner) await handleOwnerMessage(slack, state, task, message, alive, deps);
     // the owner writing in the thread counts as reading it; every Consort post after that is unread
     updateTask(taskId, t => ({ slackStatusAfterTs: message.ts, slackUnread: fromOwner ? 0 : message.bot_id ? (t.slackUnread ?? 0) + 1 : t.slackUnread }), false);
@@ -142,7 +149,7 @@ async function queueOwnerUpdate(token: string, taskId: string, message: SlackThr
   const update = { ts: message.ts, text, files: saved.saved, ...(saved.failed.length ? { failedFiles: saved.failed } : {}), at: Date.now() };
   const reopen = task.status === "ready";
   updateTask(taskId, t => ({ ownerUpdates: [...(t.ownerUpdates ?? []).filter(u => u.ts !== message.ts), update], ...(reopen ? { status: "monitoring", finishedAt: undefined, note: undefined, activity: "applying an owner update from Slack" } : {}) }), false);
-  const when = task.pendingQuestion && !filesOnly ? " after you answer the question above" : reopen ? "; reopening the task" : " after the current step";
+  const when = task.testSession && !filesOnly ? "; closing the test session to start on it now" : task.pendingQuestion && !filesOnly ? " after you answer the question above" : reopen ? "; reopening the task" : " after the current step";
   const failed = saved.failed.length ? `\n• Could not download: ${saved.failed.join("; ")}` : "";
   const got = saved.saved.length ? `${saved.saved.length} file${saved.saved.length === 1 ? "" : "s"}` : "";
   return filesOnly ? `Saved ${got || "no files"}; I'll add ${saved.saved.length === 1 ? "it" : "them"} to the ticket${when}.${failed}` : `*Queued as a change${got ? ` with ${got}` : ""}:* I'll update the ticket and the code${when}.${failed}`;

@@ -40,7 +40,7 @@ import { statusEvent } from "./statusLog";
 import { Slack } from "./slack";
 import { ensureSlackIdentity } from "./slackIdentity";
 import { taskSlackLinks } from "./slackLinks";
-import { ownerUpdatePrompt, parseUpdateSummary, updateDir } from "./ownerUpdates";
+import { isGoAhead, ownerUpdatePrompt, parseUpdateSummary, updateDir } from "./ownerUpdates";
 import { changedBySession, dirtyPaths, tearsDownEnvironment, isTestDone, isTestRequest, killTree, parseTestFailed, readSessionFile, SESSION_FILE, startTunnel, TEST_DIR, testReadyMessage, testSessionPrompt, waitForPort, type TestSessionState } from "./testSession";
 import { sourceFor, type Source } from "./sources";
 import { gatedSource, inbound, PiiWithheldError, pushGuard, type GateContext } from "./phiGate";
@@ -175,6 +175,14 @@ export async function workTask(taskId: string): Promise<void> {
 
   /** ask the owner on Slack and wait; without Slack the question is logged and the run stops */
   const ask = async (questions: string[], preformatted = false): Promise<string> => {
+    // the owner already said to stop asking and get on with it: take the recommended option instead of waiting again
+    const current = loadState().tasks.find((t) => t.id === taskId);
+    const goAhead = current?.goAhead ?? (current?.ownerUpdates ?? []).map((u) => u.text).find(isGoAhead);
+    if (goAhead) {
+      updateTask(task.id, { pendingQuestion: undefined, status: "working", note: undefined });
+      await say(`✅ Going with my recommendation, since you said to proceed: ${brief(questions[0].replace(SLACK_MARKER, ""), 300)}`);
+      return `The owner already told you to proceed without more questions ("${brief(goAhead, 200)}"). Take your recommended option for: ${questions.join(" | ")}. Do not ask again; continue.`;
+    }
     updateTask(task.id, { status: "waiting", note: questions.join(" | "), activity: `waiting on Slack: ${questions[0].slice(0, 80)}` });
     if (!slack || !thread) throw new Error(`Needs the owner but Slack is not configured. Questions: ${questions.join(" | ")}`);
     const pending = loadState().tasks.find((t) => t.id === taskId)?.pendingQuestion;
@@ -501,7 +509,8 @@ export async function workTask(taskId: string): Promise<void> {
     const text = await turn(inbound(ownerUpdatePrompt(updates, { stage: feature.stage, built: !!feature.built, prUrl: feature.prs.at(-1), ticketFile }), phi).text, builderProvider, "implementation");
     await completeReply(text, undefined, "implementation");
     const applied = new Set(updates.map((u) => u.ts));
-    updateTask(taskId, (t) => ({ ownerUpdates: (t.ownerUpdates ?? []).filter((u) => !applied.has(u.ts)) }));
+    const goAhead = updates.map((u) => u.text).reverse().find(isGoAhead);
+    updateTask(taskId, (t) => ({ ownerUpdates: (t.ownerUpdates ?? []).filter((u) => !applied.has(u.ts)), ...(goAhead ? { goAhead } : {}) }));
     const summary = parseUpdateSummary(text) ?? brief(stripAskUser(stripShipMarkers(text)), 200);
     const notes: string[] = [];
     let revised: string | undefined;
@@ -587,7 +596,7 @@ export async function workTask(taskId: string): Promise<void> {
     if (!last) return;
     // a session an earlier worker opened: stop what it started; if the owner already said done, carry on
     await closeTestSession(last);
-    const finished = !!last.readyTs && !!slack && !!thread && !!(await slack.waitForReply(thread, last.readyTs, { accept: isTestDone, timeoutMs: 1 }).catch(() => undefined));
+    const finished = !!last.readyTs && (!!last.endRequested || !!loadState().tasks.find((t) => t.id === taskId)?.ownerUpdates?.length || (!!slack && !!thread && !!(await slack.waitForReply(thread, last.readyTs, { accept: isTestDone, timeoutMs: 1 }).catch(() => undefined))));
     if (finished || !slack || !thread) { updateTask(taskId, { testSession: undefined }); return; }
     const linksNow = async () => taskSlackLinks(loadState().tasks.find((t) => t.id === taskId)!, job.repo);
     await holdEnv();
@@ -617,17 +626,28 @@ export async function workTask(taskId: string): Promise<void> {
     updateTask(taskId, (t) => ({ status: "waiting", activity: "test session open: waiting for you to say 'done' in Slack", testSession: t.testSession && { ...t.testSession, readyTs, url, ...("pid" in tunnel ? { tunnelPid: tunnel.pid } : {}) } }));
     log(task, `test session open on port ${session.port}${url ? ` at ${url}` : ""} with ${session.logins?.length ?? 0} login(s); waiting for "done"`);
     await notifyTask(taskId, "paused", "Test session open. Say 'done' in the thread when you are finished.");
-    await slack.waitForReply(thread, readyTs, { accept: isTestDone, onTick: () => { updateTask(task.id, {}); void flushTaskNotifications(taskId); } });
+    // the session ends on "done", or as soon as the owner asks for a change: they want the work, not a parked app
+    let endedBy = "done";
+    for (;;) {
+      if (await slack.waitForReply(thread, readyTs, { accept: isTestDone, timeoutMs: 1 }).catch(() => undefined)) break;
+      if (loadState().tasks.find((t) => t.id === taskId)?.ownerUpdates?.length) { endedBy = "change"; break; }
+      if (loadState().tasks.find((t) => t.id === taskId)?.testSession?.endRequested) break;
+      updateTask(task.id, {}); void flushTaskNotifications(taskId);
+      await new Promise((r) => setTimeout(r, 10_000));
+    }
+    log(task, `test session ending: ${endedBy === "done" ? "the owner said done" : "the owner asked for a change"}`);
     const put = await closeTestSession(loadState().tasks.find((t) => t.id === taskId)?.testSession);
     const waitingOn = loadState().tasks.find((t) => t.id === taskId)?.pendingQuestion;
     // a question asked before the session still needs its answer: only replies from now on count
     updateTask(taskId, { status: waitingOn ? "waiting" : "working", testSession: undefined, ...(waitingOn ? { pendingQuestion: { ...waitingOn, afterTs: String(Date.now() / 1000) } } : {}) });
     log(task, "test session closed");
-    await say(`✅ Closed the test session; continuing from *${feature.stage}*.${put ? `\n• Put back ${put} file${put === 1 ? "" : "s"} the session changed` : ""}${waitingOn ? "\n• Still waiting on your answer to the question above." : ""}`);
+    await say(`✅ Closed the test session${endedBy === "change" ? " to make your change" : ""}; continuing from *${feature.stage}*.${put ? `\n• Put back ${put} file${put === 1 ? "" : "s"} the session changed` : ""}${waitingOn ? "\n• Still waiting on your answer to the question above." : ""}`);
     await notifyTask(taskId, "running", "Test session closed; continuing.");
   };
 
   log(task, `models: planning, spec and judgement on ${builderModel} at ${roleEffort("planning", job.effortPolicy)} effort; build and routine turns on ${workerModel} at ${roleEffort("implementation", job.effortPolicy, task.plannedEffort?.level)} effort`);
+  // the owner's queued changes, and a test session they have moved on from, come before anything else: a restart must not ask about work they already asked for
+  if (task.envReadyAt && loadState().tasks.find((t) => t.id === taskId)?.ownerUpdates?.length) { await runTestSession(); await applyOwnerUpdates(); }
   if (task.rebootedAt) {
     // `consort-cli reboot`: the owner stopped the last worker; open by working out where it got to
     log(task, "rebooted by the owner; picking up after the last run");

@@ -62,7 +62,7 @@ function daemon(worktree) {
     'node:fs': { existsSync: () => true }, 'node:path': { join: (...a) => a.join('/') },
     './oversight': { workerLogTail: () => '' },
     './buildProgress': { stepLabel: name => name },
-    './testSession': testSession, './workerControl': { requestWorkerStop: () => {} },
+    './testSession': testSession, './workerControl': { requestWorkerStop: () => {} }, './slackSocket': { TEST_RELAY: 'consort_test', RESUME_RELAY: 'consort_resume' },
     './sources': { sourceFor: () => ({ comments: async () => [] }) },
   };
   const mod = { exports: {} };
@@ -107,4 +107,9 @@ test('a ready task reopens for an update; a merged task says it cannot apply it'
   await h.run();
   assert.deepEqual(h.task.ownerUpdates, []);
   assert.match(h.replies[1].text, /^⏹️ Checked: One more change\n\nThis task is closed \(PR merged\), so I can't apply changes here/);
+});
+
+test('"no more questions", "stop pausing and just upload them" and "proceed" count as go-ahead; a question does not', () => {
+  for (const text of ['i dont see them… fix them no more questions', 'fucking hell stop pausing and just upload them', 'proceed', 'go with your recommendation', "don't ask, just do it"]) assert.equal(owner.isGoAhead(text), true, text);
+  for (const text of ['what does B change?', 'add a CSV export', 'are these hardcoded or pulling live data?', 'is it done?']) assert.equal(owner.isGoAhead(text), false, text);
 });

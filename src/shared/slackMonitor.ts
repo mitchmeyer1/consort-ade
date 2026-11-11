@@ -48,7 +48,8 @@ export function slackMasterMonitor(state: CliState, threads: Map<string, string>
     const status = t.status==='ready' ? 'READY TO MERGE' : health.label;
     // 👉: the PR has waited an hour for a reviewer (cli/pipeline.ts PR watch); the owner's move is to nudge them.
     const nudge = /Your action: please nudge /.test(t.activity ?? '');
-    const icon = t.status==='ready' ? '📦' : status === 'WAITING' ? '🟠' : status === 'STOPPED' ? '❌' : FINISHED.includes(t.status) ? '🎉🍭🎊' : nudge ? '👉' : '🔄';
+    // 🧪: the owner asked to try the work by hand (cli/testSession.ts); open until they say "done"
+    const icon = t.testSession && !FINISHED.includes(t.status) ? '🧪' : t.status==='ready' ? '📦' : status === 'WAITING' ? '🟠' : status === 'STOPPED' ? '❌' : FINISHED.includes(t.status) ? '🎉🍭🎊' : nudge ? '👉' : '🔄';
     const age = t.status==='ready' ? `ready ${ago(now-(t.finishedAt??t.updatedAt))} ago` : t.finishedAt ? `finished ${ago(now-t.finishedAt)} ago` : ago(now-t.startedAt);
     const job = state.jobs.find(j=>j.id===t.jobId);
     const kind = t.kind==='review' ? 'Review' : job?.sentryProducerId || job?.source==='sentry' ? 'Sentry' : 'Feature';
@@ -56,9 +57,9 @@ export function slackMasterMonitor(state: CliState, threads: Map<string, string>
     const pr = t.review?.url ?? t.feature?.prs?.at(-1);
     const byline = author ? `author: ${linked('@'+author, 'https://github.com/'+author)}` : pr ? 'author unavailable' : 'PR not created';
     const title = `${t.slackIdentity?.emoji ?? ''} ${t.slackIdentity?.title ?? t.ticket.title}`.trim();
-    const destinations = [t.ticket.url ? linked('ticket',t.ticket.url) : '', t.review?.url ?? t.feature?.prs?.at(-1) ? linked(t.status==='ready'?'merge PR':'github', t.review?.url ?? t.feature.prs.at(-1)) : ''].filter(Boolean);
+    const destinations = [t.testSession?.url ? linked('test link',t.testSession.url) : '', t.ticket.url ? linked('ticket',t.ticket.url) : '', t.review?.url ?? t.feature?.prs?.at(-1) ? linked(t.status==='ready'?'merge PR':'github', t.review?.url ?? t.feature.prs.at(-1)) : ''].filter(Boolean);
     lines.push(`${icon} ${kind} · ${linked(title,threads.get(t.id))}${threads.has(t.id)?(t.slackUnread?` (${t.slackUnread} unread)`:''):' (Slack thread pending)'} · ${byline} · ${clean(status)} · ${clean(step.name)} ${step.n}/${step.total} · ${costCell(t.cost) || 'cost pending'} · ${age}`);
-    if (detail) lines.push(`   ${clean(t.status === 'waiting' ? t.pauseReason ?? t.note ?? t.activity ?? health.note ?? 'Needs your Slack reply' : health.note ?? t.activity ?? t.note ?? 'Preparing the task', 200)}`);
+    if (detail) lines.push(`   ${clean(t.testSession ? (t.testSession.url ? `Testing at ${t.testSession.url}. Press Resume or say done in the thread when finished.` : 'Starting a test session: bringing the app up and making logins.') : t.status === 'waiting' ? t.pauseReason ?? t.note ?? t.activity ?? health.note ?? 'Needs your Slack reply' : health.note ?? t.activity ?? t.note ?? 'Preparing the task', 200)}`);
     const ci = pr && t.prCheck ? {pass:'CI passing',pending:'CI running',fail:'CI failing',none:'No CI'}[t.prCheck.ci] : undefined;
     if (ci) lines.push(`   PR: ${ci}`);
     if (destinations.length) lines.push(`   ${destinations.join(' · ')}`);

@@ -54,9 +54,9 @@ test('a task card carries who, cost, age, the action, the stage bar and link but
  assert.equal(reply.subtitle.text,'Feature   ·   by <https://github.com/mitch|@mitch>   ·   $608   ·   18m');
  assert.equal(reply.body.text,'Confirm whether parity needs a separate task.');
  assert.equal(reply.subtext.text,'Review 7/9   ▰▰▰▰▰▰▱▱▱');
- assert.deepEqual(reply.actions.map(b=>[b.text.text,b.url,b.style]),[['Reply in thread','https://slack.example/thread','primary'],['ClickUp','https://app.clickup.com/t/123',undefined],['GitHub','https://github.com/a/b/pull/1',undefined]]);
- assert.deepEqual(ready.actions.map(b=>[b.text.text,b.style]),[['Open thread',undefined],['Merge PR','primary']]);
- assert.deepEqual(nudge.actions.map(b=>[b.text.text,b.style]),[['Open thread',undefined],['ClickUp',undefined],['GitHub','primary']]);
+ assert.deepEqual(reply.actions.map(b=>[b.text.text,b.url,b.style]),[['Chat','https://slack.example/thread','primary'],['ClickUp','https://app.clickup.com/t/123',undefined],['GitHub','https://github.com/a/b/pull/1',undefined]]);
+ assert.deepEqual(ready.actions.map(b=>[b.text.text,b.style]),[['Chat',undefined],['Merge PR','primary']]);
+ assert.deepEqual(nudge.actions.map(b=>[b.text.text,b.style]),[['Chat',undefined],['ClickUp',undefined],['GitHub','primary']]);
  assert.match(nudge.body.text,/please nudge @ada/);
  assert.equal(ready.subtext.text,'Approve 5/5   ▰▰▰▰▰');
  assert.equal(sentry.subtitle.text,'Sentry   ·   author unavailable   ·   cost pending   ·   2h');assert.equal(sentry.actions,undefined);
@@ -160,6 +160,42 @@ test('a thread with unread Consort posts gets a red button with the count; the t
   assert.equal(thread.style,'danger');
   assert.match(thread.text.text,/ · 3 new$/);
   const other=cards(blocks).find(c=>/Needs a reviewer/.test(c.title.text)).actions.find(a=>a.url==='https://slack.example/nudge');
-  assert.equal(other.text.text,'Open thread');
+  assert.equal(other.text.text,'Chat');
   assert.notEqual(other.style,'danger');
+});
+
+test('a task in a test session gets its own "In testing" group with the test link; other cards get a Test button only with an app token', () => {
+  const t = `*📊 Consort master monitor*
+Updated 2026-10-27 16:45 UTC
+
+*Working*
+🧪 Feature · <https://x.slack.com/archives/D0ABC/p1794351179831059|Notes rail> · author: <https://github.com/mitch|@mitch> · WAITING · Review 7/9 · $20 · 1d
+   Testing at https://ab12.ngrok-free.app. Say done in the thread when finished.
+   <https://ab12.ngrok-free.app|test link> · <https://app.clickup.com/t/9|ticket> · <https://github.com/a/b/pull/9|github>
+🔄 Feature · <https://x.slack.com/archives/D0ABC/p1794351000000100|List pages> · author: <https://github.com/mitch|@mitch> · RUNNING · Grilling 2/9 · $3 · 20m
+   Reading the jobs page
+   <https://app.clickup.com/t/8|ticket> · <https://github.com/a/b/pull/8|github>
+
+*Ready to merge · your action*
+No tickets waiting to be merged.`;
+  const titles = blocks => blocks.filter(b => b.type === 'section').map(b => b.text.text);
+  const all = blocks => blocks.flatMap(b => b.type === 'carousel' ? b.elements : b.type === 'card' ? [b] : []);
+  const plain = monitorBlockKit(t, 0);
+  assert.ok(titles(plain).some(x => /^\*In testing\*/.test(x)));
+  const testing = all(plain).find(c => /Notes rail/.test(c.title.text));
+  assert.deepEqual(testing.actions.map(b => [b.text.text, b.url, b.style]), [['Chat', 'https://x.slack.com/archives/D0ABC/p1794351179831059', undefined], ['Open test', 'https://ab12.ngrok-free.app', 'primary'], ['Resume', undefined, undefined]]);
+  assert.match(testing.subtext.text, /<https:\/\/github\.com\/a\/b\/pull\/9\|GitHub>/, 'the link that does not fit is in the small print');
+  for (const c of all(monitorBlockKit(t, 0, undefined, { testButtons: true }))) assert.ok(c.actions.length <= 3, 'Slack rejects more than three buttons');
+  assert.ok(all(monitorBlockKit(t, 0, undefined, { testButtons: false })).every(c => !c.actions.some(a => a.text.text === 'Test')), 'buttons can be turned off');
+  assert.ok(all(plain).find(c => /List pages/.test(c.title.text)).actions.some(a => a.text.text === 'Test'), 'Test shows by default');
+  const live = all(monitorBlockKit(t, 0, undefined, { testButtons: true }));
+  const test = live.find(c => /List pages/.test(c.title.text)).actions.find(a => a.text.text === 'Test');
+  assert.equal(test.value, 'D0ABC:1794351000.000100');
+  assert.ok(test.action_id.startsWith('consort-test'));
+  assert.equal(test.url, undefined);
+  assert.ok(!live.find(c => /Notes rail/.test(c.title.text)).actions.some(a => a.text.text === 'Test'), 'a task already in testing has no Test button');
+  const testingLive = live.find(c => /Notes rail/.test(c.title.text));
+  assert.deepEqual(testingLive.actions.map(a => a.text.text), ['Chat', 'Open test', 'Resume']);
+  assert.equal(testingLive.actions[2].value, 'D0ABC:1794351179.831059');
+  assert.match(testingLive.subtext.text, /ClickUp[\s\S]*GitHub/);
 });

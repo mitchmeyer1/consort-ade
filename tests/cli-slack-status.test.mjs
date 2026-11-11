@@ -19,7 +19,7 @@ function harness(answer = checked) {
     './slackLinks':{taskSlackLinks:async()=>({ticket:task.ticket.url,github:'https://github.com/a/b/pull/1'})},
     './slack':{Slack:class {async threadMessages(){return messages;} async post(text,thread){if(fail) throw new Error('offline');replies.push({text,thread});}}},
     './buildProgress':{stepLabel:name=>name},
-    './testSession': testSession, './workerControl': { requestWorkerStop: () => {} },
+    './testSession': testSession, './workerControl': { requestWorkerStop: () => {} }, './slackSocket': { TEST_RELAY: 'consort_test', RESUME_RELAY: 'consort_resume' },
     './oversight':{workerLogTail:()=>'2026 [T1] turn 3 at Implementing: ported providerDedup'},
     './sources':{sourceFor:()=>({comments:async()=>[{text:'Please rename the CSV column',by:'will',at:1}]})},
     './ownerUpdates':{isAcknowledgement:t=>/^thanks$/i.test(t),downloadSlackFiles:async()=>({saved:[],failed:[]})},

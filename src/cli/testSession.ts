@@ -14,9 +14,9 @@ export const TEST_DIR = ".consort/test-session";
 export const SESSION_FILE = `${TEST_DIR}/session.json`;
 
 export type TestLogin = { role: string; username: string; password?: string; notes?: string };
-export type TestSessionFile = { port: number; path?: string; pids?: number[]; logins?: TestLogin[]; notes?: string[]; stop?: string };
+export type TestSessionFile = { port: number; path?: string; pids?: number[]; logins?: TestLogin[]; /** what to try by hand: one line per story, with the login and page it needs */ tries?: { story: string; login?: string; path?: string }[]; notes?: string[]; stop?: string };
 /** what the task remembers while a session is open, so a restarted worker can clean up after the last one */
-export type TestSessionState = { requestedAt: number; requestTs: string; readyTs?: string; url?: string; pids?: number[]; tunnelPid?: number; stop?: string; dirtyBefore?: string[] };
+export type TestSessionState = { /** the owner pressed Resume on the board: the worker closes the session (cli/slackSocket.ts) */ endRequested?: number; requestedAt: number; requestTs: string; readyTs?: string; url?: string; pids?: number[]; tunnelPid?: number; stop?: string; dirtyBefore?: string[] };
 
 const plain = (text: string) => text.toLowerCase().replace(/<@[A-Z0-9]+>/gi, "").replace(/:[a-z0-9_+-]+:/g, "").replace(/[’']/g, "'").replace(/[^\p{L}\p{N}'\s/]/gu, " ").replace(/\s+/g, " ").trim();
 
@@ -34,7 +34,9 @@ export function isTestRequest(text: string): boolean {
 /** "done", "ok done", "done testing", "continue": the owner is finished testing */
 export function isTestDone(text: string): boolean {
   const t = plain(text);
-  return /^(?:ok(?:ay)? |cool |great |thanks? )?(?:i'?m |we'?re |all )?(?:done|finished)(?: testing| with (?:it|the test(?:ing)?))?\b|^(?:ok(?:ay)? |cool )?(?:continue|carry on|go ahead|resume|proceed|keep going|you can continue)\b/.test(t);
+  return /^(?:ok(?:ay)? |cool |great |thanks? )?(?:i'?m |i am |we'?re |we are |all )?(?:done|finished)(?: testing| with (?:it|the test(?:ing)?))?\b|^(?:ok(?:ay)? |cool )?(?:continue|carry on|go ahead|resume|proceed|keep going|you can continue)\b/.test(t)
+    // "where are we at? I am "Done" with the test server btw": said anywhere in the message
+    || /\b(?:done|finished) (?:with )?(?:the |your )?test(?:ing| server| session| link| app)?\b|\b(?:done|finished) testing\b|\b(?:close|end|stop|kill) (?:the |your )?test (?:server|session)\b/.test(t);
 }
 
 /** "done" with nothing else: no feedback to pass on */
@@ -50,11 +52,12 @@ Do this:
 1. Read the saved environment setup first (ENV.md and the scripts it names under .consort/), and bring up the services the app needs on this task's ports. Reuse services that are already up.
 2. Start the user-facing app in the background so it keeps running after your turn ends: \`nohup <command> > ${TEST_DIR}/<name>.log 2>&1 & echo $!\`. Record every process id you start. Never stop them yourself.
 3. Pick the ONE port a browser should open. Consort will share it through a public ngrok https address (a *.ngrok-free.app or *.ngrok.app host), with the Host header rewritten to localhost. Make the app work from that address: if the browser calls a separate API port, route it through the dev server's proxy or a relative path; allow ngrok hosts if the dev server checks them. Prefer environment variables and command flags. If you must edit a tracked file, say so in notes; Consort puts every file back when the session ends.
-4. Work out which roles someone needs to see this change: read the ticket (.consort/ship/TICKET.md), SPEC.md, and the app's own roles and permissions code. Create one login per role in the LOCAL database only, with a generated password, using the app's own seed scripts, CLI, or API where they exist. Never touch production or any shared database. If the app has no logins, make none.
-5. Seed the data a person needs to see the change (for example one record the new page shows), the same way.
+4. Decide what to seed and which logins to make from THIS task, not from habit: read the ticket (.consort/ship/TICKET.md), SPEC.md and its user stories, TEST-REPORT.md when present, the diff on this branch (git diff against the base), and the app's own roles and permissions code. List every story a person should be able to try by hand, and for each one the role it needs and the data that must exist for it to show (including the states the change cares about: empty, one, many, someone else's record, a deleted or edited one, an error case).
+   Create one login per role those stories need, in the LOCAL database only, with a generated password (or the app's own local sign-in shortcut), using the app's seed scripts, CLI or API where they exist. Never touch production or any shared database. If the app has no logins, make none.
+5. Seed that data the same way, enough to try every story on the list, and nothing about real people: made-up names, example.com emails, no real patient data.
 6. Check it: request the port with curl until it answers, and sign in with each login if you can.
 7. Write ${SESSION_FILE} as JSON:
-   {"port": 5173, "path": "/the/page/to/open", "pids": [1234], "logins": [{"role": "admin", "username": "admin@test.local", "password": "…", "notes": "can edit everyone's notes"}], "notes": ["one short line per thing the tester should know"], "stop": "optional shell command that stops only the processes you started in step 2, run from the worktree"}
+   {"port": 5173, "path": "/the/page/to/open", "pids": [1234], "logins": [{"role": "admin", "username": "admin@test.local", "password": "…", "notes": "can edit everyone's notes"}], "try": [{"story": "an admin edits someone else's note", "login": "admin", "path": "/apc-admin/1"}], "notes": ["one short line per thing the tester should know"], "stop": "optional shell command that stops only the processes you started in step 2, run from the worktree"}
    Never put the environment's own teardown (down.sh, docker compose down) in "stop": the task keeps using those services after the session.
 End with [test-ready] when the app answers on that port, or [test-failed: what stopped it, in one sentence].`;
 }
@@ -72,6 +75,7 @@ export function readSessionFile(worktree: string): TestSessionFile | undefined {
       pids: Array.isArray(j.pids) ? j.pids.map(Number).filter((n: number) => Number.isInteger(n) && n > 1) : [],
       logins: Array.isArray(j.logins) ? j.logins.filter((l: Record<string, unknown>) => l && typeof l.username === "string").map((l: Record<string, unknown>) => ({ role: String(l.role ?? "user"), username: String(l.username), ...(l.password != null ? { password: String(l.password) } : {}), ...(l.notes ? { notes: String(l.notes) } : {}) })) : [],
       notes: Array.isArray(j.notes) ? j.notes.map(String).filter(Boolean) : [],
+      tries: Array.isArray(j.try) ? j.try.filter((x: Record<string, unknown>) => x && typeof x.story === "string").slice(0, 10).map((x: Record<string, unknown>) => ({ story: String(x.story), ...(x.login ? { login: String(x.login) } : {}), ...(typeof x.path === "string" && x.path.startsWith("/") ? { path: x.path } : {}) })) : [],
       ...(typeof j.stop === "string" && j.stop.trim() ? { stop: j.stop.trim() } : {}),
     };
   } catch { return undefined; }
@@ -143,6 +147,7 @@ export function testReadyMessage(o: { url?: string; localUrl: string; session: T
     ...(o.tunnelError ? [`• No public link: ${o.tunnelError}`] : []),
     `• On this machine: ${o.localUrl}${o.session.path ?? ""}`,
     ...(logins.length ? ["*Logins* (local test data only)", ...logins] : ["• No login needed"]),
+    ...((o.session.tries ?? []).length ? ["*What to try*", ...o.session.tries!.map((t) => `• ${t.story}${t.login ? ` (as *${t.login}*)` : ""}${t.path && (o.url ?? o.localUrl) ? ` → <${o.url ?? o.localUrl}${t.path}|${t.path}>` : ""}`)] : []),
     ...(o.session.notes ?? []).slice(0, 6).map((n) => `• ${n}`),
     "",
     "Tell me 'done' when you are ready for me to continue.",
