@@ -38,6 +38,8 @@ STATUS: MONITORING`;
 const NOW=1700000000000;
 const texts=blocks=>JSON.stringify(blocks);
 const cards=blocks=>blocks.flatMap(b=>b.type==='carousel'?b.elements:b.type==='card'?[b]:[]);
+/** a card title is the link to its thread; this is its text */
+const name=c=>c.title.text.replace(/^<[^|>]+\|(.*)>$/,'$1');
 test('monitor opens with the centered banner, then groups in the order the owner acts, and ends with the update time',()=>{
  const blocks=monitorBlockKit(text,NOW);
  assert.deepEqual(blocks[0],{type:'image',block_id:`head-${NOW}`,image_url:'https://raw.githubusercontent.com/mitchmeyer1/consort-ade/main/build/consort-banner-slack.png',alt_text:'Consort'});
@@ -45,7 +47,7 @@ test('monitor opens with the centered banner, then groups in the order the owner
  assert.ok(!blocks.some(b=>b.type==='header'||b.type==='section'&&/needs your reply/.test(b.text.text)),'no summary line');
  const headings=blocks.filter(b=>b.type==='section'&&/^\*[A-Za-z ]+\*   ·   \d+$/.test(b.text.text)).map(b=>b.text.text);
  assert.deepEqual(headings,['*Needs your reply*   ·   1','*Nudge*   ·   1','*Ready to merge*   ·   1','*Working*   ·   3']);
- assert.deepEqual(cards(blocks).map(c=>c.title.text),['Curation &amp; parity','Needs a reviewer','Ship it','Paging shard','Stopped one','Analysis only']);
+ assert.deepEqual(cards(blocks).map(name),['Curation &amp; parity','Needs a reviewer','Ship it','Paging shard','Stopped one','Analysis only']);
  assert.deepEqual(blocks.filter(b=>b.type==='container').map(b=>b.title.text),['Completed']);
  assert.doesNotMatch(texts(blocks),/🟠|📦|🔄|✅|⚡|🎉|👉/);
 });
@@ -54,15 +56,16 @@ test('a task card carries who, cost, age, the action, the stage bar and link but
  assert.equal(reply.subtitle.text,'Feature   ·   by <https://github.com/mitch|@mitch>   ·   $608   ·   18m');
  assert.equal(reply.body.text,'Confirm whether parity needs a separate task.');
  assert.equal(reply.subtext.text,'Review 7/9   ▰▰▰▰▰▰▱▱▱');
- assert.deepEqual(reply.actions.map(b=>[b.text.text,b.url,b.style]),[['Chat','https://slack.example/thread','primary'],['ClickUp','https://app.clickup.com/t/123',undefined],['GitHub','https://github.com/a/b/pull/1',undefined]]);
- assert.deepEqual(ready.actions.map(b=>[b.text.text,b.style]),[['Chat',undefined],['Merge PR','primary']]);
- assert.deepEqual(nudge.actions.map(b=>[b.text.text,b.style]),[['Chat',undefined],['ClickUp',undefined],['GitHub','primary']]);
+ assert.equal(reply.title.text,'<https://slack.example/thread|Curation &amp; parity>','the title is the link to the thread');
+ assert.deepEqual(reply.actions.map(b=>[b.text.text,b.url,b.style]),[['ClickUp','https://app.clickup.com/t/123',undefined],['GitHub','https://github.com/a/b/pull/1',undefined]]);
+ assert.deepEqual(ready.actions.map(b=>[b.text.text,b.style]),[['Merge PR','primary']]);
+ assert.deepEqual(nudge.actions.map(b=>[b.text.text,b.style]),[['ClickUp',undefined],['GitHub','primary']]);
  assert.match(nudge.body.text,/please nudge @ada/);
  assert.equal(ready.subtext.text,'Approve 5/5   ▰▰▰▰▰');
  assert.equal(sentry.subtitle.text,'Sentry   ·   author unavailable   ·   cost pending   ·   2h');assert.equal(sentry.actions,undefined);
  assert.equal(stopped.subtext.text,'Setup 1/9   ▱▱▱▱▱▱▱▱▱   ·   *STOPPED*   ·   _Slack thread pending_');
  assert.equal(analysis.subtitle.text,'Sentry');assert.equal(analysis.body.text,'Reading the Sentry issue');assert.equal(analysis.subtext.text,'Triage 2/3   ▰▱▱');
- const ids=new Set(cards(monitorBlockKit(text,NOW)).flatMap(c=>(c.actions??[]).map(b=>b.action_id)));assert.equal(ids.size,8);
+ const ids=new Set(cards(monitorBlockKit(text,NOW)).flatMap(c=>(c.actions??[]).map(b=>b.action_id)));assert.equal(ids.size,5);
  assert.ok(cards(monitorBlockKit(text,NOW)).every(c=>c.block_id&&(c.actions??[]).length<=3&&(c.actions??[]).filter(b=>b.style==='primary').length<=1));
 });
 test('completed work is a table in a titled container; AI usage is a table with a coloured dot per window and when each account frees up',()=>{
@@ -93,7 +96,7 @@ test('escaped characters are decoded for tables and plain text but kept for mrkd
  const blocks=monitorBlockKit(text.replace('Finished one','Fix &amp; ship &lt;b&gt;'),NOW);
  const done=blocks.find(b=>b.type==='container'&&b.title.text==='Completed').child_blocks[0];
  assert.equal(done.rows[1][0].elements[0].elements[0].text,'Fix & ship <b>');
- assert.equal(cards(blocks)[0].title.text,'Curation &amp; parity');
+ assert.equal(name(cards(blocks)[0]),'Curation &amp; parity');
 });
 test('empty groups and tables are left out, and non-monitor text gets no blocks',()=>{
  const empty=monitorBlockKit(text.replace(/\n\*Working\*[\s\S]*?\n\n\*Accounts\*/,'\n*Working*\nNo tasks in progress.\n\n*Ready to merge · your action*\nNo tickets waiting to be merged.\n\n*Completed · most recent 6*\nNo completed tasks yet.\n\n*Accounts*'),NOW);
@@ -113,7 +116,7 @@ test('forty open tasks stay inside fifty blocks with every link kept',()=>{
  const blocks=monitorBlockKit(many,NOW);assert.ok(blocks.length<=50,String(blocks.length));
  const all=texts(blocks);for(let i=0;i<38;i++)assert.ok(all.includes(`https://slack.example/${i}`),`missing task ${i}`);
  assert.match(all,/_… 4 more tasks in the CLI_/);
- assert.ok(cards(blocks).some(c=>c.title.text==='Curation &amp; parity'),'the reply card survives');
+ assert.ok(cards(blocks).some(c=>name(c)==='Curation &amp; parity'),'the reply card survives');
  for(const b of blocks)if(b.type==='section')assert.ok(b.text.text.length<=3000);
 });
 test('Slack receives the blocks on the same root and falls back to text sections if it rejects them',async()=>{
@@ -134,10 +137,10 @@ test('Slack receives the blocks on the same root and falls back to text sections
 
 test('a task card with a PR shows its CI verdict after the stage bar, with no turn label',()=>{
  const withPr=text.replace('   need one approval from @ada;','   PR: CI passing\n   need one approval from @ada;').replace('   <https://github.com/a/b/pull/2|merge PR>','   PR: CI failing\n   <https://github.com/a/b/pull/2|merge PR>');
- const [nudge]=cards(monitorBlockKit(withPr,NOW)).filter(c=>c.title.text==='Needs a reviewer');
+ const [nudge]=cards(monitorBlockKit(withPr,NOW)).filter(c=>name(c)==='Needs a reviewer');
  assert.equal(nudge.subtext.text,'Watch PR 9/9   ▰▰▰▰▰▰▰▰▱   ·   🟢 CI passing');
  assert.match(nudge.body.text,/^need one approval/,'the PR line is not part of the action');
- const ready=cards(monitorBlockKit(withPr,NOW)).find(c=>c.title.text==='Ship it');
+ const ready=cards(monitorBlockKit(withPr,NOW)).find(c=>name(c)==='Ship it');
  assert.match(ready.subtext.text,/🔴 CI failing/);
  assert.doesNotMatch(ready.subtext.text,/turn/);
  assert.ok(!cards(monitorBlockKit(text,NOW)).some(c=>/CI |turn/.test(c.subtext?.text??'')),'no PR line, no labels');
@@ -147,21 +150,18 @@ test('a group with two or more cards scrolls sideways in carousels of up to ten;
  const blocks=monitorBlockKit(text,NOW);
  const carousels=blocks.filter(b=>b.type==='carousel');
  assert.ok(carousels.length>=1);assert.ok(carousels.every(c=>c.elements.length>=2&&c.elements.every(e=>e.type==='card')));
- assert.ok(blocks.some(b=>b.type==='card'&&b.title.text==='Ship it'),'the one ready card is not wrapped');
+ assert.ok(blocks.some(b=>b.type==='card'&&name(b)==='Ship it'),'the one ready card is not wrapped');
  const many=text.replace('*Ready to merge · your action*\n',`*Ready to merge · your action*\n${Array.from({length:12},(_,i)=>`📦 Review · <https://slack.example/r${i}|Ready ${i}> · author: <https://github.com/p|@p> · READY TO MERGE · Approve 5/5 · $1 · ready 1m ago\n   <https://github.com/a/b/pull/${i}|merge PR>\n`).join('')}`);
  const ready=monitorBlockKit(many,NOW).filter(b=>b.type==='carousel'&&b.block_id.startsWith('ready-'));
  assert.deepEqual(ready.map(c=>c.elements.length),[10,3]);
 });
-test('a thread with unread Consort posts gets a red button with the count; the title keeps its text', () => {
-  const blocks=monitorBlockKit(text.replace('<https://slack.example/thread|Curation &amp; parity>','<https://slack.example/thread|Curation &amp; parity> (3 unread)'),NOW);
+test('a thread with unread Consort posts shows the count in red in the small print; the title keeps its text', () => {
+  const blocks=monitorBlockKit(text.replace('Curation &amp; parity> ·','Curation &amp; parity> (3 unread) ·'),NOW);
   const card=cards(blocks).find(c=>c.block_id&&/Curation/.test(c.title.text));
-  assert.equal(card.title.text,'Curation &amp; parity');
-  const thread=card.actions.find(a=>a.url==='https://slack.example/thread');
-  assert.equal(thread.style,'danger');
-  assert.match(thread.text.text,/ · 3 new$/);
-  const other=cards(blocks).find(c=>/Needs a reviewer/.test(c.title.text)).actions.find(a=>a.url==='https://slack.example/nudge');
-  assert.equal(other.text.text,'Chat');
-  assert.notEqual(other.style,'danger');
+  assert.equal(name(card),'Curation &amp; parity');
+  assert.match(card.subtext.text,/^🔴 \*3 new in the thread\*/);
+  const other=cards(blocks).find(c=>/Needs a reviewer/.test(c.title.text));
+  assert.doesNotMatch(other.subtext?.text ?? '',/new in the thread/);
 });
 
 test('a task in a test session gets its own "In testing" group with the test link; other cards get a Test button only with an app token', () => {
@@ -183,8 +183,8 @@ No tickets waiting to be merged.`;
   const plain = monitorBlockKit(t, 0);
   assert.ok(titles(plain).some(x => /^\*In testing\*/.test(x)));
   const testing = all(plain).find(c => /Notes rail/.test(c.title.text));
-  assert.deepEqual(testing.actions.map(b => [b.text.text, b.url, b.style]), [['Chat', 'https://x.slack.com/archives/D0ABC/p1794351179831059', undefined], ['Open test', 'https://ab12.ngrok-free.app', 'primary'], ['Resume', undefined, undefined]]);
-  assert.match(testing.subtext.text, /<https:\/\/github\.com\/a\/b\/pull\/9\|GitHub>/, 'the link that does not fit is in the small print');
+  assert.deepEqual(testing.actions.map(b => [b.text.text, b.url]), [['Resume', undefined], ['ClickUp', 'https://app.clickup.com/t/9'], ['GitHub', 'https://github.com/a/b/pull/9']]);
+  assert.match(testing.body.text, /<https:\/\/ab12\.ngrok-free\.app\|Open the test app>/);
   for (const c of all(monitorBlockKit(t, 0, undefined, { testButtons: true }))) assert.ok(c.actions.length <= 3, 'Slack rejects more than three buttons');
   assert.ok(all(monitorBlockKit(t, 0, undefined, { testButtons: false })).every(c => !c.actions.some(a => a.text.text === 'Test')), 'buttons can be turned off');
   assert.ok(all(plain).find(c => /List pages/.test(c.title.text)).actions.some(a => a.text.text === 'Test'), 'Test shows by default');
@@ -195,7 +195,14 @@ No tickets waiting to be merged.`;
   assert.equal(test.url, undefined);
   assert.ok(!live.find(c => /Notes rail/.test(c.title.text)).actions.some(a => a.text.text === 'Test'), 'a task already in testing has no Test button');
   const testingLive = live.find(c => /Notes rail/.test(c.title.text));
-  assert.deepEqual(testingLive.actions.map(a => a.text.text), ['Chat', 'Open test', 'Resume']);
-  assert.equal(testingLive.actions[2].value, 'D0ABC:1794351179.831059');
-  assert.match(testingLive.subtext.text, /ClickUp[\s\S]*GitHub/);
+  assert.deepEqual(testingLive.actions.map(a => a.text.text), ['Resume', 'ClickUp', 'GitHub']);
+  assert.equal(testingLive.actions[0].value, 'D0ABC:1794351179.831059');
+});
+
+test('a long title is shortened inside its link, never cutting the link; the permalink query is dropped', () => {
+  const long = 'x'.repeat(200);
+  const t = text.replace('<https://slack.example/thread|Curation &amp; parity>', `<https://acme.slack.com/archives/D0CCFKLGG1H/p1793997279825839?thread_ts=1793997279.825839&amp;cid=D0CCFKLGG1H|${long}>`);
+  const card = cards(monitorBlockKit(t, NOW)).find(c => /D0CCFKLGG1H/.test(c.title.text));
+  assert.ok(card.title.text.length <= 150);
+  assert.match(card.title.text, /^<https:\/\/acme\.slack\.com\/archives\/D0CCFKLGG1H\/p1793997279825839\|x+…>$/);
 });

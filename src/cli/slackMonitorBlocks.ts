@@ -76,32 +76,38 @@ const prLabels = (row: Row) => row.ci ? `${CI_MARK[row.ci] ?? ''} ${row.ci}`.tri
 const notable = (status: string) => (['RUNNING', 'WAITING', 'READY TO MERGE', 'DONE', ''].includes(status) ? undefined : status);
 const byline = (row: Row) => row.byline?.replace(/^author: /, 'by ');
 /** One card per open task: title, who and how much, the current action, the stage bar, and up to three link buttons. */
+/**
+ * The card title as a link to the thread, within Slack's 150 characters: the permalink's query is
+ * dropped (the thread's first message needs none) and only the title's words are shortened, so the
+ * link itself is never cut.
+ */
+function linkedTitle(row: Row, max = 150): string {
+  const url = row.thread?.replace(/\?.*$/, '');
+  const room = url ? max - url.length - 3 : max;
+  const title = row.title.length > room ? `${row.title.slice(0, Math.max(1, room - 1)).trimEnd()}…` : row.title;
+  return url ? `<${url}|${title}>` : title;
+}
 function card(row: Row, group: Group, index: number, o: BlockOptions = {}): Block {
-  const primary = group.key === 'reply' ? 'thread' : group.key === 'testing' ? 'Open test' : group.key === 'ready' ? 'Merge PR' : group.key === 'nudge' ? 'GitHub' : undefined;
+  // Slack allows three buttons on a card: Test (Resume while testing), ClickUp and GitHub, always in that order.
+  // The title is the link to the task's thread (the chat), and the test link sits in the card's text.
+  const primary = group.key === 'ready' ? 'Merge PR' : group.key === 'nudge' ? 'GitHub' : undefined;
   const buttons: Block[] = [];
-  // unread Consort posts turn the thread button red; Slack has no badge, so the count is in the label
-  const threadLabel = `Chat${row.unread ? ` · ${row.unread} new` : ''}`;
-  if (row.thread) buttons.push(button(threadLabel, row.thread, `thread-${index}`, row.unread ? 'danger' : primary === 'thread' ? 'primary' : undefined));
-  // Test: start a test session from the board; only where Consort listens for clicks (an app-level token, cli/slackSocket.ts)
   const ref = threadRef(row.thread);
-  if (o.testButtons !== false && ref && group.key !== 'testing') buttons.push(actionButton('Test', `${TEST_ACTION}-${index}`, ref));
-  // a task in testing: Resume ends the session; it goes after the Open test link so the link keeps its place
-  const resume = o.testButtons !== false && ref && group.key === 'testing' ? actionButton('Resume', `${RESUME_ACTION}-${index}`, ref) : undefined;
-  // Slack allows three buttons on a card: the group's main link first, then the rest; any link left over goes in the small print
-  const room = Math.max(0, MAX_CARD_BUTTONS - buttons.length - (resume ? 1 : 0));
-  const ordered = row.links.length <= room ? row.links : [...row.links].sort((a, b) => Number(b.label === primary) - Number(a.label === primary));
-  const fit = ordered.slice(0, room);
-  for (const l of fit) buttons.push(button(l.label, l.url, `${l.label.toLowerCase().replace(/\W+/g, '-')}-${index}`, primary === l.label ? 'primary' : undefined));
-  if (resume) buttons.push(resume);
-  const overflow = ordered.slice(fit.length).map(l => link(l.url, l.label)).join('  ');
+  if (o.testButtons !== false && ref) buttons.push(group.key === 'testing' ? actionButton('Resume', `${RESUME_ACTION}-${index}`, ref) : actionButton('Test', `${TEST_ACTION}-${index}`, ref));
+  const testLink = row.links.find(l => l.label === 'Open test');
+  for (const label of ['ClickUp', 'GitHub', 'Merge PR']) {
+    const l = row.links.find(x => x.label === label);
+    if (l) buttons.push(button(l.label, l.url, `${l.label.toLowerCase().replace(/\W+/g, '-')}-${index}`, primary === l.label ? 'primary' : undefined));
+  }
   const status = notable(row.status);
-  const subtext = [overflow, row.stage ? `${row.stage.name} ${row.stage.n}/${row.stage.total}   ${bar(group.key === 'ready' ? row.stage.n : row.stage.n - 1, row.stage.total)}` : '', prLabels(row), status ? `*${status}*` : '', row.pending ? '_Slack thread pending_' : ''].filter(Boolean).join('   ·   ');
+  const subtext = [row.unread ? `🔴 *${row.unread} new in the thread*` : '', row.stage ? `${row.stage.name} ${row.stage.n}/${row.stage.total}   ${bar(group.key === 'ready' ? row.stage.n : row.stage.n - 1, row.stage.total)}` : '', prLabels(row), status ? `*${status}*` : '', row.pending ? '_Slack thread pending_' : ''].filter(Boolean).join('   ·   ');
   const subtitle = [row.kind, byline(row), row.cost, row.age].filter(Boolean).join('   ·   ');
+  const body = testLink ? `🧪 <${testLink.url}|Open the test app>${row.action ? `  ·  ${row.action.replace(/^Testing at \S+\.\s*/, '')}` : ''}` : row.action;
   return {
     type: 'card', block_id: `task-${index}`,
-    title: mrkdwn(row.title, 150),
+    title: mrkdwn(linkedTitle(row), 150),
     ...(subtitle ? { subtitle: mrkdwn(subtitle, 150) } : {}),
-    ...(row.action ? { body: mrkdwn(row.action, 200) } : {}),
+    ...(body ? { body: mrkdwn(body, 200) } : {}),
     ...(subtext ? { subtext: mrkdwn(subtext, 200) } : {}),
     ...(buttons.length ? { actions: buttons.slice(0, MAX_CARD_BUTTONS) } : {}),
   };
