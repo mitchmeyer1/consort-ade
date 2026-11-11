@@ -10,8 +10,8 @@ import { gateText, PiiWithheldError, type GateContext } from "./phiGate.ts";
 
 /**
  * The evidence step's plumbing: a screenshot helper the agent can call (system Chrome,
- * headless), image hosting for the comments (ClickUp task attachments when the ticket is a
- * ClickUp task, else an orphan `consort-evidence` branch in the repo), and the two comments
+ * headless), image hosting for the comments (an orphan `consort-evidence` branch in the PR's own
+ * repo, linked through github.com so the images render in the PR, private repos included), and the two comments
  * themselves, each linking to the other. The decisions about what to capture are the agent's
  * (shared/headless.ts EVIDENCE_PROMPT); this file moves bytes.
  */
@@ -130,21 +130,25 @@ export async function pushEvidenceBranch(repo: string, ticketId: string, files: 
   const index = join(repo, ".git", `consort-evidence-index-${process.pid}`);
   const env = { GIT_INDEX_FILE: index };
   if (parent) await git(repo, ["read-tree", parent], env); else await git(repo, ["read-tree", "--empty"], env);
-  const urls: Record<string, string> = {};
+  const paths: Record<string, string> = {};
   for (const f of files) {
     const blob = await git(repo, ["hash-object", "-w", f]);
     const path = `${ticketId}/${basename(f)}`;
     await git(repo, ["update-index", "--add", "--cacheinfo", `100644,${blob},${path}`], env);
-    urls[basename(f)] = `https://raw.githubusercontent.com/${nameWithOwner}/${branch}/${path}`;
+    paths[basename(f)] = path;
   }
   const tree = await git(repo, ["write-tree"], env);
-  const commit = await git(repo, ["commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", `evidence for ${ticketId}`], env);
+  const commit = (await git(repo, ["commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", `evidence for ${ticketId}`], env)).trim();
   await git(repo, ["push", "origin", `${commit}:refs/heads/${branch}`]);
   try { (await import("node:fs")).unlinkSync(index); } catch {}
+  // github.com links, not raw.githubusercontent.com: GitHub serves them to anyone signed in who can read the repo, so they render in a private repo's PR;
+  // pinned to the commit, so a later round that saves a file of the same name never changes an old comment
+  const urls: Record<string, string> = {};
+  for (const [name, path] of Object.entries(paths)) urls[name] = `https://github.com/${nameWithOwner}/blob/${commit}/${path.split("/").map(encodeURIComponent).join("/")}?raw=true`;
   return urls;
 }
 
-export type Published = { items: number; images: number; prComment: boolean; ticketComment: boolean; hosting: "clickup" | "branch" | "none" };
+export type Published = { items: number; images: number; prComment: boolean; ticketComment: boolean; hosting: "branch" | "none" };
 
 /**
  * Post the manifest to the PR and the ticket, images hosted where they will render. With the
@@ -172,19 +176,16 @@ export async function publishEvidence(o: { worktree: string; repo: string; ticke
   let images: Record<string, string> = {};
   let hosting: Published["hosting"] = "none";
   if (wanted.length) {
-    if (o.ticket.source === "clickup" && o.clickupKey) {
-      hosting = "clickup";
-      for (const f of wanted) {
-        const hash = digest(readFileSync(join(dir, f)));
-        const saved = receipt.images[f];
-        images[f] = saved?.hash === hash && typeof saved.url === "string" ? saved.url : await uploadClickupAttachment(o.clickupKey, o.ticket.id, join(dir, f));
-        receipt.images[f] = { hash, url: images[f] };
-        saveReceipt();
-      }
-    } else {
-      hosting = "branch";
-      images = await pushEvidenceBranch(o.repo, o.ticket.id, wanted.map((f) => join(dir, f)));
+    // every image goes to GitHub, never to the ClickUp task: ClickUp attachment links need a ClickUp login, so they show as broken images in the PR
+    hosting = "branch";
+    const hashes = Object.fromEntries(wanted.map((f) => [f, digest(readFileSync(join(dir, f)))]));
+    const fresh = wanted.filter((f) => !(receipt.images[f]?.hash === hashes[f] && receipt.images[f].url.startsWith("https://github.com/")));
+    const pushed = fresh.length ? await pushEvidenceBranch(o.repo, o.ticket.id, fresh.map((f) => join(dir, f))) : {};
+    for (const f of wanted) {
+      images[f] = pushed[f] ?? receipt.images[f].url;
+      receipt.images[f] = { hash: hashes[f], url: images[f] };
     }
+    saveReceipt();
   }
   if (wanted.some((f) => !images[f])) throw new Error("Evidence image hosting did not return every capture URL.");
   const prBody = evidenceMarkdownForPr(m, images, o.ticket.url, ticketRef(o.ticket), o.cost, o.timing);

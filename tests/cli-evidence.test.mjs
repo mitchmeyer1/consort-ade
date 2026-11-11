@@ -24,7 +24,16 @@ function fixture(t, options = {}) {
   const calls = [];
   const comments = [];
   const mocks = { '../shared/headless.ts': headless, '../shared/ship.ts': ship, './phiGate.ts': phiGate,
-    'node:util': { promisify: () => async (cmd, args) => { calls.push(args); if (options.prFails) throw new Error('PR comment rejected'); return { stdout: '' }; } },
+    'node:util': { promisify: () => async (cmd, args) => {
+      calls.push(args);
+      if (cmd === 'git') {
+        if (args[0] === 'push' && options.uploadFails) throw new Error('Upload denied');
+        if (args[0] === 'push' && options.pushFailsOnce && !options.pushedOnce) { options.pushedOnce = true; throw new TypeError('fetch failed'); }
+        return { stdout: args[0] === 'remote' ? 'git@github.com:acme/app.git\n' : args[0] === 'commit-tree' ? 'c0ffee1\n' : args[0] === 'rev-parse' && options.noBranch ? '' : args[0] === 'hash-object' ? 'b10b\n' : '' };
+      }
+      if (options.prFails) throw new Error('PR comment rejected');
+      return { stdout: '' };
+    } },
   };
   const mod = { exports: {} };
   new Function('require', 'module', 'exports', 'fetch', code)(n => mocks[n] ?? require(n), mod, mod.exports, async () => { calls.push('upload'); if (options.fetch) return options.fetch(); return options.uploadFails ? { ok: false, status: 403, text: async () => 'Upload denied' } : { ok: true, text: async () => JSON.stringify({ url: 'https://image.example/map.png' }) }; });
@@ -73,7 +82,7 @@ for (const [key, message] of [['uploadFails', /Upload denied/], ['prFails', /PR 
   test(`${key} prevents evidence completion`, async t => {
     const f = fixture(t, { [key]: true });
     await assert.rejects(f.api.publishEvidence(f.args), message);
-    if (key === 'uploadFails') assert.deepEqual(f.calls, ['upload']);
+    if (key === 'uploadFails') assert.ok(!f.calls.some(c => Array.isArray(c) && c[0] === 'pr'), 'no PR comment after a failed upload');
   });
 }
 
@@ -82,8 +91,10 @@ test('working evidence publishes images and both comments', async t => {
   f.args.cost = { usd: 0, turns: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
   f.args.timing = { startedAt: Date.UTC(2026, 9, 21, 12), endedAt: Date.UTC(2026, 9, 21, 13, 2, 3) };
   const published = await f.api.publishEvidence(f.args);
-  assert.deepEqual(published, { items: 1, images: 1, prComment: true, ticketComment: true, hosting: 'clickup' });
-  assert.ok(readFileSync(join(f.dir, '.pr-comment.md'), 'utf8').includes('https://image.example/map.png'));
+  assert.deepEqual(published, { items: 1, images: 1, prComment: true, ticketComment: true, hosting: 'branch' });
+  assert.ok(readFileSync(join(f.dir, '.pr-comment.md'), 'utf8').includes('https://github.com/acme/app/blob/c0ffee1/1/map.png?raw=true'), 'a github.com link pinned to the commit, which renders in a private repo');
+  assert.ok(!f.calls.includes('upload'), 'nothing is uploaded to ClickUp');
+  assert.ok(f.calls.some(c => Array.isArray(c) && c[0] === 'push' && c[2] === 'c0ffee1:refs/heads/consort-evidence'));
   assert.equal(f.calls.at(-1), 'ticket');
   for (const text of [readFileSync(join(f.dir, '.pr-comment.md'), 'utf8'), f.comments[0]]) {
     assert.match(text.replace(/  \n/g, "\n"), /Agent cost:[^\n]+\nStart time: 2026-10-21 12:00:00 UTC\nEnd time \(evidence ready\): 2026-10-21 13:02:03 UTC\nDuration \(including pauses\): 1h 2m 3s/);
@@ -99,20 +110,17 @@ test('credential recovery names the root path and requires confirmation without 
   assert.match(headless.VERIFY_EVIDENCE_PROMPT, /Read every image using image tools/);
 });
 
-test('publication resumes completed uploads after a later image upload fails', async t => {
-  let uploads = 0;
-  const f = fixture(t, { fetch: async () => {
-    if (++uploads === 2) throw new TypeError('fetch failed');
-    return { ok: true, text: async () => JSON.stringify({ url: `https://image.example/${uploads}.png` }) };
-  } });
+test('a failed push to GitHub posts nothing; the retry pushes and posts both comments', async t => {
+  const f = fixture(t, { pushFailsOnce: true });
   f.manifest.items.push({ title: 'Second view', image: 'second.png' });
   writeFileSync(join(f.dir, 'second.png'), readFileSync(join(f.dir, 'map.png')));
   f.save();
   await assert.rejects(f.api.publishEvidence(f.args), /fetch failed/);
   assert.equal(f.comments.length, 0);
+  assert.ok(!f.calls.some(c => Array.isArray(c) && c[0] === 'pr'));
   const result = await f.api.publishEvidence(f.args);
   assert.equal(result.images, 2);
-  assert.equal(uploads, 3, 'the first successful upload is reused');
+  assert.equal(f.comments.length, 1);
 });
 
 test('ticket comment retry reuses images and does not repost the successful PR comment', async t => {
@@ -121,7 +129,7 @@ test('ticket comment retry reuses images and does not repost the successful PR c
   f.args.source.comment = async () => { if (++attempts === 1) throw new TypeError('fetch failed'); };
   await assert.rejects(f.api.publishEvidence(f.args), /fetch failed/);
   await f.api.publishEvidence(f.args);
-  assert.equal(f.calls.filter(c => c === 'upload').length, 1);
+  assert.equal(f.calls.filter(c => Array.isArray(c) && c[0] === 'push').length, 1);
   assert.equal(f.calls.filter(c => Array.isArray(c) && c[0] === 'pr' && c[1] === 'comment').length, 1);
   assert.equal(attempts, 2);
 });
@@ -131,7 +139,7 @@ test('changed image contents invalidate a saved upload receipt', async t => {
   await f.api.publishEvidence(f.args);
   writeFileSync(join(f.dir, 'map.png'), Buffer.from('changed image fixture'));
   await f.api.publishEvidence(f.args);
-  assert.equal(f.calls.filter(c => c === 'upload').length, 2);
+  assert.equal(f.calls.filter(c => Array.isArray(c) && c[0] === 'push').length, 2);
 });
 
 test('under the PHI/PII guard, evidence text carrying an identifier stops before any upload or comment', async t => {
@@ -144,4 +152,15 @@ test('under the PHI/PII guard, evidence text carrying an identifier stops before
   f.manifest.summary = 'Map loads and shows the selected group.';
   f.save();
   assert.equal((await f.api.publishEvidence({ ...f.args, gate })).prComment, true);
+});
+
+test('a second publish of unchanged images reuses their GitHub links; old ClickUp links are replaced', async t => {
+  const f = fixture(t);
+  writeFileSync(join(f.dir, '.publication.json'), JSON.stringify({ destination: JSON.stringify(['clickup', '1', 'https://pr/1']), images: { 'map.png': { hash: 'x', url: 'https://t9013448339.p.clickup-attachments.com/map.png' } } }));
+  await f.api.publishEvidence(f.args);
+  assert.ok(f.calls.some(c => Array.isArray(c) && c[0] === 'push'), 'a ClickUp link is re-hosted on GitHub');
+  const pushes = () => f.calls.filter(c => Array.isArray(c) && c[0] === 'push').length;
+  const before = pushes();
+  await f.api.publishEvidence(f.args);
+  assert.equal(pushes(), before, 'unchanged images are not pushed again');
 });
