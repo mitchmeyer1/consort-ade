@@ -594,11 +594,26 @@ export async function workTask(taskId: string): Promise<void> {
   const runTestSession = async (): Promise<void> => {
     const last = loadState().tasks.find((t) => t.id === taskId)?.testSession;
     if (!last) return;
-    // a session an earlier worker opened: stop what it started; if the owner already said done, carry on
-    await closeTestSession(last);
     const finished = !!last.readyTs && (!!loadState().tasks.find((t) => t.id === taskId)?.ownerUpdates?.length || (!!slack && !!thread && !!(await slack.waitForReply(thread, last.readyTs, { accept: isTestDone, timeoutMs: 1 }).catch(() => undefined))));
-    if (finished || !slack || !thread) { updateTask(taskId, { testSession: undefined }); return; }
     const linksNow = async () => taskSlackLinks(loadState().tasks.find((t) => t.id === taskId)!, job.repo);
+    // a session an earlier worker opened (Consort restarted while it was open): when its app still answers,
+    // keep it and only open a new ngrok link; the old link died with the old worker
+    const kept = !finished && slack && thread && last.readyTs ? readSessionFile(task.worktree) : undefined;
+    if (kept && slack && thread && await waitForPort(kept.port, 5_000)) {
+      killTree(last.tunnelPid);
+      await holdEnv();
+      let tunnel = await startTunnel(kept.port);
+      if ("error" in tunnel && /host-header|unknown flag/i.test(tunnel.error)) tunnel = await startTunnel(kept.port, { rewriteHost: false });
+      const url = "url" in tunnel ? tunnel.url : undefined;
+      const message = `🔁 *Consort restarted, so the test link changed.* The app and logins are the same.\n${testReadyMessage({ url, localUrl: `http://localhost:${kept.port}`, session: kept, tunnelError: "error" in tunnel ? tunnel.error : undefined })}`;
+      const readyTs = await slack.post(slackStatus(message, "WAITING", await linksNow()), thread, true);
+      updateTask(taskId, (t) => ({ status: "waiting", activity: "test session open: waiting for you to say 'done' in Slack", testSession: t.testSession && { ...t.testSession, readyTs, url, tunnelPid: "pid" in tunnel ? tunnel.pid : undefined } }));
+      log(task, `test session kept after a restart on port ${kept.port}${url ? `; new link ${url}` : ""}`);
+      return waitForSessionEnd(readyTs);
+    }
+    // otherwise stop what it started; if the owner already said done, carry on
+    await closeTestSession(last);
+    if (finished || !slack || !thread) { updateTask(taskId, { testSession: undefined }); return; }
     await holdEnv();
     activity("test session: starting the app and making test logins");
     await notifyTask(taskId, "running", "Starting a test session: bringing the app up and making test logins.");
@@ -626,6 +641,10 @@ export async function workTask(taskId: string): Promise<void> {
     updateTask(taskId, (t) => ({ status: "waiting", activity: "test session open: waiting for you to say 'done' in Slack", testSession: t.testSession && { ...t.testSession, readyTs, url, ...("pid" in tunnel ? { tunnelPid: tunnel.pid } : {}) } }));
     log(task, `test session open on port ${session.port}${url ? ` at ${url}` : ""} with ${session.logins?.length ?? 0} login(s); waiting for "done"`);
     await notifyTask(taskId, "paused", "Test session open. Say 'done' in the thread when you are finished.");
+    return waitForSessionEnd(readyTs);
+  };
+  const waitForSessionEnd = async (readyTs: string): Promise<void> => {
+    if (!slack || !thread) return;
     // the session ends on "done", or as soon as the owner asks for a change: they want the work, not a parked app
     let endedBy = "done";
     for (;;) {
