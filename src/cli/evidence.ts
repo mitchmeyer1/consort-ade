@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative, isAbsolute } from "node:path";
 import { promisify } from "node:util";
-import { EVIDENCE_DIR, EVIDENCE_MANIFEST, evidenceMarkdownForPr, evidenceTextForTicket, evidenceProblems, parseEvidenceManifest, type EvidenceManifest, type EvidenceTiming, type TaskCost } from "../shared/headless.ts";
+import { EVIDENCE_DIR, EVIDENCE_MANIFEST, evidenceMarkdownForPr, evidenceTextForTicket, evidenceProblems, evidenceManifestFaults, EvidenceManifestError, parseEvidenceManifest, type EvidenceManifest, type EvidenceTiming, type TaskCost } from "../shared/headless.ts";
 import { ticketRef, type ShipTicket } from "../shared/ship.ts";
 import type { Source } from "./sources";
 import { gateText, PiiWithheldError, type GateContext } from "./phiGate.ts";
@@ -90,6 +90,9 @@ export function readManifest(worktree: string): EvidenceManifest | undefined {
 export function validateEvidence(worktree: string): EvidenceManifest {
   const manifest = readManifest(worktree);
   const issues = evidenceProblems(manifest);
+  const faults = evidenceManifestFaults(manifest);
+  // only bookkeeping is wrong: the manifest's author can repair it, so the pipeline returns it there first
+  if (issues.length && faults.length === issues.length) throw new EvidenceManifestError(faults);
   if (issues.length) throw new Error(issues.join(" "));
   const dir = realpathSync(join(worktree, EVIDENCE_DIR));
   for (const item of manifest!.items) {
