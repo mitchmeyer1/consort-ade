@@ -94,11 +94,18 @@ test('working evidence publishes images and both comments', async t => {
   assert.deepEqual(published, { items: 1, images: 1, prComment: true, ticketComment: true, hosting: 'branch' });
   assert.ok(readFileSync(join(f.dir, '.pr-comment.md'), 'utf8').includes('https://github.com/acme/app/blob/c0ffee1/1/map.png?raw=true'), 'a github.com link pinned to the commit, which renders in a private repo');
   assert.ok(!f.calls.includes('upload'), 'nothing is uploaded to ClickUp');
-  assert.ok(f.calls.some(c => Array.isArray(c) && c[0] === 'push' && c[2] === 'c0ffee1:refs/heads/consort-evidence'));
+  assert.ok(f.calls.some(c => Array.isArray(c) && c.join(' ') === 'push --no-verify origin c0ffee1:refs/heads/consort-evidence'), 'the evidence commit is never checked out, so a pre-push hook could only refuse it');
   assert.equal(f.calls.at(-1), 'ticket');
   for (const text of [readFileSync(join(f.dir, '.pr-comment.md'), 'utf8'), f.comments[0]]) {
     assert.match(text.replace(/  \n/g, "\n"), /Agent cost:[^\n]+\nStart time: 2026-10-21 12:00:00 UTC\nEnd time \(evidence ready\): 2026-10-21 13:02:03 UTC\nDuration \(including pauses\): 1h 2m 3s/);
   }
+});
+
+test('the evidence branch takes screenshots only: a file that is not an image is refused before any git call', async t => {
+  const f = fixture(t);
+  writeFileSync(join(f.dir, 'map.png'), 'export const notAnImage = true;\n');
+  await assert.rejects(f.api.publishEvidence(f.args), /not a PNG, JPEG, GIF or WebP file: map\.png/);
+  assert.equal(f.calls.length, 0);
 });
 
 test('credential recovery names the root path and requires confirmation without sharing secrets', () => {
@@ -137,7 +144,7 @@ test('ticket comment retry reuses images and does not repost the successful PR c
 test('changed image contents invalidate a saved upload receipt', async t => {
   const f = fixture(t);
   await f.api.publishEvidence(f.args);
-  writeFileSync(join(f.dir, 'map.png'), Buffer.from('changed image fixture'));
+  writeFileSync(join(f.dir, 'map.png'), Buffer.concat([readFileSync(join(f.dir, 'map.png')), Buffer.from('changed image fixture')]));
   await f.api.publishEvidence(f.args);
   assert.equal(f.calls.filter(c => Array.isArray(c) && c[0] === 'push').length, 2);
 });
