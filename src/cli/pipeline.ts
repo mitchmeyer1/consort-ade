@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { applyShipChange, newShipFeature, parseShipMarkers, prNumberFromUrl, shipBranch, shipFolder, shipSlug, stripShipMarkers, type ShipFeature, type ShipTicket } from "../shared/ship.ts";
 import { shipPrompt } from "../shared/shipPrompt.ts";
-import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUsd, DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, VERIFY_EVIDENCE_PROMPT, parseAskUser, parseReviewerReply, observeReviewBatch, pickAccount, prReadiness, ProblemError, problemOf, REBOOT_PROMPT, RESPOND_TO_REVIEW, REVIEW_QUIET_MS, cliReviewRotation, reviewersWithoutApproval, reviewWaitMessage, seedModels, SLACK_MARKER, slackAsk, slackLines, slackMessage, slackStatus, stripAskUser, type Problem } from "../shared/headless.ts";
+import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUsd, DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, EVIDENCE_REPAIR_GUIDANCE, EvidenceManifestError, VERIFY_EVIDENCE_PROMPT, parseAskUser, parseReviewerReply, observeReviewBatch, pickAccount, prReadiness, ProblemError, problemOf, REBOOT_PROMPT, RESPOND_TO_REVIEW, REVIEW_QUIET_MS, cliReviewRotation, reviewersWithoutApproval, reviewWaitMessage, seedModels, SLACK_MARKER, slackAsk, slackLines, slackMessage, slackStatus, stripAskUser, type Problem } from "../shared/headless.ts";
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { reviewPolicySection } from "../shared/reviewPolicy.ts";
@@ -880,6 +880,8 @@ export async function workTask(taskId: string): Promise<void> {
     let guidance = "";
     // evidence the PII gate withheld is recaptured without asking the owner, twice; after that the owner hears of it
     let withheldRetries = 0;
+    // a manifest whose own bookkeeping is wrong goes back to the agent that wrote it, twice; after that the owner hears of it
+    let manifestRepairs = 0;
     for (;;) {
       activity("gathering evidence");
       let blocked: Problem;
@@ -912,8 +914,14 @@ export async function workTask(taskId: string): Promise<void> {
           log(task, `evidence withheld by the PII gate (${e.categories}); recapturing`);
           continue;
         }
+        if (e instanceof EvidenceManifestError && manifestRepairs++ < 2) {
+          guidance = EVIDENCE_REPAIR_GUIDANCE(e.faults);
+          log(task, `evidence manifest returned to the agent for repair (${manifestRepairs}/2): ${e.message}`);
+          await say(`✅ The evidence manifest had ${e.faults.length === 1 ? "a bookkeeping fault" : `${e.faults.length} bookkeeping faults`}; the agent is repairing it (attempt ${manifestRepairs}/2). No action needed from you.`);
+          continue;
+        }
         // the validator and the publisher throw plain errors: their message is the reason, one sentence per bullet
-        blocked = e instanceof ProblemError ? problemOf(e, "evidence", { recent: [...recent] }) : { where: "evidence", what: "Evidence was not accepted", why: blockerBullets((e as Error).message), recent: [...recent], ...(problemOf(e, "evidence").error ? { error: problemOf(e, "evidence").error } : {}) };
+        blocked = e instanceof ProblemError ? problemOf(e, "evidence", { recent: [...recent] }) : { where: "evidence", what: e instanceof EvidenceManifestError ? "The evidence manifest is still inconsistent after two repairs" : "Evidence was not accepted", why: e instanceof EvidenceManifestError ? e.faults.slice(0, 5).map((f) => brief(f, 240)) : blockerBullets((e as Error).message), recent: [...recent], ...(problemOf(e, "evidence").error ? { error: problemOf(e, "evidence").error } : {}) };
         blocked.lead ??= "Evidence blocked. PR not handed off";
         blocked.ask ??= /API KEY REQUIRED|missing.{0,40}(?:key|credential)|(?:key|credential).{0,40}missing/i.test([blocked.what, ...(blocked.why ?? [])].join(" "))
           ? `The evidence reports missing credentials. Confirm the required credentials are available in \`${job.repo}/.env\` on this machine, then reply "done". Never send secrets in Slack.`

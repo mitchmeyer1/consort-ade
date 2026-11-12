@@ -248,6 +248,35 @@ test('confirmed root env repair retries capture and inspection before publishing
   assert.ok(h.events.indexOf('owner reply') < h.events.indexOf('publish evidence'));
 });
 
+test('a manifest with a bookkeeping fault goes back to the agent, not the owner, and then publishes', async () => {
+  let validations = 0;
+  const prompts = [];
+  const fault = 'Acceptance check has no matching proof: Tab title is Member (it cites "Tab titles", which no item in the manifest is titled)';
+  const h = harness({ task: { reviewsDone: 3, evidenceValidatedAt: undefined }, validateEvidence: () => { if (++validations === 1) throw new headless.EvidenceManifestError([fault]); },
+    turn: o => { prompts.push(o.prompt); return { text: o.prompt.includes(headless.VERIFY_EVIDENCE_PROMPT) ? '[evidence-approved]' : '' }; } });
+  await h.work();
+  assert.equal(validations, 2);
+  assert.ok(!h.events.includes('owner reply'));
+  assert.ok(!h.messages.some(m => /Evidence blocked/.test(m.text)));
+  assert.ok(h.messages.some(m => /bookkeeping fault; the agent is repairing it \(attempt 1\/2\)\. No action needed from you\./.test(m.text)));
+  const gathering = prompts.filter(p => p.includes('This turn: evidence the feature works'));
+  assert.equal(gathering.length, 2);
+  assert.ok(!gathering[0].includes('the owner has not been asked'));
+  assert.ok(gathering[1].includes(headless.EVIDENCE_REPAIR_GUIDANCE([fault])));
+  assert.equal(h.events.filter(e => e === 'publish evidence').length, 1);
+  assert.equal(h.task.status, 'ready');
+});
+
+test('a manifest still inconsistent after two repairs reaches the owner with each fault as its own line', async () => {
+  let validations = 0;
+  const faults = ['Acceptance check has no matching proof: Tab title is Member (it cites "Tab titles", which no item in the manifest is titled)', 'Evidence needs a summary of the working result.'];
+  const h = harness({ task: { reviewsDone: 3, evidenceValidatedAt: undefined }, validateEvidence: () => { validations++; throw new headless.EvidenceManifestError(faults); }, onReply: () => { throw halt; } });
+  await assert.rejects(h.work(), e => e === halt);
+  assert.equal(validations, 3);
+  assert.ok(h.messages.some(m => /^⚠️ \*Evidence blocked\. PR not handed off\*/.test(m.text) && /\n• The evidence manifest is still inconsistent after two repairs\n• Acceptance check has no matching proof: Tab title is Member \(it cites "Tab titles", which no item in the manifest is titled\)\n• Evidence needs a summary of the working result\./.test(m.text)));
+  assert.ok(!h.events.includes('publish evidence'));
+});
+
 test('independent inspection rejects a passed manifest with broken screenshots', async () => {
   const h = harness({ task: { reviewsDone: 3, evidenceValidatedAt: undefined }, turn: o => ({ text: o.prompt.includes(headless.VERIFY_EVIDENCE_PROMPT) ? 'API KEY REQUIRED appears instead of the map.' : '' }), onReply: () => { throw halt; } });
   await assert.rejects(h.work(), e => e === halt);
