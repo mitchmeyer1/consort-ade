@@ -760,16 +760,41 @@ export function evidenceProblems(m: EvidenceManifest | undefined): string[] {
   const issues: string[] = [];
   if (m.status !== "passed") issues.push("Evidence has not passed.");
   if (m.blockers?.length) issues.push(...m.blockers);
-  if (!m.summary.trim()) issues.push("Evidence needs a summary of the working result.");
   if (!m.items.length) issues.push("Evidence contains no captures or output.");
   if (m.kind !== "backend" && !m.items.some((i) => i.image)) issues.push("Frontend evidence needs screenshots of the working feature.");
   if (!m.checks?.length) issues.push("Acceptance checks are missing.");
   for (const c of m.checks ?? []) {
-    if (c.status !== "passed" || !c.story.trim() || !c.expected.trim() || !c.observed.trim()) issues.push(`Acceptance check did not pass: ${c.story || "unnamed check"}`);
-    if (!c.items.length || c.items.some((title) => !m.items.some((i) => i.title === title))) issues.push(`Acceptance check has no matching proof: ${c.story}`);
+    if (c.status !== "passed") issues.push(`Acceptance check did not pass: ${c.story || "unnamed check"}`);
   }
-  return issues;
+  return [...issues, ...evidenceManifestFaults(m)];
 }
+
+/**
+ * Faults in a manifest's own bookkeeping: a check citing an item that isn't there, a passed check with an empty field,
+ * no summary. The agent that wrote the manifest can repair these without the owner; a blocker or a failed check is not one.
+ */
+export function evidenceManifestFaults(m: EvidenceManifest | undefined): string[] {
+  if (!m) return [];
+  const faults: string[] = [];
+  if (!m.summary.trim()) faults.push("Evidence needs a summary of the working result.");
+  for (const c of m.checks ?? []) {
+    const story = c.story.trim() || "unnamed check";
+    if (c.status === "passed" && (!c.story.trim() || !c.expected.trim() || !c.observed.trim())) faults.push(`Acceptance check did not pass: ${story} (a passed check needs its story, expected and observed filled in)`);
+    const absent = c.items.filter((title) => !m.items.some((i) => i.title === title));
+    if (!c.items.length) faults.push(`Acceptance check has no matching proof: ${story} (it cites no item)`);
+    else if (absent.length) faults.push(`Acceptance check has no matching proof: ${story} (it cites ${absent.map((t) => `"${t}"`).join(", ")}, which no item in the manifest is titled)`);
+  }
+  return faults;
+}
+
+/** A manifest that claims success but only its bookkeeping is wrong, so it goes back to its author before the owner hears of it. */
+export class EvidenceManifestError extends Error {
+  readonly faults: string[];
+  constructor(faults: string[]) { super(faults.join(" ")); this.name = "EvidenceManifestError"; this.faults = faults; }
+}
+
+/** What the gathering agent is told when its manifest comes back for repair. */
+export const EVIDENCE_REPAIR_GUIDANCE = (faults: string[]) => `Your last evidence manifest was not accepted, and the owner has not been asked. Its own bookkeeping is wrong:\n${faults.map((f) => `- ${f}`).join("\n")}\nRepair ${EVIDENCE_MANIFEST} and keep every capture that is already valid; do not recapture what passed. Every title a check cites must be the exact title of an entry in items. Where a criterion has no item yet, capture real output for it and add the item: what a screenshot cannot show (a tab title, a response header, an event payload) is a text item rendered with the helper's --text. Never delete a check or weaken its story to make the manifest pass.`;
 
 export const EVIDENCE_PROMPT = (i: { helper: string; ticketUrl: string; prUrl: string; worktree: string; repoRoot?: string; /** the PHI/PII guard is on: rows come from the task's own seeded database only */ phi?: boolean }) => `## This turn: evidence the feature works, for the people who will merge it
 
@@ -790,7 +815,7 @@ Manifest schema (JSON):
 { "status": "passed" | "blocked", "blockers": [], "checks": [{ "story": "<acceptance criterion from SPEC.md>", "status": "passed" | "failed" | "blocked", "expected": "<required result>", "observed": "<actual result>", "items": ["<matching item title>"] }], "kind": "frontend" | "backend" | "mixed", "summary": "<two or three sentences: what was proven and how>", "seeded": "<how the local data was seeded, or omitted>",
   "items": [ { "title": "<what this shows>", "image": "<file name in ${EVIDENCE_DIR}>", "text": "<the output, for text items>", "command": "<the command run, if any>", "note": "<one line of context>" } ] }
 
-Rules: set status to passed only when all acceptance checks passed and blockers is empty; real output only, never mocked or hand-edited; no secrets or real customer data in any capture; six to ten items is plenty; name files for what they show. Consort posts the manifest to the PR (${i.prUrl}) and the ticket (${i.ticketUrl}), each linking to the other. Reply with one line per item when done.`;
+Rules: set status to passed only when all acceptance checks passed and blockers is empty; real output only, never mocked or hand-edited; no secrets or real customer data in any capture; six to ten items is usually plenty, and one item may serve several checks, but never leave out an item a check cites; every title in a check's items must be the exact title of an entry in items; what a screenshot cannot show (a tab title, a response header, an event payload) is a text item, rendered with the helper's --text; name files for what they show. Consort posts the manifest to the PR (${i.prUrl}) and the ticket (${i.ticketUrl}), each linking to the other. Reply with one line per item when done.`;
 
 /** A fresh agent independently checks artifacts rather than trusting the capture agent's summary. */
 export const VERIFY_EVIDENCE_PROMPT = `Independently verify ${EVIDENCE_MANIFEST} against .consort/ship/SPEC.md, TICKET.md, the diff, and the actual evidence files. Read every image using image tools and inspect command output. Do not trust manifest.status or prose claiming success. Require proof for every acceptance criterion, successful end-to-end behavior, and working external dependencies. API KEY REQUIRED tiles, error pages, missing credentials, failed checks, placeholder output, or unproven criteria mean evidence is blocked. Failure diagnostics do not prove a working feature. Do not edit the manifest or publish anything. If all criteria are proven, reply with exactly [evidence-approved]. Otherwise explain the concrete blockers, naming any required env variable without its value. Consort will ask the owner on Slack and retry; never waive a requirement.`;

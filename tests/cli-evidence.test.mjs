@@ -50,6 +50,40 @@ test('manifest rejects missing checks, failed checks, blockers, and frontend tex
   }
 });
 
+test('a check citing an item the manifest lacks is a bookkeeping fault that names the missing title; a blocker is not', () => {
+  const base = { status: 'passed', kind: 'backend', summary: 'A real response', items: [{ title: 'Response', text: '200 OK' }], checks: [{ story: 'API responds', status: 'passed', expected: '200', observed: '200', items: ['Response'] }] };
+  const faults = override => headless.evidenceManifestFaults(headless.parseEvidenceManifest({ ...base, ...override }));
+  assert.deepEqual(faults({}), []);
+  assert.deepEqual(faults({ checks: [{ ...base.checks[0], story: 'Tab title is Member', items: ['Tab titles, read from the running app'] }] }),
+    ['Acceptance check has no matching proof: Tab title is Member (it cites "Tab titles, read from the running app", which no item in the manifest is titled)']);
+  assert.deepEqual(faults({ checks: [{ ...base.checks[0], items: [] }] }), ['Acceptance check has no matching proof: API responds (it cites no item)']);
+  assert.equal(faults({ summary: '' }).length, 1);
+  assert.equal(faults({ checks: [{ ...base.checks[0], observed: '' }] }).length, 1);
+  // what the agent reported, not how it wrote it down: these still go to the owner
+  for (const declared of [{ status: 'blocked' }, { blockers: ['API KEY REQUIRED'] }, { checks: [{ ...base.checks[0], status: 'failed' }] }, { kind: 'frontend' }, { checks: [] }]) assert.deepEqual(faults(declared), []);
+  // every fault is still a problem, so nothing that failed before passes now
+  for (const override of [{ summary: '' }, { checks: [{ ...base.checks[0], items: ['missing'] }] }, { checks: [{ ...base.checks[0], expected: '' }] }]) {
+    const manifest = headless.parseEvidenceManifest({ ...base, ...override });
+    assert.deepEqual(headless.evidenceProblems(manifest), headless.evidenceManifestFaults(manifest));
+  }
+});
+
+test('validation throws a repairable error only when bookkeeping is all that is wrong', async t => {
+  const f = fixture(t);
+  f.manifest.checks[0].items = ['Tab titles, read from the running app'];
+  f.save();
+  assert.throws(() => f.api.validateEvidence(f.root), e => e instanceof headless.EvidenceManifestError && e.faults.length === 1 && /"Tab titles, read from the running app"/.test(e.message));
+  f.manifest.blockers = ['API KEY REQUIRED'];
+  f.save();
+  assert.throws(() => f.api.validateEvidence(f.root), e => !(e instanceof headless.EvidenceManifestError) && /API KEY REQUIRED/.test(e.message));
+});
+
+test('the evidence prompt states the rule the validator enforces on cited items', () => {
+  const prompt = headless.EVIDENCE_PROMPT({ helper: '/helper', ticketUrl: 'https://ticket/1', prUrl: 'https://pr/1', worktree: '/w' });
+  assert.match(prompt, /every title in a check's items must be the exact title of an entry in items/);
+  assert.match(prompt, /what a screenshot cannot show .* is a text item/);
+});
+
 test('missing or empty evidence images block before any external publication', async t => {
   const f = fixture(t);
   rmSync(join(f.dir, 'map.png'));
