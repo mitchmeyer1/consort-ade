@@ -58,7 +58,7 @@ const defaultDeps: KillDeps = {
  * (SIGTERM, then SIGKILL after 20 seconds), the daemon never restarts it, no scanner claims the
  * ticket again, its services go back to the pool, and the worktree, branch and PR stay for the owner.
  */
-export async function killTask(taskId: string, deps: KillDeps = defaultDeps): Promise<Task> {
+export async function killTask(taskId: string, deps: KillDeps = defaultDeps, options: { notify?: boolean; preserveResources?: boolean } = {}): Promise<Task> {
   const task = mutateState((s) => {
     const t = s.tasks.find((x) => x.id === taskId);
     if (!t) throw new Error(`No task ${taskId}.`);
@@ -74,13 +74,15 @@ export async function killTask(taskId: string, deps: KillDeps = defaultDeps): Pr
     for (let waited = 0; waited < 20_000 && deps.alive(pid); waited += 500) await deps.wait(500);
     for (const child of [...agents, ...(deps.alive(pid) ? await deps.children(pid) : [])]) if (deps.alive(child)) deps.signal(child, "SIGKILL");
     if (deps.alive(pid)) deps.signal(pid, "SIGKILL");
+    for (let waited = 0; waited < 5_000 && [pid, ...agents].some(p => deps.alive(p)); waited += 100) await deps.wait(100);
+    if ([pid, ...agents].some(p => deps.alive(p))) throw new Error("A task process is still running; cleanup was stopped");
   }
   // the worker may have saved on its way out: the kill stands
   updateTask(taskId, { status: "released", pid: undefined, note: "killed: you are handling it", activity: "killed by you; handle it manually" });
   await deps.release(taskId);
   for (const held of (loadState().envPool ?? []).filter((x) => x.holder?.taskId === taskId)) await deps.release(held.holder!.id);
-  updateTask(taskId, { environmentReservation: undefined, childEnvironments: [] });
+  if (!options.preserveResources) updateTask(taskId, { environmentReservation: undefined, childEnvironments: [] });
   const pr = task.feature.prs[0] ?? (task.kind === "review" ? task.review?.url : undefined);
-  await deps.notify(taskId, `Killed by you; you are handling it from here. Consort stopped its agents and will not pick this ticket up again.${task.kind === "review" ? "" : ` Branch \`${task.branch}\`.`}${pr ? ` PR: ${pr}` : ""}`).catch(() => undefined);
+  if (options.notify !== false) await deps.notify(taskId, `Killed by you; you are handling it from here. Consort stopped its agents and will not pick this ticket up again.${task.kind === "review" ? "" : ` Branch \`${task.branch}\`.`}${pr ? ` PR: ${pr}` : ""}`).catch(() => undefined);
   return loadState().tasks.find((x) => x.id === taskId) ?? task;
 }

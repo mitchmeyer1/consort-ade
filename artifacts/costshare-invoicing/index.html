@@ -1,0 +1,882 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cost Share Invoicing — Data Model</title>
+<style>
+  :root { --bg:#14151a; --panel:#1b1d23; --head:#23262e; --line:#2e313a; --ink:#e4e6eb; --muted:#8a8f9c; --new:#3f9d63; --exists:#5b6f99; --pk:#e5b84b; --fk:#82aaff; }
+  * { box-sizing:border-box; }
+  html, body { background:var(--bg); }
+  body { margin:0; color:var(--ink); font:14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { padding:18px 24px 12px; border-bottom:1px solid var(--line); }
+  h1 { margin:0; font-size:20px; }
+  header p { margin:4px 0 0; color:var(--muted); }
+  body { height:100vh; display:flex; flex-direction:column; overflow:hidden; }
+  header { flex-shrink:0; }
+  .split { display:grid; grid-template-columns: 1fr 1fr; flex:1 1 auto; min-height:0; }
+  @media (max-width: 1100px) { body { height:auto; display:block; overflow:auto; } .split { grid-template-columns:1fr; } }
+  .left { overflow:auto; padding:18px 20px 40px; display:flex; flex-direction:column; gap:16px; border-right:1px solid var(--line); }
+  .right { overflow:hidden; background:#1e1f24; display:flex; flex-direction:column; min-height:0; }
+  @media (max-width: 1100px) { .right { height:92vh; } }
+  .section { font-size:12px; text-transform:uppercase; letter-spacing:1px; color:var(--muted); margin:8px 2px -6px; }
+
+  /* table-shaped cards */
+  .tbl { border:1px solid var(--line); border-radius:8px; overflow:hidden; background:var(--panel); }
+  .tbl .name { display:flex; align-items:center; gap:10px; padding:9px 12px; background:var(--head); border-bottom:1px solid var(--line); font:600 14px ui-monospace, "SF Mono", Menlo, monospace; }
+  .tbl .why { padding:8px 12px; color:var(--muted); font-size:12.5px; border-bottom:1px solid var(--line); }
+  .badge { font:600 10px/1 -apple-system, sans-serif; text-transform:uppercase; letter-spacing:.5px; padding:4px 6px; border-radius:4px; color:#fff; }
+  .badge.new { background:var(--new); }
+  .badge.exists { background:var(--exists); }
+  table { width:100%; border-collapse:collapse; table-layout:auto; font-size:12.5px; }
+  th, td { text-align:left; padding:6px 12px; border-bottom:1px solid var(--line); vertical-align:top; }
+  tr:last-child td { border-bottom:none; }
+  th { color:var(--muted); font-weight:500; font-size:11px; text-transform:uppercase; letter-spacing:.5px; background:#1f2128; }
+  td.col { font-family: ui-monospace, "SF Mono", Menlo, monospace; white-space:nowrap; }
+  td.type { font-family: ui-monospace, "SF Mono", Menlo, monospace; color:#c3e88d; white-space:nowrap; }
+  td.note { color:var(--muted); }
+  .key { font:600 9px/1 -apple-system, sans-serif; padding:2px 4px; border-radius:3px; margin-left:6px; vertical-align:middle; }
+  .key.pk { color:#1b1d23; background:var(--pk); }
+  .key.fk { color:#1b1d23; background:var(--fk); }
+  .key.uq { color:var(--ink); border:1px solid var(--muted); }
+  .sample { border-top:1px solid var(--line); }
+  .sample .label { padding:7px 12px 0; font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:var(--muted); }
+  .sample table { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size:12px; }
+  .sample td { color:#c9ccd4; }
+  .foot { padding:7px 12px; font-size:12px; color:var(--muted); border-top:1px solid var(--line); }
+
+  /* editor */
+  .tabbar { display:flex; background:#17181c; border-bottom:1px solid #2b2d33; position:sticky; top:0; }
+  .tabbar div { padding:9px 16px; color:#cfd2da; font:12px ui-monospace, Menlo, monospace; background:#1e1f24; border-right:1px solid #2b2d33; }
+  pre { margin:0; flex:1 1 auto; min-height:0; overflow:auto; position:relative; padding:14px 0 40px; font:12.5px/1.6 ui-monospace, "SF Mono", Menlo, monospace; color:#d6d8de; counter-reset: ln; }
+  pre .l { display:block; padding:0 18px 0 58px; text-indent:-58px; white-space:pre-wrap; word-break:break-word; }
+  pre .l::before { counter-increment: ln; content: counter(ln); display:inline-block; width:44px; padding-right:14px; text-align:right; color:#555a66; user-select:none; }
+  .c { color:#7f8796; font-style:italic; }
+  .kw { color:#c792ea; }
+  .s { color:#c3e88d; }
+  .t { color:#82aaff; }
+  .n { color:#f78c6c; }
+  .tbl, .section { flex-shrink:0; }
+  .tabbar .hint { background:transparent; color:#6b7080; border:none; margin-left:auto; font-style:italic; }
+  .v { border-bottom:1px dotted #6b7280; cursor:help; position:relative; }
+  .v:hover { background:rgba(130,170,255,.12); border-radius:2px; }
+  .v:hover::after, .v.force::after { content:attr(data-tip); position:absolute; left:0; top:1.7em; z-index:20; text-indent:0;
+    white-space:pre; width:max-content; max-width:560px; overflow:hidden; padding:8px 10px; border-radius:6px;
+    background:#2a2d36; border:1px solid #444a57; color:#e4e6eb; font:12px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+    box-shadow:0 6px 20px rgba(0,0,0,.45); font-style:normal; }
+  .legend { display:flex; flex-wrap:wrap; gap:8px 16px; font-size:12px; color:var(--muted); align-items:center; flex-shrink:0; }
+  .legend > span { display:flex; align-items:center; gap:6px; }
+  .legend .key { margin-left:0; }
+  .swatch { display:inline-block; width:14px; height:4px; border-radius:2px; }
+  .erd { position:relative; display:grid; grid-template-columns:repeat(3, max-content); justify-content:space-between; gap:44px 60px; padding:16px 28px; min-width:max-content; flex-shrink:0; align-items:start; }
+  #links { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; overflow:visible; }
+  .ent { position:relative; z-index:1; background:var(--panel); border:1px solid #3a3e49; border-radius:6px; overflow:hidden; font:12px ui-monospace, "SF Mono", Menlo, monospace; box-shadow:0 2px 10px rgba(0,0,0,.3); }
+  .eh { display:flex; align-items:center; justify-content:space-between; gap:6px; padding:7px 9px; background:var(--head); border-bottom:1px solid #3a3e49; font-weight:600; font-size:12px; }
+  .er { display:grid; grid-template-columns: 1fr auto 26px; gap:8px; align-items:center; padding:4px 9px; border-bottom:1px solid var(--line); }
+  .er:last-child { border-bottom:none; }
+  .er span { white-space:nowrap; }
+  .er i { font-style:normal; color:#c3e88d; font-size:11px; }
+  .er b { text-align:right; }
+  .er .key { margin-left:0; }
+  .ent.new { border-top:3px solid var(--new); }
+  .ent.exists { border-top:3px solid var(--exists); }
+  .ent.snow { border-top:3px solid #4fb3d9; }
+  .uniq { font-size:12px; color:var(--muted); display:flex; flex-direction:column; gap:2px; padding:0 4px; flex-shrink:0; }
+  .uniq div::before { content:"• "; }
+  .seednote { font-size:12.5px; color:var(--muted); flex-shrink:0; padding:0 2px; }
+  .seed { display:flex; flex-wrap:wrap; gap:12px; flex-shrink:0; }
+  .st { max-width:100%; overflow-x:auto; border:1px solid #3a3e49; border-radius:6px; overflow:hidden; background:var(--panel); flex:1 1 auto; }
+  .st.full { flex-basis:100%; }
+  .sth { padding:6px 9px; background:var(--head); border-bottom:1px solid #3a3e49; font:600 12px ui-monospace, "SF Mono", Menlo, monospace; }
+  .st table { font:11.5px ui-monospace, "SF Mono", Menlo, monospace; }
+  .st th, .st td { padding:4px 9px; white-space:nowrap; }
+  .st th { font-family:ui-monospace, "SF Mono", Menlo, monospace; text-transform:none; letter-spacing:0; font-size:10.5px; }
+  .st td { color:#c9ccd4; }
+  #seed-rules { font-size:12.5px; color:var(--muted); }
+  #seed-rules p { margin:0 0 10px; }
+  .dcard { overflow-x:auto; }
+  .st tr.dim td { color:#6b7080; }
+  .st tr.hl td { background:rgba(229,184,75,.12); color:#f0d48a; }
+
+  /* player + inspector */
+  .tabbar { flex-shrink:0; }
+  pre .l.cur { background:rgba(229,184,75,.16); box-shadow:inset 3px 0 0 var(--pk); }
+  .insp { flex:0 0 40%; min-height:220px; display:flex; flex-direction:column; border-top:1px solid #3a3e49; background:#17181c; font:12px/1.5 ui-monospace, "SF Mono", Menlo, monospace; }
+  .pbar { display:flex; align-items:center; gap:8px; padding:7px 12px; border-bottom:1px solid #2b2d33; flex-shrink:0; }
+  .pbar button { background:#2a2d36; color:#e4e6eb; border:1px solid #444a57; border-radius:5px; padding:4px 10px; font:12px ui-monospace, Menlo, monospace; cursor:pointer; }
+  .pbar button:hover { background:#353945; }
+  .pbar button:disabled { opacity:.4; cursor:default; }
+  .pbar button.go { background:var(--new); border-color:var(--new); min-width:64px; }
+  .pbar input[type=range] { flex:1; accent-color:var(--pk); min-width:60px; }
+  .pbar .pos { color:var(--muted); white-space:nowrap; }
+  .pnote { padding:6px 12px; color:#f0d48a; border-bottom:1px solid #2b2d33; flex-shrink:0; min-height:31px; font-family:-apple-system, BlinkMacSystemFont, sans-serif; font-size:12.5px; }
+  .pvars { position:relative; overflow:auto; flex:1 1 auto; min-height:0; padding:4px 0 10px; }
+  .pv { display:grid; grid-template-columns:150px 1fr; gap:10px; padding:3px 12px; border-left:3px solid transparent; }
+  .pv .k { color:#82aaff; }
+  .pv .val { color:#d6d8de; white-space:pre-wrap; word-break:break-word; }
+  .pv.chg { background:rgba(229,184,75,.12); border-left-color:var(--pk); }
+  .pv.chg .val { color:#f0d48a; }
+  .pgrp { padding:8px 12px 2px; color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.8px; }
+  .pempty { padding:8px 12px; color:#6b7080; }
+
+  /* tabs */
+  header { display:flex; align-items:flex-end; justify-content:space-between; gap:20px; }
+  .tabs { display:flex; gap:4px; background:#1b1d23; border:1px solid var(--line); border-radius:8px; padding:3px; flex-shrink:0; }
+  .tabs a { color:var(--muted); text-decoration:none; padding:6px 16px; border-radius:6px; font-size:13px; font-weight:500; }
+  .tabs a:hover { color:var(--ink); }
+  .tabs a.on { background:#2e313a; color:#fff; }
+  .split { display:flex; }
+  .split > * { display:none; flex:1 1 auto; min-width:0; }
+  .split > .right.on { display:flex; }
+  .split > .left.on { display:grid; grid-template-columns:minmax(0, 1.05fr) minmax(0, 1fr); gap:32px; align-items:start; border-right:none; }
+  .dcol { display:flex; flex-direction:column; gap:16px; min-width:0; }
+  @media (max-width: 1100px) { .split > .left.on { grid-template-columns:1fr; } }
+
+  /* dashboard mock */
+  .split > .dash.on { display:flex; }
+  .dash { background:#f6f5f0; color:#1d1d1b; font:14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; min-height:0; }
+  .dash a { color:#2f5f8a; text-decoration:none; } .dash a:hover { text-decoration:underline; }
+  .side { width:232px; flex-shrink:0; background:#fbfaf6; border-right:1px solid #e4e2d9; display:flex; flex-direction:column; }
+  .brand { display:flex; align-items:center; justify-content:space-between; padding:18px 16px 14px; border-bottom:1px solid #e4e2d9; }
+  .logo { font:500 24px Georgia, "Times New Roman", serif; letter-spacing:-.5px; }
+  .adm { background:#1d1d1b; color:#fff; font-size:11px; font-weight:600; padding:3px 9px; border-radius:999px; }
+  #d_nav { padding:12px 8px; display:flex; flex-direction:column; gap:2px; flex:1; }
+  #d_nav a { display:flex; align-items:center; gap:9px; padding:7px 10px; border-radius:7px; color:#1d1d1b; font-weight:500; }
+  #d_nav a:hover { background:#f0eee6; text-decoration:none; }
+  #d_nav a.on { background:#ebe9e0; }
+  #d_nav svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
+  .who { padding:12px 16px; border-top:1px solid #e4e2d9; color:#77756c; font-size:12px; }
+  .dmain { flex:1; min-width:0; display:flex; flex-direction:column; }
+  .dtop { display:flex; align-items:center; justify-content:space-between; padding:12px 28px; border-bottom:1px solid #e4e2d9; background:#fbfaf6; flex-shrink:0; }
+  .crumbs { color:#77756c; font-size:13px; } .crumbs b { color:#1d1d1b; font-weight:600; } .crumbs i { font-style:normal; margin:0 7px; color:#b5b2a6; }
+  .ro { font-size:11.5px; color:#77756c; border:1px solid #dcd9ce; border-radius:999px; padding:3px 10px; }
+  .dbody { flex:1; overflow:auto; padding:26px 28px 60px; }
+  .dbody h2 { margin:0; font-size:22px; font-weight:650; }
+  .dsub { color:#77756c; margin:3px 0 20px; font-size:13px; }
+  .dcard { background:#fff; border:1px solid #e4e2d9; border-radius:10px; padding:16px 20px 8px; margin-bottom:20px; }
+  .dcard.dnotes { background:#edf6ff; border-color:#bad8f2; margin-top:28px; }
+  .dnotes th { background:#dcecff; }
+  .dnotes td { border-bottom-color:#d2e5f5; }
+  .dnotes .dsrc { color:#456580; }
+  .dcard-h { display:flex; align-items:baseline; justify-content:space-between; gap:16px; margin-bottom:12px; }
+  .dcard-h b { font-size:15px; }
+  .dsrc { font:11.5px ui-monospace, "SF Mono", Menlo, monospace; color:#8a887e; }
+  .dash table { font-size:13.5px; table-layout:auto; }
+  .dash th { background:#f1f0ea; color:#3a3936; font:600 12.5px -apple-system, BlinkMacSystemFont, sans-serif; text-transform:none; letter-spacing:0; padding:9px 12px; border-bottom:none; }
+  .dash td { padding:10px 12px; border-bottom:1px solid #eceae2; vertical-align:middle; color:#1d1d1b; }
+  .dash tr.go { cursor:pointer; } .dash tr.go:hover td { background:#faf9f4; }
+  .dash tr.none td { color:#9a978c; }
+  .dash .mono { font:12px ui-monospace, "SF Mono", Menlo, monospace; color:#77756c; }
+  .pill { display:inline-block; font-size:11.5px; font-weight:600; padding:2px 9px; border-radius:999px; background:#eeece4; color:#55534c; margin-left:6px; }
+  .pill:first-child { margin-left:0; }
+  .pill.on { background:#dff1e4; color:#256b3c; }
+  .pill.own { background:#fbecc8; color:#7a5a10; }
+  .pill.tag { font:11.5px ui-monospace, "SF Mono", Menlo, monospace; font-weight:500; background:#eef2f6; color:#3d5a75; margin:0 5px 0 0; }
+  .dempty { color:#77756c; padding:6px 0 14px; }
+  .dash tr.hlrow td { background:#fdf3d3; }
+  .dash tr.hlrow td:first-child { box-shadow:inset 3px 0 0 #d9a520; }
+  .dash a.mono { color:#2f5f8a; }
+</style>
+</head>
+<body>
+<header>
+<div>
+  <h1>Cost Share Invoicing — data model + monthly script</h1>
+  <p>One cost per <b>health plan × bucket</b>, with an optional clinic group override. Postgres tables, green edge = new, blue edge = already exists, light blue edge = Snowflake.</p>
+</div>
+<nav class="tabs" id="tabs">
+  <a href="#tab=data" data-tab="data">Data</a>
+  <a href="#tab=code" data-tab="code">Code</a>
+  <a href="#tab=dash" data-tab="dash">Dashboard</a>
+</nav>
+</header>
+
+<div class="split">
+  <div class="left" id="view-data">
+   <div class="dcol">
+    <div class="legend">
+      <span><span class="swatch" style="background:var(--new)"></span> new table</span>
+      <span><span class="swatch" style="background:var(--exists)"></span> existing table</span>
+      <span><span class="swatch" style="background:#4fb3d9"></span> Snowflake table</span>
+      <span><span class="key pk">PK</span> primary key</span>
+      <span><span class="key fk">FK</span> points to another table</span>
+      <span><span class="key uq">UQ</span> unique</span>
+      <span><i style="font-style:normal;color:#c3e88d;font-family:ui-monospace,Menlo,monospace">?</i> optional</span>
+    </div>
+    <div class="erd" id="erd">
+      <svg id="links"></svg>
+
+      <div class="ent exists" style="grid-column:1; grid-row:1" id="t_emp">
+        <div class="eh">employers</div>
+        <div class="er" data-c="t_emp.id"><span>id</span><i>bigint</i><b class="key pk">PK</b></div>
+        <div class="er"><span>member_costshare_invoicing</span><i>boolean</i><b></b></div>
+      </div>
+
+      <div class="ent exists" style="grid-column:2; grid-row:1" id="t_members">
+        <div class="eh">members</div>
+        <div class="er" data-c="t_members.id"><span>id</span><i>bigint</i><b class="key pk">PK</b></div>
+        <div class="er" data-c="t_members.employer_id"><span>employer_id</span><i>bigint</i><b class="key fk">FK</b></div>
+        <div class="er" data-c="t_members.health_plan_id"><span>health_plan_id</span><i>bigint</i><b class="key fk">FK</b></div>
+        <div class="er" data-c="t_members.uuid"><span>uuid</span><i>uuid</i><b class="key uq">UQ</b></div>
+        <div class="er"><span>stripe_customer_id</span><i>text</i><b></b></div>
+      </div>
+
+      <div class="ent new" style="grid-column:3; grid-row:1" id="t_inv">
+        <div class="eh">cost_share_invoices</div>
+        <div class="er" data-c="t_inv.id"><span>id</span><i>bigint</i><b class="key pk">PK</b></div>
+        <div class="er" data-c="t_inv.member_id"><span>member_id</span><i>bigint</i><b class="key fk">FK</b></div>
+        <div class="er"><span>period_start</span><i>date</i><b></b></div>
+        <div class="er"><span>stripe_invoice_id</span><i>text</i><b></b></div>
+        <div class="er"><span>total_cents</span><i>integer</i><b></b></div>
+        <div class="er"><span>status</span><i>text</i><b></b></div>
+        <div class="er"><span>items</span><i>jsonb</i><b></b></div>
+      </div>
+
+      <div class="ent exists" style="grid-column:1; grid-row:2" id="t_plans">
+        <div class="eh">health_plans</div>
+        <div class="er" data-c="t_plans.id"><span>id</span><i>bigint</i><b class="key pk">PK</b></div>
+        <div class="er" data-c="t_plans.employer_id"><span>employer_id</span><i>bigint</i><b class="key fk">FK</b></div>
+        <div class="er"><span>name</span><i>text</i><b></b></div>
+        <div class="er"><span>start_date</span><i>date</i><b></b></div>
+        <div class="er"><span>end_date</span><i>date</i><b></b></div>
+      </div>
+
+      <div class="ent new" style="grid-column:2; grid-row:2" id="t_costs">
+        <div class="eh">health_plan_bucket_costs</div>
+        <div class="er" data-c="t_costs.health_plan_id"><span>health_plan_id</span><i>bigint</i><b class="key fk">FK</b></div>
+        <div class="er" data-c="t_costs.apc_group_id"><span>apc_group_id</span><i>bigint?</i><b class="key fk">FK</b></div>
+        <div class="er" data-c="t_costs.bucket_id"><span>bucket_id</span><i>bigint</i><b class="key fk">FK</b></div>
+        <div class="er"><span>member_cost_cents</span><i>integer</i><b></b></div>
+        <div class="er"><span>effective_from</span><i>date</i><b></b></div>
+      </div>
+
+      <div class="ent new" style="grid-column:2; grid-row:3" id="t_buckets">
+        <div class="eh">cost_share_buckets</div>
+        <div class="er" data-c="t_buckets.id"><span>id</span><i>bigint</i><b class="key pk">PK</b></div>
+        <div class="er"><span>name</span><i>text</i><b class="key uq">UQ</b></div>
+        <div class="er"><span>display_name</span><i>text</i><b></b></div>
+        <div class="er"><span>tags</span><i>text[]</i><b></b></div>
+      </div>
+
+      <div class="ent exists" style="grid-column:3; grid-row:3" id="t_apc">
+        <div class="eh">apc_groups</div>
+        <div class="er" data-c="t_apc.id"><span>id</span><i>bigint</i><b class="key pk">PK</b></div>
+        <div class="er"><span>name</span><i>text</i><b></b></div>
+      </div>
+
+      <div class="ent snow" style="grid-column:2; grid-row:4" id="t_visits">
+        <div class="eh">visit_detail</div>
+        <div class="er"><span>id</span><i>text</i><b class="key pk">PK</b></div>
+        <div class="er" data-c="t_visits.aligned_uuid"><span>aligned_uuid</span><i>uuid</i><b class="key fk">FK</b></div>
+        <div class="er" data-c="t_visits.apc_group_id"><span>apc_group_id</span><i>bigint</i><b class="key fk">FK</b></div>
+        <div class="er"><span>tag</span><i>text</i><b></b></div>
+        <div class="er"><span>created_at</span><i>timestamp</i><b></b></div>
+      </div>
+    </div>
+    <div class="uniq">
+      <div>health_plan_bucket_costs unique on (health_plan_id, apc_group_id, bucket_id, effective_from)</div>
+      <div>cost_share_invoices unique on (member_id, period_start)</div>
+    </div>
+   </div>
+   <div class="dcol">
+    <div class="section" style="margin-top:0">Employer seed world · 2027</div>
+    <div class="seednote">Employer names, plan names and prices come from the attachments. Members, visits, accumulator balances and invoices are fictional. All invoicing flags and target EPO plan IDs are demo configuration. Existing schema retained; no legacy JSON structures imported.</div>
+    <div id="seed-rules"></div>
+    <div class="seed" id="seed-tables"></div>
+   </div>
+  </div>
+
+  <div class="right" id="view-code">
+    <div class="tabbar"><div>costshare_invoicing.pseudo</div><div class="hint">step through below · hover a variable for an example value</div></div>
+<pre id="code"></pre>
+    <div class="insp">
+      <div class="pbar">
+        <button id="p_reset">Reset</button>
+        <button id="p_back">Back</button>
+        <button id="p_play" class="go">Play</button>
+        <button id="p_next">Step</button>
+        <input type="range" id="p_seek" min="0" value="0">
+        <span class="pos" id="p_pos"></span>
+      </div>
+      <div class="pnote" id="p_note"></div>
+      <div class="pvars" id="p_vars"></div>
+    </div>
+  </div>
+
+  <div class="dash" id="view-dash">
+    <aside class="side">
+      <div class="brand"><span class="logo">Aligned</span><span class="adm">Admin</span></div>
+      <nav id="d_nav"></nav>
+      <div class="who">Fictional members · no sign-in</div>
+    </aside>
+    <div class="dmain">
+      <div class="dtop"><div class="crumbs" id="d_crumbs"></div><span class="ro">2027 employer rules · fictional activity</span></div>
+      <div class="dbody" id="d_body"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const src = String.raw`Every(1ST_OF_THE_MONTH) () => {
+
+  // bill the month before last, so visit data has settled
+  var period = 2.months_ago.all_month @@
+
+  // only employers that turned cost share invoicing on
+  PSQL::Employer.where(member_costshare_invoicing: true).each(employer) => {
+    var members = PSQL::Member.where(employer_id: employer.id)
+    var visits = Snowflake::VisitDetail.where(aligned_uuid: members.pluck(:uuid), created_at: period) @@
+
+    // sort each member's visits into buckets by tag
+    var users_with_buckets = []
+    members.each(member) => {
+      var member_buckets = {}
+      PSQL::CostShareBucket.each(bucket) => {
+        member_buckets[bucket] = visits.where(aligned_uuid: member.uuid).where(tag in bucket.tags)
+      }
+      users_with_buckets.add([member, member_buckets])
+    }
+
+    // one invoice per member
+    users_with_buckets.each(member, member_buckets) => {
+      // already invoiced this period, skip
+      if PSQL::CostShareInvoice.exists(member_id: member.id, period_start: period.start) => next
+
+      var plan_costs = PSQL::HealthPlanBucketCost.where(health_plan_id: member.health_plan_id)
+
+      var stripe_items = []
+      member_buckets.each(bucket, bucket_visits) => {
+        bucket_visits.each(visit) => {
+          // group cost wins; policy checks completion, plan dates, caps and exclusions
+          var cost_row = group_override_or_default(plan_costs, bucket, visit)
+          var cost = employer_policy_price(member, visit, cost_row, period)
+          if cost.held or cost.amount_cents == 0 => next // see employer rules
+          stripe_items.add([visit, bucket, cost.amount_cents])
+        }
+      }
+      if stripe_items.empty => next @@
+
+      // simulated only: no Stripe API calls; all invoices are fictional
+      var stripe_invoice = Stripe::Invoice.create( @@
+        customer: member.stripe_customer_id, @@
+        items: stripe_items.map(visit, bucket, cost => @@
+          { description: bucket.display_name + " on " + visit.date, amount: cost }) @@
+      ) @@
+
+      PSQL::CostShareInvoice.create(member_id: member.id, period_start: period.start, @@
+        stripe_invoice_id: stripe_invoice.id, total_cents: stripe_items.sum(cost), @@
+        items: stripe_items.map(visit, bucket, cost => @@
+          { visit_id: visit.id, bucket_id: bucket.id, amount_cents: cost })) @@
+    }
+  }
+}`;
+
+
+// Source facts describe 2027 benefits; synthetic IDs are deliberately outside source IDs.
+const SEED = {
+  employers: [
+    { id: 39, name: "TikTok", member_costshare_invoicing: true, note: "EPO $10; PPO $20; HDHP $20 up to the deductible (Molly screenshot). In-person only is provisional from PDF; screenshot does not answer all visit types. Annual physical exclusion awaits Peter. Post-deductible pricing is unknown." },
+    { id: 35, name: "ByteDance", member_costshare_invoicing: true, note: "Separate employer from TikTok. EPO $10; PPO $20; HDHP $20 up to the deductible (Molly screenshot). In-person only is provisional from PDF. Annual physical exclusion awaits Peter; post-deductible pricing is unknown." },
+    { id: 33, name: "Fifth Third", member_costshare_invoicing: true, note: "Anthem PPO / Anthem HDHP: $10 per completed capitation visit, including virtual primary care, until the out-of-pocket maximum (PDF, Will). Annual physical excluded provisionally; confirm with Peter. PDF says benefits begin January 1, 2027." },
+    { id: 30, name: "iHeartMedia", member_costshare_invoicing: true, note: "PPO Plan / High Deductible Plan: $20 for CirrusMD virtual urgent care only; primary care including One Medical Virtual Primary Care is $0 (PDF, Will). Target $20 overrides the outdated production $0. PDF says benefits begin January 1, 2027." },
+  ],
+  planRows: [
+    { id: 3901, employer_id: 39, name: "EPO", synthetic: true },
+    { id: 73, employer_id: 39, name: "Anthem PPO" },
+    { id: 74, employer_id: 39, name: "Anthem HDHP" },
+    { id: 3501, employer_id: 35, name: "EPO", synthetic: true },
+    { id: 63, employer_id: 35, name: "Aetna PPO" },
+    { id: 64, employer_id: 35, name: "Aetna HDHP" },
+    { id: 57, employer_id: 33, name: "Anthem PPO" },
+    { id: 58, employer_id: 33, name: "Anthem HDHP" },
+    { id: 51, employer_id: 30, name: "PPO Plan" },
+    { id: 52, employer_id: 30, name: "High Deductible Plan" },
+  ].map(p => ({ ...p, start_date: "2027-01-01", end_date: "2027-12-31" })),
+  groups: { 40: "One Medical", 43: "One Medical Virtual Primary Care", 615: "CirrusMD" },
+  members: [
+    { id: 101, name: "Avery Demo", employer_id: 39, health_plan_id: 3901 },
+    { id: 102, name: "Blake Demo", employer_id: 39, health_plan_id: 73 },
+    { id: 103, name: "Casey Demo", employer_id: 39, health_plan_id: 74, deductible_remaining_cents: 2500 },
+    { id: 104, name: "Drew Demo", employer_id: 35, health_plan_id: 3501 },
+    { id: 105, name: "Ellis Demo", employer_id: 35, health_plan_id: 63 },
+    { id: 106, name: "Finley Demo", employer_id: 35, health_plan_id: 64, deductible_remaining_cents: 0 },
+    { id: 107, name: "Gray Demo", employer_id: 33, health_plan_id: 57, oop_remaining_cents: 1500 },
+    { id: 108, name: "Harper Demo", employer_id: 33, health_plan_id: 58, oop_remaining_cents: 0 },
+    { id: 109, name: "Indigo Demo", employer_id: 30, health_plan_id: 51 },
+    { id: 110, name: "Jules Demo", employer_id: 30, health_plan_id: 52 },
+    { id: 111, name: "Kai Demo", employer_id: 35, health_plan_id: 64 },
+  ].map(m => ({ ...m, uuid: `demo-member-${m.id}`, stripe_customer_id: `cus_demo_${m.id}` })),
+  buckets: [
+    { id: 1, name: "annual_physical", display_name: "Annual physical", tags: ["preventive_care_visit"] },
+    { id: 2, name: "virtual_care", display_name: "Virtual care", tags: ["virtual", "telehealth", "virtual_call"] },
+    { id: 3, name: "sick_visit", display_name: "Sick / other care", tags: ["sick", "urgent", "walk_in", "mental_health", "nutrition", "womens_health"] },
+  ],
+  costs: [], visits: [],
+};
+SEED.plans = Object.fromEntries(SEED.planRows.map(p => [p.id, p.name]));
+for (const p of SEED.planRows) {
+  const base = p.employer_id === 30 ? 0 : p.employer_id === 33 || p.name === "EPO" ? 1000 : 2000;
+  for (const b of SEED.buckets) {
+    SEED.costs.push({ health_plan_id: p.id, apc_group_id: null, bucket_id: b.id, member_cost_cents: b.id === 1 ? 0 : base, effective_from: p.start_date });
+  }
+  if (p.employer_id === 30) SEED.costs.push({ health_plan_id: p.id, apc_group_id: 615, bucket_id: 2, member_cost_cents: 2000, effective_from: p.start_date });
+}
+function demoVisit(member, suffix, group, tag, day, extra = {}) {
+  return { id: `demo_v_${member}_${suffix}`, aligned_uuid: `demo-member-${member}`, apc_group_id: group, tag, date: `2027-01-${String(day).padStart(2, "0")}`, completed: true, payment_type: "capitation", visit_type: group === 40 ? "In-Person" : group === 615 ? "Chat" : "Virtual", ...extra };
+}
+SEED.visits = [
+  demoVisit(101, "sick", 40, "sick", 4), demoVisit(101, "annual", 40, "preventive_care_visit", 5),
+  demoVisit(101, "virtual", 43, "virtual", 6), demoVisit(101, "ffs", 40, "sick", 7, { payment_type: "ffs" }),
+  demoVisit(102, "sick", 40, "urgent", 8), demoVisit(102, "unknown", 40, "sick", 9, { visit_type: "Unknown" }),
+  demoVisit(103, "first", 40, "sick", 10), demoVisit(103, "boundary", 40, "sick", 11), demoVisit(103, "after", 40, "sick", 12),
+  demoVisit(104, "sick", 40, "walk_in", 13), demoVisit(105, "sick", 40, "sick", 14),
+  demoVisit(106, "after", 40, "sick", 15), demoVisit(111, "missing", 40, "sick", 16),
+  demoVisit(107, "inperson", 40, "sick", 17), demoVisit(107, "virtual", 43, "virtual", 18), demoVisit(107, "capped", 615, "virtual", 19),
+  demoVisit(107, "annual", 40, "preventive_care_visit", 20), demoVisit(107, "mental", 40, "mental_health", 21),
+  demoVisit(108, "capped", 40, "sick", 22),
+  demoVisit(109, "chat", 615, "virtual", 23), demoVisit(109, "primary", 43, "virtual", 24), demoVisit(109, "sick", 40, "sick", 25),
+  demoVisit(110, "chat", 615, "virtual", 26), demoVisit(110, "pending", 615, "virtual", 27, { completed: false }),
+  demoVisit(110, "unknown_tag", 40, "unmapped", 28),
+];
+const PERIOD = { start: "2027-01-01", end: "2027-01-31" };
+// Demo-only policy metadata: not new Postgres columns, not live Stedi responses.
+function priceVisits(visits = SEED.visits) {
+  const remaining = new Map();
+  return [...visits].sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id)).map(v => {
+    const member = SEED.members.find(m => m.uuid === v.aligned_uuid);
+    const bucket = SEED.buckets.find(b => b.tags.includes(v.tag));
+    const rows = SEED.costs.filter(c => member && c.health_plan_id === member.health_plan_id && bucket && c.bucket_id === bucket.id && c.effective_from <= v.date);
+    const row = rows.find(c => c.apc_group_id === v.apc_group_id) || rows.find(c => c.apc_group_id === null) || null;
+    const result = { v, member, bucket, row, amount: 0, reason: "", held: false };
+    const stop = (reason, held = false) => ({ ...result, reason, held });
+    if (!member) return stop("Member not mapped", true);
+    const plan = SEED.planRows.find(p => p.id === member.health_plan_id && p.employer_id === member.employer_id);
+    if (v.date < PERIOD.start || v.date > PERIOD.end) return stop("Outside invoice period");
+    if (!plan || v.date < plan.start_date || v.date > plan.end_date) return stop("No active health plan", true);
+    if (!v.completed) return stop("Visit not completed");
+    if (v.payment_type !== "capitation") return stop("Not capitation");
+    if (!bucket) return stop("Unmapped tag; review", true);
+    if (bucket.id === 1) return stop("Annual physical $0; provisional exclusion");
+    if ([39, 35].includes(member.employer_id)) {
+      if (v.visit_type === "Unknown") return stop("Unknown visit type; review", true);
+      if (v.visit_type !== "In-Person") return stop("In-person only; provisional PDF rule");
+    }
+    if (!row || row.member_cost_cents === 0) return stop(member.employer_id === 30 ? "Primary care $0; CirrusMD urgent care only" : "No positive cost configured");
+    let amount = row.member_cost_cents;
+    const hd = [39, 35].includes(member.employer_id) && /HDHP/.test(plan.name);
+    const capped = member.employer_id === 33;
+    if (hd || capped) {
+      const opening = hd ? member.deductible_remaining_cents : member.oop_remaining_cents;
+      if (!Number.isInteger(opening) || opening < 0) return stop("Missing accumulator; review (demo has no Stedi)", true);
+      const balance = remaining.has(member.id) ? remaining.get(member.id) : opening;
+      if (balance === 0) return stop(hd ? "Deductible reached; post-deductible rule unknown" : "Out-of-pocket maximum reached", hd);
+      // Crossing a deductible is held: the source never specifies split-visit pricing.
+      if (hd && balance < amount) return stop("Deductible boundary; split-visit pricing needs confirmation", true);
+      amount = Math.min(amount, balance);
+      remaining.set(member.id, balance - amount);
+    }
+    return { ...result, amount, reason: amount < row.member_cost_cents ? "Capped at remaining out-of-pocket balance (demo)" : "Billable" };
+  });
+}
+const BILLING = priceVisits();
+const EXAMPLES = {
+  period: `${PERIOD.start} to ${PERIOD.end}`,
+  employer: JSON.stringify(SEED.employers[0], null, 2),
+  members: JSON.stringify(SEED.members.filter(m => m.employer_id === 39), null, 2),
+  member: JSON.stringify(SEED.members[0], null, 2),
+  visits: JSON.stringify(SEED.visits.slice(0, 4), null, 2),
+  bucket: JSON.stringify(SEED.buckets[2], null, 2),
+  plan_costs: JSON.stringify(SEED.costs.filter(c => c.health_plan_id === 3901), null, 2),
+  cost_row: JSON.stringify(SEED.costs.find(c => c.health_plan_id === 3901 && c.bucket_id === 3)),
+  visit: JSON.stringify(SEED.visits[0], null, 2),
+  cost: "1000 ($10.00 EPO)",
+  stripe_items: "Fictional items from eligible completed visits only",
+  stripe_invoice: "in_demo_101; no Stripe request is made",
+  member_buckets: "Visits grouped by the existing cost_share_buckets tags",
+  bucket_visits: "Matching fictional visits for the selected bucket",
+  users_with_buckets: "All fictional members and their visit buckets",
+};
+
+const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const varRe = new RegExp("\\b(" + Object.keys(EXAMPLES).sort((a, b) => b.length - a.length).join("|") + ")\\b", "g");
+
+function color(line) {
+  const ci = line.indexOf("//");
+  if (ci >= 0) return colorCode(line.slice(0, ci)) + `<span class="c">${esc(line.slice(ci))}</span>`;
+  return colorCode(line);
+}
+function colorCode(line) {
+  let html = esc(line)
+    .replace(/&quot;[^&]*?&quot;/g, (m) => `<span class="s">${m}</span>`)
+    .replace(/\b(var|if|or|includes|next|null|true|Every)\b/g, '<span class="kw">$1</span>')
+    .replace(/\b(PSQL|Snowflake|Stripe)::(\w+)/g, '<span class="t">$1::$2</span>')
+    .replace(/\b(\d+)\b/g, '<span class="n">$1</span>');
+  // add tooltips only in text, never inside tags or strings
+  return html.split(/(<span class="s">.*?<\/span>|<[^>]+>)/).map((part) =>
+    part.startsWith("<") ? part : part.replace(varRe, (m) => `<span class="v" data-tip="${esc(EXAMPLES[m])}">${m}</span>`)
+  ).join("");
+}
+
+document.getElementById("code").innerHTML = src.split("\n").map((raw) => {
+  const hl = raw.endsWith(" @@");
+  const line = hl ? raw.slice(0, -3) : raw;
+  return `<span class="l">${color(line) || " "}</span>`;
+}).join("");
+const f = location.hash.match(/tip=(\w+)/);
+if (f) document.querySelectorAll(".v").forEach((el, i, all) => { if (el.textContent === f[1] && !document.querySelector(".v.force")) el.classList.add("force"); });
+// ---- player: run the script over the seed rows and record every step ----
+
+function buildTrace() {
+  const steps = [], vars = new Map(), saved = { invoices: [], items: [] };
+  const snap = (from, to, note) => steps.push({ from, to: to || from, note: note || "", vars: [...vars], invoices: [...saved.invoices], items: [...saved.items] });
+  const set = (k, v) => vars.set(k, v);
+  const drop = (...ks) => ks.forEach((k) => vars.delete(k));
+  const list = (rows) => rows.length ? "[\n" + rows.map((r) => "  " + r).join(",\n") + "\n]" : "[]";
+  const fMember = (m) => `Member #${m.id} ${m.name} { health_plan_id: ${m.health_plan_id}, uuid: "${m.uuid}" }`;
+  const fBucket = (b) => `CostShareBucket #${b.id} ${b.name} { tags: [${b.tags.join(", ")}] }`;
+  const fVisit = (v) => `VisitDetail ${v.id} { apc_group_id: ${v.apc_group_id}, tag: "${v.tag}", date: ${v.date} }`;
+  const fCost = (c) => `{ health_plan_id: ${c.health_plan_id}, apc_group_id: ${c.apc_group_id ?? "null"}, bucket_id: ${c.bucket_id}, member_cost_cents: ${c.member_cost_cents} }`;
+  const fMB = (mb) => "{ " + [...mb].map(([b, vs]) => `${b.name}: [${vs.map((v) => v.id).join(", ")}]`).join(", ") + " }";
+  const fItems = (it) => list(it.map(([v, b, c]) => `[${v.id}, ${b.name}, ${c}]`));
+  let nextInvoiceId = 7;
+
+  snap(1, 1, "Runs on the 1st of each month. Demo run is on 2027-03-01; no live billing.");
+  const period = PERIOD;
+  set("period", `${period.start} to ${period.end}`); snap(4);
+
+  for (const employer of SEED.employers.filter((e) => e.member_costshare_invoicing)) {
+    set("employer", `Employer #${employer.id} ${employer.name}`); snap(7);
+    const members = SEED.members.filter((m) => m.employer_id === employer.id);
+    set("members", list(members.map(fMember))); snap(8);
+    const uuids = members.map((m) => m.uuid);
+    const visits = SEED.visits.filter((v) => uuids.includes(v.aligned_uuid) && v.date >= period.start && v.date <= period.end);
+    set("visits", list(visits.map(fVisit))); snap(9);
+
+    const uwb = [];
+    const fUWB = () => list(uwb.map(([m, mb]) => `[Member #${m.id}, ${fMB(mb)}]`));
+    set("users_with_buckets", "[]"); snap(12);
+    for (const m of members) {
+      set("member", fMember(m)); snap(13);
+      const mb = new Map();
+      set("member_buckets", "{}"); snap(14);
+      for (const b of SEED.buckets) {
+        set("bucket", fBucket(b)); snap(15);
+        const hits = visits.filter((v) => v.aligned_uuid === m.uuid && b.tags.includes(v.tag));
+        mb.set(b, hits); set("member_buckets", fMB(mb));
+        snap(16, 16, `${hits.length} of ${m.name}'s visits have a ${b.name} tag.`);
+      }
+      drop("bucket");
+      uwb.push([m, mb]); set("users_with_buckets", fUWB()); snap(18);
+    }
+    drop("member", "member_buckets");
+
+    for (const [m, mb] of uwb) {
+      drop("plan_costs", "stripe_items", "stripe_invoice", "invoice");
+      set("member", fMember(m)); set("member_buckets", fMB(mb)); snap(22);
+      snap(24, 24, `No cost_share_invoices row for member_id ${m.id} and ${period.start}, so keep going.`);
+      const plan = SEED.plans[m.health_plan_id];
+      const planCosts = SEED.costs.filter((c) => c.health_plan_id === m.health_plan_id);
+      set("plan_costs", list(planCosts.map(fCost))); snap(26, 26, `${planCosts.length} cost rows for the ${plan} plan.`);
+      const items = [];
+      set("stripe_items", "[]"); snap(28);
+      for (const [b, bv] of mb) {
+        set("bucket", fBucket(b)); set("bucket_visits", `[${bv.map((v) => v.id).join(", ")}]`);
+        drop("visit", "cost_row");
+        snap(29, 29, bv.length ? "" : `No ${b.name} visits for ${m.name}.`);
+        for (const v of bv) {
+          drop("cost_row");
+          set("visit", fVisit(v)); snap(30);
+          const group = SEED.groups[v.apc_group_id];
+          const own = planCosts.find((c) => c.bucket_id === b.id && c.apc_group_id === v.apc_group_id);
+          const row = own || planCosts.find((c) => c.bucket_id === b.id && c.apc_group_id === null) || null;
+          const decision = BILLING.find(x => x.v.id === v.id);
+          set("cost_row", row ? fCost(row) : "null");
+          snap(32, 33, own ? `${group} has its own ${b.name} row on ${plan}, so it wins.`
+            : row ? `No ${group} row for ${b.name} on ${plan}, so the default row (apc_group_id null) is used.`
+            : `${plan} has no ${b.name} cost row at all.`);
+          if (!decision.amount) { snap(34, 34, `${decision.reason}; skip ${v.id}.`); continue; }
+          snap(34, 34, "cost_row is set, keep going.");
+          items.push([v, b, decision.amount]); set("stripe_items", fItems(items)); snap(35);
+        }
+      }
+      drop("bucket", "bucket_visits", "visit", "cost_row");
+      if (!items.length) { snap(38, 38, "Nothing to bill, skip this member."); continue; }
+      snap(38, 38, `stripe_items has ${items.length}, keep going.`);
+      const total = items.reduce((s, it) => s + it[2], 0);
+      const stripeId = "in_demo_" + m.id;
+      set("stripe_invoice", `Stripe Invoice ${stripeId} { customer: "${m.stripe_customer_id}", total: ${total} }`);
+      snap(41, 45, `Demo invoice for ${m.name} $${(total / 100).toFixed(2)}.`);
+      const invId = nextInvoiceId++;
+      saved.invoices.push(`{ id: ${invId}, member_id: ${m.id}, period_start: ${period.start}, stripe_invoice_id: "${stripeId}", total_cents: ${total},\n  items: [\n` +
+        items.map(([v, b, c]) => `    { visit_id: "${v.id}", bucket_id: ${b.id}, amount_cents: ${c} }`).join(",\n") + "\n  ] }");
+      snap(47, 50, `Saved 1 cost_share_invoices row with ${items.length} ${items.length === 1 ? "item" : "items"} inside it.`);
+    }
+  }
+  vars.clear();
+  snap(53, 53, `Done. ${saved.invoices.length} fictional invoices; no Stripe calls.`);
+  return steps;
+}
+
+const TRACE = buildTrace();
+const player = { i: 0, timer: null };
+const $ = (id) => document.getElementById(id);
+const codeLines = [...document.querySelectorAll("#code .l")];
+$("p_seek").max = TRACE.length - 1;
+
+function showStep(i) {
+  player.i = Math.max(0, Math.min(TRACE.length - 1, i));
+  const st = TRACE[player.i], prev = player.i ? TRACE[player.i - 1] : { vars: [], invoices: [], items: [] };
+  codeLines.forEach((el, n) => el.classList.toggle("cur", n + 1 >= st.from && n + 1 <= st.to));
+  // keep the current line in view inside the code area
+  const pre = $("code"), first = codeLines[st.from - 1], last = codeLines[st.to - 1];
+  if (first.offsetTop < pre.scrollTop + 40) pre.scrollTop = first.offsetTop - 80;
+  else if (last.offsetTop + last.offsetHeight > pre.scrollTop + pre.clientHeight - 40) pre.scrollTop = last.offsetTop + last.offsetHeight - pre.clientHeight + 80;
+
+  const before = new Map(prev.vars);
+  let html = st.vars.map(([k, v]) => `<div class="pv${before.get(k) === v ? "" : " chg"}"><span class="k">${k}</span><span class="val">${esc(v)}</span></div>`).join("");
+  if (!st.vars.length && !st.invoices.length) html = `<div class="pempty">no variables yet</div>`;
+  const savedRows = (name, rows, was) => rows.length ? `<div class="pgrp">saved to Postgres ${name}</div>` +
+    rows.map((r, n) => `<div class="pv${n >= was ? " chg" : ""}"><span class="k">row ${n + 1}</span><span class="val">${esc(r)}</span></div>`).join("") : "";
+  html += savedRows("cost_share_invoices", st.invoices, prev.invoices.length);
+  $("p_vars").innerHTML = html;
+  const chg = $("p_vars").querySelector(".chg");
+  const box = $("p_vars");
+  if (chg && (chg.offsetTop < box.scrollTop || chg.offsetTop + chg.offsetHeight > box.scrollTop + box.clientHeight)) box.scrollTop = chg.offsetTop - 30;
+
+  $("p_note").textContent = st.note || " ";
+  $("p_pos").textContent = `step ${player.i + 1} / ${TRACE.length} · line ${st.from}`;
+  $("p_seek").value = player.i;
+  $("p_back").disabled = $("p_reset").disabled = player.i === 0;
+  $("p_next").disabled = player.i === TRACE.length - 1;
+}
+function stopPlay() { clearInterval(player.timer); player.timer = null; $("p_play").textContent = "Play"; }
+function togglePlay() {
+  if (player.timer) return stopPlay();
+  if (player.i === TRACE.length - 1) showStep(0);
+  $("p_play").textContent = "Pause";
+  player.timer = setInterval(() => { showStep(player.i + 1); if (player.i === TRACE.length - 1) stopPlay(); }, 550);
+}
+$("p_next").onclick = () => { stopPlay(); showStep(player.i + 1); };
+$("p_back").onclick = () => { stopPlay(); showStep(player.i - 1); };
+$("p_reset").onclick = () => { stopPlay(); showStep(0); };
+$("p_play").onclick = togglePlay;
+$("p_seek").oninput = (e) => { stopPlay(); showStep(+e.target.value); };
+document.addEventListener("keydown", (e) => {
+  if (document.body.dataset.tab !== "code" || e.target.tagName === "INPUT" || e.target.tagName === "BUTTON") return;
+  if (e.key === "ArrowRight") { stopPlay(); showStep(player.i + 1); }
+  else if (e.key === "ArrowLeft") { stopPlay(); showStep(player.i - 1); }
+  else if (e.key === " ") { e.preventDefault(); togglePlay(); }
+});
+const startAt = location.hash.match(/step=(\d+)/);
+showStep(startAt ? +startAt[1] - 1 : 0);
+
+// ---- ERD connector lines ----
+const LINKS = [
+  ["t_costs.bucket_id", "t_buckets.id"],
+  ["t_costs.health_plan_id", "t_plans.id"],
+  ["t_costs.apc_group_id", "t_apc.id"],
+  ["t_members.health_plan_id", "t_plans.id"],
+  ["t_members.employer_id", "t_emp.id"],
+  ["t_plans.employer_id", "t_emp.id"],
+  ["t_inv.member_id", "t_members.id"],
+  ["t_visits.apc_group_id", "t_apc.id"],
+  ["t_visits.aligned_uuid", "t_members.uuid"],
+];
+function drawLinks() {
+  const erd = document.getElementById("erd"), svg = document.getElementById("links");
+  // shrink the whole diagram to fit the left panel when the window is narrow
+  erd.style.zoom = 1;
+  const z = Math.min(1, (erd.parentElement.clientWidth - 40) / erd.offsetWidth);
+  erd.style.zoom = z;
+  const box = erd.getBoundingClientRect();
+  const pos = (key) => {
+    const row = erd.querySelector(`[data-c="${key}"]`).getBoundingClientRect();
+    const ent = erd.querySelector(`[data-c="${key}"]`).closest(".ent").getBoundingClientRect();
+    return { l: (ent.left - box.left) / z, r: (ent.right - box.left) / z, y: (row.top + row.height / 2 - box.top) / z };
+  };
+  let paths = "", sameCol = 0; const gapUse = {}; const SPREAD = [0, -9, 9, -18, 18];
+  for (const [from, to] of LINKS) {
+    const a = pos(from), b = pos(to);
+    let d, ax, bx, aDir, bDir;
+    if (Math.abs(a.l - b.l) < 5) {           // same column: loop out the left side
+      const off = 12 + (sameCol++ % 3) * 16;
+      ax = a.l; bx = b.l; aDir = -1; bDir = -1;
+      d = `M${ax},${a.y} H${ax - off} V${b.y} H${bx}`;
+    } else {
+      const rightward = b.l > a.l;
+      ax = rightward ? a.r : a.l; bx = rightward ? b.l : b.r;
+      aDir = rightward ? 1 : -1; bDir = -aDir;
+      const g = Math.round(Math.min(ax, bx)); gapUse[g] = (gapUse[g] || 0);
+      const mx = (ax + bx) / 2 + SPREAD[gapUse[g]++ % SPREAD.length];
+      d = `M${ax},${a.y} H${mx} V${b.y} H${bx}`;
+    }
+    paths += `<path d="${d}" class="ln"/>`;
+    // crow's foot (many) at the FK end
+    paths += `<path class="ln" d="M${ax + aDir * 10},${a.y} L${ax},${a.y - 5} M${ax + aDir * 10},${a.y} L${ax},${a.y + 5}"/>`;
+    // bar (one) at the PK end
+    paths += `<path class="ln" d="M${bx + bDir * 7},${b.y - 5} V${b.y + 5}"/>`;
+  }
+  svg.innerHTML = `<style>.ln{fill:none;stroke:#6f7a92;stroke-width:1.5}</style>` + paths;
+}
+window.addEventListener("load", drawLinks);
+window.addEventListener("resize", drawLinks);
+
+// ---- dashboard: read-only mock over the same seed rows ----
+const DB = (() => {
+  const plans = SEED.planRows.map((p) => ({ ...p, label: `${p.name} ${p.start_date.slice(0, 4)}` }));
+  const groups = Object.entries(SEED.groups).map(([id, name]) => ({ id: +id, name }));
+  // Dashboard, data tables and player share exactly the same policy decisions.
+  const bill = (v) => BILLING.find(x => x.v.id === v.id);
+  const invoices = SEED.members.map((m) => {
+    const items = SEED.visits.filter((v) => v.aligned_uuid === m.uuid).map(bill).filter((x) => x.amount > 0);
+    return { member: m, items, total: items.reduce((s, x) => s + x.amount, 0) };
+  }).filter((i) => i.items.length).map((i, n) => ({ id: 7 + n, ...i }));
+  return { plans, groups, bill, invoices };
+})();
+
+const money = (c) => "$" + (c / 100).toFixed(2);
+const dl = (r, text) => `<a href="#tab=dash&r=${r}">${esc(String(text))}</a>`;
+const pill = (text, kind) => `<span class="pill ${kind || ""}">${esc(String(text))}</span>`;
+const mono = (v) => `<span class="mono">${esc(String(v))}</span>`;
+const dTable = (cols, rows, empty) => rows.length
+  ? `<table><tr>${cols.map((c) => `<th>${c}</th>`).join("")}</tr>${rows.map((r) => `<tr class="${r.r ? "go" : ""} ${r.cls || ""}" data-r="${r.r || ""}">${r.cells.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")}</table>`
+  : `<div class="dempty">${empty}</div>`;
+const dCard = (title, src, body, cls = "") => `<div class="dcard ${cls}"><div class="dcard-h"><b>${title}</b><span class="dsrc">${src}</span></div>${body}</div>`;
+const dPage = (title, sub, cards) => `<h2>${esc(title)}</h2><div class="dsub">${sub}</div>${cards.join("")}`;
+const byId = (list, id) => list.find((x) => x.id === +id);
+const planOf = (id) => byId(DB.plans, id), groupOf = (id) => byId(DB.groups, id), bucketOf = (id) => byId(SEED.buckets, id);
+const appliesAt = (c) => c.apc_group_id === null ? pill("All APC groups") : dl("groups/" + c.apc_group_id, groupOf(c.apc_group_id).name) + pill("own cost", "own");
+const planLink = (id) => dl(`employers/${planOf(id).employer_id}/plans/${id}`, planOf(id).label);
+
+const vl = (id) => `<a class="mono" href="#tab=dash&r=visits/${id}">${id}</a>`;
+const DASH_NAV = [
+  ["employers", "Employers", '<path d="M3 21h18M5 21V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16M9 7h2M13 7h2M9 11h2M13 11h2M9 15h2M13 15h2"/>'],
+  ["groups", "APC Groups", '<path d="M12 21s-7-5.5-7-11a7 7 0 0 1 14 0c0 5.5-7 11-7 11zM12 7v6M9 10h6"/>'],
+  ["buckets", "Cost Share Buckets", '<path d="M4 7h16l-2 13H6L4 7zM8 7a4 4 0 0 1 8 0M10 12h4"/>'],
+  ["visits", "Visits", '<path d="M7 3v4M17 3v4M4 9h16M5 5h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zM9 15l2 2 4-4"/>'],
+];
+
+function dashView(r) {
+  const [top, id, sub, subId] = r;
+  if (top === "visits") {
+    const rows = SEED.visits.map(DB.bill);
+    return { crumbs: id ? [["visits", "Visits"], [null, id]] : [[null, "Visits"]], html: dPage("Visits", "Fictional January 2027 visits. Held visits need a rule or balance; $0 visits are excluded.", [
+      dCard("All visits", `snowflake: visit_detail · ${rows.length} rows`,
+        dTable(["Visit", "aligned_uuid", "Member", "Health plan", "APC group", "Visit type", "Completed", "Tag", "Date", "Bucket", "Decision", "Billed"], rows.map((x) => ({ cls: (x.v.id === id ? "hlrow " : "") + (x.amount ? "" : "none"), cells: [
+          vl(x.v.id), mono(x.v.aligned_uuid), esc(x.member.name), planLink(x.member.health_plan_id), dl("groups/" + x.v.apc_group_id, groupOf(x.v.apc_group_id).name), esc(x.v.visit_type), x.v.completed ? "Yes" : "No", `<span class="pill tag">${x.v.tag}</span>`, mono(x.v.date),
+          x.bucket ? dl("buckets/" + x.bucket.id, x.bucket.display_name) : "none",
+          esc(x.reason) + (x.amount ? " " + pill(x.row.apc_group_id === null ? "Plan default" : "Group override", x.row.apc_group_id === null ? "" : "own") : ""), x.amount ? money(x.amount) : x.held ? "Held for review" : "$0.00"] })))),
+    ]) };
+  }
+  if (top === "groups" && id) {
+    const g = groupOf(id), own = SEED.costs.filter((c) => c.apc_group_id === g.id);
+    const visits = SEED.visits.filter((v) => v.apc_group_id === g.id).map(DB.bill);
+    return { crumbs: [["groups", "APC Groups"], [null, g.name]], html: dPage(g.name, `APC group #${g.id}`, [
+      dCard("Costs set for this group only", `psql: health_plan_bucket_costs where apc_group_id = ${g.id}`,
+        dTable(["Employer", "Health plan", "Bucket", "Member cost here", "Health plan default"], own.map((c) => {
+          const def = SEED.costs.find((d) => d.health_plan_id === c.health_plan_id && d.bucket_id === c.bucket_id && d.apc_group_id === null);
+          return { cells: [dl("employers/" + planOf(c.health_plan_id).employer_id, byId(SEED.employers, planOf(c.health_plan_id).employer_id).name), planLink(c.health_plan_id), dl("buckets/" + c.bucket_id, bucketOf(c.bucket_id).display_name), `<b>${money(c.member_cost_cents)}</b>`, def ? money(def.member_cost_cents) : "none"] };
+        }), "No costs set for this group. Visits here use each health plan's default cost.")),
+      dCard("Visits, January 2027", `snowflake: visit_detail where apc_group_id = ${g.id}`,
+        dTable(["Visit", "aligned_uuid", "Member", "Health plan", "Tag", "Bucket", "Cost used", "Billed"], visits.map((x) => ({ cls: x.amount ? "" : "none", cells: [
+          vl(x.v.id), mono(x.v.aligned_uuid), esc(x.member.name), planLink(x.member.health_plan_id), `<span class="pill tag">${x.v.tag}</span>`, x.bucket ? dl("buckets/" + x.bucket.id, x.bucket.display_name) : "none",
+          !x.amount ? esc(x.reason) : x.row.apc_group_id === null ? pill("Health plan default") : pill("This group's own cost", "own"), x.amount ? money(x.amount) : x.held ? "Held for review" : "$0.00"] })), "No visits.")),
+    ]) };
+  }
+  if (top === "groups") return { crumbs: [[null, "APC Groups"]], html: dPage("APC Groups", "Clinic groups. A group can have its own member cost on a health plan.", [
+    dCard("All APC groups", `psql: apc_groups · ${DB.groups.length} rows`, dTable(["ID", "Name", "Custom bucket costs", "Visits, Jan 2027"], DB.groups.map((g) => {
+      const n = SEED.costs.filter((c) => c.apc_group_id === g.id).length;
+      return { r: "groups/" + g.id, cells: [mono(g.id), dl("groups/" + g.id, g.name), n ? pill(n + (n === 1 ? " own cost" : " own costs"), "own") : pill("Uses health plan defaults"), SEED.visits.filter((v) => v.apc_group_id === g.id).length] };
+    }))),
+  ]) };
+  if (top === "buckets" && id) {
+    const b = bucketOf(id), rows = SEED.costs.filter((c) => c.bucket_id === b.id);
+    return { crumbs: [["buckets", "Cost Share Buckets"], [null, b.display_name]], html: dPage(b.display_name, `Cost share bucket #${b.id} · name: ${b.name}`, [
+      dCard("Visit tags in this bucket", `psql: cost_share_buckets.tags`, `<div style="padding:2px 0 14px">${b.tags.map((t) => `<span class="pill tag">${t}</span>`).join("")}</div>`),
+      dCard("Member cost by health plan", `psql: health_plan_bucket_costs where bucket_id = ${b.id}`,
+        dTable(["Employer", "Health plan", "Applies at", "Member cost", "Effective from"], rows.map((c) => ({ cells: [dl("employers/" + planOf(c.health_plan_id).employer_id, byId(SEED.employers, planOf(c.health_plan_id).employer_id).name), planLink(c.health_plan_id), appliesAt(c), `<b>${money(c.member_cost_cents)}</b>`, mono(planOf(c.health_plan_id).start_date)] })), "No health plan has a cost for this bucket.")),
+    ]) };
+  }
+  if (top === "buckets") return { crumbs: [[null, "Cost Share Buckets"]], html: dPage("Cost Share Buckets", "Each bucket groups the visit tags that are billed the same way.", [
+    dCard("All buckets", `psql: cost_share_buckets · ${SEED.buckets.length} rows`, dTable(["ID", "Name", "Display name", "Visit Tags", "Health plans with a cost"], SEED.buckets.map((b) => ({ r: "buckets/" + b.id, cells: [
+      mono(b.id), mono(b.name), dl("buckets/" + b.id, b.display_name), b.tags.map((t) => `<span class="pill tag">${t}</span>`).join(""), new Set(SEED.costs.filter((c) => c.bucket_id === b.id).map((c) => c.health_plan_id)).size] })))),
+  ]) };
+  if (top === "employers" && id && sub === "plans" && subId) {
+    const e = byId(SEED.employers, id), p = planOf(subId);
+    const rows = SEED.buckets.flatMap((b) => {
+      const cs = SEED.costs.filter((c) => c.health_plan_id === p.id && c.bucket_id === b.id).sort((x, y) => (x.apc_group_id || 0) - (y.apc_group_id || 0));
+      return cs.length ? cs.map((c) => ({ cells: [dl("buckets/" + b.id, b.display_name), appliesAt(c), `<b>${money(c.member_cost_cents)}</b>`, mono(p.start_date)] }))
+        : [{ cls: "none", cells: [dl("buckets/" + b.id, b.display_name), "No cost set", "Not billed", ""] }];
+    });
+    const members = SEED.members.filter((m) => m.health_plan_id === p.id);
+    return { crumbs: [["employers", "Employers"], ["employers/" + e.id, e.name], [null, p.label]], html: dPage(p.label, `Health plan #${p.id} · ${esc(e.name)} · ${p.start_date} to ${p.end_date}`, [
+      dCard("Employer rules", "Attachments · target prices", `<p>${esc(e.note)}</p><p>${p.synthetic ? "EPO ID is synthetic; PDF has no production EPO plan." : "Plan ID/name from PDF; prices follow target rules."} Accumulator balances are fixture metadata, not schema changes or Stedi responses.</p>`),
+      dCard("Member cost per bucket", `psql: health_plan_bucket_costs where health_plan_id = ${p.id}`, dTable(["Bucket", "Applies at", "Member cost", "Effective from"], rows)),
+      dCard("Members on this health plan", `psql: members where health_plan_id = ${p.id}`, dTable(["ID", "UUID", "Name"], members.map((m) => ({ cells: [mono(m.id), mono(m.uuid), esc(m.name)] })), "No members.")),
+    ]) };
+  }
+  if (top === "employers" && id) {
+    const e = byId(SEED.employers, id), plans = DB.plans.filter((p) => p.employer_id === e.id), members = SEED.members.filter((m) => m.employer_id === e.id);
+    return { crumbs: [["employers", "Employers"], [null, e.name]], html: dPage(e.name, `Employer #${e.id} · cost share invoicing ${pill(e.member_costshare_invoicing ? "On" : "Off", e.member_costshare_invoicing ? "on" : "")}`, [
+      dCard("Employer rules and open questions", "Attachments · not live verification", `<p>${esc(e.note)}</p>`),
+      dCard("Health plans", `psql: health_plans where employer_id = ${e.id}`, dTable(["ID", "Name", "Start date", "End date", "Members", "Visit buckets configured"], plans.map((p) => {
+        const cs = SEED.costs.filter((c) => c.health_plan_id === p.id);
+        return { r: `employers/${e.id}/plans/${p.id}`, cells: [mono(p.id), dl(`employers/${e.id}/plans/${p.id}`, p.name), mono(p.start_date), mono(p.end_date), members.filter((m) => m.health_plan_id === p.id).length, `${new Set(cs.map((c) => c.bucket_id)).size} of ${SEED.buckets.length}`] };
+      }))),
+      dCard("Members", `psql: members where employer_id = ${e.id}`, dTable(["ID", "UUID", "Name", "Health plan"], members.map((m) => ({ cells: [mono(m.id), mono(m.uuid), esc(m.name), planLink(m.health_plan_id)] })))),
+      dCard("Cost share invoices, January 2027", `psql: cost_share_invoices where period_start = 2027-01-01`, dTable(["ID", "Member", "Visits billed (items)", "Total"], DB.invoices.filter((i) => i.member.employer_id === e.id).map((i) => ({ cells: [
+        mono(i.id), esc(i.member.name), i.items.map((x) => `${vl(x.v.id)} ${esc(x.bucket.display_name)} ${money(x.amount)}`).join("<br>"), `<b>${money(i.total)}</b>`] })), "No invoices.")),
+    ]) };
+  }
+  return { crumbs: [[null, "Employers"]], html: dPage("Employers", "2027 benefits from the attachments. All members, visits, balances and invoices are fictional.", [
+    dCard("All employers", `psql: employers · ${SEED.employers.length} rows`, dTable(["ID", "Name", "Cost share invoicing", "Health plans", "Members"], SEED.employers.map((e) => ({ r: "employers/" + e.id, cells: [
+      mono(e.id), dl("employers/" + e.id, e.name), pill(e.member_costshare_invoicing ? "On" : "Off", e.member_costshare_invoicing ? "on" : ""), DB.plans.filter((p) => p.employer_id === e.id).length, SEED.members.filter((m) => m.employer_id === e.id).length] })))),
+    dCard('<span aria-hidden="true">📝</span> Notes', "Screenshot + outdated PDF · target rules", dTable(["Employer", "Plans / member cost", "Visit rule"], SEED.employers.map(e => ({ cells: [dl("employers/" + e.id, e.name), e.id === 30 ? "PPO / HDHP: $20 CirrusMD; $0 primary care" : e.id === 33 ? "Anthem PPO / HDHP: $10 until out-of-pocket max" : "EPO $10 · PPO $20 · HDHP $20 up to deductible", esc(e.note)] }))), "dnotes"),
+  ]) };
+}
+
+function renderDash(route) {
+  const r = (route || "employers").split("/");
+  const view = dashView(r);
+  $("d_nav").innerHTML = DASH_NAV.map(([key, label, icon]) => `<a href="#tab=dash&r=${key}" class="${(r[0] || "employers") === key ? "on" : ""}"><svg viewBox="0 0 24 24">${icon}</svg>${label}</a>`).join("");
+  $("d_crumbs").innerHTML = view.crumbs.map(([to, label]) => to ? dl(to, label) : `<b>${esc(label)}</b>`).join("<i>/</i>");
+  $("d_body").innerHTML = view.html;
+  $("d_body").scrollTop = 0;
+}
+$("d_body").addEventListener("click", (e) => {
+  const row = e.target.closest("tr.go");
+  if (row && !e.target.closest("a")) location.hash = "tab=dash&r=" + row.dataset.r;
+});
+
+// ---- seed tables: generated from the same rows as the dashboard ----
+function renderSeeds() {
+  $("seed-rules").innerHTML = SEED.employers.map(e => `<p><b>${esc(e.name)}</b> — ${esc(e.note)}</p>`).join("");
+  const table = (title, columns, rows) => `<div class="st full"><div class="sth">${esc(title)}</div><table><tr>${columns.map(c => `<th>${esc(c)}</th>`).join("")}</tr>${rows.map(r => `<tr>${r.map(v => `<td>${esc(String(v ?? "null"))}</td>`).join("")}</tr>`).join("")}</table></div>`;
+  $("seed-tables").innerHTML = [
+    table("employers · demo invoicing enabled", ["id", "name", "member_costshare_invoicing"], SEED.employers.map(e => [e.id, e.name, e.member_costshare_invoicing])),
+    table("health_plans · target benefits", ["id", "employer_id", "name", "start_date", "end_date", "source"], SEED.planRows.map(p => [p.id, p.employer_id, p.name, p.start_date, p.end_date, p.synthetic ? "synthetic EPO ID" : "PDF plan ID/name"])),
+    table("apc_groups", ["id", "name"], DB.groups.map(g => [g.id, g.name])),
+    table("members · fictional", ["id", "name", "employer_id", "health_plan_id", "demo deductible remaining", "demo OOP remaining"], SEED.members.map(m => [m.id, m.name, m.employer_id, m.health_plan_id, m.deductible_remaining_cents === undefined ? "not supplied" : money(m.deductible_remaining_cents), m.oop_remaining_cents === undefined ? "not supplied" : money(m.oop_remaining_cents)])),
+    table("cost_share_buckets", ["id", "name", "tags"], SEED.buckets.map(b => [b.id, b.name, b.tags.join(", ")])),
+    table("health_plan_bucket_costs · target prices in cents", ["health_plan_id", "apc_group_id", "bucket_id", "member_cost_cents", "effective_from"], SEED.costs.map(c => [c.health_plan_id, c.apc_group_id, c.bucket_id, c.member_cost_cents, c.effective_from])),
+    table("visit_detail · fictional January 2027", ["id", "member", "plan", "APC group", "tag", "amount", "decision"], BILLING.map(x => [x.v.id, x.member.name, SEED.plans[x.member.health_plan_id], SEED.groups[x.v.apc_group_id], x.v.tag, money(x.amount), x.reason])),
+    table("cost_share_invoices · fictional January 2027", ["id", "member_id", "period_start", "total_cents", "items"], DB.invoices.map(i => [i.id, i.member.id, PERIOD.start, i.total, JSON.stringify(i.items.map(x => ({ visit_id: x.v.id, bucket_id: x.bucket.id, amount_cents: x.amount })))])),
+  ].join("");
+}
+renderSeeds();
+
+// ---- top tabs ----
+function showTab() {
+  const tab = (location.hash.match(/tab=(\w+)/) || [])[1] || "data";
+  const route = (location.hash.match(/r=([\w\/]+)/) || [])[1];
+  document.body.dataset.tab = tab;
+  document.querySelectorAll("#tabs a").forEach((a) => a.classList.toggle("on", a.dataset.tab === tab));
+  ["data", "code", "dash"].forEach((t) => $("view-" + t).classList.toggle("on", t === tab));
+  if (tab === "data") drawLinks();
+  if (tab === "code") showStep(player.i);
+  if (tab === "dash") renderDash(route);
+}
+window.addEventListener("hashchange", () => { stopPlay(); showTab(); });
+showTab();
+</script>
+</body>
+</html>

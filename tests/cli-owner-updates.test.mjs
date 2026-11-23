@@ -1,3 +1,4 @@
+import * as abandonCommands from '../src/cli/abandonCommands.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, mkdir } from 'node:fs/promises';
@@ -54,6 +55,7 @@ function daemon(worktree) {
   const replies = []; let messages = [];
   const downloads = []; const seenAttachments = [];
   const mocks = {
+    './abandonCommands': abandonCommands, './abandonTask': { abandonTask: async () => { throw new Error('unexpected cleanup'); } },
     '../shared/headless.ts': headless,
     './state': { loadState: () => state, updateTask: (id, patch) => Object.assign(task, typeof patch === 'function' ? patch(task) : patch) },
     './slackLinks': { taskSlackLinks: async () => ({ ticket: task.ticket.url }) },

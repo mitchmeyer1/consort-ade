@@ -25,9 +25,10 @@ export function isTestRequest(text: string): boolean {
   const t = plain(text);
   if (!t || t.length > 400) return false;
   const meTry = /\b(?:i|we) (?:want to|wanna|would like to|'d like to|need to) (?:test|try|demo|play with|click through|check out|poke at)\b|\b(?:let me|can i|could i|so i can|so we can|for me to) (?:test|try|demo|play with|click through|check out|poke at)\b/;
-  const giveMe = /\b(?:spin up|start|bring up|stand up|fire up|give me|send me|share)\b.{0,40}\b(?:localhost|local server|server|test link|test url|test session|ngrok|demo|preview)\b/;
+  const giveMe = /\b(?:spin up|start|restart|open|reopen|bring up|stand up|fire up|give me|send me|share|enter|switch to|go into|put (?:me|it) (?:in|into))\b.{0,40}\b(?:localhost|local server|server|test link|test url|test session|test mode|ngrok|demo|preview)\b/;
   // "why does your ngrok say…", "I didn't ask for a test session": talking about one is not asking for one
   if (/\b(?:didn'?t|did not|don'?t|do not|never|not) (?:ask|want|need)\b/.test(t)) return false;
+  if (/\b(?:don'?t|do not|never|not to) (?:start|restart|open|reopen|enter|switch|go|put|spin|bring|stand|fire|give|send|share)\b/.test(t)) return false;
   // "test" on its own, as the footer of every thread message says
   if (/^(?:test|test it|test this|test mode|test server|testing)$/.test(t)) return true;
   return meTry.test(t) || giveMe.test(t) || /\btest it myself\b|\bmanual(?:ly)? test (?:it|this)\b/.test(t);

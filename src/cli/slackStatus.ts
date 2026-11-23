@@ -18,8 +18,10 @@ import { join } from "node:path";
 import { isBareDone, isTestDone, isTestRequest } from "./testSession";
 import { requestWorkerStop } from "./workerControl";
 import { processAlive } from "./state";
+import { abandonReply, isAbandonRequest } from "./abandonCommands";
+import { abandonTask } from "./abandonTask";
 
-export type ResponderDeps = { answer: (c: OversightContext) => Promise<OversightAnswer> };
+export type ResponderDeps = { answer: (c: OversightContext) => Promise<OversightAnswer>; abandon?: typeof abandonTask };
 
 /** tasks whose thread is being answered now; the next poll skips them so replies stay in order */
 const answering = new Map<string, Promise<void>>();
@@ -61,12 +63,52 @@ async function handleMessages(slack: Slack, taskId: string, messages: SlackThrea
 async function handleOwnerMessage(slack: Slack, state: CliState, task: Task, message: SlackThreadMessage, alive: (pid: number) => boolean, deps: ResponderDeps): Promise<void> {
   const text = (message.text ?? "").trim();
   const files = message.files ?? [];
+  const abandon = abandonReply(text);
+  if (isAbandonRequest(text)) {
+    if (task.kind === "review") {
+      await slack.post("This is a review task; Consort does not own the PR author's branch. Abandon cleanup is available in the feature task's chat.", task.slackThread);
+      return;
+    }
+    const promptTs = await slack.post(`Are you sure? This will stop this task's agents, close every unmerged PR connected to branch \`${task.branch}\`, delete that remote branch, delete the local worktree \`${task.worktree}\` (including uncommitted work), and clean up this task's test servers and resources on the Consort machine. Shared resources used by other tasks will stay. Consort will not pick this ticket up again.\n\nReply *yes abandon* to confirm, or *cancel abandon* to keep it.`, task.slackThread);
+    updateTask(task.id, { pendingAbandon: { promptTs, branch: task.branch, worktree: task.worktree } }, false);
+    return;
+  }
+  if (task.pendingAbandon || abandon) {
+    const pending = task.pendingAbandon;
+    if (!pending || Number(message.ts) <= Number(pending.promptTs)) {
+      await slack.post("Ask to abandon this task first, then reply yes abandon after the confirmation question.", task.slackThread);
+      return;
+    }
+    if (abandon === "cancel") {
+      updateTask(task.id, { pendingAbandon: undefined }, false);
+      await slack.post("Cancelled abandonment. This task and its resources are kept.", task.slackThread);
+      return;
+    }
+    if (abandon !== "confirm") {
+      await slack.post("Abandonment is waiting for confirmation. Reply yes abandon to delete it, or cancel abandon to keep it.", task.slackThread);
+      return;
+    }
+    if (pending.branch !== task.branch || pending.worktree !== task.worktree) {
+      updateTask(task.id, { pendingAbandon: undefined }, false);
+      await slack.post("This task's branch or worktree changed. Ask to abandon it again so you can confirm the current target.", task.slackThread);
+      return;
+    }
+    try {
+      const result = await (deps.abandon ?? abandonTask)(task.id);
+      updateTask(task.id, { pendingAbandon: undefined }, false);
+      await slack.post(`Abandoned this task. ${result}`, task.slackThread);
+    } catch (error) {
+      updateTask(task.id, { pendingAbandon: undefined }, false);
+      await slack.post(`Abandon cleanup did not finish: ${(error as Error).message}. Some cleanup may already have happened. Ask to abandon again to retry.`, task.slackThread);
+    }
+    return;
+  }
   // test sessions (cli/testSession.ts): the worker posts the link and waits for "done"; neither message is an answer or a change
   if (task.testSession && isTestDone(text)) {
     // "done" before the link is up: the owner no longer wants the session, so cancel it
     if (!task.testSession.readyTs) { await post(slack, task, await cancelTestSession(task, alive), await taskSlackLinks(task, state.jobs.find(j => j.id === task.jobId)?.repo), alive); return; }
     if (isBareDone(text) && !files.length) return;
-  } else if (text && !task.testSession && isTestRequest(text)) {
+  } else if (text && isTestRequest(text)) {
     await post(slack, task, await startTestSession(task, message, alive), await taskSlackLinks(task, state.jobs.find(j => j.id === task.jobId)?.repo), alive);
     return;
   }

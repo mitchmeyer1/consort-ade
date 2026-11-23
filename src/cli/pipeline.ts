@@ -42,6 +42,7 @@ import { ensureSlackIdentity } from "./slackIdentity";
 import { taskSlackLinks } from "./slackLinks";
 import { isGoAhead, ownerUpdatePrompt, parseUpdateSummary, updateDir } from "./ownerUpdates";
 import { changedBySession, dirtyPaths, tearsDownEnvironment, isTestDone, isTestRequest, killTree, parseTestFailed, readSessionFile, SESSION_FILE, startTunnel, TEST_DIR, testReadyMessage, testSessionPrompt, waitForPort, type TestSessionState } from "./testSession";
+import { isAbandonCommand } from "./abandonCommands";
 import { sourceFor, type Source } from "./sources";
 import { gatedSource, inbound, PiiWithheldError, pushGuard, type GateContext } from "./phiGate";
 import { blockAccount, loadState, processAlive, touchAccount, updateTask, WORK_DIR, type Account, type Job, type Task } from "./state";
@@ -195,7 +196,7 @@ export async function workTask(taskId: string): Promise<void> {
     let lastEmptyLog = 0;
     let lastCheckResult: string | undefined;
     // "I want to test it" is a request, never the answer (cli/testSession.ts)
-    const reply = await slack.waitForReply(thread, ts, { accept: (t) => !isTestRequest(t), onCheck: (result) => {
+    const reply = await slack.waitForReply(thread, ts, { accept: (t) => !isTestRequest(t) && !isAbandonCommand(t) && !loadState().tasks.find(x => x.id === taskId)?.pendingAbandon, onCheck: (result) => {
       if (result !== "answer" && result === lastCheckResult && Date.now() - lastEmptyLog < 60_000) return;
       lastCheckResult = result;
       lastEmptyLog = Date.now();

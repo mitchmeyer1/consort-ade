@@ -1,3 +1,4 @@
+import * as abandonCommands from '../src/cli/abandonCommands.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -18,7 +19,7 @@ import * as prArticle from '../src/shared/prArticle.ts';
 const require = createRequire(import.meta.url);
 const compile = name => ts.transpileModule(readFileSync(new URL(`../src/cli/${name}.ts`, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 function load(name, extra = {}) {
-  const mocks = { './reviewProgress': progress, './phiGate.ts': phiGate, '../shared/prArticle.ts': prArticle, '../shared/phi.ts': phi, '../shared/headless.ts': headless, '../shared/cliModels.ts': cliModels, '../shared/usage.ts': usage, '../shared/review.ts': review, '../shared/reviewPolicy.ts': reviewPolicy, '../shared/reviewSteps.ts': reviewSteps, '../shared/ship.ts': ship,
+  const mocks = { './abandonCommands': abandonCommands, './reviewProgress': progress, './phiGate.ts': phiGate, '../shared/prArticle.ts': prArticle, '../shared/phi.ts': phi, '../shared/headless.ts': headless, '../shared/cliModels.ts': cliModels, '../shared/usage.ts': usage, '../shared/review.ts': review, '../shared/reviewPolicy.ts': reviewPolicy, '../shared/reviewSteps.ts': reviewSteps, '../shared/ship.ts': ship,
     './state': { WORK_DIR: '/wt', HOME: '/home', newId: p => `${p}-1`, loadState: () => ({ tasks: extra.tasks ?? [], accounts: [], jobs: [] }) }, ...extra.mocks };
   const mod = { exports: {} };
   new Function('require', 'module', 'exports', compile(name))(n => mocks[n] ?? (n.startsWith('.') ? {} : require(n)), mod, mod.exports);

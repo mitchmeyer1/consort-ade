@@ -24,6 +24,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameS
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { addTurnCost, approvalReply, ENVIRONMENT_RULES, HEADLESS_RULES, seedModels, parseSlackIdentity, slackAsk, slackHeading, slackMessage, slackProgress, slackStatus, type SlackIdentity } from "../shared/headless.ts";
+import { isAbandonCommand } from "./abandonCommands";
 import { selectCliModel } from "../shared/cliModels.ts";
 import { modelBlock, modelLoad, rankAccounts, usageBlock } from "../shared/usage.ts";
 import { parseReview, serializeReview, type Finding, type Review, type ReviewEvent } from "../shared/review.ts";
@@ -209,7 +210,7 @@ async function reviewRound(taskId: string, watch: (t: ReviewTarget, repo: string
   /** "watch" when the owner did not approve: the caller stops the services, then watches the PR */
   const awaitApproval = async (review: Review, ts: string | undefined): Promise<"watch" | void> => {
     // only a yes or a no settles it; a question goes to the oversight agent (cli/slackStatus.ts) and the wait goes on
-    const answer = slack && thread && ts ? await slack.waitForReply(thread, ts, { pollMs: 15_000, accept: (text) => !!approvalReply(text) }) : undefined;
+    const answer = slack && thread && ts ? await slack.waitForReply(thread, ts, { pollMs: 15_000, accept: (text) => !isAbandonCommand(text) && !!approvalReply(text) }) : undefined;
     updateTask(taskId, { pendingQuestion: undefined, status: "working" });
     if (answer && saysYes(answer)) {
       const approved = await postReview(review, [], "APPROVE", `Approved after an automatic review (${countLine(review.findings)}) and the reviewer's confirmation.`, task.worktree);

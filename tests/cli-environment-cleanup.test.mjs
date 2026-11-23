@@ -5,12 +5,38 @@ import ts from 'typescript';
 import * as headless from '../src/shared/headless.ts';
 
 function load(execFile, state) {
-  const mocks = { 'node:child_process': { execFile }, '../shared/headless.ts': headless, './capacity': { environmentLimit: () => 4 }, './state': { loadState: () => state, mutateState: () => undefined, processAlive: () => true } };
+  const mocks = { 'node:child_process': { execFile }, '../shared/headless.ts': headless, './capacity': { environmentLimit: () => 4 }, './state': { loadState: () => state, mutateState: fn => fn(state), processAlive: () => true } };
   const mod = { exports: {} };
   const code = ts.transpileModule(readFileSync(new URL('../src/cli/environment.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   new Function('require', 'module', 'exports', code)(n => mocks[n] ?? process.getBuiltinModule(n), mod, mod.exports);
   return mod.exports;
 }
+
+test('abandon cleanup deletes only the task-owned sets and preserves a set reused by another task', async () => {
+  const task = { id: 'task-one', status: 'released', runCode: 'consort-reused', childEnvironments: [{ id: 'task-one/child', runCode: 'consort-child' }] };
+  const state = { tasks: [task, { id: 'task-two', status: 'working', runCode: 'consort-reused' }], envPool: [
+    { id: 'mine', portBase: 20000, runCode: 'consort-mine', lastHolder: 'task-one' },
+    { id: 'child', portBase: 20100, runCode: 'consort-child', lastHolder: 'task-one/child' },
+    { id: 'reused', portBase: 20200, runCode: 'consort-reused', holder: { id: 'task-two', taskId: 'task-two' } },
+    { id: 'other', portBase: 20300, runCode: 'consort-other', lastHolder: 'task-two' },
+  ] };
+  const calls = [];
+  const env = load((cmd, args, opts, cb) => { calls.push([cmd, ...args].join(' ')); cb(null, { stdout: '', stderr: '' }); }, state);
+  await env.destroyTaskEnvironments(task);
+  assert.deepEqual(state.envPool.map(s => s.id), ['reused', 'other']);
+  assert.ok(calls.some(c => c.includes('label=io.consort.run=consort-mine')));
+  assert.ok(calls.some(c => c.includes('label=io.consort.run=consort-child')));
+  assert.ok(!calls.some(c => c.includes('consort-reused') || c.includes('consort-other')));
+  assert.ok(!calls.some(c => /prune/.test(c)));
+});
+
+test('abandon cleanup reports Docker errors and keeps its reservation for a retry', async () => {
+  const task = { id: 'task-one', status: 'released' };
+  const state = { tasks: [task], envPool: [{ id: 'mine', portBase: 20000, runCode: 'consort-mine', lastHolder: task.id }] };
+  const env = load((cmd, args, opts, cb) => cb(cmd === 'docker' ? new Error('Docker unavailable') : null, { stdout: '', stderr: '' }), state);
+  await assert.rejects(env.destroyTaskEnvironments(task), /Docker unavailable/);
+  assert.equal(state.envPool[0].holder.taskId, task.id);
+});
 
 test('the hourly sweep removes only leftovers: unowned environments of ours, and unused volumes that are anonymous, ours or a finished desktop turn', async () => {
   const now = Date.parse('2026-10-27T18:00:00Z');

@@ -1,3 +1,4 @@
+import * as abandonCommands from '../src/cli/abandonCommands.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -14,6 +15,7 @@ function harness(answer = checked) {
   const replies = [], patches = [];
   let messages = [], fail = false;
   const mocks = {
+    './abandonCommands': abandonCommands, './abandonTask': { abandonTask: async () => { throw new Error('unexpected cleanup'); } },
     '../shared/headless.ts':headless,
     './state':{loadState:()=>state,updateTask:(id,patch,touch)=>{patches.push(touch);Object.assign(task,typeof patch==='function'?patch(task):patch);}},
     './slackLinks':{taskSlackLinks:async()=>({ticket:task.ticket.url,github:'https://github.com/a/b/pull/1'})},

@@ -1,3 +1,4 @@
+import * as abandonCommands from '../src/cli/abandonCommands.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, mkdir, writeFile, chmod } from 'node:fs/promises';
@@ -93,6 +94,7 @@ function daemon(overrides = {}) {
   const state = { slack: { userId: 'owner', botToken: 'xoxb' }, tasks: [task], jobs: [{ id: 'j', repo: '/repo' }], accounts: [] };
   const replies = [], asked = [], stops = []; let messages = [];
   const mocks = {
+    './abandonCommands': abandonCommands, './abandonTask': { abandonTask: async () => { throw new Error('unexpected cleanup'); } },
     '../shared/headless.ts': headless,
     './state': { loadState: () => state, updateTask: (id, patch) => Object.assign(task, typeof patch === 'function' ? patch(task) : patch), processAlive: () => false },
     './slackLinks': { taskSlackLinks: async () => ({ ticket: task.ticket.url }) },
@@ -160,6 +162,34 @@ test('a stop command that would take the services down is recognised; stopping a
 test('a plain "test" reply starts a session, as the thread footer says', () => {
   for (const t of ['test', 'Test', 'test it', 'testing']) assert.equal(session.isTestRequest(t), true, t);
   for (const t of ['test the login page later', 'I ran the tests']) assert.equal(session.isTestRequest(t), false, t);
+});
+
+test('requests to enter test mode bypass oversight and the code update queue', async () => {
+  for (const text of ['start test mode', 'I asked you to start test mode', 'please go into test mode', 'put it in test mode', 'switch to test mode', 'reopen the test session', 'restart test mode']) {
+    const h = daemon();
+    h.messages([{ ts: '2', user: 'owner', text }]);
+    await h.run();
+    assert.equal(h.task.testSession?.requestTs, '2', text);
+    assert.deepEqual(h.asked, [], text);
+    assert.equal(h.task.ownerUpdates, undefined, text);
+    assert.match(h.replies[0], /Starting a test session/, text);
+  }
+  for (const text of ["don't start test mode", 'why is test mode over?', 'test mode is over I see in the logs']) {
+    assert.equal(session.isTestRequest(text), false, text);
+  }
+});
+
+test('repeating a test request keeps the session and never queues a change that would close it', async () => {
+  for (const readyTs of [undefined, '3']) {
+    const active = { requestedAt: 1, requestTs: '2', ...(readyTs ? { readyTs } : {}) };
+    const h = daemon({ testSession: active });
+    h.messages([{ ts: '4', user: 'owner', text: 'I asked you to start test mode' }]);
+    await h.run();
+    assert.deepEqual(h.task.testSession, active);
+    assert.deepEqual(h.asked, []);
+    assert.equal(h.task.ownerUpdates, undefined);
+    assert.match(h.replies[0], readyTs ? /already open/ : /Already starting/);
+  }
 });
 
 test('the session plans seed data and logins from the stories, and posts a what-to-try list with links', () => {

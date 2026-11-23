@@ -95,6 +95,8 @@ export type Task = {
   pendingQuestion?: { questions: string[]; afterTs: string };
   /** the owner asked to test the work by hand (cli/testSession.ts); open until they say "done" */
   testSession?: import("./testSession").TestSessionState;
+  /** A destructive task-chat request must be confirmed after this exact prompt. */
+  pendingAbandon?: { promptTs: string; branch: string; worktree: string };
   /** the owner said "no more questions" / "proceed" in Slack (cli/ownerUpdates.ts isGoAhead): later questions take the agent's recommendation */
   goAhead?: string;
   reviewersRequested?: string[];

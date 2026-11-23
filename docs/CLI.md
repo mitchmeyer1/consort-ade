@@ -150,6 +150,10 @@ Reply and Ask buttons on the Home tab are planned, not built: see [slack-buttons
 
 ## Slack messages you will see
 
+In a feature task's Slack thread, say **kill and clean up**, **abandon this**, or **discard this task** to request abandonment. Consort asks for confirmation with the branch and local worktree path. Nothing is stopped or deleted until the configured owner replies **yes abandon** after that question. Reply **cancel abandon** to keep the task. These messages never go to the coding agent as feature changes or answers to another pending question.
+
+Confirmed abandonment stops the task's workers and test servers, closes open PRs from its branch, deletes the remote and local branch, removes its local worktree (including uncommitted changes) and parallel worktrees, and deletes its dedicated Docker resources. GitHub PRs are closed, not erased. Consort preserves resources another task has reused and refuses to delete a base branch, default branch, main checkout, or another task's worktree. Review-task chats cannot delete the PR author's branch. A failed cleanup reports the failure; request abandonment again to confirm a retry. The ticket stays excluded from automatic pickup unless you explicitly retry it.
+
 - `Picked up <title>. Working on branch …` — the thread opens.
 - `→ Spec'd — Spec written headless in 1 round.` — a stage moved.
 - `I need you on 2 things …` — answer in the thread.

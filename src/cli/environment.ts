@@ -20,7 +20,7 @@ import { loadState, mutateState, processAlive, type CliState, type EnvSlot, type
  */
 
 const run = promisify(execFile);
-const docker = (args: string[]) => run("docker", args, { timeout: 60_000, maxBuffer: 1 << 22 }).then((r) => r.stdout.trim(), () => "");
+const docker = (args: string[], strict = false) => run("docker", args, { timeout: 60_000, maxBuffer: 1 << 22 }).then((r) => r.stdout.trim(), (e) => { if (strict) throw e; return ""; });
 
 export const runCodeFor = (task: Pick<Task, "id">) => `consort-${task.id.replace(/^task-/, "")}`;
 
@@ -36,18 +36,40 @@ const KEY_OFFSETS = [0, 1, 2, 10, 11, 12, 13];
 export const environmentFor = (task: Task): TaskEnv | undefined => task.portBase ? taskEnv(task.runCode ?? runCodeFor(task), task.portBase) : undefined;
 
 /** remove everything Docker holds under the task's code; quiet when Docker is absent */
-export async function cleanupEnvironment(code: string): Promise<{ containers: number; networks: number; volumes: number }> {
+export async function cleanupEnvironment(code: string, strict = false): Promise<{ containers: number; networks: number; volumes: number }> {
   const out = { containers: 0, networks: 0, volumes: 0 };
   const ids = async (kind: "ps" | "network" | "volume", label: string) =>
-    (await docker(kind === "ps" ? ["ps", "-aq", "--filter", `label=${label}`] : [kind, "ls", "-q", "--filter", `label=${label}`])).split("\n").filter(Boolean);
+    (await docker(kind === "ps" ? ["ps", "-aq", "--filter", `label=${label}`] : [kind, "ls", "-q", "--filter", `label=${label}`], strict)).split("\n").filter(Boolean);
   for (const label of [`io.consort.run=${code}`, `com.docker.compose.project=${code}`]) {
-    const c = await ids("ps", label); if (c.length) { await docker(["rm", "-f", "-v", ...c]); out.containers += c.length; }
+    const c = await ids("ps", label); if (c.length) { await docker(["rm", "-f", "-v", ...c], strict); out.containers += c.length; }
   }
   for (const label of [`io.consort.run=${code}`, `com.docker.compose.project=${code}`]) {
-    const n = await ids("network", label); if (n.length) { await docker(["network", "rm", ...n]); out.networks += n.length; }
-    const v = await ids("volume", label); if (v.length) { await docker(["volume", "rm", "-f", ...v]); out.volumes += v.length; }
+    const n = await ids("network", label); if (n.length) { await docker(["network", "rm", ...n], strict); out.networks += n.length; }
+    const v = await ids("volume", label); if (v.length) { await docker(["volume", "rm", "-f", ...v], strict); out.volumes += v.length; }
   }
   return out;
+}
+
+/** Reserve only this task's services during deletion; another task may already have reused its old set. */
+export async function destroyTaskEnvironments(task: Task): Promise<void> {
+  const holders = new Set([task.id, ...(task.childEnvironments ?? []).map(c => c.id)]);
+  const slots = mutateState(s => {
+    const owned = (s.envPool ?? []).filter(slot => slot.holder ? slot.holder.taskId === task.id : !!slot.lastHolder && holders.has(slot.lastHolder));
+    for (const slot of owned) slot.holder = { id: `${task.id}/abandon`, taskId: task.id, pid: process.pid, at: Date.now() };
+    return owned.map(slot => ({ ...slot }));
+  });
+  for (const slot of slots) {
+    await stopAppProcesses(slot.portBase);
+    await cleanupEnvironment(slot.runCode, true);
+    mutateState(s => { s.envPool = s.envPool?.filter(x => x.id !== slot.id); });
+  }
+  // Older workers can have dedicated resources without a pool entry. Never delete a reused set.
+  for (const code of new Set([task.runCode, ...(task.childEnvironments ?? []).map(c => c.runCode)].filter((c): c is string => !!c))) {
+    const s = loadState();
+    if (slots.some(slot => slot.runCode === code) || s.envPool?.some(slot => slot.runCode === code)
+      || s.tasks.some(t => t.id !== task.id && t.runCode === code && OPEN.includes(t.status))) continue;
+    await cleanupEnvironment(code, true);
+  }
 }
 
 export class EnvironmentCapacityError extends Error {
