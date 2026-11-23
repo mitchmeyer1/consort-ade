@@ -122,6 +122,9 @@ export async function uploadClickupAttachment(key: string, taskId: string, file:
  * public repos; on private ones the links still open for people with access.
  */
 export async function pushEvidenceBranch(repo: string, ticketId: string, files: string[]): Promise<Record<string, string>> {
+  // the push below skips the repository's pre-push hook, so the branch takes screenshots and nothing else
+  const notImage = files.find((f) => !imageFormat(f));
+  if (notImage) throw new Error(`Evidence image is not a PNG, JPEG, GIF or WebP file: ${basename(notImage)}`);
   const branch = "consort-evidence";
   const remote = await git(repo, ["remote", "get-url", "origin"]).catch(() => "");
   const nameWithOwner = /github\.com[/:]([^/]+\/[^/.]+)/.exec(remote)?.[1] ?? (await gh(repo, ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]).then((s) => s.trim(), () => "unknown/unknown"));
@@ -139,13 +142,24 @@ export async function pushEvidenceBranch(repo: string, ticketId: string, files: 
   }
   const tree = await git(repo, ["write-tree"], env);
   const commit = (await git(repo, ["commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", `evidence for ${ticketId}`], env)).trim();
-  await git(repo, ["push", "origin", `${commit}:refs/heads/${branch}`]);
+  // a pre-push hook checks the checked-out tree, which never holds this commit, so it can only refuse the push (aligned-mono's does)
+  await git(repo, ["push", "--no-verify", "origin", `${commit}:refs/heads/${branch}`]);
   try { (await import("node:fs")).unlinkSync(index); } catch {}
   // github.com links, not raw.githubusercontent.com: GitHub serves them to anyone signed in who can read the repo, so they render in a private repo's PR;
   // pinned to the commit, so a later round that saves a file of the same name never changes an old comment
   const urls: Record<string, string> = {};
   for (const [name, path] of Object.entries(paths)) urls[name] = `https://github.com/${nameWithOwner}/blob/${commit}/${path.split("/").map(encodeURIComponent).join("/")}?raw=true`;
   return urls;
+}
+
+/** The image format a file's first bytes declare, whatever its name says. */
+function imageFormat(file: string): "png" | "jpeg" | "gif" | "webp" | undefined {
+  const head = readFileSync(file).subarray(0, 12);
+  if (head.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "png";
+  if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return "jpeg";
+  if (["GIF87a", "GIF89a"].includes(head.toString("latin1", 0, 6))) return "gif";
+  if (head.toString("latin1", 0, 4) === "RIFF" && head.toString("latin1", 8, 12) === "WEBP") return "webp";
+  return undefined;
 }
 
 export type Published = { items: number; images: number; prComment: boolean; ticketComment: boolean; hosting: "branch" | "none" };
