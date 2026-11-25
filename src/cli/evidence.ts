@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative, isAbsolute } from "node:path";
 import { promisify } from "node:util";
-import { EVIDENCE_DIR, EVIDENCE_MANIFEST, evidenceMarkdownForPr, evidenceTextForTicket, evidenceProblems, parseEvidenceManifest, type EvidenceManifest, type EvidenceTiming, type TaskCost } from "../shared/headless.ts";
+import { EVIDENCE_DIR, EVIDENCE_MANIFEST, stripEvidenceFromDescription, evidenceMarkdownForPr, evidenceTextForTicket, evidenceProblems, parseEvidenceManifest, type EvidenceManifest, type EvidenceTiming, type TaskCost } from "../shared/headless.ts";
 import { ticketRef, type ShipTicket } from "../shared/ship.ts";
 import type { Source } from "./sources";
 import { gateText, PiiWithheldError, type GateContext } from "./phiGate.ts";
@@ -173,7 +173,30 @@ export async function upsertEvidenceComment(repo: string, pr: number, bodyFile: 
   return keep;
 }
 
-export type Published = { items: number; images: number; prComment: boolean; ticketComment: boolean; hosting: "branch" | "none" };
+const RECEIPT = ".publication.json";
+
+/**
+ * The guard against evidence shown twice: take screenshots and evidence sections out of the PR
+ * description and leave one line pointing at the evidence comment. Runs after every publish and
+ * after every later change, because an agent turn can put them back. Resolves to how many pieces
+ * were removed; a failure to read or edit the description resolves to 0, never blocking the task.
+ */
+export async function guardPrDescription(o: { worktree: string; repo: string; pr: number; prUrl: string }): Promise<number> {
+  try {
+    let id = "";
+    try { id = String(JSON.parse(readFileSync(join(o.worktree, EVIDENCE_DIR, RECEIPT), "utf8")).prCommentId ?? ""); } catch { /* no receipt: link to the PR */ }
+    const body = await gh(o.repo, ["pr", "view", String(o.pr), "--json", "body", "--jq", ".body"]);
+    const cleaned = stripEvidenceFromDescription(body.replace(/\r\n/g, "\n"), id ? `${o.prUrl}#issuecomment-${id}` : o.prUrl);
+    if (!cleaned.removed) return 0;
+    const file = join(o.worktree, EVIDENCE_DIR, ".pr-description.md");
+    mkdirSync(join(o.worktree, EVIDENCE_DIR), { recursive: true });
+    writeFileSync(file, cleaned.body);
+    await gh(o.repo, ["pr", "edit", String(o.pr), "--body-file", file]);
+    return cleaned.removed;
+  } catch { return 0; }
+}
+
+export type Published = { items: number; images: number; prComment: boolean; ticketComment: boolean; hosting: "branch" | "none"; /** pieces of duplicated evidence taken out of the PR description */ descriptionCleaned: number };
 
 /**
  * Post the manifest to the PR and the ticket, images hosted where they will render. With the
@@ -188,8 +211,8 @@ export async function publishEvidence(o: { worktree: string; repo: string; ticke
   const dir = join(o.worktree, EVIDENCE_DIR);
   const wanted = [...new Set(m.items.map((i) => i.image).filter((f): f is string => !!f))].filter((f) => existsSync(join(dir, f)));
   // Save successful transfers so a later network failure does not upload every image again.
-  const receiptFile = join(dir, ".publication.json");
-  type Receipt = { images: Record<string, { hash: string; url: string }>; pr?: string; ticket?: string; ticketComment?: string };
+  const receiptFile = join(dir, RECEIPT);
+  type Receipt = { images: Record<string, { hash: string; url: string }>; pr?: string; prCommentId?: string; ticket?: string; ticketComment?: string };
   let receipt: Receipt = { images: {} };
   const destination = JSON.stringify([o.ticket.source, o.ticket.id, o.prUrl]);
   try {
@@ -220,7 +243,7 @@ export async function publishEvidence(o: { worktree: string; repo: string; ticke
   let prComment = false, ticketComment = false;
   const prHash = digest(prBody);
   if (receipt.pr !== prHash) {
-    await upsertEvidenceComment(o.repo, o.pr, bodyFile);
+    receipt.prCommentId = (await upsertEvidenceComment(o.repo, o.pr, bodyFile)) || receipt.prCommentId;
     receipt.pr = prHash;
     saveReceipt();
   }
@@ -235,7 +258,8 @@ export async function publishEvidence(o: { worktree: string; repo: string; ticke
     saveReceipt();
   }
   ticketComment = true;
-  return { items: m.items.length, images: Object.keys(images).length, prComment, ticketComment, hosting };
+  const descriptionCleaned = await guardPrDescription(o);
+  return { items: m.items.length, images: Object.keys(images).length, prComment, ticketComment, hosting, descriptionCleaned };
 }
 
 /** every image file the agent left in the evidence folder, for a summary */

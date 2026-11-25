@@ -21,7 +21,7 @@ import { addWorktree } from "../main/git";
 import type { Provider } from "../shared/types";
 import { runTurn, packageRoot } from "./agent";
 import { readPr, requestReviewers, reviewerSuggestions, validateReviewers, whoAmI } from "./prmonitor";
-import { findBrowser, publishEvidence, validateEvidence, writeScreenshotHelper } from "./evidence";
+import { findBrowser, guardPrDescription, publishEvidence, validateEvidence, writeScreenshotHelper } from "./evidence";
 import { EVIDENCE_TURN_MS, EVIDENCE_CHECK_MS, TurnTimeoutError, resumeEvidenceTurn, staleEvidenceTimeout, retryEvidencePublication, staleEvidenceNetworkQuestion } from "./evidenceRetry";
 import { claimForTask, releaseEnvironment, withChildEnvironment } from "./environment";
 import { flushTaskNotifications, notifyTask } from "./lifecycle";
@@ -905,6 +905,7 @@ export async function workTask(taskId: string): Promise<void> {
         const at = Date.now();
         feature = { ...feature, evidenceAt: at };
         updateTask(taskId, { feature, evidenceValidatedAt: at, evidenceHead: await headOf() });
+        if (published.descriptionCleaned) log(task, `removed ${published.descriptionCleaned} piece(s) of duplicated evidence from the PR description; it now points at the evidence comment`);
         await note(slackLines.evidence(published.items, published.images, cost ? shortUsd(cost) : undefined));
         break;
       } catch (e) {
@@ -983,6 +984,9 @@ export async function workTask(taskId: string): Promise<void> {
     // the comment is rebuilt from the manifest, so an unchanged manifest leaves the comment alone
     const checked = (await readPr(job.repo, pr).then((s) => s.headSha, () => head)) || head;
     if (evidenceCurrent(reply)) {
+      // the manifest stands, but the turn may still have put proof into the description
+      const cleaned = await guardPrDescription({ worktree: task.worktree, repo: job.repo, pr, prUrl: prUrl! });
+      if (cleaned) log(task, `removed ${cleaned} piece(s) of duplicated evidence from the PR description`);
       updateTask(taskId, { evidenceHead: checked });
       log(task, "evidence still matches the code; nothing republished");
       return false;

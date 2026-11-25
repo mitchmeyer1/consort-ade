@@ -790,7 +790,53 @@ Manifest schema (JSON):
 { "status": "passed" | "blocked", "blockers": [], "checks": [{ "story": "<acceptance criterion from SPEC.md>", "status": "passed" | "failed" | "blocked", "expected": "<required result>", "observed": "<actual result>", "items": ["<matching item title>"] }], "kind": "frontend" | "backend" | "mixed", "summary": "<two or three sentences: what was proven and how>", "seeded": "<how the local data was seeded, or omitted>",
   "items": [ { "title": "<what this shows>", "image": "<file name in ${EVIDENCE_DIR}>", "text": "<the output, for text items>", "command": "<the command run, if any>", "note": "<one line of context>" } ] }
 
-Rules: set status to passed only when all acceptance checks passed and blockers is empty; real output only, never mocked or hand-edited; no secrets or real customer data in any capture; six to ten items is plenty; name files for what they show. Consort posts the manifest to the PR (${i.prUrl}) and the ticket (${i.ticketUrl}), each linking to the other. Reply with one line per item when done.`;
+Rules: set status to passed only when all acceptance checks passed and blockers is empty; real output only, never mocked or hand-edited; no secrets or real customer data in any capture; six to ten items is plenty; name files for what they show. Consort posts the manifest to the PR (${i.prUrl}) and the ticket (${i.ticketUrl}), each linking to the other. ${EVIDENCE_ONE_PLACE} Do not post, upload or link the captures anywhere yourself. Reply with one line per item when done.`;
+
+/** One home for proof: every prompt that lets the agent write on the PR carries this. */
+export const EVIDENCE_ONE_PLACE = `Evidence lives in exactly one place on the PR: the single comment that starts with "## Evidence", which Consort writes from the manifest. The PR description never repeats it: no screenshots, no captured output, and no "Screenshots", "Evidence" or "Proof" section there. The description says what was built and why; Consort adds one line pointing to the evidence comment.`;
+
+/** marks the line in the PR description that points at the evidence comment */
+export const EVIDENCE_POINTER_MARKER = "<!-- consort-evidence-pointer -->";
+const EVIDENCE_SECTION = /^(?:\d+[.)]\s*)?(?:screen\s?shots?|evidence|proof|visual (?:proof|evidence)|captures?)\b/i;
+/** an image embed hosted where Consort puts evidence: the consort-evidence branch, or a commit-pinned blob link with ?raw=true */
+const EVIDENCE_IMAGE = /!\[[^\]]*\]\((?:[^)\s]*consort-evidence[^)\s]*|https:\/\/github\.com\/[^)\s]+\/blob\/[0-9a-f]{7,40}\/[^)\s]+\?raw=true)[^)]*\)|<img\b[^>]*(?:consort-evidence|\/blob\/[0-9a-f]{7,40}\/[^"'>\s]+\?raw=true)[^>]*>/gi;
+
+/**
+ * Take evidence out of a PR description so it is not shown twice (once there, once in the evidence
+ * comment): sections headed Screenshots / Evidence / Proof go whole, evidence-hosted images go
+ * wherever they sit, and one line pointing at the evidence comment takes the place of the first
+ * thing removed. A description with nothing to remove comes back unchanged (\`removed: 0\`).
+ */
+export function stripEvidenceFromDescription(body: string, evidenceUrl: string): { body: string; removed: number } {
+  const pointer = `**Evidence:** screenshots and captured output are in [the evidence comment](${evidenceUrl}). ${EVIDENCE_POINTER_MARKER}`;
+  const out: string[] = [];
+  let removed = 0, skipping = 0 /* heading level of the section being dropped */, fence = false, pointerAt = -1;
+  const lines = body.split("\n");
+  for (const line of lines) {
+    if (/^\s*(?:```|~~~)/.test(line)) fence = !fence;
+    const heading = fence ? null : /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+    if (heading) {
+      if (skipping && heading[1].length <= skipping) skipping = 0;
+      if (!skipping && EVIDENCE_SECTION.test(heading[2].replace(/[*_`]/g, ""))) { skipping = heading[1].length; removed++; if (pointerAt < 0) pointerAt = out.length; continue; }
+    }
+    if (skipping) continue;
+    if (line.includes(EVIDENCE_POINTER_MARKER)) { if (pointerAt < 0) pointerAt = out.length; continue; }
+    if (!fence && EVIDENCE_IMAGE.test(line)) {
+      EVIDENCE_IMAGE.lastIndex = 0;
+      const rest = line.replace(EVIDENCE_IMAGE, "").trim();
+      removed++;
+      if (pointerAt < 0) pointerAt = out.length;
+      // a line that held only images (and list or table punctuation around them) goes whole
+      if (rest.replace(/[|\-*:\s]/g, "")) out.push(rest);
+      continue;
+    }
+    EVIDENCE_IMAGE.lastIndex = 0;
+    out.push(line);
+  }
+  if (!removed) return { body, removed: 0 };
+  out.splice(pointerAt < 0 ? out.length : pointerAt, 0, pointer, "");
+  return { body: out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n", removed };
+}
 
 /** the agent's reply when a later change left the published evidence and every PR comment accurate */
 export const EVIDENCE_CURRENT = "[evidence-current]";
@@ -807,7 +853,7 @@ The branch changed after Consort published evidence on ${i.prUrl}. Someone readi
 
 1. Make sure this worktree is at the PR's head (git fetch, then fast-forward if it is behind). Read what changed${i.since ? `: \`git diff ${i.since}..HEAD\` and \`git log ${i.since}..HEAD\`` : " since the evidence was captured (compare the commits after the evidence comment's date)"}.
 2. Read ${EVIDENCE_MANIFEST} and every capture it names. For each item decide whether the change made its screenshot, output, command, title, note, or the summary wrong or misleading. Recapture each outdated item the same way it was first captured (screenshots: \`node ${i.helper} <url> [width height]\`; text: \`node ${i.helper} --text "<title>" > ${EVIDENCE_DIR}/<name>.png\`), ${i.phi ? "from this task's seeded local database only, " : ""}overwrite or replace the old file, and rewrite the manifest so every word of it describes the current code. Add an item when the change added behavior that needs proof; drop an item that no longer applies. Keep items the change did not touch exactly as they are. The same rules as the first capture apply: real output only, no secrets or real customer data, an error page is never proof.
-3. Read every comment this account wrote on the PR (\`gh api user --jq .login\`, then \`gh api --paginate repos/{owner}/{repo}/issues/${i.pr}/comments\`), and the PR description (\`gh pr view ${i.pr} --json body\`). Leave the comment that starts with "## Evidence" alone: Consort rewrites it from the manifest. For any other comment of ours, or the description, that now says something untrue (an outdated description of the behavior, a screenshot of the old UI, a file or name that changed, a later "update" comment that corrects an earlier one), edit it in place so it reads correctly on its own: \`gh api -X PATCH repos/{owner}/{repo}/issues/comments/<id> -F body=@<file>\`, \`gh pr edit ${i.pr} --body-file <file>\`. Fold a correction comment into the comment it corrects and delete the correction (\`gh api -X DELETE repos/{owner}/{repo}/issues/comments/<id>\`). Never post a new top-level comment in this turn, never edit or delete anyone else's comment, and leave replies inside review threads as they are.
+3. Read every comment this account wrote on the PR (\`gh api user --jq .login\`, then \`gh api --paginate repos/{owner}/{repo}/issues/${i.pr}/comments\`), and the PR description (\`gh pr view ${i.pr} --json body\`). Leave the comment that starts with "## Evidence" alone: Consort rewrites it from the manifest. For any other comment of ours, or the description, that now says something untrue (an outdated description of the behavior, a screenshot of the old UI, a file or name that changed, a later "update" comment that corrects an earlier one), edit it in place so it reads correctly on its own: \`gh api -X PATCH repos/{owner}/{repo}/issues/comments/<id> -F body=@<file>\`, \`gh pr edit ${i.pr} --body-file <file>\`. Fold a correction comment into the comment it corrects and delete the correction (\`gh api -X DELETE repos/{owner}/{repo}/issues/comments/<id>\`). ${EVIDENCE_ONE_PLACE} If the description or another comment of ours repeats evidence, remove it there. Never post a new top-level comment in this turn, never edit or delete anyone else's comment, and leave replies inside review threads as they are.
 
 If nothing in the manifest needed to change, end your reply with exactly ${EVIDENCE_CURRENT} (still do step 3). Otherwise end with one line per item you changed and why. If you cannot recapture something, ask the owner with [ask-user: <specific blocker and what you need>].`;
 

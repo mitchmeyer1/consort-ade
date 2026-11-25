@@ -351,6 +351,8 @@ For a missing credential, the agent names the exact variable and the repository-
 
 The PR carries a single evidence comment (it ends with a hidden `<!-- consort-evidence -->` marker). Every publish edits that comment in place; a new one is posted only when none exists, and extra copies left by older workers are deleted. The ticket's evidence comment is edited the same way.
 
+Evidence is never repeated in the PR description. After every publish, and after every later change, Consort reads the description and removes any Screenshots / Evidence / Proof section and any image hosted on the `consort-evidence` branch, leaving one line that links to the evidence comment. The prompts tell the agent the same rule; the removal is the guard for when it does not follow it.
+
 On the watch, whenever the PR's head differs from the commit the evidence was last checked against (a review fix, a CI repair, a merge, an owner request), the agent rereads the diff, recaptures any screenshot or output the change made wrong, rewrites the manifest, and corrects its own other PR comments and the PR description in place. It never posts a correction underneath. If the manifest changed, it is independently checked again and the evidence comment is rewritten, with a line naming the commit it is current as of.
 
 ### Scanner countdown and status log

@@ -34,6 +34,7 @@ function fixture(t, options = {}) {
       if (options.prFails) throw new Error('PR comment rejected');
       if (args[0] === 'api' && args[1] === 'user') return { stdout: 'consort-bot\n' };
       if (args[0] === 'api' && args[1] === '--paginate') return { stdout: options.prComments ?? '' };
+      if (args[0] === 'pr' && args[1] === 'view') return { stdout: options.prBody ?? '' };
       if (args[0] === 'pr' && args[1] === 'comment') return { stdout: 'https://github.com/acme/app/pull/1#issuecomment-900\n' };
       return { stdout: '' };
     } },
@@ -94,11 +95,12 @@ test('working evidence publishes images and both comments', async t => {
   f.args.cost = { usd: 0, turns: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
   f.args.timing = { startedAt: Date.UTC(2026, 9, 21, 12), endedAt: Date.UTC(2026, 9, 21, 13, 2, 3) };
   const published = await f.api.publishEvidence(f.args);
-  assert.deepEqual(published, { items: 1, images: 1, prComment: true, ticketComment: true, hosting: 'branch' });
+  assert.deepEqual(published, { items: 1, images: 1, prComment: true, ticketComment: true, hosting: 'branch', descriptionCleaned: 0 });
   assert.ok(readFileSync(join(f.dir, '.pr-comment.md'), 'utf8').includes('https://github.com/acme/app/blob/c0ffee1/1/map.png?raw=true'), 'a github.com link pinned to the commit, which renders in a private repo');
   assert.ok(!f.calls.includes('upload'), 'nothing is uploaded to ClickUp');
   assert.ok(f.calls.some(c => Array.isArray(c) && c[0] === 'push' && c[1] === '--no-verify' && c[3] === 'c0ffee1:refs/heads/consort-evidence'));
-  assert.equal(f.calls.at(-1), 'ticket');
+  assert.equal(f.calls.at(-2), 'ticket');
+  assert.deepEqual(f.calls.at(-1).slice(0, 2), ['pr', 'view'], 'the description is checked for repeated evidence last');
   for (const text of [readFileSync(join(f.dir, '.pr-comment.md'), 'utf8'), f.comments[0]]) {
     assert.match(text.replace(/  \n/g, "\n"), /Agent cost:[^\n]+\nStart time: 2026-10-21 12:00:00 UTC\nEnd time \(evidence ready\): 2026-10-21 13:02:03 UTC\nDuration \(including pauses\): 1h 2m 3s/);
   }
@@ -210,4 +212,38 @@ test('the refresh prompt tells the agent to edit in place and never add a commen
   assert.match(prompt, /issues\/1\/comments/);
   assert.ok(headless.evidenceCurrent(`all good\n${headless.EVIDENCE_CURRENT}`));
   assert.ok(!headless.evidenceCurrent('recaptured item 2'));
+});
+
+const DESCRIPTION = ['## What this does', 'Adds a filter to list pages.', '', '## Screenshots', '', '| Before | After |', '|---|---|', '| ![before](https://github.com/acme/app/blob/c0ffee1/1/before.png?raw=true) | ![after](https://github.com/acme/app/blob/c0ffee1/1/after.png?raw=true) |', '', '### Mobile', '![m](https://github.com/acme/app/blob/c0ffee1/1/m.png?raw=true)', '', '## Testing', 'pnpm test passes.', '![diagram](https://user-images.example/arch.png)', '![stray](https://github.com/acme/app/blob/c0ffee1/1/stray.png?raw=true)', '', '```md', '## Evidence', '![x](https://github.com/acme/app/blob/c0ffee1/1/x.png?raw=true)', '```', ''].join('\n');
+
+test('evidence in a PR description is replaced by one line pointing at the evidence comment', () => {
+  const url = 'https://pr/1#issuecomment-900';
+  const { body, removed } = headless.stripEvidenceFromDescription(DESCRIPTION, url);
+  assert.equal(removed, 2, 'the Screenshots section and the stray evidence image');
+  assert.ok(!/## Screenshots|### Mobile|before\.png|stray\.png/.test(body));
+  assert.ok(body.includes('## What this does') && body.includes('## Testing') && body.includes('pnpm test passes.'));
+  assert.ok(body.includes('arch.png'), 'an image that is not evidence stays');
+  assert.ok(body.includes('x.png'), 'a code block is left alone');
+  assert.equal(body.split(headless.EVIDENCE_POINTER_MARKER).length - 1, 1, 'one pointer line');
+  assert.ok(body.indexOf(url) < body.indexOf('## Testing'), 'the pointer sits where the section was');
+  assert.deepEqual(headless.stripEvidenceFromDescription(body, url), { body, removed: 0 }, 'a clean description is not touched again');
+  assert.equal(headless.stripEvidenceFromDescription('## Summary\nNo proof here.\n', url).removed, 0);
+});
+
+test('publishing evidence cleans a description that repeats it, and leaves a clean one alone', async t => {
+  const f = fixture(t, { prBody: DESCRIPTION });
+  const published = await f.api.publishEvidence(f.args);
+  assert.equal(published.descriptionCleaned, 2);
+  const edits = ghCalls(f, 'pr', 'edit');
+  assert.equal(edits.length, 1);
+  const written = readFileSync(edits[0][edits[0].indexOf('--body-file') + 1], 'utf8');
+  assert.ok(written.includes('https://pr/1#issuecomment-900') && !written.includes('## Screenshots'));
+  const clean = fixture(t, { prBody: '## Summary\nBuilt the filter.\n' });
+  assert.equal((await clean.api.publishEvidence(clean.args)).descriptionCleaned, 0);
+  assert.equal(ghCalls(clean, 'pr', 'edit').length, 0);
+});
+
+test('prompts that write on the PR keep proof out of the description', () => {
+  assert.match(headless.EVIDENCE_PROMPT({ helper: 'h', ticketUrl: 't', prUrl: 'p', worktree: 'w' }), /description never repeats it/);
+  assert.match(headless.EVIDENCE_REFRESH_PROMPT({ helper: 'h', prUrl: 'p', pr: 1 }), /description never repeats it/);
 });
