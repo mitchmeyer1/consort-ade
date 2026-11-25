@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { applyShipChange, newShipFeature, parseShipMarkers, prNumberFromUrl, shipBranch, shipFolder, shipSlug, stripShipMarkers, type ShipFeature, type ShipTicket } from "../shared/ship.ts";
 import { shipPrompt } from "../shared/shipPrompt.ts";
-import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUsd, DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, VERIFY_EVIDENCE_PROMPT, parseAskUser, parseReviewerReply, observeReviewBatch, pickAccount, prReadiness, ProblemError, problemOf, REBOOT_PROMPT, RESPOND_TO_REVIEW, REVIEW_QUIET_MS, cliReviewRotation, reviewersWithoutApproval, reviewWaitMessage, seedModels, SLACK_MARKER, slackAsk, slackLines, slackMessage, slackStatus, stripAskUser, type Problem } from "../shared/headless.ts";
+import { addTurnCost, blockerBullets, brief, costLine, evidenceApproved, shortUsd, DEFAULT_BLOCK_MS, earliestUnblock, ENVIRONMENT_PROMPT, ENVIRONMENT_RULES, HEADLESS_RULES, EVIDENCE_PROMPT, EVIDENCE_REFRESH_PROMPT, evidenceCurrent, VERIFY_EVIDENCE_PROMPT, parseAskUser, parseReviewerReply, observeReviewBatch, pickAccount, prReadiness, ProblemError, problemOf, REBOOT_PROMPT, RESPOND_TO_REVIEW, REVIEW_QUIET_MS, cliReviewRotation, reviewersWithoutApproval, reviewWaitMessage, seedModels, SLACK_MARKER, slackAsk, slackLines, slackMessage, slackStatus, stripAskUser, type Problem } from "../shared/headless.ts";
 import { describeLimit, resetLabel } from "../shared/seatPool.ts";
 import { parseReview, reviewSummary, type ReviewSummary } from "../shared/review.ts";
 import { reviewPolicySection } from "../shared/reviewPolicy.ts";
@@ -904,7 +904,7 @@ export async function workTask(taskId: string): Promise<void> {
         if (!published?.items || !published.prComment || !published.ticketComment) throw new ProblemError({ where: "evidence", what: "Evidence was not published to both the PR and ticket", why: [`PR comment: ${published?.prComment ? "posted" : "missing"}`, `Ticket comment: ${published?.ticketComment ? "posted" : "missing"}`, `Items: ${published?.items ?? 0}`] });
         const at = Date.now();
         feature = { ...feature, evidenceAt: at };
-        updateTask(taskId, { feature, evidenceValidatedAt: at });
+        updateTask(taskId, { feature, evidenceValidatedAt: at, evidenceHead: await headOf() });
         await note(slackLines.evidence(published.items, published.images, cost ? shortUsd(cost) : undefined));
         break;
       } catch (e) {
@@ -957,6 +957,46 @@ export async function workTask(taskId: string): Promise<void> {
     updateTask(taskId, { reviewersRequested: requested });
     if (sent.length) await note(slackLines.reviewers(sent));
   }
+  /**
+   * The branch moved after evidence was published (a review fix, a CI repair, a merge, an owner
+   * request): have the agent recheck the captures and its own PR comments against the new code,
+   * then rewrite the one evidence comment in place. True when the comment was rewritten.
+   */
+  const refreshEvidence = async (head: string): Promise<boolean> => {
+    const saved = loadState().tasks.find((t) => t.id === taskId)!;
+    if (!head || saved.evidenceHead === head) return false;
+    if (!saved.evidenceHead) {
+      // tasks from before this field: stale only if the head was committed after the evidence was validated
+      const committed = await run("git", ["log", "-1", "--format=%ct", head], { cwd: task.worktree }).then((r) => Number(r.stdout.trim()) * 1000, () => 0);
+      if (!(committed > (saved.evidenceValidatedAt ?? Infinity))) { updateTask(taskId, { evidenceHead: head }); return false; }
+    }
+    log(task, `PR head ${head.slice(0, 9)} is newer than the published evidence (${saved.evidenceHead?.slice(0, 9) ?? "no saved head"}); rechecking evidence and PR comments`);
+    activity("updating the PR evidence and comments after a change");
+    const browser = await findBrowser();
+    const helper = browser ? writeScreenshotHelper(task.worktree, browser) : undefined;
+    const prompt = EVIDENCE_REFRESH_PROMPT({ phi: phiSettings(loadState()).guard, helper: helper ?? "(no browser installed: backend output may be text; frontend screenshots require a browser)", prUrl: prUrl!, pr, since: saved.evidenceHead });
+    const reply = await resumeEvidenceTurn("Updating evidence", async (continuation) => {
+      const text = await turn(`${prompt}\n\n${continuation}`, builderProvider, "evidence", true, EVIDENCE_TURN_MS);
+      await completeReply(text, EVIDENCE_TURN_MS, "evidence");
+      return text;
+    }, say);
+    // the comment is rebuilt from the manifest, so an unchanged manifest leaves the comment alone
+    const checked = (await readPr(job.repo, pr).then((s) => s.headSha, () => head)) || head;
+    if (evidenceCurrent(reply)) {
+      updateTask(taskId, { evidenceHead: checked });
+      log(task, "evidence still matches the code; nothing republished");
+      return false;
+    }
+    validateEvidence(task.worktree);
+    const verification = await resumeEvidenceTurn("Checking evidence", (continuation) => turn(`${VERIFY_EVIDENCE_PROMPT}\n\n${continuation}`, builderProvider, "evidence", false, EVIDENCE_CHECK_MS), say);
+    if (!evidenceApproved(verification)) throw new ProblemError({ where: "evidence", what: "The updated evidence did not pass its check", why: blockerBullets(stripAskUser(verification) || parseAskUser(verification).join(" ") || "No approval was returned.") });
+    const cost = loadState().tasks.find((t) => t.id === taskId)?.cost;
+    const published = await retryEvidencePublication(() => publishEvidence({ worktree: task.worktree, repo: job.repo, ticket: task.ticket, pr, prUrl: prUrl!, source, clickupKey: state.clickupKey, cost, timing: { startedAt: task.startedAt, endedAt: saved.evidenceValidatedAt ?? Date.now() }, gate, head: checked }), say);
+    if (!published?.prComment) throw new ProblemError({ where: "evidence", what: "The updated evidence was not published to the PR" });
+    updateTask(taskId, { evidenceHead: checked });
+    await note(slackLines.working("Updated the evidence comment on the PR in place to match the latest changes. Nothing needed from you"));
+    return true;
+  };
   updateTask(task.id, { status: "monitoring", activity: "watching the PR" });
   // Read GitHub first so the pause explains the real blockers.
 
@@ -976,6 +1016,7 @@ export async function workTask(taskId: string): Promise<void> {
       }
       if (state.state === "OPEN" && await applyOwnerUpdates()) continue;
       if (state.state !== "OPEN") { await tell(slackLines.prClosed(state.state.toLowerCase())); await finish("done", `PR ${state.state.toLowerCase()}`); if (state.state === "MERGED") { await source.setStatus(task.ticket.id, "done").catch(() => {}); await syncSubtaskStatus("done").catch(() => {}); } return; }
+      if (await refreshEvidence(state.headSha)) continue;
       const seen = new Set(loadState().tasks.find((t) => t.id === taskId)?.threadsSeen ?? []);
       const fresh = [...state.unresolved, ...(state.feedback ?? [])].filter((t) => (!!t.threadId || !seen.has(t.id)) && t.author && t.author !== me && !/\[bot\]$/.test(t.author));
       const currentTask = loadState().tasks.find((t) => t.id === taskId)!;

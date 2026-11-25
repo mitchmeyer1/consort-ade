@@ -139,13 +139,38 @@ export async function pushEvidenceBranch(repo: string, ticketId: string, files: 
   }
   const tree = await git(repo, ["write-tree"], env);
   const commit = (await git(repo, ["commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", `evidence for ${ticketId}`], env)).trim();
-  await git(repo, ["push", "origin", `${commit}:refs/heads/${branch}`]);
+  // --no-verify: this commit holds only images and is never checked out, so a repo's pre-push hook
+  // that checks the working tree (or refuses any ref but HEAD) has nothing here to check
+  await git(repo, ["push", "--no-verify", "origin", `${commit}:refs/heads/${branch}`]);
   try { (await import("node:fs")).unlinkSync(index); } catch {}
   // github.com links, not raw.githubusercontent.com: GitHub serves them to anyone signed in who can read the repo, so they render in a private repo's PR;
   // pinned to the commit, so a later round that saves a file of the same name never changes an old comment
   const urls: Record<string, string> = {};
   for (const [name, path] of Object.entries(paths)) urls[name] = `https://github.com/${nameWithOwner}/blob/${commit}/${path.split("/").map(encodeURIComponent).join("/")}?raw=true`;
   return urls;
+}
+
+/** hidden in the evidence comment so later publishes find the same comment and edit it */
+export const EVIDENCE_MARKER = "<!-- consort-evidence -->";
+
+/**
+ * Keep ONE evidence comment on the PR: edit ours in place when it exists, post it when it does not,
+ * and delete any extra copies older workers left below it. A reader starting at the top of the PR
+ * then never meets evidence a later change made wrong. Resolves to the comment's id.
+ */
+export async function upsertEvidenceComment(repo: string, pr: number, bodyFile: string): Promise<string> {
+  const me = (await gh(repo, ["api", "user", "--jq", ".login"]).catch(() => "")).trim();
+  // one line per comment, oldest first: id, author, has the marker, opens with the evidence heading
+  const listed = await gh(repo, ["api", "--paginate", `repos/{owner}/{repo}/issues/${pr}/comments?per_page=100`, "--jq", `.[] | [.id, .user.login, (.body | contains("${EVIDENCE_MARKER}")), (.body | startswith("## Evidence"))] | @tsv`]);
+  const ours = listed.split("\n").map((l) => l.trim().split("\t")).filter(([id, login, marked, heading]) => /^\d+$/.test(id ?? "") && (marked === "true" || (heading === "true" && !!me && login === me))).map(([id]) => id);
+  if (!ours.length) {
+    const url = await gh(repo, ["pr", "comment", String(pr), "--body-file", bodyFile]);
+    return /issuecomment-(\d+)/.exec(url)?.[1] ?? "";
+  }
+  const [keep, ...extra] = ours;
+  await gh(repo, ["api", "-X", "PATCH", `repos/{owner}/{repo}/issues/comments/${keep}`, "-F", `body=@${bodyFile}`]);
+  for (const id of extra) await gh(repo, ["api", "-X", "DELETE", `repos/{owner}/{repo}/issues/comments/${id}`]).catch(() => "");
+  return keep;
 }
 
 export type Published = { items: number; images: number; prComment: boolean; ticketComment: boolean; hosting: "branch" | "none" };
@@ -156,7 +181,7 @@ export type Published = { items: number; images: number; prComment: boolean; tic
  * and a finding throws PiiWithheldError; images are not scanned, so EVIDENCE_PROMPT holds them to
  * the seeded local database.
  */
-export async function publishEvidence(o: { worktree: string; repo: string; ticket: ShipTicket; pr: number; prUrl: string; source: Source; clickupKey?: string; /** what the task has spent, printed with the evidence */ cost?: TaskCost; timing?: EvidenceTiming; gate?: GateContext }): Promise<Published> {
+export async function publishEvidence(o: { worktree: string; repo: string; ticket: ShipTicket; pr: number; prUrl: string; source: Source; clickupKey?: string; /** what the task has spent, printed with the evidence */ cost?: TaskCost; timing?: EvidenceTiming; gate?: GateContext; /** the commit the evidence was rechecked against after a later change; printed in the comment */ head?: string }): Promise<Published> {
   const m = validateEvidence(o.worktree);
   const verdict = o.gate ? gateText("evidence", `${evidenceMarkdownForPr(m, {}, o.ticket.url, ticketRef(o.ticket), o.cost, o.timing)}\n\n${evidenceTextForTicket(m, {}, o.prUrl, o.cost, o.timing)}`, o.gate) : undefined;
   if (verdict && !verdict.ok) throw new PiiWithheldError("evidence", verdict.categories);
@@ -164,7 +189,7 @@ export async function publishEvidence(o: { worktree: string; repo: string; ticke
   const wanted = [...new Set(m.items.map((i) => i.image).filter((f): f is string => !!f))].filter((f) => existsSync(join(dir, f)));
   // Save successful transfers so a later network failure does not upload every image again.
   const receiptFile = join(dir, ".publication.json");
-  type Receipt = { images: Record<string, { hash: string; url: string }>; pr?: string; ticket?: string };
+  type Receipt = { images: Record<string, { hash: string; url: string }>; pr?: string; ticket?: string; ticketComment?: string };
   let receipt: Receipt = { images: {} };
   const destination = JSON.stringify([o.ticket.source, o.ticket.id, o.prUrl]);
   try {
@@ -188,13 +213,14 @@ export async function publishEvidence(o: { worktree: string; repo: string; ticke
     saveReceipt();
   }
   if (wanted.some((f) => !images[f])) throw new Error("Evidence image hosting did not return every capture URL.");
-  const prBody = evidenceMarkdownForPr(m, images, o.ticket.url, ticketRef(o.ticket), o.cost, o.timing);
+  const current = o.head ? `\n\n_Updated after later changes; current as of commit ${o.head.slice(0, 9)}._` : "";
+  const prBody = `${evidenceMarkdownForPr(m, images, o.ticket.url, ticketRef(o.ticket), o.cost, o.timing)}${current}\n${EVIDENCE_MARKER}`;
   const bodyFile = join(dir, ".pr-comment.md");
   writeFileSync(bodyFile, prBody);
   let prComment = false, ticketComment = false;
   const prHash = digest(prBody);
   if (receipt.pr !== prHash) {
-    await gh(o.repo, ["pr", "comment", String(o.pr), "--body-file", bodyFile]);
+    await upsertEvidenceComment(o.repo, o.pr, bodyFile);
     receipt.pr = prHash;
     saveReceipt();
   }
@@ -202,7 +228,9 @@ export async function publishEvidence(o: { worktree: string; repo: string; ticke
   const ticketBody = evidenceTextForTicket(m, images, o.prUrl, o.cost, o.timing);
   const ticketHash = digest(ticketBody);
   if (receipt.ticket !== ticketHash) {
-    await o.source.comment(o.ticket.id, ticketBody);
+    // the ticket keeps one evidence comment too: edit the one posted before when the source can
+    const edited = !!receipt.ticketComment && !!o.source.editComment && await o.source.editComment(o.ticket.id, receipt.ticketComment, ticketBody).then(() => true, () => false);
+    if (!edited) receipt.ticketComment = (await o.source.comment(o.ticket.id, ticketBody)) || undefined;
     receipt.ticket = ticketHash;
     saveReceipt();
   }

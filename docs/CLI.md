@@ -346,6 +346,13 @@ If an acceptance check or a permanent publication error needs owner input, the w
 For a missing credential, the agent names the exact variable and the repository-root env file on the Consort machine. The owner adds the key there and confirms in Slack. Only then may the agent copy that specific variable into the worktree's appropriate ignored env file, preserving unrelated settings, restart the app, and rerun the flow. Secret values must never be sent through Slack, printed, captured, or committed.
 
 
+
+### One evidence comment, kept current
+
+The PR carries a single evidence comment (it ends with a hidden `<!-- consort-evidence -->` marker). Every publish edits that comment in place; a new one is posted only when none exists, and extra copies left by older workers are deleted. The ticket's evidence comment is edited the same way.
+
+On the watch, whenever the PR's head differs from the commit the evidence was last checked against (a review fix, a CI repair, a merge, an owner request), the agent rereads the diff, recaptures any screenshot or output the change made wrong, rewrites the manifest, and corrects its own other PR comments and the PR description in place. It never posts a correction underneath. If the manifest changed, it is independently checked again and the evidence comment is rewritten, with a line naming the commit it is current as of.
+
 ### Scanner countdown and status log
 
 The scanner row refreshes every second with `next scan in MM:SS`, `due now`, or `scanning · MM:SS elapsed`. A completed or failed scan starts the next countdown. Disabled scanners show `off`.

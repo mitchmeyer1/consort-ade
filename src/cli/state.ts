@@ -105,6 +105,8 @@ export type Task = {
   reviewRequestedAt?: number;
   /** Written only after evidence validation, independent inspection, and publication succeed. */
   evidenceValidatedAt?: number;
+  /** the PR head the published evidence was last checked against; a different head means a later change may have made it stale */
+  evidenceHead?: string;
   recoveryGuidance?: string;
   /** set by `consort-cli reboot`: the next worker opens with a turn that works out where the last run got to */
   rebootedAt?: number;

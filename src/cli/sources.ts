@@ -19,7 +19,10 @@ export type Source = {
   /** take back a marker that lost the race */
   unclaim(id: string, handle: string): Promise<void>;
   setStatus(id: string, which: keyof StatusNames): Promise<void>;
-  comment(id: string, text: string): Promise<void>;
+  /** resolves to the new comment's id when the tracker gives one, so it can be edited later */
+  comment(id: string, text: string): Promise<string | void>;
+  /** replace the text of a comment this source posted earlier */
+  editComment?(id: string, commentId: string, text: string): Promise<void>;
   ticket(id: string): Promise<ShipTicket & { body: string; status?: string }>;
   /** replace the ticket description with Markdown */
   updateBody(id: string, body: string): Promise<void>;
@@ -140,8 +143,10 @@ export function clickupSource(key: string, job: Job): Source {
       await clickup(key, `/task/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ status }) });
     },
     async comment(id, text) {
-      await clickup(key, `/task/${encodeURIComponent(id)}/comment`, { method: "POST", body: JSON.stringify({ comment_text: text }) });
+      const j = await clickup(key, `/task/${encodeURIComponent(id)}/comment`, { method: "POST", body: JSON.stringify({ comment_text: text }) });
+      return j?.id ? String(j.id) : undefined;
     },
+    async editComment(_id, commentId, text) { await clickup(key, `/comment/${encodeURIComponent(commentId)}`, { method: "PUT", body: JSON.stringify({ comment_text: text }) }); },
     async ticket(id) {
       const t = await clickup(key, `/task/${encodeURIComponent(id)}?include_markdown_description=true`);
       return { source: "clickup", id: String(t.id), url: t.url ?? `https://app.clickup.com/t/${t.id}`, title: t.name ?? String(t.id), body: t.markdown_description ?? t.description ?? "", status: t.status?.status };
@@ -184,7 +189,8 @@ export function githubSource(job: Job): Source {
       const others = (["progress", "review", "done"] as const).filter((k) => k !== which).map(label);
       await gh(job.repo, ["issue", "edit", id, "--add-label", want, ...others.flatMap((l) => ["--remove-label", l])]).catch(async () => { await gh(job.repo, ["issue", "edit", id, "--add-label", want]); });
     },
-    async comment(id, text) { await gh(job.repo, ["issue", "comment", id, "--body", text]); },
+    async comment(id, text) { return /issuecomment-(\d+)/.exec(await gh(job.repo, ["issue", "comment", id, "--body", text]))?.[1]; },
+    async editComment(_id, commentId, text) { await gh(job.repo, ["api", "-X", "PATCH", `repos/{owner}/{repo}/issues/comments/${commentId}`, "-f", `body=${text}`]); },
     async ticket(id) {
       const j = JSON.parse(await gh(job.repo, ["issue", "view", id, "--json", "number,title,url,body,state"]));
       const repo = /github\.com\/([^/]+\/[^/]+)\//.exec(j.url ?? "")?.[1];

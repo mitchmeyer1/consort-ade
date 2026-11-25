@@ -32,12 +32,15 @@ function fixture(t, options = {}) {
         return { stdout: args[0] === 'remote' ? 'git@github.com:acme/app.git\n' : args[0] === 'commit-tree' ? 'c0ffee1\n' : args[0] === 'rev-parse' && options.noBranch ? '' : args[0] === 'hash-object' ? 'b10b\n' : '' };
       }
       if (options.prFails) throw new Error('PR comment rejected');
+      if (args[0] === 'api' && args[1] === 'user') return { stdout: 'consort-bot\n' };
+      if (args[0] === 'api' && args[1] === '--paginate') return { stdout: options.prComments ?? '' };
+      if (args[0] === 'pr' && args[1] === 'comment') return { stdout: 'https://github.com/acme/app/pull/1#issuecomment-900\n' };
       return { stdout: '' };
     } },
   };
   const mod = { exports: {} };
   new Function('require', 'module', 'exports', 'fetch', code)(n => mocks[n] ?? require(n), mod, mod.exports, async () => { calls.push('upload'); if (options.fetch) return options.fetch(); return options.uploadFails ? { ok: false, status: 403, text: async () => 'Upload denied' } : { ok: true, text: async () => JSON.stringify({ url: 'https://image.example/map.png' }) }; });
-  const args = { worktree: root, repo: root, ticket: { source: 'clickup', id: '1', title: 'Map', url: 'https://ticket/1' }, pr: 1, prUrl: 'https://pr/1', clickupKey: 'test', source: { comment: async (_, text) => { comments.push(text); calls.push('ticket'); if (options.ticketFails) throw new Error('Ticket unavailable'); } } };
+  const args = { worktree: root, repo: root, ticket: { source: 'clickup', id: '1', title: 'Map', url: 'https://ticket/1' }, pr: 1, prUrl: 'https://pr/1', clickupKey: 'test', source: { comment: async (_, text) => { comments.push(text); calls.push('ticket'); if (options.ticketFails) throw new Error('Ticket unavailable'); return options.ticketCommentId; }, ...(options.ticketCommentId ? { editComment: async (_, id, text) => { calls.push(['ticket-edit', id]); comments[comments.length - 1] = text; } } : {}) } };
   return { api: mod.exports, root, dir, manifest, save, args, calls, comments };
 }
 
@@ -94,7 +97,7 @@ test('working evidence publishes images and both comments', async t => {
   assert.deepEqual(published, { items: 1, images: 1, prComment: true, ticketComment: true, hosting: 'branch' });
   assert.ok(readFileSync(join(f.dir, '.pr-comment.md'), 'utf8').includes('https://github.com/acme/app/blob/c0ffee1/1/map.png?raw=true'), 'a github.com link pinned to the commit, which renders in a private repo');
   assert.ok(!f.calls.includes('upload'), 'nothing is uploaded to ClickUp');
-  assert.ok(f.calls.some(c => Array.isArray(c) && c[0] === 'push' && c[2] === 'c0ffee1:refs/heads/consort-evidence'));
+  assert.ok(f.calls.some(c => Array.isArray(c) && c[0] === 'push' && c[1] === '--no-verify' && c[3] === 'c0ffee1:refs/heads/consort-evidence'));
   assert.equal(f.calls.at(-1), 'ticket');
   for (const text of [readFileSync(join(f.dir, '.pr-comment.md'), 'utf8'), f.comments[0]]) {
     assert.match(text.replace(/  \n/g, "\n"), /Agent cost:[^\n]+\nStart time: 2026-10-21 12:00:00 UTC\nEnd time \(evidence ready\): 2026-10-21 13:02:03 UTC\nDuration \(including pauses\): 1h 2m 3s/);
@@ -163,4 +166,48 @@ test('a second publish of unchanged images reuses their GitHub links; old ClickU
   const before = pushes();
   await f.api.publishEvidence(f.args);
   assert.equal(pushes(), before, 'unchanged images are not pushed again');
+});
+
+const ghCalls = (f, ...head) => f.calls.filter(c => Array.isArray(c) && head.every((h, i) => c[i] === h));
+
+test('the first publish posts one evidence comment carrying the hidden marker', async t => {
+  const f = fixture(t);
+  await f.api.publishEvidence(f.args);
+  assert.equal(ghCalls(f, 'pr', 'comment').length, 1);
+  assert.equal(ghCalls(f, 'api', '-X', 'PATCH').length, 0);
+  assert.ok(readFileSync(join(f.dir, '.pr-comment.md'), 'utf8').trimEnd().endsWith(f.api.EVIDENCE_MARKER));
+});
+
+test('a later publish edits the existing evidence comment in place and removes extra copies', async t => {
+  // 11: someone else's comment; 12: our marked evidence; 13: a reviewer quoting the heading; 14: an old unmarked copy of ours
+  const f = fixture(t, { prComments: ['11\talice\tfalse\tfalse', '12\tconsort-bot\ttrue\ttrue', '13\talice\tfalse\ttrue', '14\tconsort-bot\tfalse\ttrue'].join('\n') + '\n' });
+  await f.api.publishEvidence({ ...f.args, head: 'abcdef1234567890' });
+  assert.equal(ghCalls(f, 'pr', 'comment').length, 0, 'no new comment below the old one');
+  const patches = ghCalls(f, 'api', '-X', 'PATCH');
+  assert.equal(patches.length, 1);
+  assert.equal(patches[0][3], 'repos/{owner}/{repo}/issues/comments/12', 'the oldest of ours is the one kept');
+  assert.deepEqual(ghCalls(f, 'api', '-X', 'DELETE').map(c => c[3]), ['repos/{owner}/{repo}/issues/comments/14'], "only our extra copy goes; other people's comments stay");
+  assert.match(readFileSync(join(f.dir, '.pr-comment.md'), 'utf8'), /current as of commit abcdef123\./);
+});
+
+test('changed evidence rewrites the same PR comment and the same ticket comment', async t => {
+  const f = fixture(t, { ticketCommentId: 'c-77' });
+  await f.api.publishEvidence(f.args);
+  f.manifest.summary = 'Map loads with the new filter applied.';
+  f.save();
+  f.calls.length = 0;
+  await f.api.publishEvidence(f.args);
+  assert.deepEqual(f.calls.filter(c => Array.isArray(c) && c[0] === 'ticket-edit'), [['ticket-edit', 'c-77']]);
+  assert.equal(f.calls.filter(c => c === 'ticket').length, 0, 'no second ticket comment');
+  assert.ok(f.comments.at(-1).includes('new filter applied'));
+  assert.equal(f.comments.length, 1);
+});
+
+test('the refresh prompt tells the agent to edit in place and never add a comment', () => {
+  const prompt = headless.EVIDENCE_REFRESH_PROMPT({ helper: '/tmp/shot.cjs', prUrl: 'https://pr/1', pr: 1, since: 'abc123' });
+  assert.match(prompt, /git diff abc123\.\.HEAD/);
+  assert.match(prompt, /Never post a new top-level comment/);
+  assert.match(prompt, /issues\/1\/comments/);
+  assert.ok(headless.evidenceCurrent(`all good\n${headless.EVIDENCE_CURRENT}`));
+  assert.ok(!headless.evidenceCurrent('recaptured item 2'));
 });
