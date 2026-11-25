@@ -727,20 +727,28 @@ export function chooseFrom(answer: string, options: string[]): string[] {
 
 /**
  * Evidence: before a PR is handed to humans, the worker proves the feature works and posts the
- * proof on the PR and the ticket, each linking to the other. The agent writes a manifest of
- * items; a frontend feature gets screenshots of the running app over a seeded local database,
- * anything else gets terminal or database output, rendered to images as well as kept as text.
+ * proof on the PR and the ticket, each linking to the other. The proof is a list of user stories:
+ * each one thing a person or a scheduled job does in production once the change ships, with the
+ * captures that show it happening. A person's story gets screenshots of the running app over a
+ * seeded local database; a scheduled job's story has no screen, so it gets the job's real output
+ * and a generated diagram of the tables and steps involved.
  */
 export const EVIDENCE_DIR = ".consort/ship/evidence";
 export const EVIDENCE_MANIFEST = `${EVIDENCE_DIR}/manifest.json`;
-export type EvidenceItem = { title: string; image?: string; text?: string; command?: string; note?: string };
-export type EvidenceCheck = { story: string; status: "passed" | "failed" | "blocked"; expected: string; observed: string; items: string[] };
-export type EvidenceManifest = { status?: "passed" | "blocked"; checks?: EvidenceCheck[]; blockers?: string[]; kind: "frontend" | "backend" | "mixed"; summary: string; seeded?: string; items: EvidenceItem[] };
+/** the heading the one evidence comment on the PR opens with */
+export const EVIDENCE_HEADING = "## User stories";
+/** headings older workers used for the same comment; still recognized so it is edited, not duplicated */
+export const EVIDENCE_HEADINGS = [EVIDENCE_HEADING, "## Evidence"];
+export type EvidenceItem = { title: string; image?: string; text?: string; command?: string; note?: string; /** the image is a generated diagram of data and logic, not a capture of the app */ diagram?: boolean };
+/** who does the thing in production: a person (or another system calling in), or a job on a schedule */
+export type EvidenceActor = "user" | "cron";
+export type EvidenceStory = { actor: EvidenceActor; story: string; status: "passed" | "failed" | "blocked"; expected: string; observed: string; items: string[] };
+export type EvidenceManifest = { status?: "passed" | "blocked"; stories?: EvidenceStory[]; blockers?: string[]; kind: "frontend" | "backend" | "mixed"; summary: string; seeded?: string; items: EvidenceItem[] };
 
 export function parseEvidenceManifest(raw: unknown): EvidenceManifest | undefined {
   let v: unknown = raw;
   if (typeof raw === "string") { try { v = JSON.parse(raw); } catch { return undefined; } }
-  const r = v as Partial<EvidenceManifest> | undefined;
+  const r = v as (Partial<EvidenceManifest> & { checks?: unknown }) | undefined;
   if (!r || typeof r !== "object") return undefined;
   const kind = r.kind === "frontend" || r.kind === "mixed" ? r.kind : "backend";
   const items: EvidenceItem[] = (Array.isArray(r.items) ? r.items : []).flatMap((i: any) => {
@@ -748,13 +756,18 @@ export function parseEvidenceManifest(raw: unknown): EvidenceManifest | undefine
     const image = typeof i.image === "string" && /\.(png|jpe?g|gif|webp)$/i.test(i.image) ? i.image.replace(/^\.?\/?/, "").replace(/^\.consort\/ship\/evidence\//, "") : undefined;
     const text = typeof i.text === "string" && i.text.trim() ? i.text.trim().slice(0, 6000) : undefined;
     if (!image && !text) return [];
-    return [{ title: i.title.trim(), image, text, command: typeof i.command === "string" ? i.command.trim() : undefined, note: typeof i.note === "string" ? i.note.trim() : undefined }];
+    return [{ title: i.title.trim(), image, text, command: typeof i.command === "string" ? i.command.trim() : undefined, note: typeof i.note === "string" ? i.note.trim() : undefined, ...(i.diagram === true && image ? { diagram: true } : {}) }];
   });
-  const checks = Array.isArray(r.checks) ? r.checks.map((c: any): EvidenceCheck => ({ story: typeof c?.story === "string" ? c.story : "", status: c?.status === "passed" ? "passed" : c?.status === "failed" ? "failed" : "blocked", expected: typeof c?.expected === "string" ? c.expected : "", observed: typeof c?.observed === "string" ? c.observed : "", items: Array.isArray(c?.items) ? c.items.filter((t: unknown): t is string => typeof t === "string") : [] })) : undefined;
-  return { ...(r.status === "passed" || r.status === "blocked" ? { status: r.status } : {}), ...(checks ? { checks } : {}), ...(Array.isArray(r.blockers) ? { blockers: r.blockers.map(String) } : {}), kind, summary: typeof r.summary === "string" ? r.summary.trim() : "", seeded: typeof r.seeded === "string" ? r.seeded.trim() : undefined, items };
+  // `checks` is what manifests written before user stories called the same list
+  const list = Array.isArray(r.stories) ? r.stories : Array.isArray(r.checks) ? r.checks : undefined;
+  const stories = list?.map((c: any): EvidenceStory => ({ actor: c?.actor === "cron" ? "cron" : "user", story: typeof c?.story === "string" ? c.story.trim() : "", status: c?.status === "passed" ? "passed" : c?.status === "failed" ? "failed" : "blocked", expected: typeof c?.expected === "string" ? c.expected : "", observed: typeof c?.observed === "string" ? c.observed : "", items: Array.isArray(c?.items) ? c.items.filter((t: unknown): t is string => typeof t === "string") : [] }));
+  return { ...(r.status === "passed" || r.status === "blocked" ? { status: r.status } : {}), ...(stories ? { stories } : {}), ...(Array.isArray(r.blockers) ? { blockers: r.blockers.map(String) } : {}), kind, summary: typeof r.summary === "string" ? r.summary.trim() : "", seeded: typeof r.seeded === "string" ? r.seeded.trim() : undefined, items };
 }
 
-/** A capture is not proof until every acceptance check passes and points to real output. */
+/** a capture of the running app: an image that is neither a diagram nor rendered text */
+const isScreenshot = (i: EvidenceItem) => !!i.image && !i.diagram && !i.text;
+
+/** A capture is not proof until every user story passes, points to real output, and nothing is shown that is not part of a story. */
 export function evidenceProblems(m: EvidenceManifest | undefined): string[] {
   if (!m) return ["No readable evidence manifest was written."];
   const issues: string[] = [];
@@ -762,53 +775,68 @@ export function evidenceProblems(m: EvidenceManifest | undefined): string[] {
   if (m.blockers?.length) issues.push(...m.blockers);
   if (!m.summary.trim()) issues.push("Evidence needs a summary of the working result.");
   if (!m.items.length) issues.push("Evidence contains no captures or output.");
-  if (m.kind !== "backend" && !m.items.some((i) => i.image)) issues.push("Frontend evidence needs screenshots of the working feature.");
-  if (!m.checks?.length) issues.push("Acceptance checks are missing.");
-  for (const c of m.checks ?? []) {
-    if (c.status !== "passed" || !c.story.trim() || !c.expected.trim() || !c.observed.trim()) issues.push(`Acceptance check did not pass: ${c.story || "unnamed check"}`);
-    if (!c.items.length || c.items.some((title) => !m.items.some((i) => i.title === title))) issues.push(`Acceptance check has no matching proof: ${c.story}`);
+  if (m.kind !== "backend" && !m.items.some(isScreenshot)) issues.push("Frontend evidence needs screenshots of the working feature.");
+  if (!m.stories?.length) issues.push("User stories are missing.");
+  for (const c of m.stories ?? []) {
+    if (c.status !== "passed" || !c.story.trim() || !c.expected.trim() || !c.observed.trim()) issues.push(`User story did not pass: ${c.story || "unnamed story"}`);
+    const proof = c.items.map((title) => m.items.find((i) => i.title === title));
+    if (!proof.length || proof.some((i) => !i)) issues.push(`User story has no matching proof: ${c.story}`);
+    // a job on a schedule has no screen to capture, so its story shows the tables and steps instead
+    else if (c.actor === "cron" && !proof.some((i) => i!.diagram || isScreenshot(i!))) issues.push(`A scheduled job's story needs a generated diagram of its data and logic: ${c.story}`);
   }
+  if (m.stories?.length) for (const i of m.items) if (!m.stories.some((c) => c.items.includes(i.title))) issues.push(`Evidence item belongs to no user story: ${i.title}`);
   return issues;
 }
 
-export const EVIDENCE_PROMPT = (i: { helper: string; ticketUrl: string; prUrl: string; worktree: string; repoRoot?: string; /** the PHI/PII guard is on: rows come from the task's own seeded database only */ phi?: boolean }) => `## This turn: evidence the feature works, for the people who will merge it
+/** what counts as a user story, said once for the capture, refresh and verify prompts */
+export const USER_STORY_RULES = `A user story is one thing that happens in production once this change ships, written as its trigger and its end result. There are two kinds, set as "actor":
+- "user": a person using the product, or another system calling in. "An admin pastes a practice's Elation key on the Connections page → Mono verifies it with Elation and starts syncing that practice."
+- "cron": a job on a schedule. "Every day at 7 AM, Mono matches newly enrolled members to their Elation charts."
+Only what a user or a scheduled job does in production is a story. A test run, a typecheck, a migration, a seed script, a refactor, or a command only a developer would type is never a story and never an item; mention passing tests in one sentence of the summary at most. Name the real page, button, schedule, table and result in the story, in plain words a reviewer who has not read the diff can follow.`;
+
+export const EVIDENCE_PROMPT = (i: { helper: string; ticketUrl: string; prUrl: string; worktree: string; repoRoot?: string; /** the PHI/PII guard is on: rows come from the task's own seeded database only */ phi?: boolean }) => `## This turn: user stories that show the feature working, for the people who will merge it
 
 The PR has been through Consort's review rounds. Before it goes to human reviewers, produce proof a reviewer can look at without running anything, and write it to ${EVIDENCE_DIR}/ in this worktree with a manifest at ${EVIDENCE_MANIFEST}.
 
-Evidence must demonstrate that the requested feature actually works, including every acceptance criterion in SPEC.md and TICKET.md. An error page, unavailable map tiles, missing API key, broken dependency, or partially working flow is a blocker, never successful evidence. Inspect every screenshot with your image-viewing tool and read every command's output. Fix what you can and capture the successful result again. Preserve diagnostics locally, but exclude failed captures from the successful manifest.
+The proof is a list of user stories. ${USER_STORY_RULES}
+
+Work out the stories first, from SPEC.md, TICKET.md and the diff: list every way a user or a scheduled job meets this change in production. Every acceptance criterion that describes behavior must be shown by at least one story. Then act each story out for real and capture it.
+
+A story must show the feature actually working. An error page, unavailable map tiles, missing API key, broken dependency, or partially working flow is a blocker, never a passed story. Inspect every screenshot and diagram with your image-viewing tool and read every command's output. Fix what you can and capture the successful result again. Preserve diagnostics locally, but exclude failed captures from the successful manifest.
 
 If blocked, stop and ask the owner with [ask-user: <specific blocker and what you need>]. Do not claim success or invent a workaround that changes the business requirement. ${AI_COST_POLICY}
 
 An existing required key covered by the sub-dollar allowance can be used without asking again. For a missing credential, determine its exact env variable and the app's env-file convention from the repo. Ask the owner to add that variable to ${i.repoRoot ?? "the repository root on the Consort machine"}/.env (or the repository's documented root env file), then confirm in Slack. Never ask for a secret in Slack. Only after that confirmation, copy the required named variable from the root env file into the worktree's appropriate ignored env file, preserve unrelated settings, restart the app, and rerun the blocked flow. Never print, post, screenshot, or commit env values, and never copy the entire root env file. Do not copy production secrets that the local feature does not require.
 
-Decide from SPEC.md and the diff whether a frontend is involved.
-- **Frontend involved:** seed a local database with data that exercises the feature (use the repo's own seed or fixture scripts, migrations and docker-compose if it has them; invent plausible data where it has none), start the app locally, and take screenshots of the feature in use: the before state where it helps, each step, the result. Take them with the helper: \`node ${i.helper} <url> [width height]\` captures a page to a PNG and prints its path; move or copy each PNG into ${EVIDENCE_DIR}/ with a descriptive file name. Stop the app and any containers when done.
-- **No frontend:** run the feature end to end and capture what proves it: the commands and their output, database queries and their rows${i.phi ? " (from this task's seeded local database only, never a warehouse or real member rows)" : ""}, API calls and responses, test runs. Save each as text in the manifest, and also as a picture: pipe the text to \`node ${i.helper} --text "<title>" > ${EVIDENCE_DIR}/<name>.png\`, which renders it as a terminal image.
-- Both when both apply.
+How to capture each kind of story:
+- **A person on a screen:** seed a local database with data that exercises the feature (use the repo's own seed or fixture scripts, migrations and docker-compose if it has them; invent plausible data where it has none), start the app locally, do what the person would do, and take a screenshot of each step and of the result. Take them with the helper: \`node ${i.helper} <url> [width height]\` captures a page to a PNG and prints its path; move or copy each PNG into ${EVIDENCE_DIR}/ with a descriptive file name. Stop the app and any containers when done.
+- **A scheduled job:** there is no screen, so show two things. First, run the job for real against the seeded local database the way the schedule would start it, and capture what it changed: the rows before and after${i.phi ? " (from this task's seeded local database only, never a warehouse or real member rows)" : ""}, the messages or calls it sent. Save that as text in an item, and also as a picture: pipe the text to \`node ${i.helper} --text "<title>" > ${EVIDENCE_DIR}/<name>.png\`. Second, generate a diagram of how the data and logic work, as its own item with "diagram": true: write a JSON file describing the tables the job reads and writes, how they relate, and the steps it takes in order, then run \`node ${i.helper} --erd "<title>" < <file>.json > ${EVIDENCE_DIR}/<name>.png\`. The JSON is { "steps": ["<what happens first, naming the schedule>", "<next>"], "tables": [{ "name": "<table>", "note": "<read or written, and when>", "columns": ["id PK", "member_id FK", "<only the columns this job touches>"] }], "relations": [{ "from": "<table>.<column>", "to": "<table>.<column>", "label": "<how they relate>" }] }. Take table and column names from the real schema, never invented. If the job's result also shows on a page, screenshot that page too.
+- **Another system calling in** (an API client, a webhook): make the real call and capture the request and the response as text, and as a picture with \`--text\`.
 
 Manifest schema (JSON):
-{ "status": "passed" | "blocked", "blockers": [], "checks": [{ "story": "<acceptance criterion from SPEC.md>", "status": "passed" | "failed" | "blocked", "expected": "<required result>", "observed": "<actual result>", "items": ["<matching item title>"] }], "kind": "frontend" | "backend" | "mixed", "summary": "<two or three sentences: what was proven and how>", "seeded": "<how the local data was seeded, or omitted>",
-  "items": [ { "title": "<what this shows>", "image": "<file name in ${EVIDENCE_DIR}>", "text": "<the output, for text items>", "command": "<the command run, if any>", "note": "<one line of context>" } ] }
+{ "status": "passed" | "blocked", "blockers": [], "kind": "frontend" | "backend" | "mixed", "summary": "<two or three sentences: what a user and the scheduled jobs can now do, and how it was shown>", "seeded": "<how the local data was seeded, or omitted>",
+  "stories": [{ "actor": "user" | "cron", "story": "<trigger → end result>", "status": "passed" | "failed" | "blocked", "expected": "<what should happen>", "observed": "<what did happen>", "items": ["<title of each item that shows this story, in the order a reader should see them>"] }],
+  "items": [ { "title": "<what this shows>", "image": "<file name in ${EVIDENCE_DIR}>", "diagram": true, "text": "<the output, for text items>", "command": "<the command run, if any>", "note": "<one line of context>" } ] }
 
-Rules: set status to passed only when all acceptance checks passed and blockers is empty; real output only, never mocked or hand-edited; no secrets or real customer data in any capture; six to ten items is plenty; name files for what they show. Consort posts the manifest to the PR (${i.prUrl}) and the ticket (${i.ticketUrl}), each linking to the other. ${EVIDENCE_ONE_PLACE} Do not post, upload or link the captures anywhere yourself. Reply with one line per item when done.`;
+Rules: set status to passed only when every story passed and blockers is empty; every item belongs to exactly one story and an item that shows no story is left out; a "cron" story has a "diagram": true item unless it has a screenshot; set "diagram" only on images made with \`--erd\`; "kind" says whether any story has a screen ("frontend"), none does ("backend"), or both ("mixed"); real output only, never mocked or hand-edited; no secrets or real customer data in any capture; three to eight stories and six to twelve items is plenty; name files for what they show. Consort posts the stories to the PR (${i.prUrl}) and the ticket (${i.ticketUrl}), each linking to the other. ${EVIDENCE_ONE_PLACE} Do not post, upload or link the captures anywhere yourself. Reply with one line per story when done.`;
 
 /** One home for proof: every prompt that lets the agent write on the PR carries this. */
-export const EVIDENCE_ONE_PLACE = `Evidence lives in exactly one place on the PR: the single comment that starts with "## Evidence", which Consort writes from the manifest. The PR description never repeats it: no screenshots, no captured output, and no "Screenshots", "Evidence" or "Proof" section there. The description says what was built and why; Consort adds one line pointing to the evidence comment.`;
+export const EVIDENCE_ONE_PLACE = `Evidence lives in exactly one place on the PR: the single comment that starts with "${EVIDENCE_HEADING}", which Consort writes from the manifest. The PR description never repeats it: no screenshots, no diagrams, no captured output, and no "User stories", "Screenshots", "Evidence" or "Proof" section there. The description says what was built and why; Consort adds one line pointing to the evidence comment.`;
 
 /** marks the line in the PR description that points at the evidence comment */
 export const EVIDENCE_POINTER_MARKER = "<!-- consort-evidence-pointer -->";
-const EVIDENCE_SECTION = /^(?:\d+[.)]\s*)?(?:screen\s?shots?|evidence|proof|visual (?:proof|evidence)|captures?)\b/i;
+const EVIDENCE_SECTION = /^(?:\d+[.)]\s*)?(?:user stor(?:y|ies)|screen\s?shots?|evidence|proof|visual (?:proof|evidence)|captures?)\b/i;
 /** an image embed hosted where Consort puts evidence: the consort-evidence branch, or a commit-pinned blob link with ?raw=true */
 const EVIDENCE_IMAGE = /!\[[^\]]*\]\((?:[^)\s]*consort-evidence[^)\s]*|https:\/\/github\.com\/[^)\s]+\/blob\/[0-9a-f]{7,40}\/[^)\s]+\?raw=true)[^)]*\)|<img\b[^>]*(?:consort-evidence|\/blob\/[0-9a-f]{7,40}\/[^"'>\s]+\?raw=true)[^>]*>/gi;
 
 /**
  * Take evidence out of a PR description so it is not shown twice (once there, once in the evidence
- * comment): sections headed Screenshots / Evidence / Proof go whole, evidence-hosted images go
+ * comment): sections headed User stories / Screenshots / Evidence / Proof go whole, evidence-hosted images go
  * wherever they sit, and one line pointing at the evidence comment takes the place of the first
  * thing removed. A description with nothing to remove comes back unchanged (\`removed: 0\`).
  */
 export function stripEvidenceFromDescription(body: string, evidenceUrl: string): { body: string; removed: number } {
-  const pointer = `**Evidence:** screenshots and captured output are in [the evidence comment](${evidenceUrl}). ${EVIDENCE_POINTER_MARKER}`;
+  const pointer = `**User stories:** each one, with its screenshots and captured output, is in [the user stories comment](${evidenceUrl}). ${EVIDENCE_POINTER_MARKER}`;
   const out: string[] = [];
   let removed = 0, skipping = 0 /* heading level of the section being dropped */, fence = false, pointerAt = -1;
   const lines = body.split("\n");
@@ -852,13 +880,14 @@ export const EVIDENCE_REFRESH_PROMPT = (i: { helper: string; prUrl: string; pr: 
 The branch changed after Consort published evidence on ${i.prUrl}. Someone reading the PR from the top must find only statements and screenshots that match the code as it is now. Do not change product code in this turn.
 
 1. Make sure this worktree is at the PR's head (git fetch, then fast-forward if it is behind). Read what changed${i.since ? `: \`git diff ${i.since}..HEAD\` and \`git log ${i.since}..HEAD\`` : " since the evidence was captured (compare the commits after the evidence comment's date)"}.
-2. Read ${EVIDENCE_MANIFEST} and every capture it names. For each item decide whether the change made its screenshot, output, command, title, note, or the summary wrong or misleading. Recapture each outdated item the same way it was first captured (screenshots: \`node ${i.helper} <url> [width height]\`; text: \`node ${i.helper} --text "<title>" > ${EVIDENCE_DIR}/<name>.png\`), ${i.phi ? "from this task's seeded local database only, " : ""}overwrite or replace the old file, and rewrite the manifest so every word of it describes the current code. Add an item when the change added behavior that needs proof; drop an item that no longer applies. Keep items the change did not touch exactly as they are. The same rules as the first capture apply: real output only, no secrets or real customer data, an error page is never proof.
-3. Read every comment this account wrote on the PR (\`gh api user --jq .login\`, then \`gh api --paginate repos/{owner}/{repo}/issues/${i.pr}/comments\`), and the PR description (\`gh pr view ${i.pr} --json body\`). Leave the comment that starts with "## Evidence" alone: Consort rewrites it from the manifest. For any other comment of ours, or the description, that now says something untrue (an outdated description of the behavior, a screenshot of the old UI, a file or name that changed, a later "update" comment that corrects an earlier one), edit it in place so it reads correctly on its own: \`gh api -X PATCH repos/{owner}/{repo}/issues/comments/<id> -F body=@<file>\`, \`gh pr edit ${i.pr} --body-file <file>\`. Fold a correction comment into the comment it corrects and delete the correction (\`gh api -X DELETE repos/{owner}/{repo}/issues/comments/<id>\`). ${EVIDENCE_ONE_PLACE} If the description or another comment of ours repeats evidence, remove it there. Never post a new top-level comment in this turn, never edit or delete anyone else's comment, and leave replies inside review threads as they are.
+2. Read ${EVIDENCE_MANIFEST} and every capture it names. The manifest is a list of user stories under "stories" (an older manifest calls the list "checks": rename it, and give each story its "actor"). ${USER_STORY_RULES}
+   For each story and each of its items decide whether the change made the story's wording, its expected or observed result, or the item's screenshot, diagram, output, command, title, note, or the summary wrong or misleading. Recapture each outdated item the same way it was first captured (screenshots: \`node ${i.helper} <url> [width height]\`; text: \`node ${i.helper} --text "<title>" > ${EVIDENCE_DIR}/<name>.png\`; a scheduled job's diagram, marked "diagram": true in its item: \`node ${i.helper} --erd "<title>" < <file>.json > ${EVIDENCE_DIR}/<name>.png\`, where the JSON is { "steps": ["<in order>"], "tables": [{ "name": "<table>", "note": "<read or written>", "columns": ["<column>"] }], "relations": [{ "from": "<table>.<column>", "to": "<table>.<column>", "label": "<how>" }] } taken from the real schema), ${i.phi ? "from this task's seeded local database only, " : ""}overwrite or replace the old file, and rewrite the manifest so every word of it describes the current code. Add a story when the change added something a user or a scheduled job does in production; drop a story or item that no longer applies, and drop anything that is not a story (a test run, a migration, a developer command). Every item must belong to a story, and a "cron" story with no screenshot needs a diagram item. Keep stories and items the change did not touch exactly as they are. The same rules as the first capture apply: real output only, no secrets or real customer data, an error page is never proof.
+3. Read every comment this account wrote on the PR (\`gh api user --jq .login\`, then \`gh api --paginate repos/{owner}/{repo}/issues/${i.pr}/comments\`), and the PR description (\`gh pr view ${i.pr} --json body\`). Leave the comment that starts with "${EVIDENCE_HEADING}" (or, from an older worker, "## Evidence") alone: Consort rewrites it from the manifest. For any other comment of ours, or the description, that now says something untrue (an outdated description of the behavior, a screenshot of the old UI, a file or name that changed, a later "update" comment that corrects an earlier one), edit it in place so it reads correctly on its own: \`gh api -X PATCH repos/{owner}/{repo}/issues/comments/<id> -F body=@<file>\`, \`gh pr edit ${i.pr} --body-file <file>\`. Fold a correction comment into the comment it corrects and delete the correction (\`gh api -X DELETE repos/{owner}/{repo}/issues/comments/<id>\`). ${EVIDENCE_ONE_PLACE} If the description or another comment of ours repeats evidence, remove it there. Never post a new top-level comment in this turn, never edit or delete anyone else's comment, and leave replies inside review threads as they are.
 
-If nothing in the manifest needed to change, end your reply with exactly ${EVIDENCE_CURRENT} (still do step 3). Otherwise end with one line per item you changed and why. If you cannot recapture something, ask the owner with [ask-user: <specific blocker and what you need>].`;
+If nothing in the manifest needed to change, end your reply with exactly ${EVIDENCE_CURRENT} (still do step 3). Otherwise end with one line per story or item you changed and why. If you cannot recapture something, ask the owner with [ask-user: <specific blocker and what you need>].`;
 
 /** A fresh agent independently checks artifacts rather than trusting the capture agent's summary. */
-export const VERIFY_EVIDENCE_PROMPT = `Independently verify ${EVIDENCE_MANIFEST} against .consort/ship/SPEC.md, TICKET.md, the diff, and the actual evidence files. Read every image using image tools and inspect command output. Do not trust manifest.status or prose claiming success. Require proof for every acceptance criterion, successful end-to-end behavior, and working external dependencies. API KEY REQUIRED tiles, error pages, missing credentials, failed checks, placeholder output, or unproven criteria mean evidence is blocked. Failure diagnostics do not prove a working feature. Do not edit the manifest or publish anything. If all criteria are proven, reply with exactly [evidence-approved]. Otherwise explain the concrete blockers, naming any required env variable without its value. Consort will ask the owner on Slack and retry; never waive a requirement.`;
+export const VERIFY_EVIDENCE_PROMPT = `Independently verify ${EVIDENCE_MANIFEST} against .consort/ship/SPEC.md, TICKET.md, the diff, and the actual evidence files. Read every image using image tools and inspect command output. Do not trust manifest.status or prose claiming success. The manifest is a list of user stories. ${USER_STORY_RULES} Require that every way a user or a scheduled job meets this change in production has a story, that every acceptance criterion describing behavior is shown by a story, and that each story's captures show it working end to end with working external dependencies. A story or item that is not something a user or a scheduled job does in production (a test run, a typecheck, a migration, a developer command) means evidence is blocked until it is removed. A "cron" story needs its real run output and a generated diagram whose tables, columns and steps match the code; a diagram that names a table or column the schema does not have, or skips a step the job takes, is a blocker. API KEY REQUIRED tiles, error pages, missing credentials, failed stories, placeholder output, or unproven criteria mean evidence is blocked. Failure diagnostics do not prove a working feature. Do not edit the manifest or publish anything. If every story is proven, reply with exactly [evidence-approved]. Otherwise explain the concrete blockers, naming any required env variable without its value. Consort will ask the owner on Slack and retry; never waive a requirement.`;
 
 export type EvidenceTiming = { startedAt: number; endedAt: number };
 /** Wall-clock task time through verified evidence, including pauses. */
@@ -871,33 +900,51 @@ export function evidenceTimingLines(timing?: EvidenceTiming): string[] {
   return [`Start time: ${stamp(timing.startedAt)}`, `End time (evidence ready): ${stamp(timing.endedAt)}`, `Duration (including pauses): ${duration}`];
 }
 
-/** the evidence as a GitHub comment: images inline, text as code blocks, the ticket linked */
+/** each story with the items that show it, in the story's order; items no story names come last under no story */
+function storiesWithItems(m: EvidenceManifest): { story?: EvidenceStory; items: EvidenceItem[] }[] {
+  const used = new Set<string>();
+  const groups: { story?: EvidenceStory; items: EvidenceItem[] }[] = (m.stories ?? []).map((story) => ({ story, items: story.items.flatMap((title) => { const item = m.items.find((i) => i.title === title); if (!item) return []; used.add(title); return [item]; }) }));
+  const rest = m.items.filter((i) => !used.has(i.title));
+  if (rest.length) groups.push({ items: rest });
+  return groups;
+}
+const actorLabel = (s: EvidenceStory) => s.actor === "cron" ? "Scheduled job" : "User";
+
+/** the user stories as a GitHub comment: one section per story, its images inline, captured text folded away, the ticket linked */
 export function evidenceMarkdownForPr(m: EvidenceManifest, images: Record<string, string>, ticketUrl: string, ticketRefText: string, cost?: TaskCost, timing?: EvidenceTiming): string {
   const metadata = [`Ticket: ${ticketRefText} (${ticketUrl})`, ...(m.seeded ? [`Local data: ${m.seeded}`] : []), ...(cost ? [costLine(cost)] : []), ...evidenceTimingLines(timing)];
-  const out = [`## Evidence`, "", m.summary || "Proof the feature works, gathered by Consort before handing the PR to reviewers.", "", metadata.join("  \n"), ""];
-  m.items.forEach((it, n) => {
-    out.push(`### ${n + 1}. ${it.title}`);
-    if (it.note) out.push(it.note);
-    if (it.command) out.push("", "```", `$ ${it.command}`, "```");
-    if (it.image) out.push("", images[it.image] ? `![${it.title}](${images[it.image]})` : `_(image ${it.image} could not be published)_`);
-    if (it.text) out.push("", "```", it.text, "```");
+  const out = [EVIDENCE_HEADING, "", m.summary || "What a user and the scheduled jobs can do with this change, shown working by Consort before handing the PR to reviewers.", "", metadata.join("  \n"), ""];
+  storiesWithItems(m).forEach(({ story, items }, n) => {
+    out.push(story ? `### ${n + 1}. ${story.story}` : `### Other captures`);
+    if (story) out.push(`_${actorLabel(story)}._ ${story.observed}`.trim());
+    for (const it of items) {
+      out.push("", `**${it.title}**${it.note ? `  \n${it.note}` : ""}`);
+      if (it.command) out.push("", "```", `$ ${it.command}`, "```");
+      if (it.image) out.push("", images[it.image] ? `![${it.title}](${images[it.image]})` : `_(image ${it.image} could not be published)_`);
+      // the picture carries the story; the raw text stays one click away
+      if (it.text) out.push("", ...(it.image ? ["<details><summary>Captured output</summary>", ""] : []), "```", it.text, "```", ...(it.image ? ["", "</details>"] : []));
+    }
     out.push("");
   });
-  out.push(`_Posted by consort-cli. The same evidence is on the ticket._`);
+  out.push(`_Posted by consort-cli. The same user stories are on the ticket._`);
   return out.join("\n");
 }
 
-/** the evidence as a ticket comment: plain text, image links listed, the PR linked */
+/** the user stories as a ticket comment: plain text, image links listed, the PR linked */
 export function evidenceTextForTicket(m: EvidenceManifest, images: Record<string, string>, prUrl: string, cost?: TaskCost, timing?: EvidenceTiming): string {
-  const out = [`Evidence the feature works (gathered by Consort before handing the PR to reviewers)`, "", m.summary, "", `PR: ${prUrl}`, m.seeded ? `Local data: ${m.seeded}` : "", cost ? costLine(cost) : "", ...evidenceTimingLines(timing), ""];
-  m.items.forEach((it, n) => {
-    out.push(`${n + 1}. ${it.title}${it.note ? ` — ${it.note}` : ""}`);
-    if (it.command) out.push(`   $ ${it.command}`);
-    if (it.image) out.push(`   ${images[it.image] ?? `(image ${it.image} not published)`}`);
-    if (it.text) out.push(...it.text.split("\n").slice(0, 40).map((l) => `   ${l}`));
+  const out = [`User stories shown working (gathered by Consort before handing the PR to reviewers)`, "", m.summary, "", `PR: ${prUrl}`, m.seeded ? `Local data: ${m.seeded}` : "", cost ? costLine(cost) : "", ...evidenceTimingLines(timing), ""];
+  storiesWithItems(m).forEach(({ story, items }, n) => {
+    out.push(story ? `${n + 1}. ${story.story} (${actorLabel(story).toLowerCase()})` : `Other captures`);
+    if (story?.observed) out.push(`   Result: ${story.observed}`);
+    for (const it of items) {
+      out.push(`   - ${it.title}${it.note ? ` — ${it.note}` : ""}`);
+      if (it.command) out.push(`     $ ${it.command}`);
+      if (it.image) out.push(`     ${images[it.image] ?? `(image ${it.image} not published)`}`);
+      if (it.text) out.push(...it.text.split("\n").slice(0, 40).map((l) => `     ${l}`));
+    }
     out.push("");
   });
-  out.push(`The same evidence, with the images inline, is on the PR.`);
+  out.push(`The same user stories, with the images inline, are on the PR.`);
   return out.filter((l, i, a) => !(l === "" && a[i - 1] === "")).join("\n");
 }
 

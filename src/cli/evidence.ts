@@ -3,14 +3,14 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative, isAbsolute } from "node:path";
 import { promisify } from "node:util";
-import { EVIDENCE_DIR, EVIDENCE_MANIFEST, stripEvidenceFromDescription, evidenceMarkdownForPr, evidenceTextForTicket, evidenceProblems, parseEvidenceManifest, type EvidenceManifest, type EvidenceTiming, type TaskCost } from "../shared/headless.ts";
+import { EVIDENCE_DIR, EVIDENCE_HEADINGS, EVIDENCE_MANIFEST, stripEvidenceFromDescription, evidenceMarkdownForPr, evidenceTextForTicket, evidenceProblems, parseEvidenceManifest, type EvidenceManifest, type EvidenceTiming, type TaskCost } from "../shared/headless.ts";
 import { ticketRef, type ShipTicket } from "../shared/ship.ts";
 import type { Source } from "./sources";
 import { gateText, PiiWithheldError, type GateContext } from "./phiGate.ts";
 
 /**
- * The evidence step's plumbing: a screenshot helper the agent can call (system Chrome,
- * headless), image hosting for the comments (an orphan `consort-evidence` branch in the PR's own
+ * The evidence step's plumbing: a helper the agent can call for screenshots, terminal images and
+ * data diagrams (system Chrome, headless), image hosting for the comments (an orphan `consort-evidence` branch in the PR's own
  * repo, linked through github.com so the images render in the PR, private repos included), and the two comments
  * themselves, each linking to the other. The decisions about what to capture are the agent's
  * (shared/headless.ts EVIDENCE_PROMPT); this file moves bytes.
@@ -37,14 +37,14 @@ export async function findBrowser(): Promise<string | undefined> {
   return undefined;
 }
 
-/** the helper script: `node screenshot.cjs <url> [w h]` → PNG path; `node screenshot.cjs --text "<title>" < text > out.png` renders text as a terminal image */
+/** the helper script: `node screenshot.cjs <url> [w h]` → PNG path; `node screenshot.cjs --text "<title>" < text > out.png` renders text as a terminal image; `node screenshot.cjs --erd "<title>" < spec.json > out.png` draws a job's steps, tables and relations */
 export function writeScreenshotHelper(worktree: string, browser: string): string {
   const dir = join(worktree, ".consort", "tools");
   mkdirSync(dir, { recursive: true });
   mkdirSync(join(worktree, EVIDENCE_DIR), { recursive: true });
   const file = join(dir, "screenshot.cjs");
   writeFileSync(file, `#!/usr/bin/env node
-// Written by consort-cli. Captures a page with headless Chrome, or renders text piped on stdin as a terminal image.
+// Written by consort-cli. Captures a page with headless Chrome, renders text piped on stdin as a terminal image, or draws a diagram of steps and tables from JSON on stdin.
 const { execFileSync } = require("node:child_process");
 const { mkdirSync, writeFileSync, readFileSync, unlinkSync } = require("node:fs");
 const { join } = require("node:path");
@@ -53,25 +53,101 @@ const BROWSER = ${JSON.stringify(browser)};
 const OUT = ${JSON.stringify(join(worktree, EVIDENCE_DIR))};
 mkdirSync(OUT, { recursive: true });
 const args = process.argv.slice(2);
-const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
 let url, width = 1440, height = 900, out;
-if (args[0] === "--text") {
+// render a page of our own making and write the PNG to stdout
+function shoot(html, w, h) {
+  const tmp = join(OUT, "." + randomUUID() + ".html");
+  const png = join(OUT, "." + randomUUID() + ".png");
+  writeFileSync(tmp, html);
+  try {
+    execFileSync(BROWSER, ["--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-sandbox", "--window-size=" + w + "," + h, "--screenshot=" + png, "file://" + tmp], { stdio: "ignore", timeout: 60000 });
+    process.stdout.write(readFileSync(png));
+  } finally { try { unlinkSync(tmp); } catch {} try { unlinkSync(png); } catch {} }
+}
+// a diagram of how a job's data and logic work: its steps in order, the tables it touches, how they relate
+function erd(title, spec) {
+  const W = 1200, PAD = 24, LH = 20, CARD = 360, GAP = 36, PER_ROW = 3;
+  const steps = Array.isArray(spec.steps) ? spec.steps.map(String) : [];
+  const tables = (Array.isArray(spec.tables) ? spec.tables : []).filter((t) => t && t.name);
+  const relations = (Array.isArray(spec.relations) ? spec.relations : []).filter((r) => r && r.from && r.to);
+  const wrap = (s, n) => { const lines = []; let cur = ""; for (const w of String(s).split(" ")) { if (cur && (cur + " " + w).length > n) { lines.push(cur); cur = w; } else cur = cur ? cur + " " + w : w; } if (cur) lines.push(cur); return lines.length ? lines : [""]; };
+  const clip = (s, n) => { s = String(s); return s.length > n ? s.slice(0, n - 1) + "…" : s; };
+  const parts = [];
+  const text = (x, y, s, fill, bold) => parts.push('<text x="' + x + '" y="' + y + '" fill="' + fill + '"' + (bold ? ' font-weight="700"' : "") + ">" + esc(s) + "</text>");
+  const heading = (y, s) => text(PAD, y, s.toUpperCase(), "#8a8577", true);
+  let y = 76;
+  if (steps.length) {
+    heading(y, "How it runs"); y += 16;
+    steps.forEach((step, n) => {
+      const lines = wrap((n + 1) + ". " + step, 140);
+      const h = lines.length * LH + 16;
+      parts.push('<rect x="' + PAD + '" y="' + y + '" width="' + (W - PAD * 2) + '" height="' + h + '" rx="6" fill="#151515" stroke="#2f2f2f"/>');
+      lines.forEach((l, k) => text(PAD + 14, y + 22 + k * LH, l, "#e8e3d6"));
+      y += h;
+      if (n < steps.length - 1) { parts.push('<path d="M ' + (W / 2) + " " + (y + 2) + " V " + (y + 16) + '" stroke="#9fe8d8" stroke-width="2" marker-end="url(#arrow)"/>'); y += 22; }
+    });
+    y += 40;
+  }
+  const at = {};
+  if (tables.length) {
+    heading(y, "Data it reads and writes"); y += 16;
+    for (let r = 0; r < tables.length; r += PER_ROW) {
+      const row = tables.slice(r, r + PER_ROW);
+      let tallest = 0;
+      row.forEach((t, c) => {
+        const columns = (Array.isArray(t.columns) ? t.columns : []).map(String);
+        const note = t.note ? wrap(t.note, 42) : [];
+        const x = PAD + c * (CARD + GAP), h = 34 + note.length * LH + columns.length * LH + 12;
+        tallest = Math.max(tallest, h);
+        parts.push('<rect x="' + x + '" y="' + y + '" width="' + CARD + '" height="' + h + '" rx="6" fill="#151515" stroke="#3a3a3a"/>');
+        parts.push('<path d="M ' + x + " " + (y + 30) + " H " + (x + CARD) + '" stroke="#3a3a3a"/>');
+        text(x + 12, y + 20, clip(t.name, 42), "#9fe8d8", true);
+        let cy = y + 30;
+        note.forEach((l) => { cy += LH; text(x + 12, cy, l, "#8a8577"); });
+        const rows = {};
+        columns.forEach((col) => { cy += LH; rows[col.split(" ")[0]] = cy - 4; text(x + 12, cy, clip(col, 42), "#e8e3d6"); });
+        at[t.name] = { x, y, h, rows };
+      });
+      y += tallest + 34;
+    }
+  }
+  const ends = (ref) => { const dot = String(ref).lastIndexOf("."); const name = at[ref] || dot < 0 ? String(ref) : String(ref).slice(0, dot); const col = at[ref] || dot < 0 ? "" : String(ref).slice(dot + 1); return { box: at[name], col }; };
+  const drawn = [];
+  for (const r of relations) {
+    const a = ends(r.from), b = ends(r.to);
+    if (!a.box || !b.box) continue;
+    const ya = a.box.rows[a.col] || a.box.y + 15, yb = b.box.rows[b.col] || b.box.y + 15;
+    const right = a.box.x <= b.box.x, same = a.box.x === b.box.x;
+    const xa = right ? a.box.x + CARD : a.box.x, xb = same ? b.box.x + CARD + 8 : right ? b.box.x - 8 : b.box.x + CARD + 8;
+    const bend = same ? xa + GAP - 6 : (xa + xb) / 2;
+    parts.push('<path d="M ' + xa + " " + ya + " C " + bend + " " + ya + ", " + bend + " " + yb + ", " + xb + " " + yb + '" fill="none" stroke="#9fe8d8" stroke-width="1.5" marker-end="url(#arrow)"/>');
+    drawn.push(r.from + "  →  " + r.to + (r.label ? "   (" + r.label + ")" : ""));
+  }
+  if (drawn.length) {
+    heading(y, "How the tables relate"); y += 8;
+    drawn.forEach((l) => { y += LH; text(PAD, y, clip(l, 146), "#e8e3d6"); });
+    y += 30;
+  }
+  const H = Math.min(8000, Math.max(200, y));
+  const html = '<!doctype html><html><body style="margin:0;background:#0b0b0b"><svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '" style="font:13px Menlo,Consolas,monospace"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#9fe8d8"/></marker></defs><rect width="' + W + '" height="42" fill="#111"/><path d="M 0 42 H ' + W + '" stroke="#2a2a2a"/>' + '<text x="' + PAD + '" y="27" fill="#9fe8d8" font-weight="700">' + esc(title) + "</text>" + parts.join("") + "</svg></body></html>";
+  return { html, width: W, height: H };
+}
+if (args[0] === "--erd") {
+  let spec;
+  try { spec = JSON.parse(readFileSync(0, "utf8")); } catch (e) { console.error("--erd reads JSON on stdin: " + e.message); process.exit(2); }
+  if (!spec || typeof spec !== "object" || !(Array.isArray(spec.tables) && spec.tables.length) && !(Array.isArray(spec.steps) && spec.steps.length)) { console.error('--erd needs { "steps": [...], "tables": [{ "name", "note", "columns": [...] }], "relations": [{ "from": "table.column", "to": "table.column", "label" }] }'); process.exit(2); }
+  const d = erd(args[1] || "How it works", spec);
+  shoot(d.html, d.width, d.height);
+} else if (args[0] === "--text") {
   const title = args[1] || "output";
   const text = readFileSync(0, "utf8");
   const lines = text.split("\\n").length;
   width = 1000; height = Math.min(4000, Math.max(200, 70 + lines * 20));
-  const html = \`<!doctype html><html><body style="margin:0;background:#0b0b0b;color:#e8e3d6;font:13px/20px Menlo,Consolas,monospace"><div style="padding:10px 16px;border-bottom:1px solid #2a2a2a;color:#9fe8d8">\${esc(title)}</div><pre style="margin:0;padding:14px 16px;white-space:pre-wrap">\${esc(text)}</pre></body></html>\`;
-  const tmp = join(OUT, \`.\${randomUUID()}.html\`);
-  writeFileSync(tmp, html);
-  url = "file://" + tmp;
-  out = join(OUT, \`.\${randomUUID()}.png\`);
-  try {
-    execFileSync(BROWSER, ["--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-sandbox", \`--window-size=\${width},\${height}\`, \`--screenshot=\${out}\`, url], { stdio: "ignore", timeout: 60000 });
-    process.stdout.write(readFileSync(out));
-  } finally { try { unlinkSync(tmp); } catch {} try { unlinkSync(out); } catch {} }
+  shoot(\`<!doctype html><html><body style="margin:0;background:#0b0b0b;color:#e8e3d6;font:13px/20px Menlo,Consolas,monospace"><div style="padding:10px 16px;border-bottom:1px solid #2a2a2a;color:#9fe8d8">\${esc(title)}</div><pre style="margin:0;padding:14px 16px;white-space:pre-wrap">\${esc(text)}</pre></body></html>\`, width, height);
 } else {
   url = args[0];
-  if (!url) { console.error("usage: node screenshot.cjs <url> [width height] | --text <title> < file"); process.exit(2); }
+  if (!url) { console.error("usage: node screenshot.cjs <url> [width height] | --text <title> < file | --erd <title> < spec.json"); process.exit(2); }
   if (args[1]) width = Number(args[1]) || width;
   if (args[2]) height = Number(args[2]) || height;
   out = join(OUT, \`shot-\${randomUUID().slice(0, 8)}.png\`);
@@ -161,7 +237,7 @@ export const EVIDENCE_MARKER = "<!-- consort-evidence -->";
 export async function upsertEvidenceComment(repo: string, pr: number, bodyFile: string): Promise<string> {
   const me = (await gh(repo, ["api", "user", "--jq", ".login"]).catch(() => "")).trim();
   // one line per comment, oldest first: id, author, has the marker, opens with the evidence heading
-  const listed = await gh(repo, ["api", "--paginate", `repos/{owner}/{repo}/issues/${pr}/comments?per_page=100`, "--jq", `.[] | [.id, .user.login, (.body | contains("${EVIDENCE_MARKER}")), (.body | startswith("## Evidence"))] | @tsv`]);
+  const listed = await gh(repo, ["api", "--paginate", `repos/{owner}/{repo}/issues/${pr}/comments?per_page=100`, "--jq", `.[] | [.id, .user.login, (.body | contains("${EVIDENCE_MARKER}")), (${EVIDENCE_HEADINGS.map((h) => `(.body | startswith("${h}"))`).join(" or ")})] | @tsv`]);
   const ours = listed.split("\n").map((l) => l.trim().split("\t")).filter(([id, login, marked, heading]) => /^\d+$/.test(id ?? "") && (marked === "true" || (heading === "true" && !!me && login === me))).map(([id]) => id);
   if (!ours.length) {
     const url = await gh(repo, ["pr", "comment", String(pr), "--body-file", bodyFile]);

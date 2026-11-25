@@ -17,7 +17,7 @@ function fixture(t, options = {}) {
   t.after(() => rmSync(root, { force: true, recursive: true }));
   const dir = join(root, headless.EVIDENCE_DIR);
   mkdirSync(dir, { recursive: true });
-  const manifest = { status: 'passed', kind: 'frontend', summary: 'Map loads and shows the selected group.', blockers: [], checks: [{ story: 'Show locations on a map', status: 'passed', expected: 'Visible map with locations', observed: 'Map loaded and markers appeared', items: ['Working map'] }], items: [{ title: 'Working map', image: 'map.png' }] };
+  const manifest = { status: 'passed', kind: 'frontend', summary: 'Map loads and shows the selected group.', blockers: [], stories: [{ actor: 'user', story: 'Show locations on a map', status: 'passed', expected: 'Visible map with locations', observed: 'Map loaded and markers appeared', items: ['Working map'] }], items: [{ title: 'Working map', image: 'map.png' }] };
   const save = () => writeFileSync(join(root, headless.EVIDENCE_MANIFEST), JSON.stringify(manifest));
   save();
   writeFileSync(join(dir, 'map.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jT1sAAAAASUVORK5CYII=', 'base64'));
@@ -45,13 +45,39 @@ function fixture(t, options = {}) {
   return { api: mod.exports, root, dir, manifest, save, args, calls, comments };
 }
 
-test('manifest rejects missing checks, failed checks, blockers, and frontend text-only output', () => {
+test('manifest rejects missing stories, failed stories, blockers, and frontend text-only output', () => {
   assert.ok(headless.evidenceProblems(undefined).length);
-  const base = { status: 'passed', kind: 'backend', summary: 'A real response', items: [{ title: 'Response', text: '200 OK' }], checks: [{ story: 'API responds', status: 'passed', expected: '200', observed: '200', items: ['Response'] }] };
+  const base = { status: 'passed', kind: 'backend', summary: 'A real response', items: [{ title: 'Response', text: '200 OK' }], stories: [{ actor: 'user', story: 'A partner calls the API → it answers', status: 'passed', expected: '200', observed: '200', items: ['Response'] }] };
   assert.deepEqual(headless.evidenceProblems(headless.parseEvidenceManifest(base)), []);
-  for (const override of [{ status: 'blocked' }, { checks: [] }, { blockers: ['API KEY REQUIRED'] }, { kind: 'frontend' }, { checks: [{ ...base.checks[0], status: 'failed' }] }, { checks: [{ ...base.checks[0], items: ['missing'] }] }]) {
+  for (const override of [{ status: 'blocked' }, { stories: [] }, { blockers: ['API KEY REQUIRED'] }, { kind: 'frontend' }, { stories: [{ ...base.stories[0], status: 'failed' }] }, { stories: [{ ...base.stories[0], items: ['missing'] }] }]) {
     assert.ok(headless.evidenceProblems(headless.parseEvidenceManifest({ ...base, ...override })).length);
   }
+});
+
+test('evidence holds only user stories: every item shows one, and a scheduled job with no screen needs a diagram', () => {
+  const problems = (m) => headless.evidenceProblems(headless.parseEvidenceManifest(m));
+  const cron = { actor: 'cron', story: 'Every day at 7 AM, Mono syncs appointments', status: 'passed', expected: 'rows upserted', observed: '12 rows upserted', items: ['Run output'] };
+  const base = { status: 'passed', kind: 'backend', summary: 'The daily sync ran.', stories: [cron], items: [{ title: 'Run output', image: 'run.png', text: 'upserted 12' }] };
+  assert.deepEqual(problems(base), ["A scheduled job's story needs a generated diagram of its data and logic: Every day at 7 AM, Mono syncs appointments"], 'a terminal image is not a diagram');
+  const diagram = { title: 'How the sync works', image: 'erd.png', diagram: true };
+  assert.deepEqual(problems({ ...base, stories: [{ ...cron, items: ['Run output', 'How the sync works'] }], items: [...base.items, diagram] }), []);
+  assert.deepEqual(problems({ ...base, stories: [{ ...cron, items: ['Run output', 'Result page'] }], items: [...base.items, { title: 'Result page', image: 'page.png' }] }), [], 'a screenshot of where the result shows also does');
+  assert.deepEqual(problems({ ...base, stories: [{ ...cron, actor: 'user' }] }), [], 'a user story needs no diagram');
+  assert.deepEqual(problems({ ...base, stories: [{ ...cron, items: ['Run output', 'How the sync works'] }], items: [...base.items, diagram, { title: 'Test suite passes', text: '153 passed' }] }), ['Evidence item belongs to no user story: Test suite passes']);
+  assert.equal(headless.parseEvidenceManifest({ items: [{ title: 'x', text: 'y', diagram: true }] }).items[0].diagram, undefined, 'only an image can be a diagram');
+  assert.deepEqual(problems({ ...base, kind: 'frontend', stories: [{ ...cron, items: ['Run output', 'How the sync works'] }], items: [...base.items, diagram] }), ['Frontend evidence needs screenshots of the working feature.'], 'a diagram is not a screenshot of the app');
+});
+
+test('the helper draws diagrams, and the one comment is found under its new and old headings', async t => {
+  const f = fixture(t, { prComments: '11\tconsort-bot\tfalse\ttrue\n' });
+  const helper = readFileSync(f.api.writeScreenshotHelper(f.root, '/usr/bin/true'), 'utf8');
+  assert.match(helper, /args\[0\] === "--erd"/);
+  assert.doesNotThrow(() => new Function('require', 'process', helper.replace(/^#!.*\n/, '')).bind(null, () => { throw new Error('parsed, not run'); }));
+  await f.api.publishEvidence(f.args);
+  const list = f.calls.find((c) => Array.isArray(c) && c[0] === 'api' && c[1] === '--paginate');
+  assert.ok(list.at(-1).includes('startswith("## User stories")') && list.at(-1).includes('startswith("## Evidence")'));
+  assert.ok(f.calls.some((c) => Array.isArray(c) && c.includes('PATCH') && c.some((a) => String(a).includes('issues/comments/11'))), 'the old comment is edited, not joined by a second one');
+  assert.match(readFileSync(join(f.dir, '.pr-comment.md'), 'utf8'), /^## User stories\n/);
 });
 
 test('missing or empty evidence images block before any external publication', async t => {
@@ -117,7 +143,7 @@ test('credential recovery names the root path and requires confirmation without 
 
 test('a failed push to GitHub posts nothing; the retry pushes and posts both comments', async t => {
   const f = fixture(t, { pushFailsOnce: true });
-  f.manifest.items.push({ title: 'Second view', image: 'second.png' });
+  f.manifest.items.push({ title: 'Second view', image: 'second.png' }); f.manifest.stories[0].items.push('Second view');
   writeFileSync(join(f.dir, 'second.png'), readFileSync(join(f.dir, 'map.png')));
   f.save();
   await assert.rejects(f.api.publishEvidence(f.args), /fetch failed/);
@@ -228,6 +254,9 @@ test('evidence in a PR description is replaced by one line pointing at the evide
   assert.ok(body.indexOf(url) < body.indexOf('## Testing'), 'the pointer sits where the section was');
   assert.deepEqual(headless.stripEvidenceFromDescription(body, url), { body, removed: 0 }, 'a clean description is not touched again');
   assert.equal(headless.stripEvidenceFromDescription('## Summary\nNo proof here.\n', url).removed, 0);
+  const stories = headless.stripEvidenceFromDescription('## Summary\nBuilt it.\n\n## User stories\n1. An admin exports the roster.\n\n## Testing\nok\n', url);
+  assert.equal(stories.removed, 1, 'the user stories are not repeated in the description either');
+  assert.ok(!stories.body.includes('An admin exports') && stories.body.includes('## Testing') && stories.body.includes('[the user stories comment]'));
 });
 
 test('publishing evidence cleans a description that repeats it, and leaves a clean one alone', async t => {

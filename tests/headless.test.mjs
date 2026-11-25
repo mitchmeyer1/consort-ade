@@ -171,30 +171,50 @@ test('the evidence manifest is read leniently and rendered as a PR comment with 
   const { parseEvidenceManifest, evidenceMarkdownForPr, evidenceTextForTicket, EVIDENCE_PROMPT } = await import('../src/shared/headless.ts');
   assert.equal(parseEvidenceManifest('{nope'), undefined);
   assert.equal(parseEvidenceManifest(null), undefined);
-  const m = parseEvidenceManifest(JSON.stringify({ kind: 'frontend', summary: 'Export works end to end.', seeded: 'pnpm seed:roster (40 members)', items: [
-    { title: 'Roster page with the new Export button', image: './.consort/ship/evidence/01-roster.png', note: 'filters applied' },
-    { title: 'Downloaded CSV head', text: 'id,name,email\n1,Ada,ada@x', command: 'head -3 roster.csv' },
-    { title: 'bad: no image or text' },
-    { title: 'bad image type', image: 'notes.txt' },
-    { bogus: true },
-  ] }));
+  const m = parseEvidenceManifest(JSON.stringify({ kind: 'frontend', summary: 'Export works end to end.', seeded: 'pnpm seed:roster (40 members)',
+    stories: [
+      { actor: 'user', story: 'An admin clicks Export on the Roster page → a CSV of the filtered members downloads', status: 'passed', expected: 'CSV downloads', observed: 'The CSV held the 12 filtered members.', items: ['Roster page with the new Export button', 'Downloaded CSV head'] },
+      { actor: 'cron', story: 'Every day at 7 AM, Mono emails yesterday\'s export count', status: 'passed', expected: 'One email', observed: 'One email row was written.', items: ['How the daily count works', 'The run'] },
+    ],
+    items: [
+      { title: 'The run', image: 'run.png', text: 'sent 1', command: 'pnpm job export-count' },
+      { title: 'Roster page with the new Export button', image: './.consort/ship/evidence/01-roster.png', note: 'filters applied' },
+      { title: 'Downloaded CSV head', text: 'id,name,email\n1,Ada,ada@x', command: 'head -3 roster.csv' },
+      { title: 'How the daily count works', image: 'erd.png', diagram: true },
+      { title: 'bad: no image or text' },
+      { title: 'bad image type', image: 'notes.txt' },
+      { bogus: true },
+    ] }));
   assert.equal(m.kind, 'frontend');
-  assert.deepEqual(m.items.map((i) => [i.title, i.image, !!i.text]), [['Roster page with the new Export button', '01-roster.png', false], ['Downloaded CSV head', undefined, true]]);
-  const pr = evidenceMarkdownForPr(m, { '01-roster.png': 'https://cdn.example/01.png' }, 'https://app.clickup.com/t/86abc', '86abc');
-  assert.match(pr, /^## Evidence\n/);
+  assert.deepEqual(m.items.map((i) => [i.title, i.image, !!i.text, !!i.diagram]), [['The run', 'run.png', true, false], ['Roster page with the new Export button', '01-roster.png', false, false], ['Downloaded CSV head', undefined, true, false], ['How the daily count works', 'erd.png', false, true]]);
+  assert.deepEqual(m.stories.map((s) => s.actor), ['user', 'cron']);
+  const pr = evidenceMarkdownForPr(m, { '01-roster.png': 'https://cdn.example/01.png', 'erd.png': 'https://cdn.example/erd.png', 'run.png': 'https://cdn.example/run.png' }, 'https://app.clickup.com/t/86abc', '86abc');
+  assert.match(pr, /^## User stories\n/);
   assert.match(pr, /Ticket: 86abc \(https:\/\/app\.clickup\.com\/t\/86abc\)  \nLocal data: pnpm seed:roster/);
-  assert.match(pr, /### 1\. Roster page with the new Export button\nfilters applied\n\n!\[Roster page with the new Export button\]\(https:\/\/cdn\.example\/01\.png\)/);
-  assert.match(pr, /### 2\. Downloaded CSV head\n\n```\n\$ head -3 roster\.csv\n```\n\n```\nid,name,email\n1,Ada,ada@x\n```/);
+  assert.match(pr, /### 1\. An admin clicks Export on the Roster page → a CSV of the filtered members downloads\n_User\._ The CSV held the 12 filtered members\.\n\n\*\*Roster page with the new Export button\*\*  \nfilters applied\n\n!\[Roster page with the new Export button\]\(https:\/\/cdn\.example\/01\.png\)/);
+  assert.match(pr, /\*\*Downloaded CSV head\*\*\n\n```\n\$ head -3 roster\.csv\n```\n\n```\nid,name,email\n1,Ada,ada@x\n```/);
+  assert.match(pr, /### 2\. Every day at 7 AM, Mono emails yesterday's export count\n_Scheduled job\._ One email row was written\.\n\n\*\*How the daily count works\*\*\n\n!\[How the daily count works\]\(https:\/\/cdn\.example\/erd\.png\)/);
+  assert.ok(pr.indexOf('erd.png') < pr.indexOf('run.png'), 'items follow the order the story lists them in, not the order of the items array');
+  assert.match(pr, /<details><summary>Captured output<\/summary>\n\n```\nsent 1\n```\n\n<\/details>/, 'text that also has a picture is folded away');
+  assert.ok(!pr.includes('Other captures'));
   const missing = evidenceMarkdownForPr(m, {}, 'u', 'r');
   assert.match(missing, /_\(image 01-roster\.png could not be published\)_/);
   const ticket = evidenceTextForTicket(m, { '01-roster.png': 'https://cdn.example/01.png' }, 'https://github.com/o/r/pull/42');
+  assert.match(ticket, /^User stories shown working/);
   assert.match(ticket, /PR: https:\/\/github\.com\/o\/r\/pull\/42/);
-  assert.match(ticket, /1\. Roster page with the new Export button — filters applied\n   https:\/\/cdn\.example\/01\.png/);
-  assert.match(ticket, /2\. Downloaded CSV head\n   \$ head -3 roster\.csv\n   id,name,email/);
-  assert.match(ticket, /with the images inline, is on the PR/);
+  assert.match(ticket, /1\. An admin clicks Export on the Roster page → a CSV of the filtered members downloads \(user\)\n   Result: The CSV held the 12 filtered members\.\n   - Roster page with the new Export button — filters applied\n     https:\/\/cdn\.example\/01\.png/);
+  assert.match(ticket, /   - Downloaded CSV head\n     \$ head -3 roster\.csv\n     id,name,email/);
+  assert.match(ticket, /2\. Every day at 7 AM, Mono emails yesterday's export count \(scheduled job\)/);
+  assert.match(ticket, /with the images inline, are on the PR/);
+  const legacy = parseEvidenceManifest({ kind: 'backend', summary: 's', checks: [{ story: 'API responds', status: 'passed', expected: '200', observed: '200', items: ['Response'] }], items: [{ title: 'Response', text: '200 OK' }, { title: 'Loose', text: 'x' }] });
+  assert.deepEqual(legacy.stories.map((s) => [s.actor, s.story]), [['user', 'API responds']], 'a manifest written before user stories called the list checks');
+  assert.match(evidenceMarkdownForPr(legacy, {}, 'u', 'r'), /### Other captures\n\n\*\*Loose\*\*/);
   const p = EVIDENCE_PROMPT({ helper: '/w/.consort/tools/screenshot.cjs', ticketUrl: 'T', prUrl: 'P', worktree: '/w' });
   assert.match(p, /seed a local database/);
   assert.match(p, /--text "<title>"/);
+  assert.match(p, /--erd "<title>"/);
+  assert.match(p, /Only what a user or a scheduled job does in production is a story/);
+  assert.match(p, /"actor": "user" \| "cron"/);
   assert.match(p, /real output only, never mocked/);
 });
 
